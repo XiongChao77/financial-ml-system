@@ -18,6 +18,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
@@ -57,7 +58,7 @@ def make_windows(arr_2d: np.ndarray, labels_1d: np.ndarray, T: int):
       y: [M]
     """
     X, y = [], []
-    for end in range(T-1, len(arr_2d)):
+    for end in range(T-1, len(arr_2d), T // 4):
         X.append(arr_2d[end-T+1:end+1])  # 以 end 为窗口末端
         y.append(labels_1d[end])
     return np.asarray(X, np.float32), np.asarray(y, np.int64)
@@ -84,29 +85,60 @@ class CausalConv1d(nn.Conv1d):
 
 class CNN1D(nn.Module):
     """
-    架构: (因果卷积堆叠) -> GAP -> 全连接 -> logits
-    通道: 9 -> 64 -> 64 -> 128 -> GAP -> 128 -> 64 -> 3
+    一维时序分类网络架构说明
+    -----------------------------------
+    输入: [B, T, F]  (batch, 序列长度, 特征维度)
+
+    1) Inception 风格卷积分支:
+       - 分支1: Conv1d(kernel=5) + BN + ReLU, 捕捉短期局部模式
+       - 分支2: Conv1d(kernel=21) + BN + ReLU, 捕捉长期依赖模式
+       - 输出拼接后通道数为 128
+
+    2) 特征融合卷积层:
+       - Conv1d(kernel=3, padding=1) + BN + ReLU
+       - 进一步整合局部与长期特征
+
+    3) 全局池化:
+       - Global Average Pooling (在时间维度取均值)
+       - 压缩时序维，得到 [B, 128]
+
+    4) 分类头:
+       - Dropout(p_drop)
+       - 全连接层 Linear(128 -> n_classes)
+       - 输出 logits [B, n_classes]
+
+    输出: 三分类预测结果 (logits)，适合接 CrossEntropyLoss
     """
-    def __init__(self, F=9, n_classes=3, p_drop=0.3):
+    def __init__(self, channel=9, n_classes=3, p_drop=0.3):
         super().__init__()
-        self.feat = nn.Sequential(
-            CausalConv1d(F, 64, k=5, dilation=1), nn.ReLU(),
-            nn.BatchNorm1d(64),
-            CausalConv1d(64,64, k=9, dilation=1), nn.ReLU(),
-            nn.BatchNorm1d(64),
-            CausalConv1d(64,128,k=9, dilation=1), nn.ReLU(),
-            nn.BatchNorm1d(128),
-            nn.AdaptiveAvgPool1d(1)      # -> [B, 128, 1]
-        )
-        self.head = nn.Sequential(
-            nn.Flatten(),                 # -> [B, 128]
-            nn.Linear(128, 64), nn.ReLU(), nn.Dropout(p_drop),
-            nn.Linear(64, n_classes)      # logits
-        )
-    def forward(self, x):                  # x: [B, T, F]
-        x = x.transpose(1, 2)             # -> [B, F, T]
-        h = self.feat(x)                  # -> [B, 128, 1]
-        return self.head(h)               # -> [B, 3]
+        # 定义两个卷积分支
+        self.conv_small = nn.Conv1d(channel, 64, kernel_size=5, padding=2)
+        self.bn_small   = nn.BatchNorm1d(64)
+
+        self.conv_large = nn.Conv1d(channel, 64, kernel_size=21, padding=10)
+        self.bn_large   = nn.BatchNorm1d(64)
+        
+        # 融合后接一层卷积
+        self.conv_post = nn.Conv1d(128, 128, kernel_size=3, padding=1)
+        self.bn_post   = nn.BatchNorm1d(128)
+
+        self.dropout = nn.Dropout(p_drop)
+        self.fc = nn.Linear(128, n_classes)
+
+    def forward(self, x):              # x: [B, T, F]
+        x = x.transpose(1, 2)          # -> [B, F, T]
+
+        out_s = F.relu(self.bn_small(self.conv_small(x)))  # [B, 64, T]
+        out_l = F.relu(self.bn_large(self.conv_large(x)))  # [B, 64, T]
+        out = torch.cat([out_s, out_l], dim=1)             # [B, 128, T]
+
+        # 新增的卷积层
+        out = F.relu(self.bn_post(self.conv_post(out)))    # [B, 128, T]
+
+        out = out.mean(dim=-1)                             # GAP -> [B, 128]
+        out = self.dropout(out)
+        logits = self.fc(out)                              # [B, n_classes]
+        return logits
 
 # ========== 训练/评估 ==========
 @torch.no_grad()
@@ -134,7 +166,7 @@ def main():
     ap.add_argument("--train_ratio", type=float, default=0.7)
     ap.add_argument("--val_ratio", type=float, default=0.15)
     ap.add_argument("--epochs", type=int, default=100)
-    ap.add_argument("--batch_size", type=int, default=common.candlestick_num)
+    ap.add_argument("--batch_size", type=int, default= 128)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--dropout", type=float, default=0.3)
@@ -198,8 +230,8 @@ def main():
     print("Class weights:", {int(c): float(w) for c, w in zip(classes, cw)})
 
     # 9) 模型/优化器/调度器
-    F = X_tr.shape[-1]
-    model = CNN1D(F=F, n_classes=len(classes), p_drop=args.dropout).to(device)
+    channel = X_tr.shape[-1]
+    model = CNN1D(channel=channel, n_classes=len(classes), p_drop=args.dropout).to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=4)  # 兼容老版本，不加 verbose
@@ -262,7 +294,7 @@ def main():
     torch.save({
         "state_dict": model.state_dict(),
         "classes": classes.tolist(),
-        "F": F,
+        "channel": channel,
         "window": T
     }, "cnn_timeseries_torch_model.pt")
     meta = {
