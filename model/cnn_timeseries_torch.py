@@ -181,7 +181,7 @@ class CNN1D(nn.Module):
 
         out = self.eca_after_concat(out)                # [B,128,T]
         out = F.relu(self.bn_post(self.conv_post(out))) # [B,128,T]
-        # out = self.eca_after_post(out)                  # [B,128,T]
+        out = self.eca_after_post(out)                  # [B,128,T]
 
         out = out.mean(dim=-1) #和tpool二选一
         # out = self.tpool(out)                           # [B,128] (最近更重要)
@@ -369,7 +369,7 @@ def main():
 
     cm = confusion_matrix(yt_true, yt_pred, labels=classes)
     pd.DataFrame(cm, index=[f"true_{c}" for c in classes], columns=[f"pred_{c}" for c in classes]) \
-      .to_csv("confmat_cnn.csv", index=True)
+      .to_csv(os.path.join(current_work_dir,"confmat_cnn.csv"), index=True)
     # logger.info("Saved confusion matrix -> confmat_cnn.csv")
 
     torch.save({
@@ -377,7 +377,7 @@ def main():
         "classes": classes.tolist(),
         "channel": channel,
         "window": T
-    }, "cnn_timeseries_torch_model.pt")
+    }, os.path.join(current_work_dir,"cnn_timeseries_torch_model.pt"))
     meta = {
         "feature_cols": feat_cols,
         "label_col": args.label_col,
@@ -386,7 +386,7 @@ def main():
         "scaler_scale": scaler.scale_.tolist(),
         "window": T
     }
-    with open("cnn_timeseries_torch_meta.json","w",encoding="utf-8") as f:
+    with open(os.path.join(current_work_dir,"cnn_timeseries_torch_meta.json"),"w",encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     # logger.info("Saved model -> cnn_timeseries_torch_model.pt")
     # logger.info("Saved meta  -> cnn_timeseries_torch_meta.json")

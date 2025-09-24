@@ -1,3 +1,9 @@
 *old*
 *__pycache__*
 data.csv
+*backtrader*
+*CryptoTrade*
+*.log
+/model/train_log.txt
+/model/cnn_timeseries_torch_meta.json
+/model/cnn_timeseries_torch_model.pt
