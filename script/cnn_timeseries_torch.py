@@ -11,7 +11,7 @@
 - 评估: classification_report、macro-F1、混淆矩阵
 """
 
-import argparse, json ,os, sys
+import argparse, json ,os, sys , math
 import numpy as np
 import pandas as pd
 
@@ -24,6 +24,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from sklearn.utils.class_weight import compute_class_weight
 from collections import Counter
+import logging
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data import common
@@ -31,10 +32,33 @@ from data import common
 DEFAULT_FEATURES = [
     "Open_price","High_price","Low_price","Close_price",
     "Volume","Quote_asset_volume","Number_of_trades",
-    "buy_base_volume","buy_quote_volume"
+    "buy_base_volume","buy_quote_volume","MACD_DIF","MACD_DEA","MACD"
 ]
 
 # ========== 实用函数 ==========
+def setup_logger():
+    logger = logging.getLogger("train_logger")
+    logger.setLevel(logging.INFO)
+
+    # 控制台
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+
+    # 文件
+    log_file = os.path.join(current_work_dir,'train_log.txt')
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logging.INFO)
+
+    # 格式
+    formatter = logging.Formatter("%(asctime)s - %(message)s")
+    ch.setFormatter(formatter)
+    fh.setFormatter(formatter)
+
+    logger.addHandler(ch)
+    logger.addHandler(fh)
+
+    return logger
+
 def set_seed(seed=42):
     import random
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
@@ -58,7 +82,7 @@ def make_windows(arr_2d: np.ndarray, labels_1d: np.ndarray, T: int):
       y: [M]
     """
     X, y = [], []
-    for end in range(T-1, len(arr_2d), T // 4):
+    for end in range(T-1, len(arr_2d)):#, common.predict_num):
         X.append(arr_2d[end-T+1:end+1])  # 以 end 为窗口末端
         y.append(labels_1d[end])
     return np.asarray(X, np.float32), np.asarray(y, np.int64)
@@ -70,76 +94,125 @@ class SeqDataset(Dataset):
     def __len__(self): return self.X.shape[0]
     def __getitem__(self, i): return self.X[i], self.y[i]
 
-# ========== 模型定义：因果卷积 CNN ==========
+# ---- 因果卷积：左填充，右裁剪，杜绝“看未来” ----
 class CausalConv1d(nn.Conv1d):
-    """
-    通过 padding=(k-1)*dilation 并在 forward 时剪裁右侧，实现因果卷积：
-    输出在时刻 t 只依赖 <= t 的输入。
-    """
-    def __init__(self, in_ch, out_ch, k, dilation=1):
-        pad = (k - 1) * dilation
-        super().__init__(in_ch, out_ch, k, padding=pad, dilation=dilation)
-    def forward(self, x):                 # x: [B, C, T]
-        out = super().forward(x)
-        return out[..., :x.size(-1)]      # 保持长度 & 因果性
+    def __init__(self, in_ch, out_ch, kernel_size, dilation=1, bias=True):
+        pad = (kernel_size - 1) * dilation
+        super().__init__(in_ch, out_ch, kernel_size,
+                         padding=pad, dilation=dilation, bias=bias)
+    def forward(self, x):                      # x: [B,C,T]
+        y = super().forward(x)                 # 先做常规padding卷积
+        cut = (self.kernel_size[0]-1) * self.dilation[0]
+        return y[:, :, :-cut] if cut > 0 else y   # 右裁剪，保持长度 & 因果
 
+# ---- ECA: 高效通道注意力（1D版，通道维上做1D卷积） ----
+class ECA1D(nn.Module):
+    def __init__(self, channels, gamma=2.0, b=1.0, k_override=None):
+        super().__init__()
+        if k_override is None:
+            k = int(abs((math.log2(channels)/gamma) + b))
+            k = k if k % 2 == 1 else k + 1
+            k = max(3, k)
+        else:
+            k = k_override if k_override % 2 == 1 else (k_override + 1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k, padding=(k-1)//2, bias=False)
+    def forward(self, x):                  # x: [B,C,T]
+        y = x.mean(dim=-1, keepdim=True)   # [B,C,1]
+        y = self.conv(y.transpose(1,2))    # [B,1,C]
+        a = torch.sigmoid(y.transpose(1,2))# [B,C,1]
+        return x * a
+
+# ---- 最近更重要：指数衰减加权池化（替代 mean） ----
+class TimeDecayPool1D(nn.Module):
+    def __init__(self, tau=16.0, learnable=False):
+        super().__init__()
+        if learnable:
+            self.tau = nn.Parameter(torch.tensor(float(tau)))
+        else:
+            self.register_buffer("tau", torch.tensor(float(tau)))
+        self.learnable = learnable
+    def forward(self, x):                  # x: [B,C,T]
+        B, C, T = x.shape
+        t = torch.arange(T, device=x.device, dtype=x.dtype)         # 0..T-1
+        tau = self.tau if self.learnable else self.tau.to(x.device)
+        w = torch.exp(-(T - 1 - t) / (tau + 1e-8))                  # 近端更大
+        w = w / (w.sum() + 1e-12)
+        return (x * w.view(1,1,T)).sum(dim=-1)                      # [B,C]
+
+# ---- 整体模型：因果Inception -> 因果融合卷积 -> ECA -> 加权池化 -> FC ----
 class CNN1D(nn.Module):
     """
-    一维时序分类网络架构说明
-    -----------------------------------
-    输入: [B, T, F]  (batch, 序列长度, 特征维度)
-
-    1) Inception 风格卷积分支:
-       - 分支1: Conv1d(kernel=5) + BN + ReLU, 捕捉短期局部模式
-       - 分支2: Conv1d(kernel=21) + BN + ReLU, 捕捉长期依赖模式
-       - 输出拼接后通道数为 128
-
-    2) 特征融合卷积层:
-       - Conv1d(kernel=3, padding=1) + BN + ReLU
-       - 进一步整合局部与长期特征
-
-    3) 全局池化:
-       - Global Average Pooling (在时间维度取均值)
-       - 压缩时序维，得到 [B, 128]
-
-    4) 分类头:
-       - Dropout(p_drop)
-       - 全连接层 Linear(128 -> n_classes)
-       - 输出 logits [B, n_classes]
-
-    输出: 三分类预测结果 (logits)，适合接 CrossEntropyLoss
+    架构: Causal Inception(k=5/21) -> Causal conv3 -> ECA -> TimeDecayPool -> FC
+    - 因果卷积：不利用未来信息
+    - ECA：按通道自适应重标定
+    - 最近更重要：时间指数衰减加权池化
+    输入: [B, T, F]   输出: logits [B, n_classes]
     """
-    def __init__(self, channel=9, n_classes=3, p_drop=0.3):
+    def __init__(self, channel=9, n_classes=3, p_drop=0.3, tau=16.0):
         super().__init__()
-        # 定义两个卷积分支
-        self.conv_small = nn.Conv1d(channel, 64, kernel_size=5, padding=2)
+        # 并行因果卷积分支（短/长核）
+        self.conv_small = CausalConv1d(channel, 64, kernel_size=5, dilation=1, bias=False)
         self.bn_small   = nn.BatchNorm1d(64)
-
-        self.conv_large = nn.Conv1d(channel, 64, kernel_size=21, padding=10)
+        self.conv_large = CausalConv1d(channel, 64, kernel_size=21, dilation=1, bias=False)
         self.bn_large   = nn.BatchNorm1d(64)
-        
-        # 融合后接一层卷积
-        self.conv_post = nn.Conv1d(128, 128, kernel_size=3, padding=1)
+
+        # concat 后的 ECA（先做一次通道筛选）
+        self.eca_after_concat = ECA1D(channels=128)
+
+        # 融合卷积也使用因果版本，避免再次引入未来
+        self.conv_post = CausalConv1d(128, 128, kernel_size=3, dilation=1, bias=False)
         self.bn_post   = nn.BatchNorm1d(128)
+
+        # 融合后的第二次 ECA（可保留或去掉做对比）
+        self.eca_after_post = ECA1D(channels=128)
+
+        # 最近更重要的池化
+        self.tpool = TimeDecayPool1D(tau=tau, learnable=False)
 
         self.dropout = nn.Dropout(p_drop)
         self.fc = nn.Linear(128, n_classes)
 
-    def forward(self, x):              # x: [B, T, F]
-        x = x.transpose(1, 2)          # -> [B, F, T]
+    def forward(self, x):                  # x: [B,T,F]
+        x = x.transpose(1, 2)              # -> [B,F,T]
 
-        out_s = F.relu(self.bn_small(self.conv_small(x)))  # [B, 64, T]
-        out_l = F.relu(self.bn_large(self.conv_large(x)))  # [B, 64, T]
-        out = torch.cat([out_s, out_l], dim=1)             # [B, 128, T]
+        s = F.relu(self.bn_small(self.conv_small(x)))   # [B,64,T]
+        l = F.relu(self.bn_large(self.conv_large(x)))   # [B,64,T]
+        out = torch.cat([s, l], dim=1)                  # [B,128,T]
 
-        # 新增的卷积层
-        out = F.relu(self.bn_post(self.conv_post(out)))    # [B, 128, T]
+        out = self.eca_after_concat(out)                # [B,128,T]
+        out = F.relu(self.bn_post(self.conv_post(out))) # [B,128,T]
+        # out = self.eca_after_post(out)                  # [B,128,T]
 
-        out = out.mean(dim=-1)                             # GAP -> [B, 128]
+        out = out.mean(dim=-1) #和tpool二选一
+        # out = self.tpool(out)                           # [B,128] (最近更重要)
         out = self.dropout(out)
-        logits = self.fc(out)                              # [B, n_classes]
-        return logits
+        return self.fc(out)                             # [B,n_classes]
 
+class CostSensitiveLoss(nn.Module):
+    def __init__(self, penalty_matrix, base_weights=None, lambda_cost=1.0):
+        super().__init__()
+        self.register_buffer("C", torch.tensor(penalty_matrix, dtype=torch.float32))
+        self.lambda_cost = float(lambda_cost)
+        self.base_ce = nn.CrossEntropyLoss(
+            weight=(torch.tensor(base_weights, dtype=torch.float32) if base_weights is not None else None)
+        )
+
+    def forward(self, logits, targets):
+        # Cross-Entropy 部分（可带类别权重）
+        ce = self.base_ce(logits, targets)
+
+        # 期望代价部分：sum_j C[true, j] * p_j
+        probs = torch.softmax(logits, dim=1)               # [B, C]
+        C_true = self.C.index_select(0, targets)           # [B, C]
+        exp_cost = (C_true * probs).sum(dim=1).mean()      # 标量
+
+        return ce + self.lambda_cost * exp_cost
+
+penalty_matrix = [
+    [1.0, 0.8, 3.0],  # true=0, pred=0/1/2
+    [1.0, 1.0, 1.0],  # true=1, pred=0/1/2
+    [3.0, 0.8, 1.0],  # true=2, pred=0/1/2
+]
 # ========== 训练/评估 ==========
 @torch.no_grad()
 def eval_epoch(model, loader, device, criterion):
@@ -170,13 +243,14 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--dropout", type=float, default=0.3)
-    ap.add_argument("--patience", type=int, default=8)
+    ap.add_argument("--patience", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
+    logger  = setup_logger()
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Device:", device)
+    logger.info(f"Device:{device}")
 
     # 1) 读数据（需按时间升序）
     data_path = os.path.join(current_work_dir,'..', 'data','data.csv')
@@ -200,7 +274,8 @@ def main():
     T = args.window
     X_all, y_all = make_windows(A, y_all, T=T)  # 末端对齐标签
     M = len(X_all)
-    print(f"Total windows (M) = {M}, window = {T}, F = {X_all.shape[-1]}")
+    logger.info(f"Total windows (M) = {M}, window = {T}, F = {X_all.shape[-1]}")
+    logger.info(f"candlestick_num = {common.candlestick_num}, predict_num = {common.predict_num}, change_rate = {common.change_rate}")
 
     # 5) 按“窗口末端时刻”时间切分
     m_tr = int(M * args.train_ratio)
@@ -227,12 +302,18 @@ def main():
     classes = np.unique(y_tr)
     cw = compute_class_weight(class_weight="balanced", classes=classes, y=y_tr)
     class_weights = torch.tensor(cw, dtype=torch.float32, device=device)
-    print("Class weights:", {int(c): float(w) for c, w in zip(classes, cw)})
+    logger.info("Class weights: {}".format({int(c): float(w) for c, w in zip(classes, cw)}))
 
     # 9) 模型/优化器/调度器
     channel = X_tr.shape[-1]
     model = CNN1D(channel=channel, n_classes=len(classes), p_drop=args.dropout).to(device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # classes / class_weights 已经按你原代码算好
+    criterion = CostSensitiveLoss(
+        penalty_matrix=penalty_matrix,
+        base_weights=class_weights.cpu().numpy(),  # 保留类别平衡
+        lambda_cost=0                             # 先从 0.3 试起
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=4)  # 兼容老版本，不加 verbose
 
@@ -255,23 +336,23 @@ def main():
         va_loss, yv_true, yv_pred = eval_epoch(model, dl_va, device, criterion)
         scheduler.step(va_loss)
         va_f1 = f1_score(yv_true, yv_pred, average="macro") if len(yv_true) else float("nan")
-        print(f"Epoch {epoch:03d} | tr_loss {tr_loss:.4f} | va_loss {va_loss:.4f} | va_macroF1 {va_f1:.4f}")
+        logger.info(f"Epoch {epoch:03d} | tr_loss {tr_loss:.4f} | va_loss {va_loss:.4f} | va_macroF1 {va_f1:.4f}")
 
         if va_loss < best_val - 1e-6:
             best_val, best_state, wait = va_loss, {k:v.cpu().clone() for k,v in model.state_dict().items()}, 0
         else:
             wait += 1
             if wait >= args.patience:
-                print("Early stopping."); break
+                logger.info("Early stopping."); break
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
     # 11) 测试集评估 + 保存
     te_loss, yt_true, yt_pred = eval_epoch(model, dl_te, device, criterion)
-    print("\n=== Test Report ===")
-    print(classification_report(yt_true, yt_pred, digits=4))
-    print("Test macro-F1:", f1_score(yt_true, yt_pred, average="macro"))
+    logger.info("\n=== Test Report ===")
+    logger.info(classification_report(yt_true, yt_pred, digits=4))
+    logger.info("Test macro-F1:{}".format(f1_score(yt_true, yt_pred, average="macro")))
 
     # 计算测试集中每个标签的真实占比
     # 假设你的真实标签在 yt_true 里
@@ -280,16 +361,16 @@ def main():
     classes_sorted = sorted(counts.keys())
     true_pct = {c: counts[c]/total for c in classes_sorted}
 
-    print("\n=== True label proportion (Test set) ===")
+    logger.info("\n=== True label proportion (Test set) ===")
     for c in classes_sorted:
-        print(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
+        logger.info(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
 
 
 
     cm = confusion_matrix(yt_true, yt_pred, labels=classes)
     pd.DataFrame(cm, index=[f"true_{c}" for c in classes], columns=[f"pred_{c}" for c in classes]) \
       .to_csv("confmat_cnn.csv", index=True)
-    print("Saved confusion matrix -> confmat_cnn.csv")
+    # logger.info("Saved confusion matrix -> confmat_cnn.csv")
 
     torch.save({
         "state_dict": model.state_dict(),
@@ -307,8 +388,8 @@ def main():
     }
     with open("cnn_timeseries_torch_meta.json","w",encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
-    print("Saved model -> cnn_timeseries_torch_model.pt")
-    print("Saved meta  -> cnn_timeseries_torch_meta.json")
+    # logger.info("Saved model -> cnn_timeseries_torch_model.pt")
+    # logger.info("Saved meta  -> cnn_timeseries_torch_meta.json")
 
 if __name__ == "__main__":
     main()
