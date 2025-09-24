@@ -5,7 +5,7 @@ import datetime,os
 from common import *
 
 current_work_dir = os.path.dirname(__file__) 
-data_path = os.path.join(current_work_dir, 'klines15m.csv')
+data_path = os.path.join(current_work_dir, origin_data)
 
 #**********column info: Kline_open_time,Open_price,High_price,Low_price,Close_price,Volume,Kline_close_time,Quote_asset_volume,Number_of_trades,buy_base_volume,buy_quote_volume,ignore
 df = pd.read_csv(data_path)
@@ -76,27 +76,6 @@ def attach_label(df):
     # 可选：确保类型一致
     df['label'] = df['label'].astype(int)
 
-    return df
-
-def add_macd(df, fast=12, slow=26, signal=9):
-    """
-    在数据中加入MACD指标：
-      - MACD_DIF: EMA(fast) - EMA(slow)
-      - MACD_DEA: DIF的EMA(signal)
-      - MACD:     2 * (DIF - DEA)
-    计算基于 Close_price 列。
-    """
-    if 'Close_price' not in df.columns:
-        raise ValueError("缺少列 Close_price，无法计算MACD")
-    close = df['Close_price']
-    ema_fast = close.ewm(span=fast, adjust=False).mean()
-    ema_slow = close.ewm(span=slow, adjust=False).mean()
-    dif = ema_fast - ema_slow
-    dea = dif.ewm(span=signal, adjust=False).mean()
-    macd = 2 * (dif - dea)
-    df['MACD_DIF'] = dif
-    df['MACD_DEA'] = dea
-    df['MACD'] = macd
     return df
 
 # 计算MACD指标
