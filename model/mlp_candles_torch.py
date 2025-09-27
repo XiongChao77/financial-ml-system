@@ -26,9 +26,9 @@ from torch.utils.data import Dataset, DataLoader
 
 # ---- 默认特征列（自动补充其它数值列）----
 DEFAULT_FEATURES = [
-    "Open_price","High_price","Low_price","Close_price",
-    "Volume","Quote_asset_volume","Number_of_trades",
-    "buy_base_volume","buy_quote_volume"
+    "open","high","low","close",
+    "volume","quote_asset_volume","number_of_trades",
+    "taker_buy_base_volume","taker_buy_quote_volume"
 ]
 
 # ---------------- 实用函数 ----------------

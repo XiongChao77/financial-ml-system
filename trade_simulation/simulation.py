@@ -31,7 +31,7 @@ class TradeResult():
         self.times = 0
 
 _cash = 10000
-
+commission = 0.001
 # ------------- Logging Utilities -------------
 def setup_logging(log_file: str, verbose: bool = False):
     """
@@ -248,7 +248,7 @@ class MyStrategy(bt.Strategy):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run backtest with optional logging and reduced console noise.")
     parser.add_argument("--allow-short", action="store_true", default=True, help="是否允许做空（默认允许）")
-    parser.add_argument("--allow-long", action="store_true", default=False, help="是否允许做多（默认允许）")
+    parser.add_argument("--allow-long", action="store_true", default=True, help="是否允许做多（默认允许）")
     parser.add_argument("--verbose", action="store_true", help="输出详细日志（默认关闭）")
     parser.add_argument("--log-file", type=str, default=os.path.join(current_work_dir, "backtest.log"),
                         help="日志文件路径（默认 ../logs/backtest.log)")
@@ -257,13 +257,13 @@ if __name__ == '__main__':
     # Setup logging & redirect all output to file (overwrite)
     logger.info("Backtest started. verbose=%s, log_file=%s", args.verbose, args.log_file)
 
-    data_path = os.path.join(current_work_dir,'..', 'data', origin_data)
+    data_path = os.path.join(current_work_dir,'..', 'data', test_data)
     df = pd.read_csv(data_path)
-    df = df.loc[::-1]
+    df = add_weekly_mas(df, weeks=(7, 25), method='sma', strict=False) #用到'open_time_dt_utc'
     # 时间处理（K线开始时间通常是毫秒时间戳）
-    df['Kline_open_time'] = pd.to_datetime(df['Kline_open_time'], unit='ms', utc=True).dt.tz_convert(None)
-    df['Kline_close_time'] = pd.to_datetime(df['Kline_close_time'], unit='ms', utc=True).dt.tz_convert(None)
-    logger.info("Columns: {},data range:{} --> {}".format(list(df.columns),df['Kline_open_time'].min(),df['Kline_open_time'].max()))
+    df['open_time_dt_utc'] = pd.to_datetime(df['open_time_dt_utc'], utc=True).dt.tz_convert(None)
+    df['close_time_dt_utc'] = pd.to_datetime(df['close_time_dt_utc'], utc=True).dt.tz_convert(None)
+    logger.info("Columns: {},data range:{} --> {}".format(list(df.columns),df['open_time_dt_utc'].min(),df['open_time_dt_utc'].max()))
     # df = df.iloc[:5000]   #chose a few day only
 
     # ---------- NEW: 离线生成预测列 ----------
@@ -308,21 +308,24 @@ if __name__ == '__main__':
     # Pass it to the backtrader datafeed and add it to the cerebro
     data = PandasDataWithPred(
         dataname=df_with_pred,
-        datetime=df_with_pred.columns.get_loc('Kline_open_time'),
-        open=df_with_pred.columns.get_loc('Open_price'),
-        high=df_with_pred.columns.get_loc('High_price'),
-        low=df_with_pred.columns.get_loc('Low_price'),
-        close=df_with_pred.columns.get_loc('Close_price'),
-        volume=df_with_pred.columns.get_loc('Volume'),
+        # Do not pass values before this date
+        # fromdate=datetime.datetime(2023, 7, 1),
+        # # Do not pass values before this date
+        # todate=datetime.datetime(2024, 3, 1),
+        datetime=df_with_pred.columns.get_loc('open_time_dt_utc'),
+        open=df_with_pred.columns.get_loc('open'),
+        high=df_with_pred.columns.get_loc('high'),
+        low=df_with_pred.columns.get_loc('low'),
+        close=df_with_pred.columns.get_loc('close'),
+        volume=df_with_pred.columns.get_loc('volume'),
         nocase=True
     )
 
-    
     cerebro.adddata(data)
 
     # Set our desired cash start
     cerebro.broker.setcash(_cash)
-    cerebro.broker.setcommission(commission=0.001)  # 0.06% 示例
+    cerebro.broker.setcommission(commission=commission)  # 0.06% 示例
 
     # Add a FixedSize sizer according to the stake
     cerebro.addsizer(bt.sizers.FixedSize, stake=1)
@@ -360,10 +363,11 @@ if __name__ == '__main__':
 
     # ---- 一条“总览”即可：清晰、浓缩 ----
     logger.info(
-        ("SUMMARY | GrossRet: {ret:.2f}% | CAGR: {cagr:.2f}% | "
+        ("SUMMARY | commission:{com:2f}% GrossRet: {ret:.2f}% | CAGR: {cagr:.2f}% | "
         "Sharpe: {sr:.3f} | MaxDD: {mdd:.2f}% ({mdd_amt:.0f}) | "
         "Trades: {nt} | WinRate: {wr:.2f}% | AvgPnL: {ap:.2f} | "
         "Expo avg/p95/max: {avg:.1f}%/{p95:.1f}%/{mx:.1f}%").format(
+            com=commission*100.0,
             ret=perf['gross_return']*100.0,
             cagr=perf['cagr']*100.0,
             sr=sr,

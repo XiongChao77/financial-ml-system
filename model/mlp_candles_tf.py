@@ -4,8 +4,8 @@
 MLP (TensorFlow/Keras) for 15m candle classification
 ----------------------------------------------------
 - Input: a CSV with columns like
-  Open_price, High_price, Low_price, Close_price, Volume, Quote_asset_volume,
-  Number_of_trades, buy_base_volume, buy_quote_volume, label
+  open, high, low, close, volume, quote_asset_volume,
+  number_of_trades, taker_buy_base_volume, taker_buy_quote_volume, label
 - Task: 3-class classification (0=down, 1=flat/weak, 2=up)
 - Split: chronological Train/Val/Test by ratios
 - Preprocess: StandardScaler on numeric features (fit on Train only)
@@ -39,9 +39,9 @@ import tensorflow as tf
 from tensorflow.keras import layers, models, callbacks
 
 DEFAULT_FEATURES = [
-    "Open_price","High_price","Low_price","Close_price",
-    "Volume","Quote_asset_volume","Number_of_trades",
-    "buy_base_volume","buy_quote_volume"
+    "open","high","low","close",
+    "volume","quote_asset_volume","number_of_trades",
+    "taker_buy_base_volume","taker_buy_quote_volume"
 ]
 
 def parse_label_map(s: str):

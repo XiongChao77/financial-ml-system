@@ -28,13 +28,6 @@ import logging
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data import common
-# ====== 你可以按需要修改的默认特征列（9维）======
-DEFAULT_FEATURES = [
-    "Open_price","High_price","Low_price","Close_price",
-    "Volume","Quote_asset_volume","Number_of_trades",
-    "buy_base_volume","buy_quote_volume","MACD_DIF","MACD_DEA","MACD"
-]
-
 # ========== 实用函数 ==========
 def setup_logger():
     logger = logging.getLogger("train_logger")
@@ -82,7 +75,7 @@ def make_windows(arr_2d: np.ndarray, labels_1d: np.ndarray, T: int):
       y: [M]
     """
     X, y = [], []
-    for end in range(T-1, len(arr_2d)):#, common.predict_num):
+    for end in range(T-1, len(arr_2d)):#,common.predict_num):#, common.predict_num):
         X.append(arr_2d[end-T+1:end+1])  # 以 end 为窗口末端
         y.append(labels_1d[end])
     return np.asarray(X, np.float32), np.asarray(y, np.int64)
@@ -209,9 +202,9 @@ class CostSensitiveLoss(nn.Module):
         return ce + self.lambda_cost * exp_cost
 
 penalty_matrix = [
-    [1.0, 0.8, 3.0],  # true=0, pred=0/1/2
+    [1.0, 1, 1.5],  # true=0, pred=0/1/2
     [1.0, 1.0, 1.0],  # true=1, pred=0/1/2
-    [3.0, 0.8, 1.0],  # true=2, pred=0/1/2
+    [1.5, 1, 1.0],  # true=2, pred=0/1/2
 ]
 # ========== 训练/评估 ==========
 @torch.no_grad()
@@ -253,18 +246,19 @@ def main():
     logger.info(f"Device:{device}")
 
     # 1) 读数据（需按时间升序）
-    data_path = os.path.join(current_work_dir,'..', 'data','data.csv')
+    data_path = os.path.join(current_work_dir,'..', 'data',common.train_data)
     df = pd.read_csv(data_path)
 
     # 2) 选择特征列
     if args.feature_cols.strip():
         feat_cols = [c.strip() for c in args.feature_cols.split(",")]
     else:
-        feat_cols = [c for c in DEFAULT_FEATURES if c in df.columns]
+        feat_cols = [c for c in common.DEFAULT_FEATURES if c in df.columns]
         # 把其它数值型列也一并加入（不含 label）
-        extras = [c for c in df.columns if c not in feat_cols + [args.label_col]]
-        extras = [c for c in extras if pd.api.types.is_numeric_dtype(df[c])]
-        feat_cols += extras
+        # extras = [args.label_col]
+        # extras = [c for c in df.columns if c not in feat_cols + [args.label_col]]
+        # extras = [c for c in extras if pd.api.types.is_numeric_dtype(df[c])]
+        # feat_cols += extras
 
     # 3) 原始数组与标签
     A = df[feat_cols].astype(np.float32).to_numpy()   # [N, F]
