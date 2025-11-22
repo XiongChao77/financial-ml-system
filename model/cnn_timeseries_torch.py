@@ -272,9 +272,13 @@ def main():
 
     # ========== 【新增】调用保存 Debug 数据 ==========
     # 保存目录设置在 exported_project_files/model/debug_data 下
-    if False:
+    if True:
         debug_dir = os.path.join(current_work_dir, "debug_data")
         full_ds.save_debug_data(debug_dir)
+        exit()
+
+    if True:
+        full_ds.inspect_final_data()
         exit()
     # ===============================================
 

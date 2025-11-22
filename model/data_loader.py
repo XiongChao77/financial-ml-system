@@ -126,8 +126,8 @@ class TimeSeriesWindowDataset(Dataset):
             if df_clean.empty:
                  raise RuntimeError("Dataset became empty after dropping NaNs. Check TA windows.")
 
-        values = df[clean_feature_cols].to_numpy(dtype=np.float32, copy=True)   # [N, F]
-        labels = df[label_col].astype(int).to_numpy()                       # [N]
+        values = df_clean[clean_feature_cols].to_numpy(dtype=np.float32, copy=True)   # [N, F]
+        labels = df_clean[label_col].astype(int).to_numpy()                       # [N]
         # === 过滤逻辑结束 ===
         
         # 1. 划分窗口 (Partitioning)
@@ -155,6 +155,8 @@ class TimeSeriesWindowDataset(Dataset):
         # === 【核心修复 2】遍历特征并使用缓存的原始数据进行缩放 ===
         for f_idx, feature_name in enumerate(clean_feature_cols):
             
+            if feature_name == 'SMA_7W' or feature_name == 'SMA_25W':
+                pass
             # 1. 获取缩放基准列名
             basis_col = get_scaling_basis_col(feature_name)
 
@@ -174,7 +176,42 @@ class TimeSeriesWindowDataset(Dataset):
             # axis=1 表示沿时间轴计算，keepdims=True 保持维度以便广播 [M, 1, 1]
             mu = np.mean(basis_window, axis=1, keepdims=True)
             sigma = np.std(basis_window, axis=1, keepdims=True)
-            
+
+            # --- 【新增调试陷阱】抓取 SMA_25W 的计算细节 ---
+            if feature_name == 'SMA_25W' or feature_name == 'SMA_7W': 
+                # 1. 临时计算一下缩放结果
+                temp_denom = sigma + eps
+                temp_scaled = (X3d[:, :, f_idx:f_idx + 1] - mu) / temp_denom
+                
+                # 2. 查找绝对值最大的位置
+                max_val = np.max(np.abs(temp_scaled))
+                
+                # 3. 如果最大值异常大（比如 > 20），打印计算过程
+                if max_val > 20.0:
+                    # 找到最大值的索引
+                    flat_idx = np.argmax(np.abs(temp_scaled))
+                    # 转换回 (Window, Time, Feature) 坐标
+                    m, t, _ = np.unravel_index(flat_idx, temp_scaled.shape)
+                    
+                    print(f"\n🔍 [DEBUG TRAP] Investigating SMA_25W Explosion")
+                    print(f"---------------------------------------------")
+                    print(f"Location -> Window Index: {m}, Time Step: {t}")
+                    print(f"Equation -> (Raw_Value - Mu) / Sigma = Result")
+                    
+                    raw_val = X3d[m, t, f_idx]
+                    curr_mu = mu[m, 0, 0]
+                    curr_sigma = sigma[m, 0, 0]
+                    
+                    print(f"  Raw Value (X) : {raw_val:.4f}")
+                    print(f"  Mean (Mu)     : {curr_mu:.4f}")
+                    print(f"  Diff (X - Mu) : {raw_val - curr_mu:.6f}")
+                    print(f"  Sigma (Std)   : {curr_sigma:.8f}  <-- 重点看这个！")
+                    print(f"  Calc Result   : {(raw_val - curr_mu) / (curr_sigma + eps):.4f}")
+                    print(f"---------------------------------------------")
+                    
+                    # 只要抓到一次典型的就够了，不用一直刷屏，可以取消下面的注释让它只报一次
+                    # break
+
             # --- C. 应用 Z-Score 缩放 (修改点) ---
             # 使用基准列的均值和标准差来缩放当前特征
             # 这样如果是 Open/High/Low，它们都会减去 Close 的均值，除以 Close 的标准差
@@ -188,7 +225,7 @@ class TimeSeriesWindowDataset(Dataset):
     def __len__(self): return self.X.shape[0]
     def __getitem__(self, i): return self.X[i], self.y[i]
 
-# ========== 【新增】 保存处理后数据的方法 ==========
+    # ========== 【新增】 保存处理后数据的方法 ==========
     def save_debug_data(self, output_dir: str):
         """
         将处理后的 Tensor 数据保存到文件，用于检查归一化结果。
@@ -234,13 +271,72 @@ class TimeSeriesWindowDataset(Dataset):
         print(f"{'Feature':<25} | {'Mean':<10} | {'Std':<10} | {'Min':<10} | {'Max':<10}")
         print("-" * 75)
         for i, col in enumerate(self.feature_names):
-            # 为了不刷屏，只打印前10个特征
-            if i >= 10: 
-                print(f"... and {len(self.feature_names) - 10} more features")
-                break
+            # # 为了不刷屏，只打印前10个特征
+            # if i >= 10: 
+            #     print(f"... and {len(self.feature_names) - 10} more features")
+            #     break
             col_data = last_step_data[:, i]
             print(f"{col:<25} | {col_data.mean():.4f}     | {col_data.std():.4f}     | {col_data.min():.4f}     | {col_data.max():.4f}")
         print("=========================================\n")
+
+    # ========== 【新增】 最终数据异常值检测方法 ==========
+    def inspect_final_data(self, clip_limit: float = 5.0):
+            """
+            检查最终的 self.X 数据中是否存在超出给定 Z-Score 限制的异常值。
+            打印 Nan/Inf 出现的位置，并按绝对值打印最大的 5 个异常值。
+            """
+            print(f"\n--- Starting Final Data Outlier Inspection (Limit: +/- {clip_limit:.1f}) ---")
+            
+            # 转换为 NumPy 数组进行检查
+            X_np = self.X.numpy()
+            
+            # 1. 检查 NaN 或 Inf
+            nan_or_inf_mask = np.isnan(X_np) | np.isinf(X_np)
+            if nan_or_inf_mask.any():
+                print("🚨 CRITICAL ERROR: Found NaN or Inf values in the final processed data (self.X).")
+                nan_loc = np.where(nan_or_inf_mask)
+                if nan_loc[0].size > 0:
+                    f_idx = nan_loc[2][0]
+                    print(f"  -> First NaN/Inf detected at Window: {nan_loc[0][0]}, Feature: {self.feature_names[f_idx]}")
+                
+            # 2. 检查 Z-Score Outliers (超过 ±clip_limit)
+            is_outlier = (X_np > clip_limit) | (X_np < -clip_limit)
+            outlier_locs = np.where(is_outlier)
+            
+            if outlier_locs[0].size > 0:
+                print(f"⚠️ WARNING: Found {outlier_locs[0].size} total outliers exceeding +/- {clip_limit:.1f}.")
+                
+                # --- 新增逻辑: 排序并打印最大的 5 个异常值 ---
+                
+                # 1. 提取所有异常值
+                # 使用 outlier_locs 数组作为索引，提取对应的值
+                outlier_values = X_np[outlier_locs]
+                
+                # 2. 获取按绝对值排序的索引 (降序)
+                sorted_indices = np.argsort(np.abs(outlier_values))[::-1]
+                
+                print(f"--- Top {min(5, sorted_indices.size)} Largest Outliers (by Magnitude) ---")
+                
+                # 3. 打印前 5 个最大异常值的位置
+                for i in range(min(5, sorted_indices.size)):
+                    
+                    # 获取在 outlier_locs 数组中的原始索引
+                    original_outlier_idx = sorted_indices[i] 
+                    
+                    # 使用原始索引获取三维坐标
+                    w_idx, t_idx, f_idx = (outlier_locs[0][original_outlier_idx],
+                                        outlier_locs[1][original_outlier_idx],
+                                        outlier_locs[2][original_outlier_idx])
+                    
+                    value = outlier_values[original_outlier_idx]
+                    feature_name = self.feature_names[f_idx]
+                    
+                    print(f"  [TOP {i+1}] Window: {w_idx:<5} | Bar: {t_idx:<3} | Feature: {feature_name:<20} | Value: {value:.4f}")
+
+            else:
+                print("✅ All data points are within the +/- limit. Data quality is good.")
+                
+            print("-" * 40)
 
 def _as_strided_windows(a2d: np.ndarray, window: int) -> np.ndarray:
     """

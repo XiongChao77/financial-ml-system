@@ -37,9 +37,9 @@ def add_macd(df: pd.DataFrame,
 def add_weekly_mas(
     df,
     # ---- 周线均线 ----
-    weeks=(7, 25),
+    weeks=[7,25],
     # ---- 日线均线（新增，可配置）----
-    days=(5, 10, 20),
+    days=[5, 10, 20],
     price_col='close',
     method='sma',          # 'sma' 或 'ema'
     strict=True,           # 严格型：窗口未满为 NaN；宽松型：尽早给值
