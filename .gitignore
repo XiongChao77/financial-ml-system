@@ -9,3 +9,5 @@ data.csv
 /model/cnn_timeseries_torch_model.pt
 confmat_cnn.csv
 *.csv
+*exported_project_files*
+*debug_data*
