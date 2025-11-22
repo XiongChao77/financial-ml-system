@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import torch,os
 from torch.utils.data import Dataset
+from data_process.common import predict_num
 
 PRICE_BASE_FEATURES = [ 'SMA' , 'EMA' ,'open', 'high', 'low', 'close'] #will match features by this, and the basic is price
 VOLUME_BASE_FEATURES = ['volume','taker_buy_base_volume', ]  #the basic is volume
@@ -176,9 +177,10 @@ class TimeSeriesWindowDataset(Dataset):
             # axis=1 表示沿时间轴计算，keepdims=True 保持维度以便广播 [M, 1, 1]
             mu = np.mean(basis_window, axis=1, keepdims=True)
             sigma = np.std(basis_window, axis=1, keepdims=True)
-
+            
             # --- 【新增调试陷阱】抓取 SMA_25W 的计算细节 ---
-            if feature_name == 'SMA_25W' or feature_name == 'SMA_7W': 
+            if False:
+            # if feature_name == 'SMA_25W' or feature_name == 'SMA_7W': 
                 # 1. 临时计算一下缩放结果
                 temp_denom = sigma + eps
                 temp_scaled = (X3d[:, :, f_idx:f_idx + 1] - mu) / temp_denom
@@ -216,7 +218,9 @@ class TimeSeriesWindowDataset(Dataset):
             # 使用基准列的均值和标准差来缩放当前特征
             # 这样如果是 Open/High/Low，它们都会减去 Close 的均值，除以 Close 的标准差
             # 从而保留了 K 线结构，同时将数值范围限制在合理区间
-            X3d[:, :, f_idx:f_idx + 1] = (X3d[:, :, f_idx:f_idx + 1] - mu) / (sigma + eps)
+            # X3d[:, :, f_idx:f_idx + 1] = (X3d[:, :, f_idx:f_idx + 1] - mu) / (sigma + eps)
+            # X3d[:, :, f_idx:f_idx + 1] = (X3d[:, :, f_idx:f_idx + 1] - mu) / (mu + eps)
+            X3d[:, :, f_idx:f_idx + 1] = (X3d[:, :, f_idx:f_idx + 1] - mu) / (mu/10 + sigma + eps) #avoid small sigma
 
         # 3. 转换为 PyTorch Tensor
         self.X = torch.from_numpy(X3d)
@@ -338,15 +342,25 @@ class TimeSeriesWindowDataset(Dataset):
                 
             print("-" * 40)
 
-def _as_strided_windows(a2d: np.ndarray, window: int) -> np.ndarray:
+def _as_strided_windows(a2d: np.ndarray, window: int, stride: int = 1) -> np.ndarray:
     """
-    Turn [N, F] into overlapping [M, T, F] with stride tricks, then copy for safety.
-    M = N - T + 1
+    Turn [N, F] into overlapping [M, T, F] with custom stride S.
+    M = (N - T) // S + 1
     """
+    S = max(1, int(stride)) # 确保步长至少为 1
     N, F = a2d.shape
-    M = N - window + 1
+    M = (N - window) // S + 1 # 计算新的样本数量 M
+    
     if M <= 0:
         raise ValueError(f"Data length {N} must be >= window {window}.")
+    
     s0, s1 = a2d.strides
-    view = np.lib.stride_tricks.as_strided(a2d, shape=(M, window, F), strides=(s0, s0, s1), writeable=False)
+    
+    # 关键修改：样本轴（第一个维度 M）的步长现在是 s0 * S
+    view = np.lib.stride_tricks.as_strided(
+        a2d, 
+        shape=(M, window, F), 
+        strides=(s0 * S, s0, s1), # <--- 引入步长 S
+        writeable=False
+    )
     return view.copy()

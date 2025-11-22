@@ -15,6 +15,7 @@ FILES_TO_EXPORT = [
     r"data_process/ta_calculation.py",
     r"model/cnn_timeseries_torch.py",
     r"model/data_loader.py",
+    r"model/run_experiments.py",
     r"trade_simulation/cus_analyzer.py",
     r"trade_simulation/simulation.py",
     r"export_files.py"
