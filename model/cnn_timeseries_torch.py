@@ -6,7 +6,7 @@
 - 输入: 连续时间序列 CSV（按时间升序），包含 9 个数值特征列 + label(0/1/2)
 - 窗口: 每个样本为 256×9（末端时刻的 label 作为该样本标签）
 - 切分: 按时间顺序 70%/15%/15% -> Train/Val/Test
-- 标准化: 仅用 Train 拟合 StandardScaler，再用于 Val/Test
+- 相对化: 每个窗口内，价格组与成交量组分别按最大值缩放到100（按列名分组）
 - 模型: 因果卷积 1D-CNN + GAP + FC
 - 评估: classification_report、macro-F1、混淆矩阵
 """
@@ -25,9 +25,11 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from sklearn.utils.class_weight import compute_class_weight
 from collections import Counter
 import logging
+from tqdm import tqdm
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
-from data import common
+from data_process import common
+from model.data_loader import TimeSeriesWindowDataset
 # ========== 实用函数 ==========
 def setup_logger():
     logger = logging.getLogger("train_logger")
@@ -66,19 +68,14 @@ def chrono_split_idx(n: int, train_ratio=0.7, val_ratio=0.15):
     te = np.arange(n_tr + n_va, n)
     return tr, va, te
 
-def make_windows(arr_2d: np.ndarray, labels_1d: np.ndarray, T: int):
-    """
-    arr_2d: [N, F] 连续序列（按时间升序）
-    labels_1d: [N] 与每个时刻对齐的标签(0/1/2)，末端对齐
-    返回:
-      X: [M, T, F]
-      y: [M]
-    """
-    X, y = [], []
-    for end in range(T-1, len(arr_2d)):#,common.predict_num):#, common.predict_num):
-        X.append(arr_2d[end-T+1:end+1])  # 以 end 为窗口末端
-        y.append(labels_1d[end])
-    return np.asarray(X, np.float32), np.asarray(y, np.int64)
+def chrono_split_by_window_ends(M: int, train_ratio=0.7, val_ratio=0.15):
+    """返回 (tr_start,tr_stop), (va_start,va_stop), (te_start,te_stop) on window-ends."""
+    n_tr = int(M * train_ratio)
+    n_va = int(M * val_ratio)
+    tr = (0, n_tr)
+    va = (n_tr, n_tr + n_va)
+    te = (n_tr + n_va, M)
+    return tr, va, te
 
 class SeqDataset(Dataset):
     def __init__(self, X, y):
@@ -202,9 +199,9 @@ class CostSensitiveLoss(nn.Module):
         return ce + self.lambda_cost * exp_cost
 
 penalty_matrix = [
-    [1.0, 1, 1.5],  # true=0, pred=0/1/2
+    [1.0, 1, 2],  # true=0, pred=0/1/2
     [1.0, 1.0, 1.0],  # true=1, pred=0/1/2
-    [1.5, 1, 1.0],  # true=2, pred=0/1/2
+    [2, 1, 1.0],  # true=2, pred=0/1/2
 ]
 # ========== 训练/评估 ==========
 @torch.no_grad()
@@ -232,7 +229,7 @@ def main():
     ap.add_argument("--train_ratio", type=float, default=0.7)
     ap.add_argument("--val_ratio", type=float, default=0.15)
     ap.add_argument("--epochs", type=int, default=100)
-    ap.add_argument("--batch_size", type=int, default= 128)
+    ap.add_argument("--batch_size", type=int, default= 2048)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--dropout", type=float, default=0.3)
@@ -244,85 +241,103 @@ def main():
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device:{device}")
+    is_cude_available = device == 'cuda'
 
     # 1) 读数据（需按时间升序）
-    data_path = os.path.join(current_work_dir,'..', 'data',common.train_data)
+    data_path = common.train_data_path
     df = pd.read_csv(data_path)
+    split_idx = int(len(df) * common.model_train_rate)
+    # 切分数据
+    train_df = df.iloc[:split_idx]
 
     # 2) 选择特征列
     if args.feature_cols.strip():
         feat_cols = [c.strip() for c in args.feature_cols.split(",")]
     else:
         feat_cols = [c for c in common.DEFAULT_FEATURES if c in df.columns]
-        # 把其它数值型列也一并加入（不含 label）
-        # extras = [args.label_col]
-        # extras = [c for c in df.columns if c not in feat_cols + [args.label_col]]
-        # extras = [c for c in extras if pd.api.types.is_numeric_dtype(df[c])]
-        # feat_cols += extras
-
-    # 3) 原始数组与标签
-    A = df[feat_cols].astype(np.float32).to_numpy()   # [N, F]
-    y_all = df[args.label_col].astype(int).to_numpy() # [N]
 
     # 4) 窗口化 -> [M, T, F], [M]
     T = args.window
-    X_all, y_all = make_windows(A, y_all, T=T)  # 末端对齐标签
-    M = len(X_all)
-    logger.info(f"Total windows (M) = {M}, window = {T}, F = {X_all.shape[-1]}")
-    logger.info(f"candlestick_num = {common.candlestick_num}, predict_num = {common.predict_num}, change_rate = {common.change_rate}")
+    logger.info(f"Using TimeSeriesWindowDataset for windowing and scaling...")
+    
+    # 实例化 TimeSeriesWindowDataset，它在内部完成了窗口划分和 t=0 缩放
+    feat_cols = [col for col in df.columns]
+    logger.info(f"Features num:{len(feat_cols)},: {feat_cols}") # 可选：打印查看
+    full_ds = TimeSeriesWindowDataset(
+        df=df, 
+        feature_cols=feat_cols, 
+        label_col=args.label_col, 
+        window=T
+    )
 
-    # 5) 按“窗口末端时刻”时间切分
-    m_tr = int(M * args.train_ratio)
-    m_va = int(M * args.val_ratio)
-    X_tr, X_va, X_te = X_all[:m_tr], X_all[m_tr:m_tr+m_va], X_all[m_tr+m_va:]
-    y_tr, y_va, y_te = y_all[:m_tr], y_all[m_tr:m_tr+m_va], y_all[m_tr+m_va:]
+    # ========== 【新增】调用保存 Debug 数据 ==========
+    # 保存目录设置在 exported_project_files/model/debug_data 下
+    if False:
+        debug_dir = os.path.join(current_work_dir, "debug_data")
+        full_ds.save_debug_data(debug_dir)
+        exit()
+    # ===============================================
 
-    # 6) 标准化（仅在 Train 拟合；逐特征、跨时间共享）
-    scaler = StandardScaler()
-    X_tr_2d = X_tr.reshape(-1, X_tr.shape[-1])   # [m_tr*T, F]
-    X_va_2d = X_va.reshape(-1, X_va.shape[-1])
-    X_te_2d = X_te.reshape(-1, X_te.shape[-1])
+    # # === 【新增】核心优化：全量数据预加载到 GPU ===
+    # logger.info(f"Pre-loading entire dataset to {device}...")
+    # # 直接修改 Dataset 内部的 Tensor，将其移动到 GPU
+    # full_ds.X = full_ds.X.to(device) 
+    # full_ds.y = full_ds.y.to(device)
+    # logger.info("Data loaded to VRAM.")
 
-    X_tr = scaler.fit_transform(X_tr_2d).reshape(-1, T, X_tr.shape[-1])
-    X_va = scaler.transform(X_va_2d).reshape(-1, T, X_va.shape[-1])
-    X_te = scaler.transform(X_te_2d).reshape(-1, T, X_te.shape[-1])
+    # 可用窗口数量 M
+    M = len(full_ds)
+    logger.info(f"Total windows (M) = {M}, window = {T}, F = {len(feat_cols)}")
 
-    # 7) DataLoader
-    dl_tr = DataLoader(SeqDataset(X_tr, y_tr), batch_size=args.batch_size, shuffle=True)
-    dl_va = DataLoader(SeqDataset(X_va, y_va), batch_size=args.batch_size, shuffle=False)
-    dl_te = DataLoader(SeqDataset(X_te, y_te), batch_size=args.batch_size, shuffle=False)
+    # 3) 按“窗口末端”做时间切分，并构建一次性 Dataset/DataLoader
+    tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, args.train_ratio, args.val_ratio)
+    s_tr, e_tr = tr_rng
+    s_va, e_va = va_rng
+    s_te, e_te = te_rng
 
-    # 8) 类别权重（平衡不均衡）
+    ds_tr = SeqDataset(full_ds.X[s_tr:e_tr].numpy(), full_ds.y[s_tr:e_tr].numpy())
+    ds_va = SeqDataset(full_ds.X[s_va:e_va].numpy(), full_ds.y[s_va:e_va].numpy())
+    ds_te = SeqDataset(full_ds.X[s_te:e_te].numpy(), full_ds.y[s_te:e_te].numpy())
+
+    dl_tr = DataLoader(ds_tr, batch_size=args.batch_size, shuffle=True,  pin_memory=is_cude_available)
+    dl_va = DataLoader(ds_va, batch_size=args.batch_size, shuffle=False, pin_memory=is_cude_available)
+    dl_te = DataLoader(ds_te, batch_size=args.batch_size, shuffle=False, pin_memory=is_cude_available)
+
+    # 8) 类别权重（直接用 y_tr 计算，无需遍历 DataLoader）
+    y_tr = full_ds.y[s_tr:e_tr].numpy()
     classes = np.unique(y_tr)
     cw = compute_class_weight(class_weight="balanced", classes=classes, y=y_tr)
     class_weights = torch.tensor(cw, dtype=torch.float32, device=device)
     logger.info("Class weights: {}".format({int(c): float(w) for c, w in zip(classes, cw)}))
 
-    # 9) 模型/优化器/调度器
-    channel = X_tr.shape[-1]
+    # 9) 模型/优化器/调度器（原逻辑保持不变）
+    feat_cols = full_ds.feature_names
+    channel = full_ds.feature_count
+    logger.info(f"Final Features num:{len(feat_cols)},: {feat_cols}") # 可选：打印查看
     model = CNN1D(channel=channel, n_classes=len(classes), p_drop=args.dropout).to(device)
-    # criterion = nn.CrossEntropyLoss(weight=class_weights)
-    # classes / class_weights 已经按你原代码算好
     criterion = CostSensitiveLoss(
         penalty_matrix=penalty_matrix,
-        base_weights=class_weights.cpu().numpy(),  # 保留类别平衡
-        lambda_cost=0                             # 先从 0.3 试起
+        base_weights=class_weights.cpu().numpy(),
+        lambda_cost=0
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=4)  # 兼容老版本，不加 verbose
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=4)
 
     # 10) 训练循环（早停基于 val_loss）
     best_val, best_state, wait = float("inf"), None, 0
     for epoch in range(1, args.epochs+1):
         model.train()
         tr_loss, tr_total = 0.0, 0
-        for xb, yb in dl_tr:
+        for xb, yb in tqdm(dl_tr, desc=f"Epoch {epoch}/{args.epochs}", ncols=100):
             xb, yb = xb.to(device), yb.to(device)
             logits = model(xb)
             loss = criterion(logits, yb)
-            optimizer.zero_grad(set_to_none=True); loss.backward()
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+
             tr_loss += loss.item() * xb.size(0)
             tr_total += xb.size(0)
         tr_loss /= max(1, tr_total)
@@ -359,8 +374,6 @@ def main():
     for c in classes_sorted:
         logger.info(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
 
-
-
     cm = confusion_matrix(yt_true, yt_pred, labels=classes)
     pd.DataFrame(cm, index=[f"true_{c}" for c in classes], columns=[f"pred_{c}" for c in classes]) \
       .to_csv(os.path.join(current_work_dir,"confmat_cnn.csv"), index=True)
@@ -370,14 +383,14 @@ def main():
         "state_dict": model.state_dict(),
         "classes": classes.tolist(),
         "channel": channel,
-        "window": T
+        "window": T,
+         "feature_cols": feat_cols,
+         "label_col": args.label_col
     }, os.path.join(current_work_dir,"cnn_timeseries_torch_model.pt"))
     meta = {
         "feature_cols": feat_cols,
         "label_col": args.label_col,
         "classes": classes.tolist(),
-        "scaler_mean": scaler.mean_.tolist(),
-        "scaler_scale": scaler.scale_.tolist(),
         "window": T
     }
     with open(os.path.join(current_work_dir,"cnn_timeseries_torch_meta.json"),"w",encoding="utf-8") as f:
