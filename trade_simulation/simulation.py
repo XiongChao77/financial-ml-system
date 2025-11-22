@@ -31,7 +31,7 @@ class TradeResult():
         self.times = 0
 
 _cash = 10000
-commission = 0.001 # 0.1%
+commission = 0.0 # 0.1%
 
 # ------------- Logging Utilities -------------
 def setup_logging(log_file: str, verbose: bool = False):
@@ -79,7 +79,7 @@ def offline_predict_cnn(df, feature_cols, label_col, window, model, device, batc
     # 2. 创建 DataLoader
     dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
     
-    # 3. 批量推理
+# 3. 批量推理
     model.eval()
     preds, confs = [], []
     
@@ -95,6 +95,20 @@ def offline_predict_cnn(df, feature_cols, label_col, window, model, device, batc
     if len(preds) > 0:
         preds = np.concatenate(preds)
         confs = np.concatenate(confs)
+        
+        # --- 新增代码: 打印预测结果分布 ---
+        total_predictions = len(preds)
+        unique_labels, counts = np.unique(preds, return_counts=True)
+        
+        logger.info("--- Overall Prediction Distribution ---")
+        for label, count in zip(unique_labels, counts):
+            percentage = (count / total_predictions) * 100
+            # 确保只打印 0, 1, 2 (如果存在其他标签，这也能处理)
+            if label in (0, 1, 2):
+                logger.info(f"Label {label}: {count} samples ({percentage:.2f}%)")
+        logger.info("-------------------------------------")
+        # --- 新增代码结束 ---
+        
     else:
         logger.warning("No predictions generated!")
         return df
@@ -215,7 +229,7 @@ class MyStrategy(bt.Strategy):
                 self.dir = target_dir
                 self.layers = 1
                 target_pct = self.params.trade_risk * self.layers * self.dir
-                self.order_target_percent(target=target_pct)
+                self.user_order_target_percent(target=target_pct)
             return
 
         # B. 同向加仓 (Pyramiding)
@@ -224,7 +238,7 @@ class MyStrategy(bt.Strategy):
             if not self.position and self.layers == 0:
                 self.layers = 1
                 target_pct = self.params.trade_risk * self.layers * self.dir
-                self.order_target_percent(target=target_pct)
+                self.user_order_target_percent(target=target_pct)
                 return
             
             # 加仓
@@ -232,7 +246,7 @@ class MyStrategy(bt.Strategy):
                 self.layers += 1
                 # 计算新的累计目标仓位 (例如 5% -> 10%)
                 target_pct = self.params.trade_risk * self.layers * self.dir
-                self.order_target_percent(target=target_pct)
+                self.user_order_target_percent(target=target_pct)
                 logger.debug(f"Pyramiding: Layer {self.layers}, Target {target_pct:.2%}")
             return
 
@@ -241,6 +255,14 @@ class MyStrategy(bt.Strategy):
         # 强制最后平仓
         if len(self.data) - 1 == len(self) - 1 and self.position:
             self.close()
+
+    def user_order_target_percent(self, target):
+        cash = self.broker.get_cash() * target
+        size = cash / self.dataclose[0]
+        if cash > 0:
+            self.buy(size=size)
+        elif cash < 0:
+            self.sell(size=abs(size))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run backtest.")

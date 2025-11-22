@@ -199,9 +199,9 @@ class CostSensitiveLoss(nn.Module):
         return ce + self.lambda_cost * exp_cost
 
 penalty_matrix = [
-    [1.0, 1, 2],  # true=0, pred=0/1/2
+    [1.0, 1, 1],  # true=0, pred=0/1/2
     [1.0, 1.0, 1.0],  # true=1, pred=0/1/2
-    [2, 1, 1.0],  # true=2, pred=0/1/2
+    [1, 1, 1.0],  # true=2, pred=0/1/2
 ]
 # ========== 训练/评估 ==========
 @torch.no_grad()
@@ -229,7 +229,7 @@ def main():
     ap.add_argument("--train_ratio", type=float, default=0.7)
     ap.add_argument("--val_ratio", type=float, default=0.15)
     ap.add_argument("--epochs", type=int, default=100)
-    ap.add_argument("--batch_size", type=int, default= 2048)
+    ap.add_argument("--batch_size", type=int, default= 128)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--dropout", type=float, default=0.3)
@@ -272,12 +272,12 @@ def main():
 
     # ========== 【新增】调用保存 Debug 数据 ==========
     # 保存目录设置在 exported_project_files/model/debug_data 下
-    if True:
+    if False:
         debug_dir = os.path.join(current_work_dir, "debug_data")
         full_ds.save_debug_data(debug_dir)
         exit()
 
-    if True:
+    if False:
         full_ds.inspect_final_data()
         exit()
     # ===============================================
