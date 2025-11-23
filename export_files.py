@@ -10,15 +10,16 @@ OUTPUT_DIR = "exported_project_files"
 # 需要导出的文件列表 (使用原始字符串 r"" 处理反斜杠)
 FILES_TO_EXPORT = [
     r"data_process/common.py",
-    r"data_process/download_binance_klines.py",
+    # r"data_process/download_binance_klines.py",
     r"data_process/preparation.py",
     r"data_process/ta_calculation.py",
     r"model/cnn_timeseries_torch.py",
     r"model/data_loader.py",
     r"model/run_experiments.py",
+    r"model/feature_correlation_analysis.py",
     r"trade_simulation/cus_analyzer.py",
     r"trade_simulation/simulation.py",
-    r"export_files.py"
+    # r"export_files.py"
     # 注意：你提供的列表中 trade_simulation\cus_analyzer.py 出现了两次，这里已自动去重
 ]
 

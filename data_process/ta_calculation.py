@@ -45,7 +45,7 @@ def add_weekly_mas(
     strict=True,           # 严格型：窗口未满为 NaN；宽松型：尽早给值
     kline_col='open_time_dt_utc',
     # ---- 斜率（仅对周均线，保持原行为）----
-    add_slope=True,        # 是否为每条周均线计算斜率
+    add_slope=False,        # 是否为每条周均线计算斜率,经过验证统计相关性约 0.001
     slope_method='reg',   # 'diff' 或 'reg'
     slope_weeks=2,         # 斜率回看窗口（单位：周）
     normalize=True         # 是否输出无量纲斜率（斜率 / MA）
