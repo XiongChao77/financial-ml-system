@@ -250,11 +250,11 @@ def main():
     # 切分数据
     train_df = df.iloc[:split_idx]
 
-    # 2) 选择特征列
-    if args.feature_cols.strip():
-        feat_cols = [c.strip() for c in args.feature_cols.split(",")]
-    else:
-        feat_cols = [c for c in common.DEFAULT_FEATURES if c in df.columns]
+    # # 2) 选择特征列
+    # if args.feature_cols.strip():
+    #     feat_cols = [c.strip() for c in args.feature_cols.split(",")]
+    # else:
+    #     feat_cols = [c for c in common.DEFAULT_FEATURES if c in df.columns]
 
     # 4) 窗口化 -> [M, T, F], [M]
     T = args.window

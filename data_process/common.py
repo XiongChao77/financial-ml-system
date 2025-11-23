@@ -11,12 +11,14 @@ weak_change = change_rate / 5.0
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
 乘数 (Multiplier),阈值位置,含义
-vol_multiplier=1.0,1σ,约 31.8% 的价格变动会超出这个阈值（上下尾部）。
-vol_multiplier=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号数量适中。
-vol_multiplier=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
-vol_multiplier=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
+VOL_MULTIPLIER=1.0,1σ,约 31.8% 的价格变动会超出这个阈值（上下尾部）。
+VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号数量适中。
+VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
+VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-vol_multiplier = 1.1
+VOL_MULTIPLIER = 1.2
+# 最小硬阈值 (覆盖手续费+滑点)
+MIN_THRESHOLD = 0.005  # 0.25%
 
 label_decrease = 0
 # label_decrease_weak =1 
@@ -47,7 +49,6 @@ DEFAULT_FEATURES = [
 # SMA_5D,SMA_10D,SMA_20D
 
 def attach_attr(df):
-    
     # 1. 基础处理
     df.rename({'ignore':'label'},axis=1, inplace=True) 
 
@@ -57,14 +58,9 @@ def attach_attr(df):
     df = add_weekly_mas(df) 
     df = add_rsi(df, period=14, price_col="close", strict=True)
     df = add_kdj(df, n=9, m1=3, m2=3, strict=True)
-
-    # --- 3. 标签生成与清理 ---
-    
-    # 生成标签 (label) 和动态阈值 (threshold)
-    df = attach_label(df) 
     return df
 
-def attach_label(df):
+def attach_label(df,vol_multiplier = VOL_MULTIPLIER,min_threshold = MIN_THRESHOLD):
     """
     依据未来收益率与当前波动率的动态关系分3类，并将计算出的动态阈值保存到 'threshold' 列。
     
@@ -74,17 +70,11 @@ def attach_label(df):
     """
     assert 'close' in df.columns, "缺少列 close"
     assert predict_num > 0, "predict_num 必须 > 0"
-
+    print(f"[attach_label] VOL_MULTIPLIER:{vol_multiplier},MIN_THRESHOLD:{min_threshold}")
     # ---------------- 参数设置 ----------------
     # 波动率参考窗口
     vol_window = candlestick_num 
     
-    # 最小硬阈值 (覆盖手续费+滑点)
-    min_threshold = 0.0025  # 0.25%
-    # -----------------------------------------
-
-    df = df.copy()
-
     # 1. 计算未来收益率 (Target)
     future_close = df['close'].shift(-predict_num)
     pct = (future_close - df['close']) / df['close']

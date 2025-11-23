@@ -31,7 +31,7 @@ class TradeResult():
         self.times = 0
 
 _cash = 10000
-commission = 0.0 # 0.1%
+commission = 0#0.001 # 0.1%
 
 # ------------- Logging Utilities -------------
 def setup_logging(log_file: str, verbose: bool = False):

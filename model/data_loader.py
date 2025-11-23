@@ -12,13 +12,16 @@ QUOTE_ASSET_VOLUME_FEATURES = ['quote_asset_volume','taker_buy_quote_volume' ]  
 MACD_FEATURES =['MACD'] #base:MACD_DEA
 KDJ_FEATURES =['KDJ'] #base:KDJ_D
 SELF_BASE_FEATURES = ['number_of_trades','SLOPE_REG_','N_SLOPE_REG_','RSI']   #the basic is theirself
-DROP_FEATURES =['threshold','label','open_time_dt_utc', 'close_time_dt_utc']
+#number_of_trades 和vloume高度重合，统计相关性低,quote_asset_volume和vloume高度重合.
+#taker_buy_quote_volume--taker_buy_base_volume,
+DROP_FEATURES =['threshold','label','open_time_dt_utc', 'close_time_dt_utc' ,'number_of_trades','quote_asset_volume',
+                'taker_buy_quote_volume']
 
 # --- 基准映射表 ---
 BASIS_MAP = {
     'PRICE_BASE': 'close',
     'VOLUME_BASE': 'volume',
-    'QUOTE_ASSET_VOLUME_BASE': 'quote_asset_volume',
+    # 'QUOTE_ASSET_VOLUME_BASE': 'quote_asset_volume',
     'MACD_BASE': 'MACD_DEA',
     'KDJ_BASE': 'KDJ_D',
 }
