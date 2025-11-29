@@ -22,6 +22,14 @@ class CusAnalyzer(bt.Analyzer):
         self.end_dt = None
         self._ratios = []
         self._max_ratio = 0.0
+        # 资金曲线
+        self.equity_curve = []
+
+        # 回撤曲线
+        self.drawdown_curve = []
+
+        # 收益曲线（逐 bar 收益）
+        self.return_curve = []
 
     def _gross_exposure_value(self):
         expv = 0.0
@@ -38,15 +46,41 @@ class CusAnalyzer(bt.Analyzer):
             self.start_dt = dt
         self.end_dt = dt
 
-        # 记录当期暴露比例
+        # ---- 资金 ----
         equity = float(self.strategy.broker.getvalue())
+
+        # 资金曲线
+        self.equity_curve.append({
+            "dt": int(dt.timestamp()),
+            "value": equity
+        })
+
+        # ---- 收益 ----
+        if len(self.equity_curve) > 1:
+            prev = self.equity_curve[-2]["value"]
+            ret = (equity - prev) / prev if prev != 0 else 0
+        else:
+            ret = 0.0
+
+        self.return_curve.append({
+            "dt": int(dt.timestamp()),
+            "ret": ret
+        })
+
+        # ---- 回撤 ----
+        peak = max([p["value"] for p in self.equity_curve])
+        dd = (equity - peak) / peak if peak != 0 else 0
+
+        self.drawdown_curve.append({
+            "dt": int(dt.timestamp()),
+            "dd": dd
+        })
+
+        # ---- 暴露统计 ----
         if equity > 0:
             ratio = self._gross_exposure_value() / equity
             self._ratios.append(ratio)
-            if ratio > self._max_ratio:
-                self._max_ratio = ratio
-
-        # 不在 next 中取 end_value，避免多次覆盖；stop 时统一取
+            self._max_ratio = max(self._max_ratio, ratio)
 
     def stop(self):
         # 期末净值
@@ -73,6 +107,20 @@ class CusAnalyzer(bt.Analyzer):
         else:
             avg_pos_ratio = std_pos_ratio = p95_pos_ratio = max_pos_ratio = 0.0
 
+        # ---- 计算 rolling return（30-bar）----
+        rr30 = []
+        eq = [v["value"] for v in self.equity_curve]
+        dt = [v["dt"] for v in self.equity_curve]
+
+        win = 30  # 滚动窗口大小，可根据你的时间周期调整
+
+        for i in range(len(eq)):
+            if i < win:
+                rr30.append({"dt": dt[i], "rolling": 0})
+            else:
+                r = (eq[i] - eq[i - win]) / eq[i - win]
+                rr30.append({"dt": dt[i], "rolling": r})
+
         self.rets = {
             'start_value': self.start_value,
             'end_value': self.end_value,
@@ -84,4 +132,12 @@ class CusAnalyzer(bt.Analyzer):
             'std_pos_ratio': std_pos_ratio,
             'p95_pos_ratio': p95_pos_ratio,
             'max_pos_ratio': max_pos_ratio,
+            # ⭐ 资金曲线
+            "equity_curve": self.equity_curve,
+            # ⭐ 回撤曲线（每根 bar）
+            "drawdown_curve": self.drawdown_curve,
+            # ⭐ 收益曲线（逐 bar）
+            "return_curve": self.return_curve,
+            # ⭐ 滚动收益曲线（30-bar）
+            "rolling_return_30": rr30
         }
