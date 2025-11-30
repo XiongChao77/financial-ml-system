@@ -1,69 +1,7 @@
 import logging,math
 import pandas as pd
 import numpy as np
-#define model
-candlestick_num = 120
-predict_num = 16
-change_rate = 0.006 # 0.2%
-label_decrease = 0
-# label_decrease_weak =1 
-label_ignore = 1
-# label_increase_weak = 3
-label_increase = 2
-# origin_data = "klines15m.csv"
-origin_data = "data/BTCUSDT_15m.csv"
-train_data = "data/train_data.csv"
-test_data = "data/test_data.csv"
-log_level = logging.INFO
-
-# ====== 你可以按需要修改的默认特征列（9维）======
-#只使用无量纲特征，让模型学习形态
-DEFAULT_FEATURES = [
-"taker_base_share", "taker_quote_share",
-"price_change_pct","number_of_trades_pct","quote_asset_volume_pct","volume_pct",
-"high_pct","low_pct","close_pct","EMA_25W_SLOPE_REG_4W_N"
-]
-# DEFAULT_FEATURES = [
-#     "open","high","low","close","volume","taker_buy_base_volume","taker_buy_quote_volume", "quote_asset_volume", "number_of_trades" ,
-#     "MACD_DIF","MACD_DEA","MACD", "SMA_5D","SMA_10D","SMA_10D","SMA_20D"
-# ]
-#"MACD_DIF","MACD_DEA","MACD"
-#EMA_7W,EMA_7W_SLOPE_REG_4W,EMA_7W_SLOPE_REG_4W_N,EMA_25W,EMA_25W_SLOPE_REG_4W,EMA_25W_SLOPE_REG_4W_N 
-# , "RSI_14","KDJ_K","KDJ_D","KDJ_J"
-# SMA_5D,SMA_10D,SMA_20D
-
-
-def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    新增以下无量纲化特征：
-    - price_change_pct: 当前 open 相对前一根 open 的变化率（%）
-    - high_pct, low_pct, close_pct: 当前 high/low/close 相对 open 的变化率（%）
-    
-    参数:
-        df: 包含 ['open','high','low','close'] 列的 DataFrame
-    返回:
-        新的 DataFrame（复制一份，不修改原始 df）
-    """
-    df = df.copy()
-
-    eps = (1e-9) # 防止异常值和极端情况
-    # 1. 当前 open 相对前一根 open 的变化率
-    df['price_change_pct'] = (df['open'] / (df['open'].shift(1)+eps) - 1.0)
-    df['number_of_trades_pct'] = (df['number_of_trades'] / (df['number_of_trades'].shift(1)+eps) - 1.0)
-    df['quote_asset_volume_pct'] = (df['quote_asset_volume'] / (df['quote_asset_volume'].shift(1)+eps) - 1.0)
-    df['volume_pct'] = (df['volume'] / (df['volume'].shift(1)+eps) - 1.0)
-    # 平均成交价
-    df['avg_price'] = df['quote_asset_volume'] / ((df['volume'] )+eps)
-    # 主动买单占比
-    df['taker_base_share'] = df['taker_buy_base_volume'] / ((df['volume'] )+eps)
-    df['taker_quote_share'] = df['taker_buy_quote_volume'] / ((df['quote_asset_volume'] )+eps)
-
-    # 2. 基于当前 open 计算 high/low/close 的百分比变化
-    df['high_pct'] = (df['high'] / df['open'])
-    df['low_pct']  = (df['low']  / df['open'])
-    df['close_pct']= (df['close']/ df['open'])
-
-    return df
+import os
 
 def add_macd(df: pd.DataFrame,
              fast: int = 12,
@@ -94,37 +32,21 @@ def add_macd(df: pd.DataFrame,
     out['MACD_DEA'] = dea
     out['MACD'] = macd
 
-    # ---- 均线（SMA + EMA）----
-    cnt = close.expanding(min_periods=1).count()  # 用于严格化 EMA
-    for w in ma_windows:
-        w = int(w)
-        if w <= 0:
-            continue
-        # SMA
-        out[f"MA_{w}"] = close.rolling(window=w, min_periods=w).mean()
-        # # EMA（严格：窗口未满置 NaN，便于与 SMA 一致）
-        # ema_w = close.ewm(span=w, adjust=False).mean()
-        # out[f"EMA_{w}"] = ema_w.where(cnt >= w, np.nan)
-
     return out
-
-
-import numpy as np
-import pandas as pd
 
 def add_weekly_mas(
     df,
     # ---- 周线均线 ----
-    weeks=(7, 25),
+    weeks=[7,25],
     # ---- 日线均线（新增，可配置）----
-    days=(5, 10, 20),
+    days=[5, 10, 20],
     price_col='close',
     method='sma',          # 'sma' 或 'ema'
     strict=True,           # 严格型：窗口未满为 NaN；宽松型：尽早给值
     kline_col='open_time_dt_utc',
     # ---- 斜率（仅对周均线，保持原行为）----
-    add_slope=True,        # 是否为每条周均线计算斜率
-    slope_method='diff',   # 'diff' 或 'reg'
+    add_slope=False,        # 是否为每条周均线计算斜率,经过验证统计相关性约 0.001
+    slope_method='reg',   # 'diff' 或 'reg'
     slope_weeks=2,         # 斜率回看窗口（单位：周）
     normalize=True         # 是否输出无量纲斜率（斜率 / MA）
 ):
@@ -253,10 +175,10 @@ def add_weekly_mas(
 
             if slope_method == 'diff':
                 slope = _slope_diff(ma_w, steps)
-                slope_col = f"{ma_w_col}_SLOPE_{slope_weeks}W"
+                slope_col = f"SLOPE_DIFF_{ma_w_col}_{slope_weeks}W"
             elif slope_method == 'reg':
                 slope = _slope_reg(ma_w, steps)
-                slope_col = f"{ma_w_col}_SLOPE_REG_{slope_weeks}W"
+                slope_col = f"SLOPE_REG_{ma_w_col}_{slope_weeks}W"
             else:
                 raise ValueError("slope_method 只能为 'diff' 或 'reg'")
 
@@ -268,13 +190,13 @@ def add_weekly_mas(
             out[slope_col] = slope
 
             if normalize:
-                norm_col = f"{slope_col}_N"  # 归一化斜率
+                norm_col = f"N_{slope_col}"  # 归一化斜率
                 denom = ma_w.replace(0, np.nan)
                 out[norm_col] = slope / denom
 
     return out
 
-
+#Dimensionless
 def add_rsi(
     df: pd.DataFrame,
     period: int = 14,
@@ -315,7 +237,7 @@ def add_rsi(
 
     return out
 
-
+#Dimensionless
 def add_kdj(
     df: pd.DataFrame,
     n: int = 9,
@@ -367,26 +289,3 @@ def add_kdj(
         out[j_col] = out[j_col].where(valid_rsv, np.nan)
 
     return out
-
-
-#####find inf
-def find_float32_issues(df):
-    import numpy as np, pandas as pd
-    num = df.select_dtypes(include=[np.number])
-    X = num.to_numpy()
-    fmax = np.finfo(np.float32).max
-    masks = {
-        "nan": np.isnan(X),
-        "pos_inf": np.isposinf(X),
-        "neg_inf": np.isneginf(X),
-        "abs>float32_max": np.abs(X) > fmax,
-    }
-    report = pd.DataFrame({k: v.sum(axis=0) for k, v in masks.items()}, index=num.columns)
-    # 位置明细
-    bad_mask = np.zeros_like(X, dtype=bool)
-    for m in masks.values(): bad_mask |= m
-    rows, cols = np.where(bad_mask)
-    for r, c in zip(rows, cols):
-        print(df.iloc[r].iat[c])
-    positions = [(num.index[r], num.columns[c], df.loc[num.index[r], num.columns[c]]) for r, c in zip(rows, cols)]
-    return report.sort_values(list(report.columns), ascending=False), positions
