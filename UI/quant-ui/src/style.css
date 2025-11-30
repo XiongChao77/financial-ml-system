@@ -1,0 +1,103 @@
+/* 1. 基础设置 */
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden; /* 禁止页面滚动 */
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: #f0f2f5;
+}
+
+/* 2. Flex 布局容器 */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+h2 { margin: 0 0 10px 0; font-size: 22px; }
+
+/* 3. 统计面板 */
+.dashboard {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 15px;
+  margin-bottom: 15px;
+  flex-shrink: 0;
+}
+.card {
+  background: white;
+  padding: 10px 15px;
+  border-radius: 8px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+  text-align: center;
+}
+.card h3 { margin: 0 0 5px 0; font-size: 12px; color: #888; }
+.card p { margin: 0; font-size: 16px; font-weight: bold; color: #333; }
+.win { color: #26a69a !important; }
+.loss { color: #ef5350 !important; }
+
+/* 4. 新增：工具栏样式 */
+.toolbar {
+    margin-bottom: 10px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+}
+.tf-btn {
+    padding: 6px 12px;
+    margin-right: 8px;
+    border: 1px solid #ddd;
+    background: white;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+.tf-btn:hover { background: #f5f5f5; }
+.tf-btn.active {
+    background: #2196F3;
+    color: white;
+    border-color: #2196F3;
+}
+
+/* 5. 图表容器 */
+#chart-container {
+  flex: 1;              /* 自动占据剩余高度 */
+  min-height: 0;        
+  width: 100%;
+  background: white;
+  border-radius: 8px 8px 0 0; /* 下方直角连接滚动条 */
+  box-shadow: 0 -2px 10px rgba(0,0,0,0.05);
+  position: relative;
+}
+
+#loading {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 18px; color: #666;
+    background: rgba(255,255,255,0.9);
+    padding: 20px;
+    border-radius: 8px;
+    z-index: 100;
+}
+
+/* 6. 底部滚动条 */
+.scrollbar-container {
+    flex-shrink: 0;
+    height: 30px;
+    background: white;
+    padding: 0 10px;
+    display: flex;
+    align-items: center;
+    border-radius: 0 0 8px 8px;
+    border-top: 1px solid #eee;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+}
+#time-scrollbar {
+    width: 100%;
+    cursor: pointer;
+}
