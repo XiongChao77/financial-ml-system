@@ -289,3 +289,70 @@ def add_kdj(
         out[j_col] = out[j_col].where(valid_rsv, np.nan)
 
     return out
+
+def add_volume_features(df: pd.DataFrame,
+                        vol_ma_windows=(5, 10, 20),
+                        vwap_windows=(20, 48, 96),
+                        cmf_window=20,
+                        mfi_window=14) -> pd.DataFrame:
+    """
+    增加成交量与量价结合指标：
+      - VOL_MA_w, VOL_ratio_w
+      - ATS（平均每笔成交量）
+      - QAV_MA_w, quote_ratio_w
+      - OBV
+      - PVT
+      - VWAP_w
+      - CMF
+      - MFI
+    """
+    out = df.copy()
+
+    # ==== 1. 成交量均线 + 比值 ====
+    for w in vol_ma_windows:
+        vol_ma = out['volume'].rolling(w).mean()
+        out[f'VOL_MA_{w}'] = vol_ma
+        out[f'VOL_ratio_{w}'] = out['volume'] / (vol_ma.replace(0, np.nan))
+
+    # ==== 2. 平均每笔成交量 ====
+    out['ATS'] = out['volume'] / (out['number_of_trades'].replace(0, np.nan))
+
+    # ==== 3. 成交额均线 + 比值 ====
+    for w in vol_ma_windows:
+        qav_ma = out['quote_asset_volume'].rolling(w).mean()
+        out[f'QAV_MA_{w}'] = qav_ma
+        out[f'QAV_ratio_{w}'] = out['quote_asset_volume'] / (qav_ma.replace(0, np.nan))
+
+    # ==== 4. OBV ====
+    close = out['close']
+    sign = np.where(close > close.shift(1), 1,
+           np.where(close < close.shift(1), -1, 0))
+    out['OBV'] = (sign * out['volume']).cumsum()
+
+    # ==== 5. PVT ====
+    pct = close.pct_change()
+    out['PVT'] = (pct * out['volume']).cumsum()
+
+    # ==== 6. VWAP（滚动）====
+    for w in vwap_windows:
+        pv = out['close'] * out['volume']
+        vwap = pv.rolling(w).sum() / out['volume'].rolling(w).sum()
+        out[f'VWAP_{w}'] = vwap
+
+    # ==== 7. CMF ====
+    mfm = ((out['close'] - out['low']) - (out['high'] - out['close'])) / \
+          (out['high'] - out['low']).replace(0, np.nan)
+    mfv = mfm * out['volume']
+    out['CMF'] = mfv.rolling(cmf_window).sum() / out['volume'].rolling(cmf_window).sum()
+
+    # ==== 8. MFI ====
+    tp = (out['high'] + out['low'] + out['close']) / 3
+    mf = tp * out['volume']
+    pos = np.where(tp > tp.shift(1), mf, 0)
+    neg = np.where(tp < tp.shift(1), mf, 0)
+    pos_sum = pd.Series(pos).rolling(mfi_window).sum()
+    neg_sum = pd.Series(neg).rolling(mfi_window).sum()
+    mfi = 100 - (100 / (1 + pos_sum / (neg_sum.replace(0, np.nan))))
+    out['MFI'] = mfi
+
+    return out

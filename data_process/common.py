@@ -4,7 +4,7 @@ import numpy as np
 import os
 from data_process.ta_calculation import *
 #define model
-candlestick_num = 120
+CANDLESTICK_NUM = 120
 predict_num = 16
 change_rate = 0.006 # 0.2%
 weak_change = change_rate / 5.0
@@ -16,7 +16,7 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-VOL_MULTIPLIER = 1.2
+VOL_MULTIPLIER = 0.8
 # 最小硬阈值 (覆盖手续费+滑点)
 MIN_THRESHOLD = 0.005  # 0.25%
 
@@ -34,20 +34,6 @@ train_data_path = os.path.join(DATA_PROCESS_OUT_DIR, "train_data.csv")
 test_data_path  = os.path.join(DATA_PROCESS_OUT_DIR, "test_data.csv")
 log_level = logging.INFO
 
-# ====== 你可以按需要修改的默认特征列（9维）======
-#只使用无量纲特征，让模型学习形态
-DEFAULT_FEATURES = [
-"open","high","low","close","volume","taker_buy_base_volume","quote_asset_volume","taker_buy_quote_volume","number_of_trades"
-]
-# DEFAULT_FEATURES = [
-#     "open","high","low","close","volume","taker_buy_base_volume","taker_buy_quote_volume", "quote_asset_volume", "number_of_trades" ,
-#     "MACD_DIF","MACD_DEA","MACD", "SMA_5D","SMA_10D","SMA_10D","SMA_20D"
-# ]
-#"MACD_DIF","MACD_DEA","MACD"
-#EMA_7W,EMA_7W_SLOPE_REG_4W,EMA_7W_SLOPE_REG_4W_N,EMA_25W,EMA_25W_SLOPE_REG_4W,EMA_25W_SLOPE_REG_4W_N 
-# , "RSI_14","KDJ_K","KDJ_D","KDJ_J"
-# SMA_5D,SMA_10D,SMA_20D
-
 def attach_attr(df):
     # 1. 基础处理
     df.rename({'ignore':'label'},axis=1, inplace=True) 
@@ -58,11 +44,13 @@ def attach_attr(df):
     df = add_weekly_mas(df) 
     df = add_rsi(df, period=14, price_col="close", strict=True)
     df = add_kdj(df, n=9, m1=3, m2=3, strict=True)
+    df = add_volume_features(df)
     return df
 
-def attach_label(df,vol_multiplier = VOL_MULTIPLIER,min_threshold = MIN_THRESHOLD):
+def attach_label(df, candlestick_num:int = CANDLESTICK_NUM, vol_multiplier = VOL_MULTIPLIER,min_threshold = MIN_THRESHOLD, 
+                 keep_rate = False):
     """
-    依据未来收益率与当前波动率的动态关系分3类，并将计算出的动态阈值保存到 'threshold' 列。
+    依据未来收益率与当前波动率的动态关系分3类,并将计算出的动态阈值保存到 'threshold' 列。
     
     Label 0: 下跌 (收益率 < -动态阈值)
     Label 1: 震荡 (绝对值 <= 动态阈值)
@@ -113,19 +101,8 @@ def attach_label(df,vol_multiplier = VOL_MULTIPLIER,min_threshold = MIN_THRESHOL
 
     df['label'] = df['label'].astype(int)
 
-    # ---------------- 统计输出 ----------------
-    counts = df['label'].value_counts().sort_index()
-    proportions = df['label'].value_counts(normalize=True).sort_index()
-    
-    print("\n=== 动态标签分布统计 ===")
-    print(f"阈值已保存至列: 'threshold'")
-    print(f"阈值范围: Min={df['threshold'].min():.4f}, Max={df['threshold'].max():.4f}, Mean={df['threshold'].mean():.4f}")
-    
-    for label_val, cnt in counts.items():
-        label_name = "下跌" if label_val == 0 else ("上涨" if label_val == 2 else "震荡")
-        pct_val = proportions[label_val]
-        print(f"Label {label_val} ({label_name}): {cnt} 个, 占比 {pct_val:.4%}")
-    print("==========================\n")
+    if keep_rate == True:
+        df['return_rate'] = pct
 
     return df
     

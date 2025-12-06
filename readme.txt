@@ -1,6 +1,7 @@
 ################################ environment ########################################
 pip3 install torch torchvision
 pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4
+pip install pytorch-ignite
 
 ################################ how to use ########################################
 data\preparation.py
@@ -67,7 +68,7 @@ taker_buy_quote_volume：taker 主动买入对应的计价资产成交额。
 优化回测(长期)
 尝试不同时间尺度(目前在不同品类完全不适用)
 尝试不同品类(目前在不同品类完全不适用)
-
+套利？
 ***************************Problem***************************************
 1.模型对上涨/下跌的预测在相反的大趋势行情中非常不准，持续预测错误导致巨额亏损。
     解决思路：引入长期均线。由模型学习；或者直接禁止逆势交易。
@@ -82,6 +83,13 @@ taker_buy_quote_volume：taker 主动买入对应的计价资产成交额。
 2.基于标准的统计归一化方法
 
 *******************************数据挖掘*********************************************
+因子相关性分析.先搭一个基本的框架
+·信息系数 Information Coefficient
+斯皮尔曼相关系数
+皮尔逊相关系数（Pearson Correlation Coefficient）
+热力图
 volume: 目前的volume体现不出放量/缩量，应该增加类似volume均线的指标
+从秒级数据挖掘信息，整合成分钟级别特征
+上影线和下影线等信息在量化中如何表征？
 ****************************************************************************
 
