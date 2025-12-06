@@ -225,7 +225,7 @@ def main():
     ap.add_argument("--csv", required=False, help="按时间升序的 CSV 文件路径")
     ap.add_argument("--feature_cols", default="", help="逗号分隔;留空则用默认9列 + 其它数值列")
     ap.add_argument("--label_col", default="label")
-    ap.add_argument("--window", type=int, default=common.candlestick_num)
+    ap.add_argument("--window", type=int, default=common.CANDLESTICK_NUM)
     ap.add_argument("--train_ratio", type=float, default=0.7)
     ap.add_argument("--val_ratio", type=float, default=0.15)
     ap.add_argument("--epochs", type=int, default=100)
@@ -249,12 +249,6 @@ def main():
     split_idx = int(len(df) * common.model_train_rate)
     # 切分数据
     train_df = df.iloc[:split_idx]
-
-    # # 2) 选择特征列
-    # if args.feature_cols.strip():
-    #     feat_cols = [c.strip() for c in args.feature_cols.split(",")]
-    # else:
-    #     feat_cols = [c for c in common.DEFAULT_FEATURES if c in df.columns]
 
     # 4) 窗口化 -> [M, T, F], [M]
     T = args.window
