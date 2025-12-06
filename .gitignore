@@ -11,3 +11,4 @@ confmat_cnn.csv
 *.csv
 *exported_project_files*
 *debug_data*
+data_process/data/*
