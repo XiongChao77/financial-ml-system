@@ -8,8 +8,8 @@ from data_process.common import *
 
 def main():
     df = pd.read_csv(origin_data_path)
-    df = attach_attr(df)
-    df = attach_label(df, keep_rate=True)
+    attach_attr(df)
+    attach_label(df)
     # ---------------- 统计输出 ----------------
     counts = df['label'].value_counts().sort_index()
     proportions = df['label'].value_counts(normalize=True).sort_index()
@@ -36,5 +36,5 @@ def main():
     return df
 
 if __name__ == "__main__":
-#**********column info: open_time_dt_utc,open,high,low,close,volume,close_time_dt_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
+#**********column info: open_time_utc,open,high,low,close,volume,close_time_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     main()

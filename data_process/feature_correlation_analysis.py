@@ -34,7 +34,7 @@ except:
 # 请确保在运行此脚本前，已执行 preparation.py 生成 train_data.csv
 # 假设此脚本从项目根目录运行
 HIGH_CORR_THRESHOLD = 0.90 # 设定冗余阈值
-ANALYZE_TARGET = 'ORIGIN'  # ORIGIN: only analyze origin data, REL:only analyze rel data
+ANALYZE_TARGET = 'REL'  # ORIGIN: only analyze origin data, REL:only analyze rel data
 
 def compute_hsic_ignite(x_data, y_data, device=None, max_samples=4000) -> float:
     """
@@ -222,19 +222,20 @@ def analyze_correlation(
 # =======================================================
 # 🌟 新增：并行执行函数
 # =======================================================
-def single_run_analysis(candlestick_num:int, vm: float, mt: float, df_ta_only: pd.DataFrame):
+def single_run_analysis(candlestick_num:int, predict_num:int, vm: float, mt: float, df: pd.DataFrame):
     """
     针对一组 (vm, mt) 参数执行完整的标签、相关性、归一化和分析流程。
     返回包含参数和两个分析结果字符串的字典。
     """
-    
+    print(f"candlestick_num:{candlestick_num},predict_num:{predict_num},single_run_analysis")
     # --- 1. 标签计算 (使用传入的 vm, mt) ---
     try:
-        df_label = common.attach_label(df_ta_only.copy(), candlestick_num, vol_multiplier=vm, min_threshold=mt, keep_rate = True)
+        common.attach_label(df, candlestick_num, predict_num, 
+                                       vol_multiplier=vm, min_threshold=mt, keep_rate = True)
         
         # 🌟 新增：计算标签比例 🌟
         # normalize=True 会返回百分比 (0.0 ~ 1.0)
-        label_counts = df_label['label'].value_counts(normalize=True)
+        label_counts = df['label'].value_counts(normalize=True)
         
         # 使用 .get() 防止某些极端情况下某一类完全没出现
         ratios = {
@@ -245,26 +246,26 @@ def single_run_analysis(candlestick_num:int, vm: float, mt: float, df_ta_only: p
 
     except AssertionError as e:
         raise RuntimeError(f"ERROR in attach_label for vm={vm}, mt={mt}: {e}")
-
+    
     # --- 2. 原始特征分析 (Case 1) ---
     analysis_result_raw =  {}
     if ANALYZE_TARGET == 'ORIGIN':
-        # df_label 包含了标签，可以直接进行相关性分析
-        analysis_result_raw = analyze_correlation(df_label.copy())
-
+        # df 包含了标签，可以直接进行相关性分析
+        analysis_result_raw = analyze_correlation(df.copy())
 
     # --- 3. 归一化和归一化特征分析 (Case 2) ---
     analysis_result_reg = {}
     if ANALYZE_TARGET == 'REL':
-        feat_cols = [col for col in df_label.columns]
-        # **注意：TimeSeriesWindowDataset 内部处理 NaN，这里使用 df_label 的副本**
+        print(f"candlestick_num:{candlestick_num},predict_num:{predict_num},REL")
+        feat_cols = [col for col in df.columns]
+        # **注意：TimeSeriesWindowDataset 内部处理 NaN，这里使用 df 的副本**
         full_ds = data_loader.TimeSeriesWindowDataset(
-            df=df_label.copy(), 
+            df, 
             feature_cols=feat_cols, 
             label_col='label', 
             window=candlestick_num
         )
-        
+        print(f"candlestick_num:{candlestick_num},predict_num:{predict_num},TimeSeriesWindowDataset")
         # 提取最后一个时间步 X3d[M, T, F] -> X_np[M, F]
         X_np = full_ds.X[:, -1, :].numpy() 
         
@@ -273,10 +274,12 @@ def single_run_analysis(candlestick_num:int, vm: float, mt: float, df_ta_only: p
         df_scaled['label'] = full_ds.y.numpy()
         
         analysis_result_reg = analyze_correlation(df_scaled)
+        print(f"candlestick_num:{candlestick_num},predict_num:{predict_num},analyze_correlation")
 
     # 返回结构化结果，包含比例
     return {
         'candlestick_num': candlestick_num,
+        'predict_num': predict_num,
         'vm': vm,
         'mt': mt,
         'raw': analysis_result_raw,
@@ -289,10 +292,10 @@ def single_run_analysis(candlestick_num:int, vm: float, mt: float, df_ta_only: p
 def _unpack_and_run(task_tuple):
     """
     辅助函数，用于 ProcessPoolExecutor.map()。
-    它接收一个任务元组 (vm, mt, df_ta_only)，并将其解包传递给 single_run_analysis。
+    它接收一个任务元组 (vm, mt, df)，并将其解包传递给 single_run_analysis。
     """
-    candlestick_num, vm, mt, df_ta_only = task_tuple
-    return single_run_analysis(candlestick_num, vm, mt, df_ta_only)
+    candlestick_num, predict_num, vm, mt, df = task_tuple
+    return single_run_analysis(candlestick_num, predict_num, vm, mt, df)
 
 def main():
     print("--- Correlation Analysis Utility ---")
@@ -310,21 +313,22 @@ def main():
     for period in period_list:
         evaluate_file = os.path.join(os.path.dirname(common.origin_data_path), f"BTCUSDT_{period}.csv" )
         df_base = pd.read_csv(evaluate_file)
-        df_ta_only = common.attach_attr(df_base.copy())
+        common.attach_attr(df_base)
         tasks = []
-        index += 1
-        tasks.append((index,0, 0, df_ta_only))
         for candlestick_num in candlestick_num_range:
+            for predict_num in [candlestick_num//8, candlestick_num//6, candlestick_num//4]:
             # --- 1. 准备任务参数列表 ---
-            for vm in vm_range:
-                for mt in mt_range:
-                    # 任务参数：(candlestick_num,vm, mt, df_ta_only)
-                    # tasks.append((candlestick_num,vm, mt, df_ta_only))
-                    pass
+            # for vm in vm_range:
+            #     for mt in mt_range:
+            #         # 任务参数：(candlestick_num,vm, mt, df)
+            #         # tasks.append((candlestick_num,vm, mt, df))
+            #         pass
+                result =  _unpack_and_run((candlestick_num, predict_num, 0, 0, df_base.copy()))
+                tasks.append((candlestick_num, predict_num, 0, 0, df_base.copy()))
         all_results = [] # 存储所有任务返回的字典
         
         # --- 2. 使用 ProcessPoolExecutor 进行并行计算 ---
-        num_processes = 2 #avoid cuda error #os.cpu_count() if os.cpu_count() else 4 # 安全获取核心数
+        num_processes = 8 #avoid cuda error #os.cpu_count() if os.cpu_count() else 4 # 安全获取核心数
         print(f"Starting parallel analysis using {num_processes} processes for {len(tasks)} tasks...")
 
         # ProcessPoolExecutor 适用于计算密集型任务，实现真正的并行
@@ -378,8 +382,8 @@ def perform_statistical_analysis(results_list: list[str, Dict]):
             redundant_data = res[data_key][1]
             
             row = {
-                'period': period,
                 'candlestick_num': res['candlestick_num'],
+                'predict_num': res['predict_num'],
                 'vm': res['vm'],
                 'mt': res['mt'],
                 # 🌟 新增：提取标签比例
@@ -391,6 +395,7 @@ def perform_statistical_analysis(results_list: list[str, Dict]):
             config = {
                 'period': period,
                 'candlestick_num': res['candlestick_num'],
+                'predict_num': res['predict_num'],
                 'vm': res['vm'],
                 'mt': res['mt'],
             }
@@ -408,46 +413,46 @@ def perform_statistical_analysis(results_list: list[str, Dict]):
             row.update(corr_data)
             rows.append(row)
 
-    if not rows:
-        print("❌ 没有有效的结果数据。")
-        return
+        if not rows:
+            print("❌ 没有有效的结果数据。")
+            return
 
-    df_master = pd.DataFrame(rows)
-    
-    # 定义列组
-    param_cols = ['period', 'candlestick_num', 'vm', 'mt']
-    ratio_cols = ['ratio_0', 'ratio_1', 'ratio_2']
-    # 特征列是排除参数和比例列之后的列
-    feature_cols = [c for c in df_master.columns if c not in param_cols and c not in ratio_cols]
+        df_master = pd.DataFrame(rows)
+        
+        # 定义列组
+        param_cols = ['candlestick_num', 'predict_num','vm', 'mt']
+        ratio_cols = ['ratio_0', 'ratio_1', 'ratio_2']
+        # 特征列是排除参数和比例列之后的列
+        feature_cols = [c for c in df_master.columns if c not in param_cols and c not in ratio_cols]
 
-    # --- 2. 特征重要性分析 (不变) ---
-    print(f"\n📊 [1] 特征表现排行 (Top Features)")
-    feature_stats = df_master[feature_cols].agg(['mean', 'max', 'std']).T
-    feature_stats = feature_stats.sort_values(by='max', ascending=False)
-    print(feature_stats.head(5).to_string())
+        # --- 2. 特征重要性分析 (不变) ---
+        print(f"\n📊 [1] 特征表现排行 (Top Features)")
+        feature_stats = df_master[feature_cols].agg(['mean', 'max', 'std']).T
+        feature_stats = feature_stats.sort_values(by='max', ascending=False)
+        print(feature_stats.head(5).to_string())
 
-    # --- 3. 最佳参数组合 (包含标签分布) ---
-    print(f"\n🏆 [2] 最佳参数组合 (按 Top 3 特征相关性排序)")
-    print("-" * 50)
-    
-    # 计算得分为前3个特征相关性的均值
-    # 建议修改：只基于 MI (互信息) 计算得分，因为这是最“真实”的信息量
-    mi_cols = [c for c in df_master.columns if c.endswith('_mi')]
-    if mi_cols:
-        df_master['score_mean_mi_top3'] = df_master[mi_cols].apply(lambda x: x.nlargest(3).mean(), axis=1)
-        # 按 MI 得分排序
-        df_master = df_master.sort_values(by='score_mean_mi_top3', ascending=False)
-    df_master['score_max'] = df_master[feature_cols].max(axis=1)
-    
-    # 保存文件 (现在包含了 ratio 列)
-    output_path = os.path.join(common.PROJECT_DIR, 'correlation_result', f'analysis_data_{data_key}_.csv')
-    df_master.to_csv(output_path, index=False)
+        # --- 3. 最佳参数组合 (包含标签分布) ---
+        print(f"\n🏆 [2] 最佳参数组合 (按 Top 3 特征相关性排序)")
+        print("-" * 50)
+        
+        # 计算得分为前3个特征相关性的均值
+        # 建议修改：只基于 MI (互信息) 计算得分，因为这是最“真实”的信息量
+        mi_cols = [c for c in df_master.columns if c.endswith('_mi')]
+        if mi_cols:
+            df_master['score_mean_mi_top3'] = df_master[mi_cols].apply(lambda x: x.nlargest(3).mean(), axis=1)
+            # 按 MI 得分排序
+            df_master = df_master.sort_values(by='score_mean_mi_top3', ascending=False)
+        df_master['score_max'] = df_master[feature_cols].max(axis=1)
+        
+        # 保存文件 (现在包含了 ratio 列)
+        output_path = os.path.join(common.PROJECT_DIR, 'correlation_result', f'analysis_data_{period}_{data_key}.csv')
+        df_master.to_csv(output_path, index=False)
 
     # --- 🌟 [新增] 保存冗余因子数据 ---
     if all_redundant_data:
         # 使用 pd.concat 合并所有任务的冗余数据
         df_redundant_master = pd.concat(all_redundant_data, ignore_index=True)
-        redundant_output_path = os.path.join(common.PROJECT_DIR, 'correlation_result', f'redundancy_analysis_{data_key}_.csv')
+        redundant_output_path = os.path.join(common.PROJECT_DIR, 'correlation_result', f'redundancy_analysis_{data_key}.csv')
         
         # 使用 float_format 确保相关性数值精度
         df_redundant_master.to_csv(redundant_output_path, index=False, float_format='%.6f')
