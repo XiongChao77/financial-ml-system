@@ -2,10 +2,10 @@ import logging,math
 import pandas as pd
 import numpy as np
 import os
-from data_process.ta_calculation import *
+from data_process.feature import *
 #define model
-candlestick_num = 120
-predict_num = 16
+CANDLESTICK_NUM = 120
+PREDICT_NUM = 16
 change_rate = 0.006 # 0.2%
 weak_change = change_rate / 5.0
 # 波动率系数 (0.5 ~ 1.0 之间调整)
@@ -16,9 +16,9 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-VOL_MULTIPLIER = 1.2
+VOL_MULTIPLIER = 0.6
 # 最小硬阈值 (覆盖手续费+滑点)
-MIN_THRESHOLD = 0.005  # 0.25%
+MIN_THRESHOLD = 0.007  # 0.25%
 
 label_decrease = 0
 # label_decrease_weak =1 
@@ -34,35 +34,18 @@ train_data_path = os.path.join(DATA_PROCESS_OUT_DIR, "train_data.csv")
 test_data_path  = os.path.join(DATA_PROCESS_OUT_DIR, "test_data.csv")
 log_level = logging.INFO
 
-# ====== 你可以按需要修改的默认特征列（9维）======
-#只使用无量纲特征，让模型学习形态
-DEFAULT_FEATURES = [
-"open","high","low","close","volume","taker_buy_base_volume","quote_asset_volume","taker_buy_quote_volume","number_of_trades"
-]
-# DEFAULT_FEATURES = [
-#     "open","high","low","close","volume","taker_buy_base_volume","taker_buy_quote_volume", "quote_asset_volume", "number_of_trades" ,
-#     "MACD_DIF","MACD_DEA","MACD", "SMA_5D","SMA_10D","SMA_10D","SMA_20D"
-# ]
-#"MACD_DIF","MACD_DEA","MACD"
-#EMA_7W,EMA_7W_SLOPE_REG_4W,EMA_7W_SLOPE_REG_4W_N,EMA_25W,EMA_25W_SLOPE_REG_4W,EMA_25W_SLOPE_REG_4W_N 
-# , "RSI_14","KDJ_K","KDJ_D","KDJ_J"
-# SMA_5D,SMA_10D,SMA_20D
-
 def attach_attr(df):
     # 1. 基础处理
     df.rename({'ignore':'label'},axis=1, inplace=True) 
 
     # --- 2. 指标计算 (生成所有原始、未缩放的特征列) ---
     # df = add_relative_features(df)
-    df = add_macd(df) 
-    df = add_weekly_mas(df) 
-    df = add_rsi(df, period=14, price_col="close", strict=True)
-    df = add_kdj(df, n=9, m1=3, m2=3, strict=True)
-    return df
+    FeatureFactory(FEATURE_CONFIG).generate(df)
 
-def attach_label(df,vol_multiplier = VOL_MULTIPLIER,min_threshold = MIN_THRESHOLD):
+def attach_label(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PREDICT_NUM , vol_multiplier = VOL_MULTIPLIER,
+                 min_threshold = MIN_THRESHOLD, keep_rate = False):
     """
-    依据未来收益率与当前波动率的动态关系分3类，并将计算出的动态阈值保存到 'threshold' 列。
+    依据未来收益率与当前波动率的动态关系分3类,并将计算出的动态阈值保存到 'threshold' 列。
     
     Label 0: 下跌 (收益率 < -动态阈值)
     Label 1: 震荡 (绝对值 <= 动态阈值)
@@ -113,52 +96,32 @@ def attach_label(df,vol_multiplier = VOL_MULTIPLIER,min_threshold = MIN_THRESHOL
 
     df['label'] = df['label'].astype(int)
 
-    # ---------------- 统计输出 ----------------
-    counts = df['label'].value_counts().sort_index()
-    proportions = df['label'].value_counts(normalize=True).sort_index()
-    
-    print("\n=== 动态标签分布统计 ===")
-    print(f"阈值已保存至列: 'threshold'")
-    print(f"阈值范围: Min={df['threshold'].min():.4f}, Max={df['threshold'].max():.4f}, Mean={df['threshold'].mean():.4f}")
-    
-    for label_val, cnt in counts.items():
-        label_name = "下跌" if label_val == 0 else ("上涨" if label_val == 2 else "震荡")
-        pct_val = proportions[label_val]
-        print(f"Label {label_val} ({label_name}): {cnt} 个, 占比 {pct_val:.4%}")
-    print("==========================\n")
+    if keep_rate == True:
+        df['return_rate'] = pct
 
-    return df
-    
-def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    新增以下无量纲化特征：
-    - price_change_pct: 当前 open 相对前一根 open 的变化率（%）
-    - high_pct, low_pct, close_pct: 当前 high/low/close 相对 open 的变化率（%）
-    
-    参数:
-        df: 包含 ['open','high','low','close'] 列的 DataFrame
-    返回:
-        新的 DataFrame（复制一份，不修改原始 df）
-    """
-    df = df.copy()
+FEATURE_CONFIG:list[FeatureBase] = [
+    FeatureMACD(fast=12, slow=26, signal=9),
+    FeatureMA(weeks=[7,25], days=[5, 10, 20], method='sma', strict=True, add_slope = False, slope_method='reg', slope_weeks= 2),
+    FeatureRsi(period=14, price_col='close', strict=True, prefix='RSI'),
+    FeatureKdj(n=9, m1=3, m2=3, high_col='high', low_col='low',  close_col='close', strict=True, prefix='KDJ'),
+    FeatureVolMa(vol_ma_windows = (5, 10, 20)),
+    FeatureQavMa(vol_ma_windows = (5, 10, 20)),
+    FeatureOBV(),
+    FeaturePVT(),
+    FeatureWAP(vwap_windows = (20, 48, 96)),
+    FeatureCFM(cmf_window = 20),
+    FeatureMFI(mfi_window=14),
+    FeatureATS(), #FeatureContainer(FeatureATS),
+    FeatureCandle(),
+]
 
-    eps = (1e-9) # 防止异常值和极端情况
-    # 1. 当前 open 相对前一根 open 的变化率
-    df['price_change_pct'] = (df['open'] / (df['open'].shift(1)+eps) - 1.0)
-    df['number_of_trades_pct'] = (df['number_of_trades'] / (df['number_of_trades'].shift(1)+eps) - 1.0)
-    df['quote_asset_volume_pct'] = (df['quote_asset_volume'] / (df['quote_asset_volume'].shift(1)+eps) - 1.0)
-    df['volume_pct'] = (df['volume'] / (df['volume'].shift(1)+eps) - 1.0)
-    # 平均成交价
-    df['avg_price'] = df['quote_asset_volume'] / ((df['volume'] )+eps)
-    df['avg_price_pct'] = (df['avg_price_pct'] / (df['avg_price_pct'].shift(1)+eps) - 1.0)
-    # 主动买单占比
-    df['taker_base_share'] = df['taker_buy_base_volume'] / ((df['volume'] )+eps)
-    df['taker_quote_share'] = df['taker_buy_quote_volume'] / ((df['quote_asset_volume'] )+eps)
-
-    # 2. 基于当前 open 计算 high/low/close 的百分比变化
-    df['high_pct'] = (df['high'] / df['open'])
-    df['low_pct']  = (df['low']  / df['open'])
-    df['close_pct']= (df['close']/ df['open'])
-
-    return df
-
+class FeatureFactory:
+    def __init__(self, config_list:list[FeatureBase] = FEATURE_CONFIG):
+        self.features:list[FeatureBase] = config_list
+        # for f in config_list:
+        #     self.features.append(f.feature(f.parameters))
+    def generate(self,df):
+        for f in self.features:     f.generate(df)
+    def normalize(self, X: np.ndarray, feature_cols: list[str]):
+        for f in self.features:
+            f.normalize(X, feature_cols)
