@@ -8,8 +8,21 @@ from data_process.common import *
 
 def main():
     df = pd.read_csv(origin_data_path)
-    df = attach_attr(df)
-    df = attach_label(df)
+    attach_attr(df)
+    attach_label(df)
+    # ---------------- 统计输出 ----------------
+    counts = df['label'].value_counts().sort_index()
+    proportions = df['label'].value_counts(normalize=True).sort_index()
+    
+    print("\n=== 动态标签分布统计 ===")
+    print(f"阈值已保存至列: 'threshold'")
+    print(f"阈值范围: Min={df['threshold'].min():.4f}, Max={df['threshold'].max():.4f}, Mean={df['threshold'].mean():.4f}")
+    
+    for label_val, cnt in counts.items():
+        label_name = "下跌" if label_val == 0 else ("上涨" if label_val == 2 else "震荡")
+        pct_val = proportions[label_val]
+        print(f"Label {label_val} ({label_name}): {cnt} 个, 占比 {pct_val:.4%}")
+    print("==========================\n")
     
     # 计算切分点
     split_idx = int(len(df) * 0.8)
@@ -23,5 +36,5 @@ def main():
     return df
 
 if __name__ == "__main__":
-#**********column info: open_time_dt_utc,open,high,low,close,volume,close_time_dt_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
+#**********column info: open_time_utc,open,high,low,close,volume,close_time_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     main()

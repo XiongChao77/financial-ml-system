@@ -20,7 +20,7 @@ sys.path.append(os.path.join(current_work_dir,'..'))
 
 # 引入自定义模块
 from data_process.common import *
-from model.cnn_timeseries_torch import CNN1D
+from model.train import CNN1D
 from model.data_loader import TimeSeriesWindowDataset 
 from trade_simulation import cus_analyzer,cus_comminfo
 
@@ -33,7 +33,7 @@ class TradeResult():
         self.times = 0
 
 _cash = 10000
-commission = 0 # 0.001 # 0.1%
+commission = 0.001 # 0.001 # 0.1%
 
 # ------------- Logging Utilities -------------
 def setup_logging(log_file: str, verbose: bool = False):
@@ -171,8 +171,8 @@ class PandasDataWithPred(bt.feeds.PandasData):
 class MyStrategy(bt.Strategy):
     params = dict(
         holdbar=1,                 
-        trade_risk=0.05,           # 每次加仓 5% 总资金
-        max_layers=10,              # 最大加仓层数
+        trade_risk=0.1,           # 每次加仓 5% 总资金
+        max_layers=6,              # 最大加仓层数
         allow_short=True,         
         allow_long=True,           
         thresh=None,               # 置信度阈值
@@ -302,7 +302,7 @@ class Parameters:
     def __init__(self):
         self.allow_short = True
         self.allow_long = True
-        self.thresh:float = 0
+        self.thresh:float = 0.4
         self.verbose = False
         
 def main():
@@ -319,12 +319,12 @@ def main():
 	# 直接读取 CSV，假设其中已包含所有特征列和时间列
     df = pd.read_csv(data_path)
     # 【关键】检查时间列是否存在
-    if 'open_time_dt_utc' not in df.columns:
-        logger.error("CRITICAL: 'open_time_dt_utc' column missing.")
+    if 'open_time_utc' not in df.columns:
+        logger.error("CRITICAL: 'open_time_utc' column missing.")
         sys.exit(1)
     # 【关键】解析时间列
     # 不再调用 attach_attr，避免重复计算和潜在的数据修改
-    df['open_time_dt_utc'] = pd.to_datetime(df['open_time_dt_utc'], utc=True)
+    df['open_time_utc'] = pd.to_datetime(df['open_time_utc'], utc=True)
 
     # 2. 模型加载
     if not os.path.exists(META_PATH) or not os.path.exists(MODEL_PATH):
@@ -351,7 +351,7 @@ def main():
     # 3. 离线推理
     df_with_pred , model_stats= offline_predict_cnn(df, feature_cols, label_col, window, model, device)
     df_with_pred.dropna(subset=['pred'], inplace=True)
-    logger.info(f"Data range: {df_with_pred['open_time_dt_utc'].min()} to {df_with_pred['open_time_dt_utc'].max()}")
+    logger.info(f"Data range: {df_with_pred['open_time_utc'].min()} to {df_with_pred['open_time_utc'].max()}")
 
     # 4. Backtrader 执行
     cerebro = bt.Cerebro(runonce=False) 
@@ -365,7 +365,7 @@ def main():
 
     data = PandasDataWithPred(
         dataname=df_with_pred,
-        datetime='open_time_dt_utc', 
+        datetime='open_time_utc', 
         open='open',
         high='high',
         low='low',
@@ -397,8 +397,8 @@ def main():
     trade_logs = cerebro.trade_logs
 
     # ========== 转 K线 JSON ==========
-    candles = df[['open_time_dt_utc','open','high','low','close']].copy()
-    candles.rename(columns={"open_time_dt_utc": "time"}, inplace=True)
+    candles = df[['open_time_utc','open','high','low','close']].copy()
+    candles.rename(columns={"open_time_utc": "time"}, inplace=True)
     candles["time"] = candles["time"].apply(lambda dt: int(dt.timestamp()))
     candles_json = candles.to_dict(orient="records")
 
@@ -467,7 +467,7 @@ def generate_backtest_report(strat, model_stats=None, save_path="full_backtest_r
     summary = (
         f"SUMMARY | GrossRet: {gross_return*100:.2f}% | CAGR: {cagr*100:.2f}% | "
         f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | "
-        f"Trades: {total_trades} | WinRate: {win_rate:.2f}%"
+        f"Trades: {total_trades} | WinRate: {win_rate:.2f}% commission: {commission*100:.2f}%"
     )
     print(summary)
 
