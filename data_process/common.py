@@ -1,7 +1,7 @@
 import logging,math
 import pandas as pd
 import numpy as np
-import os
+import os, colorlog , logging
 from data_process.feature import *
 #define model
 CANDLESTICK_NUM = 120
@@ -27,11 +27,12 @@ label_ignore = 1
 label_increase = 2
 model_train_rate = 0.8
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR) 
+PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR)
+TEMPORARY_DIR = os.path.join(PROJECT_DIR , 'temporary')
 origin_data_path = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency', "BTCUSDT_15m.csv")
 DATA_PROCESS_OUT_DIR = os.path.join(DATA_PROCESS_DIR, 'output')
-train_data_path = os.path.join(DATA_PROCESS_OUT_DIR, "train_data.csv")
-test_data_path  = os.path.join(DATA_PROCESS_OUT_DIR, "test_data.csv")
+train_data_path = os.path.join(TEMPORARY_DIR, "train_data.csv")
+test_data_path  = os.path.join(TEMPORARY_DIR, "test_data.csv")
 log_level = logging.INFO
 
 def attach_attr(df):
@@ -98,6 +99,58 @@ def attach_label(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PRE
 
     if keep_rate == True:
         df['return_rate'] = pct
+
+#console: All
+#file: above Info
+def setup_logger(log_name="app_logger", log_path="logs"):
+    """
+    设置日志记录器：控制台彩色输出 (INFO+)，文件输出 (INFO+)。
+    :return: 配置好的日志记录器对象。
+    """
+    # 确保日志目录存在
+    os.makedirs(log_path, exist_ok=True)
+    
+    logger = logging.getLogger(log_name)
+    logger.setLevel(logging.DEBUG) # 确保所有消息都能进入处理流程
+
+    # 避免重复添加 handlers (重要，防止多次调用函数时重复记录)
+    if logger.handlers:
+        logger.handlers = []
+
+    log_format = "%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s"
+
+    # --- 1. 控制台处理程序 (StreamHandler) ---
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG) # 控制台输出：INFO 及以上
+    
+    # 彩色格式化器
+    color_formatter = colorlog.ColoredFormatter(
+        "%(log_color)s" + log_format,
+        datefmt="%Y-%m-%d %H:%M:%S",
+        log_colors={
+            'DEBUG':    'cyan',
+            'INFO':     'green',
+            'WARNING':  'yellow',
+            'ERROR':    'red',
+            'CRITICAL': 'bold_red,bg_yellow',
+        }
+    )
+    ch.setFormatter(color_formatter)
+    logger.addHandler(ch)
+
+    # --- 2. 文件处理程序 (FileHandler) ---
+    log_file = os.path.join(log_path, f"{log_name}.log")
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    
+    # 设置文件最低输出等级：INFO
+    fh.setLevel(logging.INFO) 
+    
+    # 普通格式化器
+    file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    fh.setFormatter(file_formatter)
+    logger.addHandler(fh)
+
+    return logger
 
 FEATURE_CONFIG:list[FeatureBase] = [
     FeatureMACD(fast=12, slow=26, signal=9),

@@ -1,7 +1,10 @@
+
+https://docs.crunchdao.com/real-time-competitions/competitions/falcon
 ################################ environment ########################################
 pip3 install torch torchvision
 pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4
-pip install pytorch-ignite
+pip install pytorch-ignite  colorlog
+
 
 ################################ how to use ########################################
 data\preparation.py
