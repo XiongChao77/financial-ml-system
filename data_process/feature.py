@@ -97,6 +97,17 @@ class FeatureMA(FeatureBase):
         self.add_slope = kwargs.get('add_slope', False)
         self.slope_method = kwargs.get('slope_method', 'reg')# 'diff' 或 'reg'
         self.slope_weeks = kwargs.get('slope_weeks', 2)     # 斜率回看窗口（单位：周）
+        for d in self.days:
+            ma_col = f"{'SMA' if self.method=='sma' else 'EMA'}_{d}D"
+            self.features.append(ma_col)
+        for w in self.weeks:
+            ma_w_col = f"{'SMA' if self.method=='sma' else 'EMA'}_{w}W"
+            self.features.append(ma_w_col)
+            # 周线斜率（保持原行为）
+            if self.add_slope:
+                slope_col = f"{'SLOPE_DIFF_' if self.method=='diff' else 'SLOPE_REG_'}{ma_w_col}_{self.slope_weeks}W"
+                self.features.append(slope_col)
+
     def generate(self,df:pd.DataFrame):
         kline_col='open_time_utc'
         price_col='close'
@@ -194,7 +205,6 @@ class FeatureMA(FeatureBase):
             else:
                 ma_col = f"EMA_{d}D"
             out[ma_col] = ma_d
-            self.features.append(ma_col)
 
         # 4) 计算 —— 周线均线（原有）
         for w in self.weeks:
@@ -205,7 +215,6 @@ class FeatureMA(FeatureBase):
             ma_w = _ma(close, window_w)
             ma_w_col = f"{'SMA' if m=='sma' else 'EMA'}_{w}W"
             out[ma_w_col] = ma_w
-            self.features.append(ma_w_col)
             
             # 周线斜率（保持原行为）
             if self.add_slope:
@@ -219,7 +228,6 @@ class FeatureMA(FeatureBase):
                     slope_col = f"SLOPE_REG_{ma_w_col}_{self.slope_weeks}W"
                 else:
                     raise ValueError("slope_method 只能为 'diff' 或 'reg'")
-                self.features.append(slope_col)
                 if self.strict:
                     valid_ma = ma_w.notna()
                     valid_slope = ma_w.rolling(steps).count() >= steps
