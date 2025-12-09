@@ -30,7 +30,7 @@ def main():
     train_df = df.iloc[:split_idx]
     test_df = df.iloc[split_idx:]
     # 写入文件
-    if not os.path.exists(DATA_PROCESS_OUT_DIR): os.makedirs(DATA_PROCESS_OUT_DIR)
+    os.makedirs(TEMPORARY_DIR , exist_ok=True)
     train_df.to_csv(train_data_path, index=False, encoding="utf-8")
     test_df.to_csv(test_data_path, index=False, encoding="utf-8")
     return df
