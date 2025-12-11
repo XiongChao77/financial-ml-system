@@ -31,8 +31,12 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process import common
 from model.data_loader import TimeSeriesWindowDataset
+#   model
 from model.cnn import CNN1D
 from model.lstm import LSTM1D
+from model.transformer_v1 import Transformer1D
+from model.transformer_v2 import Transformer1D_V2
+from model.xgb import XGBoostAdapter
 
 def set_seed(seed=42):
     import random
@@ -143,24 +147,32 @@ def main():
     ap.add_argument("--dropout", type=float, default=0.3)
     ap.add_argument("--patience", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42)
-    # === For lstm ===
+    # === 模型选择 ===
     ap.add_argument(
         "--model_type",
         type=str,
-        default="cnn",
-        choices=["cnn", "lstm"],
-        help="选择模型: cnn 或 lstm",
+        default="transformer",
+        choices=["cnn", "lstm", "transformer, xgboost"], # 【修改】添加 transformer
+        help="Model architecture: cnn, lstm, or transformer",
     )
     ap.add_argument("--lstm_hidden", type=int, default=64, help="LSTM 隐藏层维度")
     ap.add_argument("--lstm_layers", type=int, default=2, help="LSTM 层数")
     ap.add_argument("--bidirectional", action='store_true', help="使用双向 LSTM")  #store_true/store_false
+    # === 【新增】Transformer 参数 ===
+    ap.add_argument("--trans_d_model", type=int, default=64, help="Transformer 内部维度 (d_model)")
+    ap.add_argument("--trans_nhead", type=int, default=8, help="Attention 头数 (d_model 必须能被此数整除)")
+    ap.add_argument("--trans_layers", type=int, default=5, help="Transformer Encoder 层数")
+    ap.add_argument("--trans_dim_feedforward", type=int, default=256, help="FFN 中间层维度")
     # ================
+    #  xgboost 特有参数
+    ap.add_argument("--xgb_depth", type=int, default=6)
+    ap.add_argument("--xgb_estimators", type=int, default=100)
     args = ap.parse_args()
 
     logger = common.setup_logger(log_name='train', log_path=os.path.join(common.TEMPORARY_DIR, 'training.log'))
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.debug(f"Device:{device}")
+    logger.info(f"Device:{device}")
     is_cude_available = device == "cuda"
 
     # 1) 读数据（需按时间升序）
@@ -172,11 +184,11 @@ def main():
 
     # 4) 窗口化 -> [M, T, F], [M]
     T = args.window
-    logger.debug(f"Using TimeSeriesWindowDataset for windowing and scaling...")
-
+    logger.info(f"Using TimeSeriesWindowDataset for windowing and scaling...")
+    
     # 实例化 TimeSeriesWindowDataset，它在内部完成了窗口划分和 t=0 缩放
     feat_cols = [col for col in df.columns]
-    logger.debug(f"Features num:{len(feat_cols)},: {feat_cols}")  # 可选：打印查看
+    logger.info(f"Features num:{len(feat_cols)},: {feat_cols}")  # 可选：打印查看
     full_ds = TimeSeriesWindowDataset(
         df=df, feature_cols=feat_cols, label_col=args.label_col, window=T
     )
@@ -194,15 +206,15 @@ def main():
     # ===============================================
 
     # # === 【新增】核心优化：全量数据预加载到 GPU ===
-    # logger.debug(f"Pre-loading entire dataset to {device}...")
+    logger.info(f"Pre-loading entire dataset to {device}...")
     # # 直接修改 Dataset 内部的 Tensor，将其移动到 GPU
     # full_ds.X = full_ds.X.to(device)
     # full_ds.y = full_ds.y.to(device)
-    # logger.debug("Data loaded to VRAM.")
+    logger.info("Data loaded to VRAM.")
 
     # 可用窗口数量 M
     M = len(full_ds)
-    logger.debug(f"Total windows (M) = {M}, window = {T}, F = {len(feat_cols)}")
+    logger.info(f"Total windows (M) = {M}, window = {T}, F = {len(feat_cols)}")
 
     # 3) 按“窗口末端”做时间切分，并构建一次性 Dataset/DataLoader
     tr_rng, va_rng, te_rng = chrono_split_by_window_ends(
@@ -231,16 +243,16 @@ def main():
     classes = np.unique(y_tr)
     cw = compute_class_weight(class_weight="balanced", classes=classes, y=y_tr)
     class_weights = torch.tensor(cw, dtype=torch.float32, device=device)
-    logger.info(
+    logger.record(
         "Class weights: {}".format({int(c): float(w) for c, w in zip(classes, cw)})
     )
 
     # 9) 模型/优化器/调度器（原逻辑保持不变）
     feat_cols = full_ds.feature_names
     channel = full_ds.feature_count
-    logger.info(f"Final Features num:{len(feat_cols)},: {feat_cols}")  # 可选：打印查看
+    logger.warning(f"Final Features num:{len(feat_cols)},: {feat_cols}")  # 可选：打印查看
     if args.model_type == "lstm":
-        logger.info(f"Initializing LSTM (hidden={args.lstm_hidden}, layers={args.lstm_layers}, bidirectional={args.bidirectional})...")
+        logger.record(f"Initializing LSTM (hidden={args.lstm_hidden}, layers={args.lstm_layers}, bidirectional={args.bidirectional})...")
         model = LSTM1D(
             input_size=channel,
             hidden_size=args.lstm_hidden,
@@ -249,8 +261,37 @@ def main():
             p_drop=args.dropout,
             bidirectional=args.bidirectional
         ).to(device)
+    elif args.model_type == "transformer": # 【新增】
+        logger.record(f"Initializing Transformer (d_model={args.trans_d_model}, nhead={args.trans_nhead}, layers={args.trans_layers})...")
+        # 检查 d_model 是否能被 nhead 整除
+        if args.trans_d_model % args.trans_nhead != 0:
+            raise ValueError(f"trans_d_model ({args.trans_d_model}) must be divisible by trans_nhead ({args.trans_nhead})")
+            
+        model = Transformer1D_V2(
+            input_size=channel,
+            n_classes=len(classes),
+            d_model=args.trans_d_model,
+            nhead=args.trans_nhead,
+            num_layers=args.trans_layers,
+            dim_feedforward=args.trans_dim_feedforward,
+            dropout=args.dropout,
+            max_len=args.window # 位置编码的最大长度需 >= 窗口长度
+        ).to(device)
+    elif args.model_type == "xgboost":
+        logger.info(f"Initializing XGBoost (depth={args.xgb_depth}, est={args.xgb_estimators})...")
+        # 计算展平后的维度 Input Dim = Window * Features
+        input_dim = T * len(feat_cols)
+        model = XGBoostAdapter(
+            input_dim=input_dim,
+            n_classes=len(classes),
+            params={
+                'max_depth': args.xgb_depth,
+                'n_estimators': args.xgb_estimators,
+                'learning_rate': args.lr
+            }
+        )
     else:
-        logger.info("Initializing CNN...")
+        logger.record("Initializing CNN...")
         model = CNN1D(
             channel=channel, 
             n_classes=len(classes), 
@@ -294,7 +335,7 @@ def main():
             if len(yv_true)
             else float("nan")
         )
-        logger.debug(
+        logger.info(
             f"Epoch {epoch:03d} | tr_loss {tr_loss:.4f} | va_loss {va_loss:.4f} | va_macroF1 {va_f1:.4f}"
         )
 
@@ -307,7 +348,7 @@ def main():
         else:
             wait += 1
             if wait >= args.patience:
-                logger.info("Early stopping. epoch {epoch}")
+                logger.record("Early stopping. epoch {epoch}")
                 break
 
     if best_state is not None:
@@ -315,9 +356,9 @@ def main():
 
     # 11) 测试集评估 + 保存
     te_loss, yt_true, yt_pred = eval_epoch(model, dl_te, device, criterion)
-    logger.info("\n=== Test Report ===")
-    logger.info(classification_report(yt_true, yt_pred, digits=4))
-    logger.info("Test macro-F1:{}".format(f1_score(yt_true, yt_pred, average="macro")))
+    logger.record("\n=== Test Report ===")
+    logger.record(classification_report(yt_true, yt_pred, digits=4))
+    logger.record("Test macro-F1:{}".format(f1_score(yt_true, yt_pred, average="macro")))
 
     # 计算测试集中每个标签的真实占比
     # 假设你的真实标签在 yt_true 里
@@ -326,15 +367,15 @@ def main():
     classes_sorted = sorted(counts.keys())
     true_pct = {c: counts[c] / total for c in classes_sorted}
 
-    logger.info("\n=== True label proportion (Test set) ===")
+    logger.record("\n=== True label proportion (Test set) ===")
     for c in classes_sorted:
-        logger.info(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
+        logger.record(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
 
     cm = confusion_matrix(yt_true, yt_pred, labels=classes)
     pd.DataFrame(
         cm, index=[f"true_{c}" for c in classes], columns=[f"pred_{c}" for c in classes]
     ).to_csv(os.path.join(common.TEMPORARY_DIR, "confmat_cnn.csv"), index=True)
-    logger.debug("Saved confusion matrix -> confmat_cnn.csv")
+    logger.info("Saved confusion matrix -> confmat_cnn.csv")
 
     torch.save(
         {
@@ -381,13 +422,17 @@ def main():
         # 如果是 LSTM，记录其架构参数，方便推理时重建
         "lstm_hidden": getattr(args, 'lstm_hidden', 64),
         "lstm_layers": getattr(args, 'lstm_layers', 2),
-        "bidirectional": getattr(args, 'bidirectional', False) # 保存这个状态
+        "bidirectional": getattr(args, 'bidirectional', False), # 保存这个状态
+        "trans_d_model": getattr(args, 'trans_d_model', 128),
+        "trans_nhead": getattr(args, 'trans_nhead', 4),
+        "trans_layers": getattr(args, 'trans_layers', 2),
+        "trans_dim_feedforward": getattr(args, 'trans_dim_feedforward', 512)
     }
 
     with open(os.path.join(common.TEMPORARY_DIR, "torch_model_train_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
-    logger.debug("Saved model -> torch_model_train_info.pt")
-    logger.debug("Saved meta  -> torch_model_train_meta.json")
+    logger.info("Saved model -> torch_model_train_info.pt")
+    logger.info("Saved meta  -> torch_model_train_meta.json")
 
 
 if __name__ == "__main__":
