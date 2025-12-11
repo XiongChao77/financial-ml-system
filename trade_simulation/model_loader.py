@@ -10,6 +10,7 @@ META_PATH  = os.path.join(current_work_dir, '..', 'model', "torch_model_train_me
 from data_process.common import *
 from model.cnn import CNN1D
 from model.lstm import LSTM1D
+from model.transformer_v2 import Transformer1D_V2
 from model.data_loader import TimeSeriesWindowDataset 
 # -----------------------------------------------------------------------------
 # Encapsulated Model Handler
@@ -17,7 +18,7 @@ from model.data_loader import TimeSeriesWindowDataset
 class ModelHandler:
     def __init__(self, device=None):
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.logger = logging.getLogger("backtest")
+        self.logger = logging.getLogger("trade")
         
         self.meta_path = os.path.join(TEMPORARY_DIR, "torch_model_train_meta.json")
         self.model_path = os.path.join(TEMPORARY_DIR, "torch_model_train_info.pt")
@@ -42,7 +43,7 @@ class ModelHandler:
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
 
-        self.logger.info(f"Loading {self.model_type.upper()} model on {self.device}...")
+        self.logger.record(f"Loading {self.model_type.upper()} model on {self.device}...")
         
         # 加载权重状态字典
         state = torch.load(self.model_path, map_location=self.device)
@@ -62,6 +63,23 @@ class ModelHandler:
                 p_drop=0.0,
                 bidirectional = bidirectional
             )
+        elif self.model_type == "transformer":
+            # 读取 Transformer 特有参数 (默认值需与 train.py 保持一致)
+            d_model = self.meta.get("trans_d_model", 64)
+            nhead = self.meta.get("trans_nhead", 4)
+            num_layers = self.meta.get("trans_layers", 2)
+            dim_feedforward = self.meta.get("trans_dim_feedforward", 256)
+            
+            self.model = Transformer1D_V2(
+                input_size=channel,
+                n_classes=n_classes,
+                d_model=d_model,
+                nhead=nhead,
+                num_layers=num_layers,
+                dim_feedforward=dim_feedforward,
+                dropout=0.0, # 推理时关闭 dropout
+                max_len=self.window # 必须 >= 训练时的 window size
+            ) 
         else:
             self.model = CNN1D(
                 channel=channel, 
@@ -77,7 +95,7 @@ class ModelHandler:
         """
         输入原始 DataFrame，输出包含预测结果的 DataFrame 和 评估指标
         """
-        self.logger.info("Starting inference pipeline...")
+        self.logger.record("Starting inference pipeline...")
         
         # 1. 准备数据
         ds = TimeSeriesWindowDataset(
@@ -133,33 +151,33 @@ class ModelHandler:
         # 删除 NaN 行（可选，取决于是否需要保留前面的数据用于绘图，回测通常需要保留）
         # df_out.dropna(subset=['pred'], inplace=True) 
         
-        self.logger.info(f"Inference complete. Valid samples: {len(preds)}")
+        self.logger.record(f"Inference complete. Valid samples: {len(preds)}")
         return df_out, stats
     
     def evaluate_performance(self, y_true, y_pred, labels=None):
         """
         生成符合要求的 Test Report 格式日志
         """
-        self.logger.info("\n=== Test Report ===")
+        self.logger.record("\n=== Test Report ===")
         
         # 1. 生成主要分类报告 (Precision, Recall, F1)
         # digits=4 确保保留4位小数 (例如 0.0956)
         report = classification_report(y_true, y_pred, digits=4, zero_division=0)
         # logger 默认会处理换行，直接打印即可
-        self.logger.info("\n" + report)
+        self.logger.record("\n" + report)
 
         # 2. 宏平均 F1 (单独打印)
         macro_f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
-        self.logger.info(f"Test macro-F1:{macro_f1}")
+        self.logger.record(f"Test macro-F1:{macro_f1}")
         
         # 3. 真实标签分布
-        self.logger.info("\n=== True label proportion (Test set) ===")
+        self.logger.record("\n=== True label proportion (Test set) ===")
         unique_labels, counts = np.unique(y_true, return_counts=True)
         total_samples = len(y_true)
         
         for label, count in zip(unique_labels, counts):
             proportion = count / total_samples
-            self.logger.info(f"label {label}: {count} samples, {proportion:.4f} of total")
+            self.logger.record(f"label {label}: {count} samples, {proportion:.4f} of total")
 
         # 返回 UI 需要的简单指标字典
         return {

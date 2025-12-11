@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 import os, colorlog , logging
 from data_process.feature import *
+from data_process.logger    import setup_logger
 #define model
 CANDLESTICK_NUM = 120
 PREDICT_NUM = 16
-change_rate = 0.006 # 0.2%
-weak_change = change_rate / 5.0
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
 乘数 (Multiplier),阈值位置,含义
@@ -16,9 +15,10 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-VOL_MULTIPLIER = 0.6
+VOL_MULTIPLIER = 0.8
 # 最小硬阈值 (覆盖手续费+滑点)
-MIN_THRESHOLD = 0.007  # 0.25%
+MIN_THRESHOLD = 0.01  # 0.25%
+STOP_MULTIPLIER_RATE = 0.5
 
 label_decrease = 0
 # label_decrease_weak =1 
@@ -28,8 +28,12 @@ label_increase = 2
 model_train_rate = 0.8
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR)
-TEMPORARY_DIR = os.path.join(PROJECT_DIR , 'temporary')
-origin_data_path = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency', "BTCUSDT_15m.csv")
+TEMPORARY_DIR = os.path.join(PROJECT_DIR , 'output')
+PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency')
+origin_data_path = os.path.join(PROJECT_DATA_DIR, "BTCUSDT_15m.csv")
+# origin_data_path = os.path.join(PROJECT_DATA_DIR, "ETHUSDT_15m.csv")
+# origin_data_path = os.path.join(PROJECT_DATA_DIR, "BNBUSDT_15m.csv")
+# origin_data_path = os.path.join(PROJECT_DATA_DIR, "DOGEUSDT_15m.csv")
 DATA_PROCESS_OUT_DIR = os.path.join(DATA_PROCESS_DIR, 'output')
 train_data_path = os.path.join(TEMPORARY_DIR, "train_data.csv")
 test_data_path  = os.path.join(TEMPORARY_DIR, "test_data.csv")
@@ -43,114 +47,118 @@ def attach_attr(df):
     # df = add_relative_features(df)
     FeatureFactory(FEATURE_CONFIG).generate(df)
 
-def attach_label(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PREDICT_NUM , vol_multiplier = VOL_MULTIPLIER,
-                 min_threshold = MIN_THRESHOLD, keep_rate = False):
+def attach_label(df, 
+                                 candlestick_num:int = CANDLESTICK_NUM, 
+                                 predict_num:int = PREDICT_NUM, 
+                                 vol_multiplier = VOL_MULTIPLIER,
+                                 stop_multiplier_rate = STOP_MULTIPLIER_RATE, # 这里传入比例，如 0.3 或 0.5
+                                 min_threshold = MIN_THRESHOLD):
     """
-    依据未来收益率与当前波动率的动态关系分3类,并将计算出的动态阈值保存到 'threshold' 列。
+    打标签逻辑 (盈亏比绑定版):
+    止损阈值不再独立计算，而是止盈阈值的一个百分比。
     
-    Label 0: 下跌 (收益率 < -动态阈值)
-    Label 1: 震荡 (绝对值 <= 动态阈值)
-    Label 2: 上涨 (收益率 > 动态阈值)
+    例如: vol_multiplier=2.0 (预期涨2倍波动), stop_multiplier_rate=0.5
+    => 目标涨幅 = 2.0 * Vol
+    => 容忍跌幅 = 1.0 * Vol (即目标的 50%)
     """
-    assert 'close' in df.columns, "缺少列 close"
+    # 0. 基础检查
+    assert 'close' in df.columns and 'high' in df.columns and 'low' in df.columns, "缺少 OHLC 数据"
     assert predict_num > 0, "predict_num 必须 > 0"
-    print(f"[attach_label] VOL_MULTIPLIER:{vol_multiplier},MIN_THRESHOLD:{min_threshold}")
-    # ---------------- 参数设置 ----------------
-    # 波动率参考窗口
-    vol_window = candlestick_num 
-    
-    # 1. 计算未来收益率 (Target)
-    future_close = df['close'].shift(-predict_num)
-    pct = (future_close - df['close']) / df['close']
+    print(f"[Labeling] Target Vol: {vol_multiplier}, Stop Rate: {stop_multiplier_rate*100}%")
 
-    # 2. 计算动态阈值 (Dynamic Threshold)
+    # 1. 计算波动率基准
+    vol_window = candlestick_num
     returns = df['close'].pct_change()
     rolling_std = returns.rolling(window=vol_window).std()
+    
+    # 时间扩充波动率
     expected_vol = rolling_std * np.sqrt(predict_num)
     
-    # 计算阈值序列
-    dynamic_threshold = (expected_vol * vol_multiplier).clip(lower=min_threshold)
+    # 2. 计算动态阈值
+    # -------------------------------------------------------------------------
+    # A. 目标阈值 (Target Threshold) - 基于波动率
+    target_threshold = (expected_vol * vol_multiplier).clip(lower=min_threshold)
     
-    # === 【新增】 将阈值写入 DataFrame ===
-    # 填充前部的 NaN (预热期)，避免保存出来的 CSV 这一列前面是空的
-    # 我们可以用 min_threshold 填充，或者用第一个有效值填充
-    df['threshold'] = dynamic_threshold.fillna(min_threshold)
+    # B. 止损阈值 (Stop Threshold) - 基于目标阈值的百分比
+    # 逻辑：如果我们想要去赚取 target_threshold 的钱，我们最多愿意亏损 target * rate 的钱
+    stop_threshold = target_threshold * stop_multiplier_rate
     
-    # 3. 打标签 (Labeling)
-    # 注意：这里直接使用列 df['threshold'] 进行比较
-    cond_decrease = (pct < -df['threshold'])
-    cond_increase = (pct > df['threshold'])
+    # (可选) 如果你希望止损也有一个绝对的最小下限，可以加 clip，但在比例逻辑下通常不需要
+    # stop_threshold = stop_threshold.clip(lower=0.002) 
+
+    # 存入 DataFrame
+    df['threshold'] = target_threshold.fillna(min_threshold)
+    df['stop_threshold'] = stop_threshold.fillna(min_threshold * stop_multiplier_rate)
+
+    # 3. 获取未来数据 (含路径依赖检查)
+    # -------------------------------------------------------------------------
+    # 最终收益率
+    future_close = df['close'].shift(-predict_num)
+    pct_final = (future_close - df['close']) / df['close']
     
+    # 期间最低价 (检查多单止损)
+    future_low_min = df['low'].rolling(window=predict_num).min().shift(-predict_num)
+    # 期间最高价 (检查空单止损)
+    future_high_max = df['high'].rolling(window=predict_num).max().shift(-predict_num)
+
+    # 计算期间最大回撤/反向波动
+    max_drawdown = (future_low_min - df['close']) / df['close'] 
+    max_runup = (future_high_max - df['close']) / df['close']
+
+    # 4. 打标签 (Labeling)
+    # -------------------------------------------------------------------------
+    
+    # === Label 2: 做多 ===
+    # 1. 最终涨幅 > 目标
+    # 2. 期间最大跌幅 > -止损 (即没有跌破止损线)
+    cond_long = (pct_final > df['threshold']) & \
+                (max_drawdown > -df['stop_threshold'])
+
+    # === Label 0: 做空 ===
+    # 1. 最终跌幅 < -目标
+    # 2. 期间最大涨幅 < 止损 (即没有涨破止损线)
+    cond_short = (pct_final < -df['threshold']) & \
+                 (max_runup < df['stop_threshold'])
+
+    # 应用标签
     df['label'] = np.select(
-        [cond_decrease, cond_increase],
+        [cond_short, cond_long],
         [label_decrease, label_increase],
         default=label_ignore
     )
 
-    # 4. 数据清洗
-    # 前 vol_window 行波动率计算不准，强制忽略
+    # 5. 清洗
     df.iloc[:vol_window, df.columns.get_loc('label')] = label_ignore
-
-    # 删尾（未来价格不可用的部分）
+    
     if predict_num > 0:
         df = df.iloc[:-predict_num].reset_index(drop=True)
 
     df['label'] = df['label'].astype(int)
 
-    if keep_rate == True:
-        df['return_rate'] = pct
+    df['return_rate'] = pct_final
+        
+    return df
 
-#console: All
-#file: above Info
-def setup_logger(log_name="app_logger", log_path="logs"):
-    """
-    设置日志记录器：控制台彩色输出 (INFO+)，文件输出 (INFO+)。
-    :return: 配置好的日志记录器对象。
-    """
-    # 确保日志目录存在
-    os.makedirs(log_path, exist_ok=True)
+def data_analyze(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PREDICT_NUM , vol_multiplier = VOL_MULTIPLIER,
+                 min_threshold = MIN_THRESHOLD):
+    # ============================================================
+    # === 【新增功能】 计算未来窗口内的最大上涨和最大下跌比例 ===
+    # ============================================================
+    # 逻辑说明：
+    # 1. rolling(window=N).max() 计算的是 [t-N+1, t] 的最大值
+    # 2. shift(-N) 将数据向上平移，使得索引 t 处的数据变成原索引 t+N 处的数据
+    # 3. 结合起来：在索引 t 处，我们要的是 [t+1, t+N] 的极值
     
-    logger = logging.getLogger(log_name)
-    logger.setLevel(logging.DEBUG) # 确保所有消息都能进入处理流程
-
-    # 避免重复添加 handlers (重要，防止多次调用函数时重复记录)
-    if logger.handlers:
-        logger.handlers = []
-
-    log_format = "%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s"
-
-    # --- 1. 控制台处理程序 (StreamHandler) ---
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG) # 控制台输出：INFO 及以上
+    # 未来的最高价序列 (窗口: t+1 到 t+predict_num)
+    future_rolling_max = df['high'].rolling(window=predict_num).max().shift(-predict_num)
+    # 未来的最低价序列 (窗口: t+1 到 t+predict_num)
+    future_rolling_min = df['low'].rolling(window=predict_num).min().shift(-predict_num)
     
-    # 彩色格式化器
-    color_formatter = colorlog.ColoredFormatter(
-        "%(log_color)s" + log_format,
-        datefmt="%Y-%m-%d %H:%M:%S",
-        log_colors={
-            'DEBUG':    'cyan',
-            'INFO':     'green',
-            'WARNING':  'yellow',
-            'ERROR':    'red',
-            'CRITICAL': 'bold_red,bg_yellow',
-        }
-    )
-    ch.setFormatter(color_formatter)
-    logger.addHandler(ch)
-
-    # --- 2. 文件处理程序 (FileHandler) ---
-    log_file = os.path.join(log_path, f"{log_name}.log")
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    
-    # 设置文件最低输出等级：INFO
-    fh.setLevel(logging.INFO) 
-    
-    # 普通格式化器
-    file_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    fh.setFormatter(file_formatter)
-    logger.addHandler(fh)
-
-    return logger
+    # 计算相对于当前收盘价的涨跌幅
+    # max_up: 未来窗口内能卖到的最高收益率
+    df['max_up'] = (future_rolling_max - df['close']) / df['close']
+    # max_down: 未来窗口内可能承受的最大亏损率
+    df['max_down'] = (future_rolling_min - df['close']) / df['close']
 
 FEATURE_CONFIG:list[FeatureBase] = [
     FeatureMACD(fast=12, slow=26, signal=9),

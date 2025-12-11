@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os
+import os,sys
 import time
 import csv
 from _csv import Writer
@@ -11,6 +11,9 @@ import shutil
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import islice
+current_work_dir = os.path.dirname(__file__) 
+sys.path.append(os.path.join(current_work_dir,'..'))
+from common import PROJECT_DATA_DIR
 
 # Configuration
 BASE_URL = "https://api.binance.com"
@@ -276,9 +279,9 @@ class BinanceDownloader:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--symbol", default="BNBUSDT")
     parser.add_argument("--interval", default="15m") #e.g., "1h" – supported intervals: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
-    parser.add_argument("--dir", default="/home/chao/work/Quant/data_process/data")
+    parser.add_argument("--dir", default=PROJECT_DATA_DIR)
     parser.add_argument("--update", default = True ,action="store_true")
     args = parser.parse_args()
     
