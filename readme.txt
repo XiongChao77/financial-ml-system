@@ -1,7 +1,6 @@
 ################################ environment ########################################
 pip3 install torch torchvision
-pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4
-pip install pytorch-ignite  colorlog
+pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4 pytorch-ignite  colorlog backtrader
 
 
 ################################ how to use ########################################
@@ -29,6 +28,10 @@ pip install pytorch-ignite  colorlog
 量化的本质是寻找市场规律，这种规律可能是个人/机构/AI产生的。规律始终存在，即阿尔法（Alpha）并非消失，只是不断迁移，而竞争在于发现和适应的速率
 模型 ≠ 策略，模型产生信号，策略使用信号.
 模型优化之后，precision和recall的提升非常明显。但回测的表现反而下降，令人费解！
+·如何降低回撤？
+    降低持仓比例，或是动态调整持仓比例.盈利时可以重仓交易，亏损时轻仓交易
+    提升夏普比率，降低单位收益的风险.
+
 ################################实施步骤########################################
 BTC预测四分之一长度的走势 整张图形在4h级别   约360根蜡烛图组成，每根蜡烛图 1分钟！
 1分钟级别的图形噪声太大，用5分钟作为基础时间预测，  5分钟间隔，38小时-456个蜡烛图(短一点可以选18小时)作为总图形，预测接下来1-2小时走势， 价格波动大约在 0.2%， 
@@ -82,7 +85,7 @@ taker_buy_quote_volume：taker 主动买入对应的计价资产成交额。
 增加过去CANDLESTICK_NUM的波动率，可能对模型有参考意义
 通过统计预测上涨/下跌成功时反方向的回撤，来设置合理的止损，过滤FP的同时减少TP的回撤
 优化盈亏比，降低回撤，提升夏普比率
-
+保存每一步的参数，训练结果和回测结果。避免反复测试并可以复现
 
 套利？
 优化模型(长期)

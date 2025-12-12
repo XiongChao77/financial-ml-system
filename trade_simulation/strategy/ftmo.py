@@ -7,7 +7,7 @@ from trade_simulation.strategy.base_strategy import BaseStrategy
 class FtmoStrategy(BaseStrategy):
     params = dict(
         holdbar=1,
-        trade_risk=0.9,  # 每次加仓 10% 总资金
+        trade_risk=0.9,  # 每次加仓 10% 总资金. 0-1
         max_layers=1,  # 最大加仓层数
         allow_short=True,
         allow_long=True,
@@ -23,6 +23,7 @@ class FtmoStrategy(BaseStrategy):
         self.dir = 0  # 当前持仓方向: 1(多), -1(空), 0(无)
         self.layers = 0  # 当前加仓层数
         self.trade_logs = []
+        self.params.trade_risk = self.params.position_ratio * self.params.trade_risk
         self.logger.warning(f"stop_loss is {self.params.stop_loss}")
 
     def notify_order(self, order):
@@ -103,7 +104,7 @@ class FtmoStrategy(BaseStrategy):
 
     def stop(self):
         value = self.broker.getvalue()
-        self.logger.record(f"End Value: {value:.2f}")
+        self.logger.record(f"Start Value: {self.broker.startingcash:2f} | End Value: {value:.2f}")
         # UI
         self.cerebro.trade_logs = self.trade_logs
 

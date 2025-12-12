@@ -18,7 +18,7 @@ VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER = 0.8
 # 最小硬阈值 (覆盖手续费+滑点)
 MIN_THRESHOLD = 0.01  # 0.25%
-STOP_MULTIPLIER_RATE = 0.4
+STOP_MULTIPLIER_RATE = 0.5
 
 label_decrease = 0
 # label_decrease_weak =1 
