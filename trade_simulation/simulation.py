@@ -41,8 +41,8 @@ class Parameters:
     def __init__(self):
         self.allow_short = True
         self.allow_long = True
-        self.thresh: float = None#0.45
-        self.commission = 0.05   # 0.1 = 0.1%
+        self.thresh: float =None# None#0.5#None#0.45
+        self.commission = 0.1   # 0.1 = 0.1%
         self.cash = 10000
         self.stop_loss = 0.9  #1% stop loss
         self.take_profit = 0.9

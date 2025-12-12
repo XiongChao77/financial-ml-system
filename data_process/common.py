@@ -5,7 +5,7 @@ import os, colorlog , logging
 from data_process.feature import *
 from data_process.logger    import setup_logger
 #define model
-CANDLESTICK_NUM = 120
+CANDLESTICK_NUM = 96
 PREDICT_NUM = 16
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
@@ -18,7 +18,7 @@ VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER = 0.8
 # 最小硬阈值 (覆盖手续费+滑点)
 MIN_THRESHOLD = 0.01  # 0.25%
-STOP_MULTIPLIER_RATE = 0.5
+STOP_MULTIPLIER_RATE = 0.4
 
 label_decrease = 0
 # label_decrease_weak =1 
