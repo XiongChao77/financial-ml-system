@@ -175,7 +175,7 @@ def main():
     ap.add_argument("--lstm_layers", type=int, default=2, help="LSTM 层数")
     ap.add_argument("--bidirectional", action='store_true', help="使用双向 LSTM")  #store_true/store_false
     # === 【新增】Transformer 参数 ===
-    ap.add_argument("--trans_d_model", type=int, default=128, help="Transformer 内部维度 (d_model)")
+    ap.add_argument("--trans_d_model", type=int, default=64, help="Transformer 内部维度 (d_model)")
     ap.add_argument("--trans_nhead", type=int, default=8, help="Attention 头数 (d_model 必须能被此数整除)")
     ap.add_argument("--trans_layers", type=int, default=5, help="Transformer Encoder 层数")
     ap.add_argument("--trans_dim_feedforward", type=int, default=256, help="FFN 中间层维度通常是 4倍 d_model")
@@ -338,11 +338,11 @@ def main():
         )
     else:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=4
+            optimizer, mode="max", factor=0.5, patience=4
         )
 
     # 10) 训练循环（早停基于 val_loss）
-    best_val, best_state, wait = float("inf"), None, 0
+    best_f1, best_state, wait = float("-inf"), None, 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         tr_loss, tr_total = 0.0, 0
@@ -363,23 +363,21 @@ def main():
         tr_loss /= max(1, tr_total)
 
         va_loss, yv_true, yv_pred = eval_epoch(model, dl_va, device, criterion)
-        if args.model_type != "transformer":
-            scheduler.step(va_loss)
         va_f1 = (
             f1_score(yv_true, yv_pred, average="macro")
             if len(yv_true)
-            else float("nan")
+            else 0.0 # 避免 nan 导致比较出错
         )
+        if args.model_type != "transformer":
+            scheduler.step(va_f1)
         logger.info(
             f"Epoch {epoch:03d} | tr_loss {tr_loss:.4f} | va_loss {va_loss:.4f} | va_macroF1 {va_f1:.4f}"
         )
 
-        if va_loss < best_val - 1e-6:
-            best_val, best_state, wait = (
-                va_loss,
-                {k: v.cpu().clone() for k, v in model.state_dict().items()},
-                0,
-            )
+        if va_f1 > best_f1 + 1e-4:  
+            best_f1 = va_f1
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            wait = 0
         else:
             wait += 1
             if wait >= args.patience:

@@ -2,9 +2,10 @@ import backtrader as bt
 import logging
 
 class BaseStrategy(bt.Strategy):
-    params = (
-        ('stop_loss', 0.05),  # 5% 止损
-        ('take_profit', 0.50), # 10% 止盈 (可选)
+    params = dict(
+        stop_loss = 0.05,  # 5% 止损
+        take_profit = 0.50, # 10% 止盈 (可选)
+        position_ratio = 1,
     )
 
     def __init__(self):
