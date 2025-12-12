@@ -26,10 +26,10 @@ def main():
     
     # 计算切分点
     start_idx = int(len(df) * 0.05) #drop first 5%
+    df = df.iloc[start_idx:]
     split_idx = int(len(df) * 0.8)
     # 切分数据
-    start_idx = int(len(df) * 0.05)
-    train_df = df.iloc[start_idx:split_idx]
+    train_df = df.iloc[:split_idx]
     test_df = df.iloc[split_idx:]
     # 写入文件
     os.makedirs(TEMPORARY_DIR , exist_ok=True)

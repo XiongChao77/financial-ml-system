@@ -45,7 +45,7 @@ class TimeSeriesWindowDataset(Dataset):
             
             df_clean.dropna(inplace=True)
             df_clean.reset_index(drop=True, inplace=True)
-            print(f"\n--- Data Length after Drop: {len(df_clean)}---")
+            print(f"--- Data Length after Drop: {len(df_clean)}---")
             if df_clean.empty:
                  raise RuntimeError("Dataset became empty after dropping NaNs. Check TA windows.")
 

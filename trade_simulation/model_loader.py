@@ -158,7 +158,7 @@ class ModelHandler:
         """
         生成符合要求的 Test Report 格式日志
         """
-        self.logger.record("\n=== Test Report ===")
+        self.logger.record("=== Test Report ===")
         
         # 1. 生成主要分类报告 (Precision, Recall, F1)
         # digits=4 确保保留4位小数 (例如 0.0956)

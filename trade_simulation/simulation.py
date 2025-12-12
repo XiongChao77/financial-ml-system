@@ -41,11 +41,12 @@ class Parameters:
     def __init__(self):
         self.allow_short = True
         self.allow_long = True
-        self.thresh: float =None# None#0.5#None#0.45
+        self.thresh: float =None#0.5#None#0.45
         self.commission = 0.1   # 0.1 = 0.1%
         self.cash = 10000
         self.stop_loss = 0.9  #1% stop loss
         self.take_profit = 0.9
+        self.position_ratio = 1     #0-1
 
 
 def main():
@@ -101,6 +102,7 @@ def main():
         thresh=args.thresh,
         stop_loss=args.stop_loss,
         take_profit = args.take_profit,
+        position_ratio = args.position_ratio,
     )
 
     data = PandasDataWithPred(
@@ -122,12 +124,8 @@ def main():
     )
     # cerebro.broker.set_coc(True)  #
 
-    cerebro.addanalyzer(
-        btanalyzers.SharpeRatio,
-        _name="sharpe",
-        timeframe=bt.TimeFrame.Days,
-        compression=1,
-    )
+    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, compression=1, factor=365)
+    cerebro.addanalyzer(bt.analyzers.Returns, _name='returns' , tann=365)
     cerebro.addanalyzer(btanalyzers.DrawDown, _name="dd")
     cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(cus_analyzer.CusAnalyzer, _name="customize")
@@ -139,7 +137,7 @@ def main():
     # 5. 结果统计
     # UI
     # 封装统计数据 (合并回测数据和模型指标)
-    statistics = generate_backtest_report(strat, model_stats, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
+    statistics = generate_backtest_report(strat, model_stats, commission=args.commission, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
 
     trade_logs = cerebro.trade_logs
 
@@ -174,7 +172,7 @@ def safe_get(d, keys, default=0):
     return cur if cur != {} else default
 
 
-def generate_backtest_report(strat, model_stats, save_path):
+def generate_backtest_report(strat, model_stats, save_path, commission):
     """
     修复版报告生成器：
     1. 修正 Profit Factor 计算公式 (Gross Won / Gross Lost)
@@ -188,15 +186,17 @@ def generate_backtest_report(strat, model_stats, save_path):
     sharpe = strat.analyzers.sharpe.get_analysis()
 
     # ----- 基础数值 -----
-    gross_return = perf.get("gross_return", 0)
-    cagr = perf.get("cagr", 0)
-    start_value = perf.get("start_value", 0)
-    end_value = perf.get("end_value", 0)
+    start_value = strat.broker.startingcash  # 初始资金
+    end_value = strat.broker.getvalue()      # 最终资金
+    gross_return = (end_value - start_value) / start_value
+    ret_analyzer = strat.analyzers.returns.get_analysis()
+    cagr = ret_analyzer.get('rnorm', 0.0)
     sr = sharpe.get("sharperatio", 0.0) or 0.0
 
     # ----- 最大回撤 -----
     maxdd_pct = dd.get("max", {}).get("drawdown", 0.0)
     maxdd_amt = dd.get("max", {}).get("moneydown", 0.0)
+    maxdd_len = dd.get("max", {}).get("len", 0)
 
     # ----- 交易统计 (总体) -----
     total_trades = safe_get(trades, ["total", "closed"], 0)
@@ -229,62 +229,42 @@ def generate_backtest_report(strat, model_stats, save_path):
         total_days = 1
     daily_trades = total_trades / total_days
 
-    # 2. 遍历交易记录
-    pct_gross_list = []
-    pct_net_list = []
-    
-    # Backtrader 的 trades['closed'] 是一个列表，列表的每个元素对应一个 data feed
-    # 比如 trades['closed'][0] 是第一个币种的所有交易列表
-    closed_container = trades.get('closed', [])
-    
-    all_trades_objects = []
-    
-    # 扁平化处理：不管是一层列表还是两层列表，都摊平
-    if isinstance(closed_container, list):
-        for item in closed_container:
-            if isinstance(item, list):
-                all_trades_objects.extend(item) # 正常的 Backtrader 结构
-            else:
-                all_trades_objects.append(item) # 防御性代码
-    elif isinstance(closed_container, dict):
-        for key in closed_container:
-            all_trades_objects.extend(closed_container[key])
-
-    for tr in all_trades_objects:
-        # 确保数据存在
-        if 'price' in tr and 'size' in tr:
-            entry_price = tr['price']
-            size = abs(tr['size'])
-            entry_value = entry_price * size
-            
-            if entry_value > 0:
-                pct_gross_list.append(tr['pnl'] / entry_value)
-                pct_net_list.append(tr['pnlcomm'] / entry_value)
-
     # 计算平均值 (*100 转为百分比)
-    avg_pct_gross = (sum(pct_gross_list) / len(pct_gross_list) * 100) if pct_gross_list else 0.0
-    avg_pct_net = (sum(pct_net_list) / len(pct_net_list) * 100) if pct_net_list else 0.0
+    avg_pct_gross = avg_pnl_gross /(avg_cost/2) * commission
+    avg_pct_net = avg_pnl_net / (avg_cost/2) * commission
 
     # ============================================================
-
-    # 多空统计
+    # --- 1. 多头统计 (Long) ---
     long_total = safe_get(trades, ["long", "total"], 0)
-    long_win_rate = (safe_get(trades, ["long", "won"], 0) / long_total * 100) if long_total > 0 else 0.0
+    long_won   = safe_get(trades, ["long", "won"], 0)   # 获胜次数
+    # 多头总盈亏 (金额)
+    long_pnl_total = safe_get(trades, ["long", "pnl", "total"], 0.0)
+    # 多头胜率
+    long_win_rate = (long_won / long_total * 100) if long_total > 0 else 0.0
+    # --- 2. 空头统计 (Short) ---
     short_total = safe_get(trades, ["short", "total"], 0)
-    short_win_rate = (safe_get(trades, ["short", "won"], 0) / short_total * 100) if short_total > 0 else 0.0
+    short_won   = safe_get(trades, ["short", "won"], 0)
+    # 空头总盈亏 (金额)
+    short_pnl_total = safe_get(trades, ["short", "pnl", "total"], 0.0)
+    # 空头胜率
+    short_win_rate = (short_won / short_total * 100) if short_total > 0 else 0.0
 
-    # Log 输出
+
+    # summary 输出
     logger.info("-" * 80)
-    summary = (
-        f"SUMMARY | GrossRet: {gross_return*100:.2f}% | CAGR: {cagr*100:.2f}% | "
-        f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% | PF: {profit_factor:.2f}"
-    )
-    logger.info(summary)
+    logger.info(f"SUMMARY | GrossRet: {gross_return*100:.2f}% | CAGR: {cagr*100:.2f}% | "
+                f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | commission: {commission:.2f}%")
     logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}%")
-    logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f} | Avg Net: {avg_pnl_net:.2f} (Cost: {avg_cost:.2f}/trade)")
-    logger.info(f"PNL(%)  | Avg Gross: {avg_pct_gross:.3f}% | Avg Net: {avg_pct_net:.3f}%")
-    logger.info(f"DETAILS | Long WR: {long_win_rate:.1f}% | Short WR: {short_win_rate:.1f}%")
+    logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
+    logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
     logger.info("-" * 80)
+
+    # logger.info(summary)
+    # logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}%")
+    # logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f} | Avg Net: {avg_pnl_net:.2f} (Cost: {avg_cost:.2f}/trade)")
+    # logger.info(f"PNL(%)  | Avg Gross: {avg_pct_gross:.3f}% | Avg Net: {avg_pct_net:.3f}%")
+    # logger.info(f"DETAILS | Long WR: {long_win_rate:.1f}% | Short WR: {short_win_rate:.1f}%")
+    # logger.info("-" * 80)
 
     # 构造 JSON (略微精简，保持原有结构)
     full_report = {
@@ -292,8 +272,29 @@ def generate_backtest_report(strat, model_stats, save_path):
         "profit_factor": profit_factor,
         "avg_pct_gross": avg_pct_gross,
         "avg_pct_net": avg_pct_net,
+        # 各 Analyzer 原始数据
         "trade_analyzer_raw": trades,
-        # ... 其他字段保持不变 ...
+        # 基础资金曲线
+        "start_value": start_value,
+        "end_value": end_value,
+        "cagr": cagr,
+        "sharpe": sr,
+        # 回撤
+        "max_drawdown_pct": maxdd_pct,
+        "max_drawdown_amount": maxdd_amt,
+        "max_drawdown_duration": maxdd_len,
+        # 交易统计
+        "total_trades": total_trades,
+        "total_won": total_won,
+        "win_rate": win_rate,
+        # 暴露信息来自 CusAnalyzer
+        "avg_pos_ratio": perf.get("avg_pos_ratio", 0),
+        "std_pos_ratio": perf.get("std_pos_ratio", 0),
+        "p95_pos_ratio": perf.get("p95_pos_ratio", 0),
+        "max_pos_ratio": perf.get("max_pos_ratio", 0),
+        "drawdown_raw": dd,
+        # 模型预测指标（从外部传入）
+        "model_metrics": model_stats or {},
     }
     
     # 写入文件
@@ -308,10 +309,21 @@ def generate_backtest_report(strat, model_stats, save_path):
         "avg_trade_net": f"{avg_pct_net:.3f}%",
         "daily_frequency": f"{daily_trades:.2f} 次/天",
         "avg_pnl_net": f"${avg_pnl_net:.2f}",
-        # ... 其他字段 ...
+        "cagr": f"{cagr*100:.2f}%",
+        "sharpe": f"{sr:.3f}",
+        "max_drawdown": f"{maxdd_pct:.2f}%",
+        "total_trades": total_trades,
+        "win_rate": f"{win_rate:.2f}%",
+        "start_value": f"{start_value:.2f}",
+        "end_value": f"{end_value:.2f}",
+        **(model_stats or {}),
     }
     return ui_stats
 
 
 if __name__ == "__main__":
+    start_time = time.time()
     main()
+    end_time = time.time()
+    run_time = end_time - start_time
+    logger.info(f": run_time: {run_time:.4f} s")
