@@ -218,6 +218,19 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     max_daily_dd = perf.get('max_daily_dd', 0.0) # 例如 -0.045
     max_daily_date = perf.get('max_daily_dd_date', 'N/A')
     violation_days = perf.get('daily_dd_violation_days', 0)
+    # 1. 获取全局最低净值
+    global_min_equity = perf.get('global_min_equity', 0.0)
+    # 2. 计算距离初始资金的跌幅 (FTMO Max Loss)
+    start_cash = strat.broker.startingcash
+    dist_to_start_pct = (global_min_equity - start_cash) / start_cash
+    # 3. 打印日志
+    logger.info(f"FTMO LINE | Min Equity: ${global_min_equity:.2f}")
+    logger.info(f"          | Dist to Start: {dist_to_start_pct*100:.2f}% (Limit: -10%)")
+
+    if dist_to_start_pct < -0.10:
+        logger.warning("❌ FAILED: 账户曾经跌破初始本金的 10%！")
+    else:
+        logger.info("✅ PASSED: 总资金风控通过")
 
     # 在日志中打印
     logger.info(f"RISK(Daily)| Worst Day: {max_daily_dd*100:.2f}% ({max_daily_date}) | >4% Days: {violation_days}")
