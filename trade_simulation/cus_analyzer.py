@@ -19,6 +19,8 @@ class CusAnalyzer(bt.Analyzer):
         self._curr_date = None        # 当前处理的日期
         self._day_start_equity = self.strategy.broker.getvalue() # 当日开盘净值
         self._day_min_equity = self.day_start_equity             # 当日最低净值
+        # --- 3. 全局最低净值相关状态  ---
+        self._global_min_equity = self.strategy.broker.getvalue()
 
     def next(self):
         """每个 Bar 结束时调用，分发逻辑"""
@@ -27,6 +29,9 @@ class CusAnalyzer(bt.Analyzer):
         
         # 2. 追踪日内回撤
         self._track_daily_drawdown()
+
+        # 3. 追踪全局最低净值 【新增】
+        self._track_global_min()
 
     def stop(self):
         """回测结束，执行最终统计汇总"""
@@ -37,11 +42,25 @@ class CusAnalyzer(bt.Analyzer):
         exposure_metrics = self._finalize_exposure()
         drawdown_metrics = self._finalize_drawdown()
 
+        # 直接获取最低净值
+        global_metrics = {
+            'global_min_equity': self._global_min_equity
+        }
+
         # 合并结果
-        self.rets = {**exposure_metrics, **drawdown_metrics}
+        self.rets = {**exposure_metrics, **drawdown_metrics, **global_metrics}
 
     def get_analysis(self):
         return self.rets
+
+    # =========================================================
+    # 私有方法区：全局最低净值逻辑 (Global Min Logic) 【新增】
+    # =========================================================
+    def _track_global_min(self):
+        """简单的追踪逻辑：只记录历史出现过的最低值"""
+        current_equity = self.strategy.broker.getvalue()
+        if current_equity < self._global_min_equity:
+            self._global_min_equity = current_equity
 
     # =========================================================
     # 私有方法区：持仓暴露逻辑 (Position Exposure Logic)
