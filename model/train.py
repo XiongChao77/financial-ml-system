@@ -26,7 +26,6 @@ from sklearn.utils.class_weight import compute_class_weight
 from collections import Counter
 import logging
 from tqdm import tqdm
-from torch.optim.lr_scheduler import LambdaLR
 
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
@@ -38,20 +37,6 @@ from model.lstm import LSTM1D
 from model.transformer_v1 import Transformer1D
 from model.transformer_v2 import Transformer1D_V2
 from model.xgb import XGBoostAdapter
-
-def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
-    """
-    创建一个带有 warmup 的学习率调度器。
-    前 num_warmup_steps 步线性增加，之后线性减少。
-    """
-    def lr_lambda(current_step: int):
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        return max(
-            0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))
-        )
-
-    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 def set_seed(seed=42):
     import random
@@ -84,9 +69,8 @@ def chrono_split_by_window_ends(M: int, train_ratio=0.7, val_ratio=0.15):
 
 class SeqDataset(Dataset):
     def __init__(self, X, y):
-        # 兼容逻辑：如果是 Tensor 直接用，否则从 Numpy 转换
-        self.X = X if torch.is_tensor(X) else torch.from_numpy(X)
-        self.y = y if torch.is_tensor(y) else torch.from_numpy(y)
+        self.X = torch.from_numpy(X)  # [M, T, F]
+        self.y = torch.from_numpy(y)  # [M]
 
     def __len__(self):
         return self.X.shape[0]
@@ -95,29 +79,35 @@ class SeqDataset(Dataset):
         return self.X[i], self.y[i]
 
 
-class CostSensitiveLoss(nn.Module):
-    def __init__(self, penalty_matrix, base_weights=None, lambda_cost=1.0):
-        super().__init__()
-        self.register_buffer("C", torch.tensor(penalty_matrix, dtype=torch.float32))
-        self.lambda_cost = float(lambda_cost)
-        self.base_ce = nn.CrossEntropyLoss(
-            weight=(
-                torch.tensor(base_weights, dtype=torch.float32)
-                if base_weights is not None
-                else None
-            )
-        )
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        # alpha 应为 tensor，对应 [class_0_weight, class_1_weight, class_2_weight]
+        self.register_buffer('alpha', alpha) 
 
-    def forward(self, logits, targets):
-        # Cross-Entropy 部分（可带类别权重）
-        ce = self.base_ce(logits, targets)
+    def forward(self, inputs, targets):
+        # inputs: [N, C] (logits)
+        # targets: [N]
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss) # 预测正确的概率
+        
+        # 核心公式： (1 - pt)^gamma * log(pt)
+        # 当 pt 接近 1 (预测很准) 时，权重趋近 0
+        # 当 pt 接近 0 (预测很难) 时，权重趋近 1
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
 
-        # 期望代价部分：sum_j C[true, j] * p_j
-        probs = torch.softmax(logits, dim=1)  # [B, C]
-        C_true = self.C.index_select(0, targets)  # [B, C]
-        exp_cost = (C_true * probs).sum(dim=1).mean()  # 标量
+        if self.alpha is not None:
+            alpha_t = self.alpha[targets]
+            focal_loss = alpha_t * focal_loss
 
-        return ce + self.lambda_cost * exp_cost
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 
 penalty_matrix = [
@@ -157,7 +147,7 @@ def main():
     ap.add_argument("--train_ratio", type=float, default=0.7)
     ap.add_argument("--val_ratio", type=float, default=0.15)
     ap.add_argument("--epochs", type=int, default=100)
-    ap.add_argument("--batch_size", type=int, default=128*2)
+    ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--dropout", type=float, default=0.3)
@@ -167,18 +157,18 @@ def main():
     ap.add_argument(
         "--model_type",
         type=str,
-        default="transformer",
+        default="lstm",
         choices=["cnn", "lstm", "transformer, xgboost"], # 【修改】添加 transformer
         help="Model architecture: cnn, lstm, or transformer",
     )
-    ap.add_argument("--lstm_hidden", type=int, default=64, help="LSTM 隐藏层维度")
+    ap.add_argument("--lstm_hidden", type=int, default=80, help="LSTM 隐藏层维度")
     ap.add_argument("--lstm_layers", type=int, default=2, help="LSTM 层数")
     ap.add_argument("--bidirectional", action='store_true', help="使用双向 LSTM")  #store_true/store_false
     # === 【新增】Transformer 参数 ===
     ap.add_argument("--trans_d_model", type=int, default=64, help="Transformer 内部维度 (d_model)")
     ap.add_argument("--trans_nhead", type=int, default=8, help="Attention 头数 (d_model 必须能被此数整除)")
-    ap.add_argument("--trans_layers", type=int, default=5, help="Transformer Encoder 层数")
-    ap.add_argument("--trans_dim_feedforward", type=int, default=256, help="FFN 中间层维度通常是 4倍 d_model")
+    ap.add_argument("--trans_layers", type=int, default=3, help="Transformer Encoder 层数")
+    ap.add_argument("--trans_dim_feedforward", type=int, default=256, help="FFN 中间层维度")
     # ================
     #  xgboost 特有参数
     ap.add_argument("--xgb_depth", type=int, default=6)
@@ -194,6 +184,9 @@ def main():
     # 1) 读数据（需按时间升序）
     data_path = common.train_data_path
     df = pd.read_csv(data_path)
+    split_idx = int(len(df) * common.model_train_rate)
+    # 切分数据
+    train_df = df.iloc[:split_idx]
 
     # 4) 窗口化 -> [M, T, F], [M]
     T = args.window
@@ -218,6 +211,13 @@ def main():
         exit()
     # ===============================================
 
+    # # === 【新增】核心优化：全量数据预加载到 GPU ===
+    logger.info(f"Pre-loading entire dataset to {device}...")
+    # # 直接修改 Dataset 内部的 Tensor，将其移动到 GPU
+    # full_ds.X = full_ds.X.to(device)
+    # full_ds.y = full_ds.y.to(device)
+    logger.info("Data loaded to VRAM.")
+
     # 可用窗口数量 M
     M = len(full_ds)
     logger.info(f"Total windows (M) = {M}, window = {T}, F = {len(feat_cols)}")
@@ -230,36 +230,27 @@ def main():
     s_va, e_va = va_rng
     s_te, e_te = te_rng
 
+    ds_tr = SeqDataset(full_ds.X[s_tr:e_tr].numpy(), full_ds.y[s_tr:e_tr].numpy())
+    ds_va = SeqDataset(full_ds.X[s_va:e_va].numpy(), full_ds.y[s_va:e_va].numpy())
+    ds_te = SeqDataset(full_ds.X[s_te:e_te].numpy(), full_ds.y[s_te:e_te].numpy())
+
+    dl_tr = DataLoader(
+        ds_tr, batch_size=args.batch_size, shuffle=True, pin_memory=is_cude_available
+    )
+    dl_va = DataLoader(
+        ds_va, batch_size=args.batch_size, shuffle=False, pin_memory=is_cude_available
+    )
+    dl_te = DataLoader(
+        ds_te, batch_size=args.batch_size, shuffle=False, pin_memory=is_cude_available
+    )
+
     # 8) 类别权重（直接用 y_tr 计算，无需遍历 DataLoader）
     y_tr = full_ds.y[s_tr:e_tr].numpy()
     classes = np.unique(y_tr)
     cw = compute_class_weight(class_weight="balanced", classes=classes, y=y_tr)
-    class_weights = torch.tensor(cw, dtype=torch.float32, device=device) # <--- 立即移到 GPU
+    class_weights = torch.tensor(cw, dtype=torch.float32, device=device)
     logger.record(
         "Class weights: {}".format({int(c): float(w) for c, w in zip(classes, cw)})
-    )
-
-    # # === 【新增】核心优化：全量数据预加载到 GPU ===
-    logger.info(f"Pre-loading entire dataset to {device}...")
-    # 直接修改 Dataset 内部的 Tensor，将其移动到 GPU
-    # full_ds.X = full_ds.X.to(device)  # too many data
-    # full_ds.y = full_ds.y.to(device)
-    logger.info("Data loaded to VRAM.")
-    
-    ds_tr = SeqDataset(full_ds.X[s_tr:e_tr], full_ds.y[s_tr:e_tr]) 
-    ds_va = SeqDataset(full_ds.X[s_va:e_va], full_ds.y[s_va:e_va])
-    ds_te = SeqDataset(full_ds.X[s_te:e_te], full_ds.y[s_te:e_te])
-
-    train_workers = 8
-    use_pin_memory = not ds_tr.X.is_cuda
-    dl_tr = DataLoader(
-        ds_tr, batch_size=args.batch_size, shuffle=True, pin_memory=use_pin_memory, num_workers=train_workers, persistent_workers=True
-    )
-    dl_va = DataLoader(
-        ds_va, batch_size=args.batch_size, shuffle=False, pin_memory=use_pin_memory, num_workers=train_workers, persistent_workers=True
-    )
-    dl_te = DataLoader(
-        ds_te, batch_size=args.batch_size, shuffle=False, pin_memory=use_pin_memory, num_workers=train_workers, persistent_workers=True
     )
 
     # 9) 模型/优化器/调度器（原逻辑保持不变）
@@ -312,37 +303,17 @@ def main():
             n_classes=len(classes), 
             p_drop=args.dropout
         ).to(device)
-    criterion = CostSensitiveLoss(
-        penalty_matrix=penalty_matrix,
-        base_weights=class_weights.cpu().numpy(),
-        lambda_cost=0,
-    ).to(device)
+    focal_alpha = class_weights # 或者 torch.tensor([1.0, 0.3, 1.0]).to(device)
+    criterion = FocalLoss(alpha=focal_alpha, gamma=2.0).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
-    if args.model_type == "transformer":
-        # 1. 计算总步数
-        # total_steps = epochs * steps_per_epoch
-        steps_per_epoch = len(dl_tr)
-        total_steps = args.epochs * steps_per_epoch
-
-        # 2. 设定 Warmup 步数 (通常占总步数的 5% ~ 10%)
-        warmup_steps = int(total_steps * 0.1) 
-
-        # 3. 替换掉原来的 ReduceLROnPlateau
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(...) # 删掉这行
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer, 
-            num_warmup_steps=warmup_steps, 
-            num_training_steps=total_steps
-        )
-    else:
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="max", factor=0.5, patience=4
-        )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=4
+    )
 
     # 10) 训练循环（早停基于 val_loss）
-    best_f1, best_state, wait = float("-inf"), None, 0
+    best_val, best_state, wait = float("inf"), None, 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         tr_loss, tr_total = 0.0, 0
@@ -355,29 +326,28 @@ def main():
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            if args.model_type == "transformer":
-                scheduler.step() # 注意：Warmup 调度器是在每个 step 更新，而不是每个 epoch
 
             tr_loss += loss.item() * xb.size(0)
             tr_total += xb.size(0)
         tr_loss /= max(1, tr_total)
 
         va_loss, yv_true, yv_pred = eval_epoch(model, dl_va, device, criterion)
+        scheduler.step(va_loss)
         va_f1 = (
             f1_score(yv_true, yv_pred, average="macro")
             if len(yv_true)
-            else 0.0 # 避免 nan 导致比较出错
+            else float("nan")
         )
-        if args.model_type != "transformer":
-            scheduler.step(va_f1)
         logger.info(
             f"Epoch {epoch:03d} | tr_loss {tr_loss:.4f} | va_loss {va_loss:.4f} | va_macroF1 {va_f1:.4f}"
         )
 
-        if va_f1 > best_f1 + 1e-4:  
-            best_f1 = va_f1
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            wait = 0
+        if va_loss < best_val - 1e-6:
+            best_val, best_state, wait = (
+                va_loss,
+                {k: v.cpu().clone() for k, v in model.state_dict().items()},
+                0,
+            )
         else:
             wait += 1
             if wait >= args.patience:

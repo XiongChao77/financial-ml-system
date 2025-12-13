@@ -41,8 +41,8 @@ class Parameters:
     def __init__(self):
         self.allow_short = True
         self.allow_long = True
-        self.thresh: float =None#0.5#None#0.45
-        self.commission = 0.1   # 0.1 = 0.1%
+        self.thresh: float =None#None#0.5#None#0.45
+        self.commission = 0.05   # 0.1 = 0.1%
         self.cash = 10000
         self.stop_loss = 0.9  #1% stop loss
         self.take_profit = 0.9
@@ -258,13 +258,6 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
     logger.info("-" * 80)
-
-    # logger.info(summary)
-    # logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}%")
-    # logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f} | Avg Net: {avg_pnl_net:.2f} (Cost: {avg_cost:.2f}/trade)")
-    # logger.info(f"PNL(%)  | Avg Gross: {avg_pct_gross:.3f}% | Avg Net: {avg_pct_net:.3f}%")
-    # logger.info(f"DETAILS | Long WR: {long_win_rate:.1f}% | Short WR: {short_win_rate:.1f}%")
-    # logger.info("-" * 80)
 
     # 构造 JSON (略微精简，保持原有结构)
     full_report = {
