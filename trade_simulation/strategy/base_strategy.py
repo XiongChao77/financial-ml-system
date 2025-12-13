@@ -1,5 +1,9 @@
 import backtrader as bt
-import logging
+import logging,sys,os
+current_work_dir = os.path.dirname(__file__)
+sys.path.append(os.path.join(current_work_dir, "..", '..'))
+# 引入自定义模块
+from data_process import common
 
 class BaseStrategy(bt.Strategy):
     params = dict(
@@ -12,7 +16,8 @@ class BaseStrategy(bt.Strategy):
         self.logger = logging.getLogger("trade")
         # === 关键：用于记录每一笔"存活"的交易组 ===
         # 结构: [{'id': id, 'stop': stop_ord, 'limit': limit_ord, 'size': size}, ...]
-        self.live_trades = [] 
+        self.live_trades = []
+        self.closed_pnl = []
 
     def user_order_target_percent(self, target):
         """
@@ -90,14 +95,35 @@ class BaseStrategy(bt.Strategy):
     # 辅助逻辑封装
     # ----------------------------------------------------------------
 
+    def notify_trade(self, trade):
+        """
+        交易通知：只有当一笔交易平仓（不管是止盈还是止损）时，才会触发此函数
+        这里才能拿到真正的盈亏数据。
+        """
+        if not trade.isclosed:
+            return
+
+        # trade.pnl: 毛利 (不含手续费)
+        # trade.pnlcomm: 净利 (含手续费)
+        # 记录净利润 (含手续费)
+        self.closed_pnl.append(trade.pnlcomm)
+        # 打印包含手续费的净盈亏
+        direction = ( "🟢 多" if trade.size > 0  else "🔴 空" )
+        self.logger.debug(f"💸 交易结算 {direction} | 毛利: {trade.pnl:.2f} | 手续费: {trade.commission:.2f} | 净利: {trade.pnlcomm:.2f}")
+
+        # 如果你想把盈亏回写到上面的 trade_logs 里，比较麻烦，
+        # 因为 trade_logs 是按单(order)记的，而这里是按回合(trade)记的。
+        # 通常建议单独存一个 closed_trades 列表。
+
     def _open_bracket(self, size, is_buy):
         """执行 Bracket 下单并记录返回值"""
         price = self.data.close[0]
-        
+        stop_loss = self.data.stop_threshold[0]*self.params.stop_loss
+
         if is_buy:
-            stop_price = price * (1.0 - self.params.stop_loss)
+            stop_price = price * (1.0 - stop_loss)
             limit_price = price * (1.0 + self.params.take_profit)
-            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, stop_loss:{self.params.stop_loss}")
+            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, stop_loss:{stop_loss}")
             
             # returns: [Main, Stop, Limit]
             orders = self.buy_bracket(
@@ -116,9 +142,9 @@ class BaseStrategy(bt.Strategy):
             })
             
         else: # Sell
-            stop_price = price * (1.0 + self.params.stop_loss)
+            stop_price = price * (1.0 + stop_loss)
             limit_price = price * (1.0 - self.params.take_profit)
-            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, stop_loss:{self.params.stop_loss}")
+            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, stop_loss:{stop_loss}")
             orders = self.sell_bracket(
                 size=size, 
                 price=price, 

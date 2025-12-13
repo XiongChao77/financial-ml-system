@@ -7,7 +7,7 @@ from trade_simulation.strategy.base_strategy import BaseStrategy
 class SimpleStrategy(BaseStrategy):
     params = dict(
         holdbar=1,
-        trade_risk=0.6,  # 每次加仓 10% 总资金
+        trade_risk=0.98,  # 每次加仓 10% 总资金
         max_layers=1,  # 最大加仓层数
         allow_short=True,
         allow_long=True,
