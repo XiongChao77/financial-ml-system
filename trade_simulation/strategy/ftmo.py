@@ -7,12 +7,12 @@ from trade_simulation.strategy.base_strategy import BaseStrategy
 class FtmoStrategy(BaseStrategy):
     params = dict(
         holdbar=1,
-        trade_risk=0.9,  # 每次加仓 10% 总资金. 0-1
+        trade_risk=0.98,  # 每次加仓 10% 总资金. 0-1
         max_layers=1,  # 最大加仓层数
         allow_short=True,
         allow_long=True,
         thresh=None,  # 置信度阈值
-        stop_loss = 0.99
+        stop_loss = 1
     )
 
     def __init__(self):
@@ -35,15 +35,12 @@ class FtmoStrategy(BaseStrategy):
             elif order.exectype == bt.Order.Limit:
                 order_type_name = "💰 止盈成交 (限价单)"
                 self.debug_limitation(order)
-                return
             elif order.exectype == bt.Order.Stop:
                 order_type_name = "🛑 止损成交 (止损单)"
                 self.debug_limitation(order)
-                return
             elif order.exectype == bt.Order.StopTrail:
                 order_type_name = "📉 移动止损成交 (追踪单)"
                 self.debug_limitation(order)
-                return
             if order.isbuy():
                 self.logger.debug(
                     f"BUY EXECUTED, Price: {order.executed.price}, Cost: {order.executed.value}, Comm {order.executed.comm}"
@@ -69,6 +66,7 @@ class FtmoStrategy(BaseStrategy):
             self.logger.warning(f"Order Canceled/Margin/Rejected: {order.getstatusname()}")
         elif order.status == order.Canceled:
             pass
+
 
     def debug_limitation(self,order):
         # 1. 忽略未完成的订单状态 (Submitted/Accepted 等)
