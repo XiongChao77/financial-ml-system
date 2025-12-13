@@ -24,13 +24,17 @@ def main():
         print(f"Label {label_val} ({label_name}): {cnt} 个, 占比 {pct_val:.4%}")
     print("==========================\n")
     
-    # 计算切分点
-    start_idx = int(len(df) * 0.05) #drop first 5%
-    df = df.iloc[start_idx:]
-    split_idx = int(len(df) * 0.8)
-    # 切分数据
+    # 1. drop unstable data in the early stage    There will be data drop in attach_attr(SMA_W)
+    # drop_ratio = 0.02
+    # start_idx = math.ceil(len(df) * drop_ratio)
+    # df = df.iloc[start_idx:].reset_index(drop=True)
+
+    # 2. 时间序列切分（80% train / 20% test）
+    train_ratio = 0.8
+    split_idx = math.floor(len(df) * train_ratio)
+
     train_df = df.iloc[:split_idx]
-    test_df = df.iloc[split_idx:]
+    test_df  = df.iloc[split_idx:]
     # 写入文件
     os.makedirs(TEMPORARY_DIR , exist_ok=True)
     train_df.to_csv(train_data_path, index=False, encoding="utf-8")
