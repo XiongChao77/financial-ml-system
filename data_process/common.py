@@ -5,7 +5,7 @@ import os, colorlog , logging
 from data_process.feature import *
 from data_process.logger    import setup_logger
 #define model
-CANDLESTICK_NUM = 96
+CANDLESTICK_NUM = 136
 PREDICT_NUM = 16
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
