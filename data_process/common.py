@@ -65,31 +65,9 @@ def attach_label(df,
     assert 'close' in df.columns and 'high' in df.columns and 'low' in df.columns, "缺少 OHLC 数据"
     assert predict_num > 0, "predict_num 必须 > 0"
     print(f"[Labeling] Target Vol: {vol_multiplier}, Stop Rate: {stop_multiplier_rate*100}%")
-
-    # 1. 计算波动率基准
+    
     vol_window = candlestick_num
-    returns = df['close'].pct_change()
-    rolling_std = returns.rolling(window=vol_window).std()
-    
-    # 时间扩充波动率
-    expected_vol = rolling_std * np.sqrt(predict_num)
-    
-    # 2. 计算动态阈值
-    # -------------------------------------------------------------------------
-    # A. 目标阈值 (Target Threshold) - 基于波动率
-    target_threshold = (expected_vol * vol_multiplier).clip(lower=min_threshold)
-    
-    # B. 止损阈值 (Stop Threshold) - 基于目标阈值的百分比
-    # 逻辑：如果我们想要去赚取 target_threshold 的钱，我们最多愿意亏损 target * rate 的钱
-    stop_threshold = target_threshold * stop_multiplier_rate
-    
-    # (可选) 如果你希望止损也有一个绝对的最小下限，可以加 clip，但在比例逻辑下通常不需要
-    # stop_threshold = stop_threshold.clip(lower=0.002) 
-
-    # 存入 DataFrame
-    df['threshold'] = target_threshold.fillna(min_threshold)
-    df['stop_threshold'] = stop_threshold.fillna(min_threshold * stop_multiplier_rate)
-
+    df = calculate_thresholds(df, candlestick_num, predict_num, vol_multiplier, stop_multiplier_rate, min_threshold)
     # 3. 获取未来数据 (含路径依赖检查)
     # -------------------------------------------------------------------------
     # 最终收益率
@@ -137,6 +115,43 @@ def attach_label(df,
 
     df['return_rate'] = pct_final
         
+    return df
+
+def calculate_thresholds(df, 
+                         candlestick_num: int = CANDLESTICK_NUM, 
+                         predict_num: int = PREDICT_NUM, 
+                         vol_multiplier = VOL_MULTIPLIER,
+                         stop_multiplier_rate = STOP_MULTIPLIER_RATE, 
+                         min_threshold = MIN_THRESHOLD):
+    """
+    【核心逻辑提取】计算动态止盈 (threshold) 和 止损 (stop_threshold)
+    该函数同时用于:
+    1. 训练前的数据预处理 (attach_label)
+    2. 回测/实盘中的信号生成 (simulation/production)
+    """
+    # 基础检查
+    assert 'close' in df.columns, "缺少 Close 数据"
+    
+    # 1. 计算波动率基准 (Rolling Standard Deviation)
+    vol_window = candlestick_num
+    returns = df['close'].pct_change()
+    rolling_std = returns.rolling(window=vol_window).std()
+    
+    # 2. 时间扩充波动率 (Time Scaling: sigma * sqrt(T))
+    expected_vol = rolling_std * np.sqrt(predict_num)
+    
+    # 3. 计算动态阈值
+    # A. 目标止盈阈值 (基于波动率)
+    target_threshold = (expected_vol * vol_multiplier).clip(lower=min_threshold)
+    
+    # B. 目标止损阈值 (基于止盈的百分比，保持盈亏比)
+    stop_threshold = target_threshold * stop_multiplier_rate
+    
+    # 4. 写入 DataFrame (处理 NaN)
+    # 使用 copy 防止 SettingWithCopyWarning (视调用情况而定，这里直接赋值通常没问题)
+    df['threshold'] = target_threshold.fillna(min_threshold)
+    df['stop_threshold'] = stop_threshold.fillna(min_threshold * stop_multiplier_rate)
+    
     return df
 
 def data_analyze(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PREDICT_NUM , vol_multiplier = VOL_MULTIPLIER,

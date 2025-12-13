@@ -15,12 +15,12 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process.common import *
 from model.train import CNN1D
 from model.data_loader import TimeSeriesWindowDataset
-from trade_simulation import cus_analyzer, cus_comminfo, model_loader
+from trade_simulation import cus_analyzer, cus_comminfo, model_loader, result_analyze
 from trade_simulation.strategy.ftmo import FtmoStrategy
 from trade_simulation.strategy.simpe import  SimpleStrategy
 
 log_file = os.path.join(TEMPORARY_DIR, "backtest.log")
-logger = setup_logger(log_name='trade' ,log_path= log_file, console_level =logging.INFO)
+logger = setup_logger(log_name='trade' ,log_path= log_file, console_level =logging.DEBUG)
 
 class TradeResult:
     def __init__(self) -> None:
@@ -31,22 +31,26 @@ class PandasDataWithPred(bt.feeds.PandasData):
     lines = (
         "pred",
         "conf",
+        "threshold",       # 动态止盈阈值
+        "stop_threshold",  # 动态止损阈值
     )
     params = (
         ("pred", -1),
         ("conf", -1),
+        ("threshold", -1),      # 自动匹配列名
+        ("stop_threshold", -1), # 自动匹配列名
     )
 
 class Parameters:
     def __init__(self):
         self.allow_short = True
         self.allow_long = True
-        self.thresh: float =None#None#0.5#None#0.45
+        self.thresh: float =0.4#None#0.5#None#0.45
         self.commission = 0.05   # 0.1 = 0.1%
         self.cash = 10000
-        self.stop_loss = 0.9  #1% stop loss
-        self.take_profit = 0.9
-        self.position_ratio = 1     #0-1
+        self.stop_loss = 2  # should be 1-10   stop_loss = self.data.stop_threshold[0]*self.params.stop_loss
+        self.take_profit = 0.99
+        self.position_ratio = 0.6     #0-1
 
 
 def main():
@@ -81,6 +85,15 @@ def main():
         df_with_pred, model_stats = handler.predict(df)
         # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
         df_with_pred = df_with_pred.dropna(subset=["pred"]).copy()
+
+        # B. 【关键修改】调用封装函数计算动态阈值
+        # 这会自动在 df_with_pred 中生成 'threshold' 和 'stop_threshold' 两列
+        # 且使用的参数 (VOL_MULTIPLIER 等) 默认与 common.py 中定义的训练参数完全一致
+        df_with_pred = calculate_thresholds(df_with_pred)
+
+        # C. 过滤无效数据 (过滤掉 pred 为空 或 阈值为 NaN 的行)
+        df_with_pred = df_with_pred.dropna(subset=["pred", "threshold", "stop_threshold"]).copy()
+
         logger.record(
             f"Backtest range: {df_with_pred['open_time_utc'].min()} to {df_with_pred['open_time_utc'].max()}"
         )
@@ -113,6 +126,8 @@ def main():
         low="low",
         close="close",
         volume="volume",
+        threshold="threshold",
+        stop_threshold="stop_threshold",
         openinterest=-1,
         nocase=True,
     )
@@ -133,7 +148,8 @@ def main():
     logger.record("Starting Backtest...")
     results = cerebro.run()
     strat = results[0]
-
+    result_analyze.analyze_pnl_distribution(strat.closed_pnl)
+    # result_analyze.analyze_trade_dependency(strat.closed_pnl)
     # 5. 结果统计
     # UI
     # 封装统计数据 (合并回测数据和模型指标)
@@ -197,6 +213,17 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     maxdd_pct = dd.get("max", {}).get("drawdown", 0.0)
     maxdd_amt = dd.get("max", {}).get("moneydown", 0.0)
     maxdd_len = dd.get("max", {}).get("len", 0)
+
+    # --- 读取日内回撤数据 ---
+    max_daily_dd = perf.get('max_daily_dd', 0.0) # 例如 -0.045
+    max_daily_date = perf.get('max_daily_dd_date', 'N/A')
+    violation_days = perf.get('daily_dd_violation_days', 0)
+
+    # 在日志中打印
+    logger.info(f"RISK(Daily)| Worst Day: {max_daily_dd*100:.2f}% ({max_daily_date}) | >4% Days: {violation_days}")
+
+    if max_daily_dd < -0.05:
+        logger.warning("❌ 严重警告：单日回撤已触发 FTMO 5% 违规红线！")
 
     # ----- 交易统计 (总体) -----
     total_trades = safe_get(trades, ["total", "closed"], 0)
@@ -312,7 +339,6 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
         **(model_stats or {}),
     }
     return ui_stats
-
 
 if __name__ == "__main__":
     start_time = time.time()
