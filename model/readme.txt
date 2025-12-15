@@ -1,3 +1,12 @@
+***************Model******************
+•	Convolution Neural Networks
+•	Recurrent Neural Networks (RNN)
+•	Deep Autoencoders (unsupervised learning)
+•	GAN (2014)
+•	Deep Forrest (2017)
+•	Transformer (GPT3, 2020)
+
+
 *tr_loss 训练集损失（training loss）
 *va_loss 验证集损失（validation loss）
 *va_macroF1 precision + recall 的调和平均,0 = 完全乱猜,1 = 完美分类.

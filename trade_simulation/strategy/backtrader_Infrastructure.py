@@ -1,3 +1,4 @@
+from enum import IntEnum
 import backtrader as bt
 import logging,sys,os
 current_work_dir = os.path.dirname(__file__)
@@ -5,7 +6,7 @@ sys.path.append(os.path.join(current_work_dir, "..", '..'))
 # 引入自定义模块
 from data_process import common
 
-class BaseStrategy(bt.Strategy):
+class BdInfrastructure(bt.Strategy):
     params = dict(
         stop_loss = 0.05,  # 5% 止损
         take_profit = 0.50, # 10% 止盈 (可选)
