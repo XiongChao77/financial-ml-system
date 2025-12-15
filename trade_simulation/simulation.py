@@ -16,11 +16,10 @@ from data_process.common import *
 from model.train import CNN1D
 from model.data_loader import TimeSeriesWindowDataset
 from trade_simulation import cus_analyzer, cus_comminfo, model_loader, result_analyze
-from trade_simulation.strategy.ftmo import FtmoStrategy
-from trade_simulation.strategy.simpe import  SimpleStrategy
+from trade_simulation.strategy.bt_ftmo import FtmoStrategy
 
-log_file = os.path.join(TEMPORARY_DIR, "backtest.log")
-logger = setup_logger(log_name='trade' ,log_path= log_file, console_level =logging.DEBUG)
+log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
+logger = setup_logger(log_name='trade' ,log_path= log_file, console_level =logging.DEBUG, record_level = logging.DEBUG)
 
 class TradeResult:
     def __init__(self) -> None:
@@ -30,13 +29,13 @@ class TradeResult:
 class PandasDataWithPred(bt.feeds.PandasData):
     lines = (
         "pred",
-        "conf",
+        "pred_prob",
         "threshold",       # 动态止盈阈值
         "stop_threshold",  # 动态止损阈值
     )
     params = (
         ("pred", -1),
-        ("conf", -1),
+        ("pred_prob", -1),
         ("threshold", -1),      # 自动匹配列名
         ("stop_threshold", -1), # 自动匹配列名
     )
@@ -135,7 +134,7 @@ def main():
     cerebro.adddata(data)
     cerebro.broker.setcash(args.cash)
     cerebro.broker.addcommissioninfo(
-        cus_comminfo.CommInfo_Cryptocurrency(commission=args.commission)
+        cus_comminfo.CommInfo_Cryptocurrency(commission=args.commission, leverage =10)
     )
     # cerebro.broker.set_coc(True)  #
 
@@ -148,7 +147,7 @@ def main():
     logger.record("Starting Backtest...")
     results = cerebro.run()
     strat = results[0]
-    result_analyze.analyze_pnl_distribution(strat.closed_pnl)
+    # result_analyze.analyze_pnl_distribution(strat.closed_pnl)
     # result_analyze.analyze_trade_dependency(strat.closed_pnl)
     # 5. 结果统计
     # UI
@@ -213,7 +212,7 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     maxdd_pct = dd.get("max", {}).get("drawdown", 0.0)
     maxdd_amt = dd.get("max", {}).get("moneydown", 0.0)
     maxdd_len = dd.get("max", {}).get("len", 0)
-
+    calmar = (cagr / abs(maxdd_pct) / 100.0) if maxdd_pct > 0 else 0.0
     # --- 读取日内回撤数据 ---
     max_daily_dd = perf.get('max_daily_dd', 0.0) # 例如 -0.045
     max_daily_date = perf.get('max_daily_dd_date', 'N/A')
@@ -293,8 +292,8 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     # summary 输出
     logger.info("-" * 80)
     logger.info(f"SUMMARY | GrossRet: {gross_return*100:.2f}% | CAGR: {cagr*100:.2f}% | "
-                f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | commission: {commission:.2f}%")
-    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}%")
+                f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | calmar: {calmar:.2f}%")
+    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% | commission: {commission:.2f}%")
     logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
     logger.info("-" * 80)

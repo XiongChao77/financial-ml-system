@@ -2,6 +2,7 @@ import backtrader as bt
 
 class CommInfo_Cryptocurrency(bt.CommInfoBase):
     params = (
+        ('leverage', 1.0),    # 【关键参数】默认杠杆倍数
     )
 
     # def __init__(self, **kwargs):
@@ -13,3 +14,11 @@ class CommInfo_Cryptocurrency(bt.CommInfoBase):
             return (self.p.leverage * (cash / self.get_margin(price)))
 
         return (self.p.leverage * (cash / price))
+    
+    def get_margin(self, price):
+        """
+        【核心逻辑】
+        Backtrader 每次开仓都会调用这个函数查询“需要多少本金”。
+        保证金 = 价格 / 杠杆
+        """
+        return price / self.p.leverage
