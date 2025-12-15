@@ -165,3 +165,45 @@ class CusAnalyzer(bt.Analyzer):
     def day_start_equity(self):
         """提供属性访问，方便外部(如策略)在盘中获取今日初始权益，用于熔断判断"""
         return self._day_start_equity
+    
+class CalmarRatio(bt.Analyzer):
+    """
+    Calmar(MAR) = CAGR / MaxDrawdown
+    - CAGR: 来自 bt.analyzers.Returns 的 rnorm（年化，decimal）
+    - MaxDD: 来自 bt.analyzers.DrawDown 的 max.drawdown（百分比）
+    """
+    params = dict(returns_name='returns', dd_name='dd')
+
+    def stop(self):
+        strat = self.strategy
+
+        # 取 CAGR (decimal, e.g. 0.32)
+        cagr = 0.0
+        try:
+            cagr = strat.analyzers.getbyname(self.p.returns_name).get_analysis().get('rnorm', 0.0) or 0.0
+        except Exception:
+            cagr = 0.0
+
+        # 取 MaxDD (% value, e.g. 25.0)
+        maxdd_pct = 0.0
+        try:
+            dd = strat.analyzers.getbyname(self.p.dd_name).get_analysis()
+            maxdd_pct = dd.get('max', {}).get('drawdown', 0.0) or 0.0
+        except Exception:
+            maxdd_pct = 0.0
+
+        maxdd = abs(maxdd_pct) / 100.0  # 转为小数
+
+        if maxdd > 0:
+            calmar = cagr / maxdd
+        else:
+            calmar = 0.0
+
+        self.rets = {
+            'cagr': float(cagr),
+            'maxdd': float(maxdd),
+            'calmar': float(calmar),
+        }
+
+    def get_analysis(self):
+        return self.rets 

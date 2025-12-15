@@ -135,9 +135,9 @@ class ModelHandler:
         # 4. 写入 DataFrame
         df_out = df.copy()
         df_out['pred'] = np.nan
-        df_out['conf'] = np.nan
+        df_out['pred_prob'] = np.nan
         df_out.loc[valid_idx, 'pred'] = preds
-        df_out.loc[valid_idx, 'conf'] = confs
+        df_out.loc[valid_idx, 'pred_prob'] = confs
 
         # 5. 计算评估指标 (如果有标签)
         stats = {}

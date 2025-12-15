@@ -1,9 +1,16 @@
+from enum import IntEnum
 import logging,math
 import pandas as pd
 import numpy as np
 import os, colorlog , logging
 from data_process.feature import *
 from data_process.logger    import setup_logger
+
+class Signal(IntEnum):
+    SHORT = 0
+    NEUTRAL = 1
+    LONG = 2
+
 #define model
 CANDLESTICK_NUM = 136
 PREDICT_NUM = 16
@@ -19,12 +26,8 @@ VOL_MULTIPLIER = 0.8
 # 最小硬阈值 (覆盖手续费+滑点)
 MIN_THRESHOLD = 0.01  # 0.25%
 STOP_MULTIPLIER_RATE = 0.5
-
-label_decrease = 0
 # label_decrease_weak =1 
-label_ignore = 1
 # label_increase_weak = 3
-label_increase = 2
 model_train_rate = 0.8
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR)
@@ -101,12 +104,12 @@ def attach_label(df,
     # 应用标签
     df['label'] = np.select(
         [cond_short, cond_long],
-        [label_decrease, label_increase],
-        default=label_ignore
+        [Signal.SHORT, Signal.LONG],
+        default=Signal.NEUTRAL
     )
 
     # 5. 清洗
-    df.iloc[:vol_window, df.columns.get_loc('label')] = label_ignore
+    df.iloc[:vol_window, df.columns.get_loc('label')] = Signal.NEUTRAL
     
     if predict_num > 0:
         df = df.iloc[:-predict_num].reset_index(drop=True)
