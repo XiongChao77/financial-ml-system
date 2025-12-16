@@ -30,8 +30,8 @@ NUM_THREADS = 8
 BATCH_REQUEST_COUNT = 20 
 
 OUTPUT_COLUMNS = [
-    "open_time_ms", "open_time_utc", "open", "high", "low", "close", "volume",
-    "number_of_trades", "close_time_utc", "quote_asset_volume", 
+    "open_time_ms_utc", "open_time_date_utc", "open", "high", "low", "close", "volume",
+    "number_of_trades", "close_time_ms_utc", "quote_asset_volume", 
     "taker_buy_base_volume", "taker_buy_quote_volume"
 ]
 
@@ -279,8 +279,8 @@ class BinanceDownloader:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbol", default="BNBUSDT")
-    parser.add_argument("--interval", default="15m") #e.g., "1h" – supported intervals: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+    parser.add_argument("--symbol", default="DOGEUSDT")
+    parser.add_argument("--interval", default="5m") #e.g., "1h" – supported intervals: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
     parser.add_argument("--dir", default=PROJECT_DATA_DIR)
     parser.add_argument("--update", default = True ,action="store_true")
     args = parser.parse_args()

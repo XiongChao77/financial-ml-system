@@ -42,5 +42,5 @@ def main():
     return df
 
 if __name__ == "__main__":
-#**********column info: open_time_utc,open,high,low,close,volume,close_time_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
+#**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     main()
