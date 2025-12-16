@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os, sys
 
-from trade_simulation import simulation
+from trade import simulation
 
 app = FastAPI()
 result = simulation.main()

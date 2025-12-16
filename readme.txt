@@ -14,7 +14,7 @@ pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook j
     cd Quant/model
     python train.py
 *Backtrade test
-    cd Quant/trade_simulation
+    cd Quant/trade
     python simulation.py
 *UI
     backend:
