@@ -48,8 +48,8 @@ class Parameters:
         self.commission = 0.05   # 0.1 = 0.1%
         self.cash = 10000
         self.stop_loss = 2  # should be 1-10   stop_loss = self.data.stop_threshold[0]*self.params.stop_loss
-        self.take_profit = 0.99
-        self.position_ratio = 0.6     #0-1
+        self.take_profit = 0.99 #止盈. 0 - n倍
+        self.position_ratio = 0.99     #0-1
 
 
 def main():
@@ -212,7 +212,7 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     maxdd_pct = dd.get("max", {}).get("drawdown", 0.0)
     maxdd_amt = dd.get("max", {}).get("moneydown", 0.0)
     maxdd_len = dd.get("max", {}).get("len", 0)
-    calmar = (cagr / abs(maxdd_pct) / 100.0) if maxdd_pct > 0 else 0.0
+    calmar = (cagr*100 / abs(maxdd_pct)) if maxdd_pct > 0 else 0.0
     # --- 读取日内回撤数据 ---
     max_daily_dd = perf.get('max_daily_dd', 0.0) # 例如 -0.045
     max_daily_date = perf.get('max_daily_dd_date', 'N/A')
@@ -292,7 +292,7 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     # summary 输出
     logger.info("-" * 80)
     logger.info(f"SUMMARY | GrossRet: {gross_return*100:.2f}% | CAGR: {cagr*100:.2f}% | "
-                f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | calmar: {calmar:.2f}%")
+                f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | calmar: {calmar:.2f}")
     logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% | commission: {commission:.2f}%")
     logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
