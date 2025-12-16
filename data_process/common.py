@@ -3,8 +3,9 @@ import logging,math
 import pandas as pd
 import numpy as np
 import os, colorlog , logging
+from datetime import datetime
 from data_process.feature import *
-from data_process.logger    import setup_logger
+from data_process.logger    import setup_logger,setup_session_logger
 
 class Signal(IntEnum):
     SHORT = 0
