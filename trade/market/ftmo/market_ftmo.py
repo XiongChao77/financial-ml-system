@@ -16,8 +16,8 @@ sys.path.append(os.path.join(current_work_dir, "..", '..'))
 # 引入自定义模块
 from data_process import common
 from data_process.common import FeatureFactory, FEATURE_CONFIG
-from trade_simulation import model_loader
-from trade_simulation.strategy.ftmo_strategy import FtmoBrain, MarketState, PositionDir, ActionType, Signal
+from trade import model_loader
+from trade.strategy.ftmo_strategy import FtmoBrain, MarketState, PositionDir, ActionType, Signal
 
 
 
@@ -259,7 +259,8 @@ class MT5Executor:
         
         return direction, layers, total_vol
 
-    def execute_order(self, action_type: ActionType, target_dir: PositionDir, target_pct: float):
+    def execute_order(self, action_type: ActionType, target_dir: PositionDir, target_pct: float,
+                      sl: float = 0.0, tp: float = 0.0, layer_idx=1):
         """
         执行交易指令
         """
@@ -288,8 +289,8 @@ class MT5Executor:
         
         target_lots = round(target_value / price_est, 2)
         
-        # 最小手数检查 (通常是 0.01)
-        if target_lots < 0.01: target_lots = 0.01
+        # # 最小手数检查 (通常是 0.01)
+        # if target_lots < 0.01: target_lots = 0.01
         
         self.logger.info(f"Action: {action_type} | Dir: {target_dir} | Pct: {target_pct:.2f} | Calc Lots: {target_lots}")
 
@@ -308,15 +309,18 @@ class MT5Executor:
             order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
             price = tick.ask if is_buy else tick.bid
             
+            # === 构建请求字典 ===
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": self.symbol,
                 "volume": target_lots,
                 "type": order_type,
                 "price": price,
-                "deviation": 200, # 滑点允许
+                "sl": float(sl),  # <--- 加入止损价格 (必须是 float)
+                "tp": float(tp),  # <--- 加入止盈价格 (必须是 float)
+                "deviation": 200,
                 "magic": self.magic,
-                "comment": f"AutoTrade {action_type.value}",
+                "comment": f"AT_L{layer_idx} {action_type.value}", # 把层数写进注释
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
@@ -325,7 +329,7 @@ class MT5Executor:
             if result.retcode != mt5.TRADE_RETCODE_DONE:
                 self.logger.error(f"Order Failed: {result.comment} ({result.retcode})")
             else:
-                self.logger.info(f"Order Executed: {result.volume} lots @ {result.price}")
+                self.logger.info(f"Order Done: {result.volume} lots @ {result.price} | SL: {sl} | TP: {tp}")
 
     def close_all(self):
         """平掉所有属于本策略的持仓"""
@@ -377,7 +381,16 @@ class LiveBot:
             LiveConfig.TIMEFRAME, 
             max_len = self.min_bars_needed + 500
         )
-        
+        #strategy
+        self.brain = FtmoBrain(
+            trade_risk=LiveConfig.TRADE_RISK, 
+            max_layers=LiveConfig.MAX_LAYERS,
+            holdbar=LiveConfig.HOLD_BAR,
+            allow_long=LiveConfig.ALLOW_LONG,
+            allow_short=LiveConfig.ALLOW_SHORT,
+            thresh=LiveConfig.THRESH
+        )
+
         # 4. 执行数据预热 (Warmup) -> 填充内存
         self.data_feed.initialize_cache(self.min_bars_needed, self.interval_ms)
         
@@ -413,6 +426,8 @@ class LiveBot:
             print("columns:", df.columns.tolist())
             # 使用 FeatureFactory 生成特征
             self.factory.generate(df)
+
+            df = df[-self.model_handler.window -1 :]    #only keep the last window
             
             # B. 计算动态阈值 (复用 common.py 逻辑)
             # 这会生成 threshold 和 stop_threshold 列
@@ -438,7 +453,7 @@ class LiveBot:
             return
 
         # 3. 获取 MT5 当前状态
-        curr_dir, curr_layers, curr_vol = self.executor.get_current_state()
+        curr_dir, curr_layers, curr_vol = self.executor.get_current_state() #sync state here
         self.logger.info(f"MT5 State: Dir={curr_dir}, Layers={curr_layers}, Vol={curr_vol}")
 
         # 4. 构建 MarketState
