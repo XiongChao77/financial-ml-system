@@ -47,6 +47,8 @@ class FeatureBase(ABC):
     @abstractmethod
     def generate(self,df:pd.DataFrame) -> None: ...
     def normalize(self, X: np.ndarray, feature_cols: list[str]) : pass
+    @abstractmethod
+    def min_history_request(self, kline_interval_ms:int = None) -> int: ...
 """
 直接在原数据上添加 MACD 与多条均线（同时包含 SMA 与 EMA）。
 生成列：
@@ -59,7 +61,7 @@ class FeatureMACD(FeatureBase):
         super().__init__(**kwargs)
         self.fast:int = kwargs.get('fast', 12)
         self.slow:int = kwargs.get('slow', 26)
-        self.signal:list = kwargs.get('signal', 9)
+        self.signal:int = kwargs.get('signal', 9)
         self.features = ['MACD_DIF', 'MACD_DEA', 'MACD']
     def generate(self,df:pd.DataFrame):
         out = df
@@ -76,7 +78,18 @@ class FeatureMACD(FeatureBase):
         out['MACD'] = macd
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
         self._normalize(X, feature_cols , self.features , feature_base = "MACD_DEA")
-
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算 MACD 所需的最小历史 K 线数量。
+        由于 EMA 需要数据预热 (Warmup) 才能收敛，
+        通常建议请求 (Slow + Signal) * 4 的长度以确保精度。
+        """        
+        # 基础周期：最慢的均线 + 信号线周期
+        base_cycle = self.slow + self.signal
+        # 乘以 4 倍用于 EMA 收敛 (Warmup Buffer)
+        # 例如 (26 + 9) * 4 = 140 根 K 线
+        return int(base_cycle * 4)
+        
 """
 基于时间列自动推断 1 根K线的时间长度，计算：
     * 周均线（SMA/EMA）：如 7W / 25W，并可选计算周均线斜率
@@ -92,11 +105,17 @@ class FeatureMA(FeatureBase):
         super().__init__(**kwargs)
         self.weeks = kwargs.get('weeks', [7,25])
         self.days = kwargs.get('days', [5, 10, 20])
+        self.bars = kwargs.get('bars', [7, 25, 99])
         self.method = kwargs.get('method', 'sma') # 'sma' 或 'ema'
         self.strict = kwargs.get('strict', True)# 严格型：窗口未满为 NaN；宽松型：尽早给值
         self.add_slope = kwargs.get('add_slope', False)
         self.slope_method = kwargs.get('slope_method', 'reg')# 'diff' 或 'reg'
         self.slope_weeks = kwargs.get('slope_weeks', 2)     # 斜率回看窗口（单位：周）
+        # 注册特征名
+        # 1. 注册原生 K 线均线 (如 SMA_7B)
+        for b in self.bars:
+            ma_col = f"{self.method.upper()}_{b}B"
+            self.features.append(ma_col)
         for d in self.days:
             ma_col = f"{'SMA' if self.method=='sma' else 'EMA'}_{d}D"
             self.features.append(ma_col)
@@ -106,8 +125,26 @@ class FeatureMA(FeatureBase):
             # 周线斜率（保持原行为）
             if self.add_slope:
                 slope_col = f"{'SLOPE_DIFF_' if self.method=='diff' else 'SLOPE_REG_'}{ma_w_col}_{self.slope_weeks}W"
-                self.features.append(slope_col)
+                # self.features.append(slope_col)
 
+    def _calculate_klines_count(self, kline_interval_ms: float):
+        """
+        [纯数学计算] 根据给定的周期毫秒数，计算每天和每周包含多少根 K 线。
+        不再依赖 DataFrame。
+        """
+        if kline_interval_ms <= 0:
+            # 默认保底值 (假设 15m)
+            return 96, 96 * 7
+            
+        one_day_ms = 24 * 60 * 60 * 1000
+        one_week_ms = 7 * one_day_ms
+
+        # 使用 round 确保浮点精度误差不会导致向下取整错误
+        klines_per_day = max(int(round(one_day_ms / kline_interval_ms)), 1)
+        klines_per_week = max(int(round(one_week_ms / kline_interval_ms)), 1)
+        
+        return klines_per_day, klines_per_week
+    
     def generate(self,df:pd.DataFrame):
         kline_col='open_time_date_utc'
         price_col='close'
@@ -131,12 +168,8 @@ class FeatureMA(FeatureBase):
         kline_ns = np.median(diffs_ns)
         if not np.isfinite(kline_ns) or kline_ns <= 0:
             raise ValueError("检测到非正或无效的K线周期，请检查时间数据")
-
-        one_day_ns  = 24 * 60 * 60 * 1e9
-        one_week_ns = 7  * 24 * 60 * 60 * 1e9
-
-        klines_per_day  = max(int(round(one_day_ns  / kline_ns)), 1)
-        klines_per_week = max(int(round(one_week_ns / kline_ns)), 1)
+        
+        klines_per_day,klines_per_week = self._calculate_klines_count(kline_ns/1_000_000)
 
         out = df
         close = out[price_col].astype(float)
@@ -193,6 +226,15 @@ class FeatureMA(FeatureBase):
                 slope = slope.where(valid, np.nan)
             return slope
 
+        # 计算 —— 原生 K 线均线 (新增)
+        # 这里直接按根数计算，不随时间周期缩放
+        for b in self.bars:
+            b = int(b)
+            if b <= 0: continue
+            ma_b = _ma(close, b)
+            ma_col = f"{self.method.upper()}_{b}B"
+            out[ma_col] = ma_b
+
         # 3) 计算 —— 日线均线（新增）
         for d in self.days:
             d = int(d)
@@ -236,6 +278,31 @@ class FeatureMA(FeatureBase):
 
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
         self._normalize(X, feature_cols , self.features , "close")
+    def min_history_request(self, kline_interval_ms: int) -> int:
+        """
+        [实现] 根据当前 K 线周期，计算模型所需的最少历史 K 线数量
+        """
+        # 调用封装好的周期计算函数
+        k_day, k_week = self._calculate_klines_count(kline_interval_ms)
+        
+        # 1. 均线最大窗口 (取周线和日线中较大的需求)
+        max_d_window = max(self.days) * k_day if self.days else 0
+        max_w_window = max(self.weeks) * k_week if self.weeks else 0
+        base_required = max(max_d_window, max_w_window)
+        
+        # 2. 考虑斜率窗口 (回看步数)
+        slope_buffer = 0
+        if self.add_slope:
+            slope_buffer = self.slope_weeks * k_week
+            
+        # 3. EMA 精度补偿因子 (EMA 需要约 3.5 倍窗口才能使初始权重衰减至 <1%)
+        multiplier = 3.5 if self.method.lower() == 'ema' else 1.0
+        
+        # 总请求量 = (最大周期 * 预热系数) + 斜率回看
+        total_needed = int(base_required * multiplier + slope_buffer)
+        
+        # 保底返回 200 根，确保数据量足够计算基础指标
+        return max(total_needed, 200)
 
 #Dimensionless
 class FeatureRsi(FeatureBase):
@@ -290,6 +357,19 @@ class FeatureRsi(FeatureBase):
 
         # 简单缩放，保留绝对位置信息
         X[:, :, target_indices] = (X[:, :, target_indices] / 100.0) - 0.5
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算 RSI 所需的最小历史 K 线数量。
+        RSI 使用 Wilder 平滑（alpha=1/period），本质上也是一种 EMA。
+        为了使数值收敛并与标准软件一致，通常建议提供至少 5 到 10 倍周期的历史数据。
+        """
+        # 基础周期，例如 14
+        base_period = self.period
+        # 为了保证实盘计算精度，建议使用 6 倍周期作为预热
+        # 14 * 6 = 84 根 K 线
+        # 这样可以确保 EMA 的初始权重衰减到足够小，数值达到稳定状态
+        warmup_factor = 6
+        return int(base_period * warmup_factor)
 """
 经典 KDJ：
     RSV = (C - LLV(n)) / (HHV(n) - LLV(n)) * 100
@@ -351,6 +431,23 @@ class FeatureKdj(FeatureBase):
 
         # 映射到 [-0.5, 0.5]
         X[:, :, target_indices] = (X[:, :, target_indices] / 100.0) - 0.5
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算 KDJ 所需的最小历史 K 线数量。
+        1. 基础窗口 n: 计算 RSV 需要 n 根 K 线。
+        2. 平滑窗口 m1, m2: K 和 D 使用 alpha=1/m 的递推平滑。
+        为了确保 EWM 收敛精度，平滑部分建议提供 4 倍以上的缓冲区。
+        """
+        # 1. 基础 RSV 窗口
+        base_n = self.n
+        
+        # 2. 平滑收敛需求 (K 和 D 是嵌套平滑)
+        # 参照 EMA 的收敛逻辑，通常取 (m1 + m2) * 4 作为安全冗余
+        warmup_buffer = int((self.m1 + self.m2) * 4)
+        
+        # 总需求 = 基础窗口 + 预热缓冲区
+        # 例如默认参数 (9, 3, 3) -> 9 + (3+3)*4 = 33 根
+        return base_n + warmup_buffer
 
 class FeatureContainer:
     def __init__(self,feature:type[FeatureBase],  **kwargs):
@@ -374,6 +471,19 @@ class FeatureVolMa(FeatureBase):
             
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
         self._normalize(X, feature_cols , self.ma_features , feature_base = 'volume')
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算成交量均线所需的最小历史 K 线数量。
+        逻辑：取所有配置窗口中的最大值，并增加少量缓冲区确保标准化计算稳定。
+        """
+        if not self.vol_ma_windows:
+            return 0
+        # 1. 获取最大窗口期 (例如 20)
+        max_window = max(self.vol_ma_windows)
+        # 2. 增加缓冲区
+        # 对于 SMA 来说，max_window 根就能出数，
+        # 但为了 normalize 逻辑在时间轴上有统计意义，建议提供 1.5 倍到 2 倍的数据
+        return int(max_window * 1.5)
 
 # ==== 3. 成交额均线 + 比值 ====
 class FeatureQavMa(FeatureBase):
@@ -392,7 +502,19 @@ class FeatureQavMa(FeatureBase):
             self.features.extend([f'QAV_MA_{w}', f'QAV_ratio_{w}'])
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
         self._normalize(X, feature_cols , self.qa_features , feature_base = 'quote_asset_volume')
-
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算成交额均线 (QAV MA) 所需的最小历史 K 线数量。
+        """
+        if not self.vol_ma_windows:
+            return 0
+            
+        # 1. 获取所有配置窗口中的最大值 (例如 20)
+        max_window = max(self.vol_ma_windows)
+        
+        # 2. 增加缓冲区 (建议 1.5 倍) 
+        # 确保在计算第一个有效特征点时，标准化逻辑已有足够的样本背景
+        return int(max_window * 1.5)
 # ==== 4. OBV ====
 class FeatureOBV(FeatureBase):
     def __init__(self,**kwargs):
@@ -405,7 +527,18 @@ class FeatureOBV(FeatureBase):
         df['OBV'] = (sign * df['volume']).cumsum()
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
         self._normalize(X, feature_cols , self.features , feature_base = self.features[0])  #Self-Normalization
-
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算 OBV 所需的最小历史 K 线数量。
+        OBV 是一个累积指标，为了让标准化 (Normalization) 逻辑获得稳定的
+        均值和标准差，建议提供至少 2 倍于模型窗口 (window) 的历史数据。
+        """
+        # 这里的 window 建议与 TimeSeriesWindowDataset 中的 window 保持一致
+        # 如果类中没有保存 window，可以给一个稳健的默认值（如 200）
+        model_window = getattr(self, 'window', 100) 
+        
+        # 为了让累积值的波动率在归一化时趋于平稳
+        return int(model_window * 2)
 # ==== PVT ====
 class FeaturePVT(FeatureBase):
     def __init__(self,**kwargs):
@@ -416,7 +549,19 @@ class FeaturePVT(FeatureBase):
         df['PVT'] = (pct * df['volume']).cumsum()
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
         self._normalize(X, feature_cols , self.features , feature_base = self.features[0])  #Self-Normalization
-        
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算 PVT 所需的最小历史 K 线数量。
+        PVT 是累积指标，需要足够的样本量来让归一化 (Normalization) 过程中的
+        均值和标准差趋于稳定。
+        """
+        # 建议参考模型训练时的 window 大小 (通常在 100 左右)
+        # 如果类中没有保存 window，则给一个安全的保守估计值
+        model_window = getattr(self, 'window', 100)
+        # 2倍窗口可以确保在第一个推理窗口 [T-window, T] 之前，
+        # 已经有一段数据用于形成指标的初始统计分布
+        return int(model_window * 2)
+    
 # ==== VWAP（滚动） ====
 class FeatureWAP(FeatureBase):
     def __init__(self,**kwargs):
@@ -431,7 +576,20 @@ class FeatureWAP(FeatureBase):
             df[f'VWAP_{w}'] = vwap
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
         self._normalize(X, feature_cols , self.features , feature_base = 'close')
-
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+            """
+            计算滚动 VWAP 所需的最小历史 K 线数量。
+            逻辑：取配置窗口中的最大值，并增加缓冲区以确保标准化逻辑在实盘初期具有统计稳定性。
+            """
+            if not self.vwap_windows:
+                return 0
+                
+            # 1. 获取最大窗口期 (例如 96)
+            max_window = max(self.vwap_windows)
+            
+            # 2. 增加缓冲区 (建议 1.5 倍)
+            # 确保 rolling sum 能够完整计算，且 normalize 过程有足够的历史样本作为背景
+            return int(max_window * 1.5)
 # ==== CMF ====
 class FeatureCFM(FeatureBase):
     def __init__(self,**kwargs):
@@ -443,6 +601,18 @@ class FeatureCFM(FeatureBase):
         mfv = mfm * df['volume']
         df['CMF'] = mfv.rolling(self.cmf_window).sum() / df['volume'].rolling(self.cmf_window).sum()
         self.features = ['CMF']
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算 Chaikin Money Flow (CMF) 所需的最小历史 K 线数量。
+        逻辑：基于 cmf_window，并增加缓冲区以确保滚动求和逻辑的统计稳定性。
+        """
+        # 1. 基础窗口需求 (例如默认的 20)
+        base_window = self.cmf_window
+        
+        # 2. 增加 50% 的缓冲区 (Warmup Buffer)
+        # 确保在第一个推理窗口之前，指标已有足够的背景样本
+        # 例如 20 * 1.5 = 30 根
+        return int(base_window * 1.5)
 
 # ==== MFI ====
 class FeatureMFI(FeatureBase):
@@ -475,7 +645,17 @@ class FeatureMFI(FeatureBase):
         # MFI / 100.0  -> 范围 [0, 1]
         # (MFI / 100.0) - 0.5 -> 范围 [-0.5, 0.5] (推荐，配合 tanh 激活函数更好)
         X[:, :, target_indices] = (X[:, :, target_indices] / 100.0) - 0.5
-
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算资金流量指数 (MFI) 所需的最小历史 K 线数量。
+        逻辑：基于 mfi_window，增加缓冲区以确保滚动求和逻辑的稳定性。
+        """
+        # 1. 基础窗口需求 (例如默认的 14)
+        base_window = self.mfi_window
+        
+        # 2. 增加缓冲区 (建议 1.5 倍至 2 倍)
+        # 确保在第一个推理窗口之前，数据已足以生成稳定的指标分布
+        return int(base_window * 2)
 class FeatureATS(FeatureBase):
     def __init__(self,**kwargs):
         super().__init__(**kwargs)
@@ -489,7 +669,17 @@ class FeatureATS(FeatureBase):
         我们需要捕捉的是它相对于自身历史水平的波动（Z-Score）。
         """
         self._normalize(X=X, full_feature_cols=feature_cols, target_feature_cols=self.features, feature_base='ATS')  # <--- 必须自缩放
-
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算平均单笔成交量 (ATS) 所需的最小历史 K 线数量。
+        虽然指标本身是逐 K 线计算的，但为了使 Z-Score 标准化逻辑稳定，
+        建议提供至少与模型观察窗口等长的历史数据。
+        """
+        # 建议参考模型训练时的 window 大小 (通常在 100 左右)
+        model_window = getattr(self, 'window', 100)
+        
+        # 提供 1 倍窗口作为标准化计算的基础样本
+        return int(model_window)
 class FeatureCandle(FeatureBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -563,7 +753,21 @@ class FeatureCandle(FeatureBase):
         # 它们已经是 [-1, 1] 且 0 有特殊含义，无需处理
         # 唯一例外是 'gap'，如果它的数值过小 (如 0.0001)，可能需要放大
         # 但通常 Transformer/LSTM 能处理这种小数值，不做处理也行。
-
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        """
+        计算 K线形态特征所需的最小历史 K 线数量。
+        虽然大部分形态是单根计算，但 gap 和 body_mom 依赖前一根数据，
+        且 Z-Score 标准化需要足够的样本背景。
+        """
+        # 1. 基础依赖：diff/shift 至少需要 2 根
+        base_dependency = 2
+        
+        # 2. 标准化稳定性需求：建议参考模型观察窗口 (Window)
+        # 如果类中没有保存 window，则给一个安全的保守值
+        model_window = getattr(self, 'window', 100)
+        
+        # 返回模型窗口大小，确保 Z-Score 计算有足够的样本数
+        return max(base_dependency, int(model_window))
 
 class FeatureOrigin(FeatureBase):
     def __init__(self,**kwargs):
@@ -579,3 +783,5 @@ class FeatureOrigin(FeatureBase):
         self._normalize(X, feature_cols , self.quote_base_features , feature_base = "quote_asset_volume")
         for f in self.self_based_features:
             self._normalize(X, feature_cols , [f] , feature_base = f)
+    def min_history_request(self, kline_interval_ms:int = None) -> int:
+        return 1

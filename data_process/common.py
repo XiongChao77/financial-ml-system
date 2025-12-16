@@ -36,6 +36,7 @@ PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Crypto
 origin_data_path = os.path.join(PROJECT_DATA_DIR, "BTCUSDT_15m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "BTCUSDT_5m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "ETHUSDT_15m.csv")
+# origin_data_path = os.path.join(PROJECT_DATA_DIR, "ETHUSDT_5m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "BNBUSDT_15m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "DOGEUSDT_15m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "DOGEUSDT_5m.csv")
@@ -46,8 +47,7 @@ log_level = logging.INFO
 
 def attach_attr(df):
     # 1. 基础处理
-    df.rename({'ignore':'label'},axis=1, inplace=True) 
-
+    # df.drop('ignore', axis=1, inplace=True)
     # --- 2. 指标计算 (生成所有原始、未缩放的特征列) ---
     # df = add_relative_features(df)
     FeatureFactory(FEATURE_CONFIG).generate(df)
@@ -182,7 +182,7 @@ def data_analyze(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PRE
 
 FEATURE_CONFIG:list[FeatureBase] = [
     FeatureMACD(fast=12, slow=26, signal=9),
-    FeatureMA(weeks=[7,25], days=[5, 10, 20], method='sma', strict=True, add_slope = False, slope_method='reg', slope_weeks= 2),
+    FeatureMA(weeks=[7,25], days=[5, 10, 20], bars = [], method='sma', strict=True, add_slope = False, slope_method='reg', slope_weeks= 2),
     FeatureRsi(period=14, price_col='close', strict=True, prefix='RSI'),
     FeatureKdj(n=9, m1=3, m2=3, high_col='high', low_col='low',  close_col='close', strict=True, prefix='KDJ'),
     FeatureVolMa(vol_ma_windows = (5, 10, 20)),
@@ -206,3 +206,6 @@ class FeatureFactory:
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
         for f in self.features:
             f.normalize(X, feature_cols)
+    def get_global_min_history(self, kline_interval_ms:int) -> int:
+        """遍历所有已注册特征，返回其中最大的历史需求"""
+        return max([f.min_history_request(kline_interval_ms) for f in self.features])
