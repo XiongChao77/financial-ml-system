@@ -123,9 +123,16 @@ class FtmoStrategy(BtExecutor):
         if np.isnan(pred) or np.isnan(pred_prob):
             return
 
+        self.dir = PositionDir.FLAT
         if not self.position:   #sync with stopprice
             self.dir = PositionDir.FLAT
             self.layers = 0
+        elif self.position.size > 0:
+            self.dir = PositionDir.LONG
+            self.layers = 1
+        elif self.position.size < 0:
+            self.dir = PositionDir.SHORT
+            self.layers = 1
 
         state = MarketState(
             price=self.data.close[0],
