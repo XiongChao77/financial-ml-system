@@ -9,7 +9,7 @@ import pandas as pd
 import logging
 
 current_work_dir = os.path.dirname(__file__)
-sys.path.append(os.path.join(current_work_dir, ".."))
+sys.path.append(os.path.join(current_work_dir, "..",'..'))
 
 # 引入自定义模块
 from data_process.common import *
