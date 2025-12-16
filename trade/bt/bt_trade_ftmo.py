@@ -2,10 +2,10 @@ import backtrader as bt
 import logging
 from datetime import timezone
 import numpy as np
-from trade_simulation.strategy.backtrader_Infrastructure import BdInfrastructure
-from trade_simulation.strategy.ftmo_strategy import FtmoBrain,MarketState,TradingAction,ActionType,PositionDir,Signal
+from trade.bt.bt_executor import BtExecutor
+from trade.strategy.strategy_ftmo import FtmoBrain,MarketState,TradingAction,ActionType,PositionDir,Signal
 # --- Strategy ---
-class FtmoStrategy(BdInfrastructure):
+class FtmoStrategy(BtExecutor):
     params = dict(
         holdbar=1,
         trade_risk=0.98,  # 每次加仓 10% 总资金. 0-1
@@ -25,6 +25,7 @@ class FtmoStrategy(BdInfrastructure):
         self.trade_logs = []
         self.params.trade_risk = self.params.position_ratio * self.params.trade_risk
         self.brain = FtmoBrain(
+            self,
             trade_risk=self.params.trade_risk,
             max_layers=self.params.max_layers,
             holdbar=self.params.holdbar,
@@ -128,32 +129,14 @@ class FtmoStrategy(BdInfrastructure):
 
         state = MarketState(
             price=self.data.close[0],
-            signal=Signal(self.data.pred[0]),
-            pred_prob=float(self.data.pred_prob[0]),
+            signal=Signal(pred),
+            pred_prob=float(pred_prob),
             position_dir=self.dir,
             layers=self.layers,
         )
 
-        action = self.brain.decide(state)
-
-        self.execute_action(action)
+        self.brain.decide(state)
 
         # # 强制最后平仓
         # if len(self.data) - 1 == len(self) - 1 and self.position:
         #     self.close()
-
-    def execute_action(self, action: TradingAction):
-
-        if action.action == ActionType.HOLD:
-            return
-
-        if action.action == ActionType.CLOSE:
-            self.user_close()
-            self.dir = 0
-            self.layers = 0
-            return
-
-        if action.action in (ActionType.OPEN, ActionType.REVERSE, ActionType.PYRAMID):
-            self.dir = action.target_dir
-            self.layers = action.target_layers
-            self.user_order_target_percent(target=action.target_pct)

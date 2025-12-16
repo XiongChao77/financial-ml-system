@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Optional
 from abc import ABC, abstractmethod
 from data_process.common import Signal
+from trade.strategy.base_executor import BaseExecutor
 # ============================================================
 # 枚举定义（系统协议层）
 # ============================================================
@@ -75,6 +76,7 @@ class FtmoBrain(Brain):
 
     def __init__(
         self,
+        executor: BaseExecutor,
         trade_risk: float,
         max_layers: int,
         holdbar: int,
@@ -82,6 +84,7 @@ class FtmoBrain(Brain):
         allow_short: bool = True,
         thresh: Optional[float] = None,
     ):
+        self.executor = executor
         self.trade_risk = trade_risk
         self.max_layers = max_layers
         self.holdbar = holdbar
@@ -107,44 +110,49 @@ class FtmoBrain(Brain):
         elif signal == Signal.SHORT and self.allow_short:
             target_dir = PositionDir.SHORT
 
-        # =====================================================
-        # A. 当前无持仓
-        # =====================================================
-        if state.position_dir == PositionDir.FLAT:
+        action = TradingAction(ActionType.HOLD)
+
+        if state.position_dir == PositionDir.FLAT:  #当前无持仓
             if target_dir != PositionDir.FLAT:
-                return TradingAction(
+                action = TradingAction(
                     action=ActionType.OPEN,
                     target_dir=target_dir,
                     target_layers=1,
                     target_pct=self.trade_risk * target_dir,
                 )
-            return TradingAction(ActionType.HOLD)
+        else:   #当前有持仓
+            if target_dir == PositionDir.FLAT:  #震荡 -> 平仓
+                action = TradingAction(ActionType.CLOSE)
+            elif target_dir != state.position_dir:  #方向反转 -> 反手
+                action = TradingAction(
+                    action=ActionType.REVERSE,
+                    target_dir=target_dir,
+                    target_layers=1,
+                    target_pct=self.trade_risk * target_dir,
+                )
+            elif state.layers < self.max_layers:  #同向 -> 加仓
+                new_layers = state.layers + 1
+                action = TradingAction(
+                    action=ActionType.PYRAMID,
+                    target_dir=state.position_dir,
+                    target_layers=new_layers,
+                    target_pct=self.trade_risk * new_layers * state.position_dir,
+                )
+        self.execute_action(action)
 
-        # =====================================================
-        # B. 当前有持仓
-        # =====================================================
 
-        # ---- B1. 震荡 -> 平仓
-        if target_dir == PositionDir.FLAT:
-            return TradingAction(ActionType.CLOSE)
+    def execute_action(self, action: TradingAction):
 
-        # ---- B2. 方向反转 -> 反手
-        if target_dir != state.position_dir:
-            return TradingAction(
-                action=ActionType.REVERSE,
-                target_dir=target_dir,
-                target_layers=1,
-                target_pct=self.trade_risk * target_dir,
-            )
+        if action.action == ActionType.HOLD:
+            return
 
-        # ---- B3. 同向 -> 加仓
-        if state.layers < self.max_layers:
-            new_layers = state.layers + 1
-            return TradingAction(
-                action=ActionType.PYRAMID,
-                target_dir=state.position_dir,
-                target_layers=new_layers,
-                target_pct=self.trade_risk * new_layers * state.position_dir,
-            )
+        if action.action == ActionType.CLOSE:
+            self.executor.user_close()
+            self.dir = 0
+            self.layers = 0
+            return
 
-        return TradingAction(ActionType.HOLD)
+        if action.action in (ActionType.OPEN, ActionType.REVERSE, ActionType.PYRAMID):
+            self.dir = action.target_dir
+            self.layers = action.target_layers
+            self.executor.user_order_target_percent(target_pct=action.target_pct)

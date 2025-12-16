@@ -15,9 +15,10 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process.common import *
 from model.train import CNN1D
 from model.data_loader import TimeSeriesWindowDataset
-from trade_simulation import cus_analyzer, cus_comminfo, model_loader, result_analyze
-from trade_simulation.strategy.bt_ftmo import FtmoStrategy
+from model import model_loader
+from trade.bt import cus_analyzer, cus_comminfo, result_analyze
 
+from trade.bt.bt_trade_ftmo import FtmoStrategy
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
 logger = setup_logger(log_name='trade' ,log_path= log_file, console_level =logging.INFO, record_level = logging.DEBUG)
 

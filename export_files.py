@@ -17,10 +17,10 @@ FILES_TO_EXPORT = [
     r"model/data_loader.py",
     r"model/run_experiments.py",
     r"model/feature_correlation_analysis.py",
-    r"trade_simulation/cus_analyzer.py",
-    r"trade_simulation/simulation.py",
+    r"trade/cus_analyzer.py",
+    r"trade/simulation.py",
     # r"export_files.py"
-    # 注意：你提供的列表中 trade_simulation\cus_analyzer.py 出现了两次，这里已自动去重
+    # 注意：你提供的列表中 trade\cus_analyzer.py 出现了两次，这里已自动去重
 ]
 
 # --- 主逻辑 ---

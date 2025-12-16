@@ -5,8 +5,9 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", '..'))
 # 引入自定义模块
 from data_process import common
+from trade.strategy.base_executor import BaseExecutor
 
-class BdInfrastructure(bt.Strategy):
+class BtExecutor(BaseExecutor,bt.Strategy):
     params = dict(
         stop_loss = 0.05,  # 5% 止损
         take_profit = 0.50, # 10% 止盈 (可选)
@@ -20,7 +21,7 @@ class BdInfrastructure(bt.Strategy):
         self.live_trades = []
         self.closed_pnl = []
 
-    def user_order_target_percent(self, target):
+    def user_order_target_percent(self, target_pct:float):
         """
         全能下单函数 (带订单追踪版):
         1. 自动计算股数
@@ -34,7 +35,7 @@ class BdInfrastructure(bt.Strategy):
         current_size = self.position.size 
         
         # 2. 计算目标股数
-        target_value = total_value * target
+        target_value = total_value * target_pct
         target_size = target_value / current_price
         
         if target_size == current_size:
@@ -82,11 +83,11 @@ class BdInfrastructure(bt.Strategy):
             # 调用专门的减仓处理函数
             self._reduce_position_fifo(reduce_amount, is_buy_close=(current_size > 0))
 
-    def user_close(self, data=None, size=None, **kwargs):
+    def user_close(self, size=None, **kwargs):
         self.logger.debug(f"user_close ammount :{size}")
         current_size = self.position.size
         if size is None or size >= current_size:
-            self.close(data, None , **kwargs) # 全平仓位
+            self.close(**kwargs) # 全平仓位
             self._cancel_all_live_orders() # 辅助函数：取消所有挂单
             self.live_trades.clear() 
         else:

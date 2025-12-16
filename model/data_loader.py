@@ -20,17 +20,22 @@ class TimeSeriesWindowDataset(Dataset):
         self, 
         df: pd.DataFrame, 
         feature_cols: List[str], 
-        label_col: str, 
-        window: int
+        label_col: str = None, 
+        window: int = CANDLESTICK_NUM
     ):
         # === 过滤逻辑：必须在提取 values 之前执行 ===
         clean_feature_cols = [col for col in feature_cols if col not in DROP_FEATURES]
         self.feature_names = clean_feature_cols
         self.feature_count = len(clean_feature_cols)
         
+        has_label = (label_col is not None) and (label_col in df.columns)
+        # === 3. 构建提取列列表 ===
+        cols_to_extract = clean_feature_cols.copy()
+        if has_label:
+            cols_to_extract.append(label_col)
         # === 【修复 1】: 彻底清洗 NaN ===
         # 这一步至关重要！任何技术指标产生的 NaN 都会导致训练崩溃
-        df_clean = df[clean_feature_cols + [label_col]].copy()
+        df_clean = df[cols_to_extract].copy()
         
         # 检查是否有 NaN
         nan_rows = df_clean[df_clean.isnull().any(axis=1)]
@@ -51,7 +56,12 @@ class TimeSeriesWindowDataset(Dataset):
                  raise RuntimeError("Dataset became empty after dropping NaNs. Check TA windows.")
 
         values = df_clean[clean_feature_cols].to_numpy(dtype=np.float32, copy=True)   # [N, F]
-        labels = df_clean[label_col].astype(int).to_numpy()                       # [N]
+        if has_label:
+            labels = df_clean[label_col].astype(int).to_numpy()
+        else:
+            # 如果没有标签，生成全 0 的伪标签，长度与 values 一致
+            # 这样 DataLoader 可以正常工作，但取出的 y 是无意义的
+            labels = np.zeros(len(df_clean), dtype=int)
         # === 过滤逻辑结束 ===
         
         # 1. 划分窗口 (Partitioning)
