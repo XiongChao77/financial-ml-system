@@ -5,6 +5,6 @@ from data_process import preparation
 from model import train
 from trade_simulation import simulation
 
-# preparation.main()
+preparation.main()
 train.main()
 simulation.main()
