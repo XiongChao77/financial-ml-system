@@ -7,19 +7,17 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
-import MetaTrader5 as mt5
 
 # 添加项目路径以导入自定义模块
 current_work_dir = os.path.dirname(__file__)
-sys.path.append(os.path.join(current_work_dir, "..", '..'))
+sys.path.append(os.path.join(current_work_dir, "..", '..' , '..'))
 
 # 引入自定义模块
 from data_process import common
 from data_process.common import FeatureFactory, FEATURE_CONFIG
-from trade import model_loader
-from trade.strategy.ftmo_strategy import FtmoBrain, MarketState, PositionDir, ActionType, Signal
-
-
+from model import model_loader
+from trade.strategy.strategy_ftmo import FtmoBrain, MarketState, PositionDir, ActionType, Signal
+from trade.market.ftmo import ftmo_executor
 
 pd.set_option("display.max_columns", None)   # 不限制列数
 pd.set_option("display.width", None)         # 自动宽度（别强行换行）
@@ -45,6 +43,7 @@ class LiveConfig:
     THRESH = 0.40       # 置信度阈值
     ALLOW_LONG = True
     ALLOW_SHORT = True
+    STOP_LOSS = 2   #止损动态控制
     
     # MT5 魔法数字
     MAGIC_NUMBER = 888888
@@ -217,153 +216,21 @@ class BinanceDataFeed:
         return export_df
 
 # ============================================================
-# 2. 执行器：MT5 Executor
-# ============================================================
-class MT5Executor:
-    """
-    负责与 MT5 交互：查询持仓、执行订单
-    """
-    def __init__(self, symbol, magic_number):
-        self.symbol = symbol
-        self.magic = magic_number
-        self.logger = logging.getLogger("MT5Executor")
-        
-        if not mt5.initialize():
-            self.logger.critical("MT5 Initialize Failed!")
-            raise RuntimeError("MT5 Init Failed")
-            
-        self.logger.info(f"Connected to MT5. Account: {mt5.account_info().login}")
-
-    def get_current_state(self):
-        """
-        获取当前策略在 MT5 上的持仓状态
-        返回: (PositionDir, Layers, Lots)
-        """
-        positions = mt5.positions_get(symbol=self.symbol)
-        
-        # 筛选属于本策略的持仓 (Magic Number)
-        my_pos = [p for p in positions if p.magic == self.magic]
-        
-        if not my_pos:
-            return PositionDir.FLAT, 0, 0.0
-        
-        # 假设 FTMO 是 Netting 账户或我们会自行处理合并，这里简单取第一个持仓
-        # 如果有多个持仓，需要聚合计算
-        total_vol = sum(p.volume for p in my_pos)
-        direction = PositionDir.LONG if my_pos[0].type == mt5.ORDER_TYPE_BUY else PositionDir.SHORT
-        
-        # 估算当前层数 (这里简化处理，假设每次固定手数或基于比例反推)
-        # 实盘中层数维护比较复杂，这里简单将 有持仓=1层 (如果你的策略是固定每层比例)
-        # 或者你需要把层数持久化到本地文件
-        layers = 1 if total_vol > 0 else 0
-        
-        return direction, layers, total_vol
-
-    def execute_order(self, action_type: ActionType, target_dir: PositionDir, target_pct: float,
-                      sl: float = 0.0, tp: float = 0.0, layer_idx=1):
-        """
-        执行交易指令
-        """
-        # 1. 获取账户信息计算手数
-        account = mt5.account_info()
-        if not account:
-            self.logger.error("Could not get account info")
-            return
-            
-        balance = account.balance
-        
-        # 2. 获取当前价格
-        tick = mt5.symbol_info_tick(self.symbol)
-        if not tick:
-            self.logger.error(f"Symbol {self.symbol} not found")
-            return
-            
-        # 3. 计算目标手数 (FTMO BTCUSD Contract Size = 1)
-        # Target Value = Balance * target_pct
-        # Lots = Target Value / Price
-        if target_pct is None: target_pct = 0.0
-        
-        target_value = balance * abs(target_pct)
-        # 这里的 price 用 mid price 估算
-        price_est = (tick.bid + tick.ask) / 2
-        
-        target_lots = round(target_value / price_est, 2)
-        
-        # # 最小手数检查 (通常是 0.01)
-        # if target_lots < 0.01: target_lots = 0.01
-        
-        self.logger.info(f"Action: {action_type} | Dir: {target_dir} | Pct: {target_pct:.2f} | Calc Lots: {target_lots}")
-
-        # 4. 执行逻辑分支
-        if action_type == ActionType.CLOSE:
-            self.close_all()
-            
-        elif action_type in [ActionType.OPEN, ActionType.REVERSE, ActionType.PYRAMID]:
-            # 对于反手，先平仓再开仓 (简单稳健的做法)
-            if action_type == ActionType.REVERSE:
-                self.close_all()
-                time.sleep(1) # 等待成交
-            
-            # 开新仓 / 加仓
-            is_buy = (target_dir == PositionDir.LONG)
-            order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-            price = tick.ask if is_buy else tick.bid
-            
-            # === 构建请求字典 ===
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": self.symbol,
-                "volume": target_lots,
-                "type": order_type,
-                "price": price,
-                "sl": float(sl),  # <--- 加入止损价格 (必须是 float)
-                "tp": float(tp),  # <--- 加入止盈价格 (必须是 float)
-                "deviation": 200,
-                "magic": self.magic,
-                "comment": f"AT_L{layer_idx} {action_type.value}", # 把层数写进注释
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
-            }
-            
-            result = mt5.order_send(request)
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                self.logger.error(f"Order Failed: {result.comment} ({result.retcode})")
-            else:
-                self.logger.info(f"Order Done: {result.volume} lots @ {result.price} | SL: {sl} | TP: {tp}")
-
-    def close_all(self):
-        """平掉所有属于本策略的持仓"""
-        positions = mt5.positions_get(symbol=self.symbol)
-        my_pos = [p for p in positions if p.magic == self.magic]
-        
-        for pos in my_pos:
-            tick = mt5.symbol_info_tick(self.symbol)
-            type_close = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-            price_close = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
-            
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": self.symbol,
-                "volume": pos.volume,
-                "type": type_close,
-                "position": pos.ticket,
-                "price": price_close,
-                "magic": self.magic,
-                "comment": "Close All"
-            }
-            mt5.order_send(request)
-            self.logger.info(f"Closed position {pos.ticket}")
-
-# ============================================================
 # 3. 主控程序：LiveBot
 # ============================================================
 class LiveBot:
     def __init__(self):
+        self.logger, log_path = common.setup_session_logger(
+                    log_root=common.TEMPORARY_DIR, 
+                    sub_folder='market_ftmo_sessions',
+                    symbol=LiveConfig.SYMBOL_FTMO
+                )
         self.logger = common.setup_logger(log_name='ftmo_live', log_path=os.path.join(common.TEMPORARY_DIR, 'market_ftmo'))
         
         self.logger.info("Initializing Live Bot...")
 
-        self.executor = MT5Executor(LiveConfig.SYMBOL_FTMO, LiveConfig.MAGIC_NUMBER)
+        self._log_startup_info(log_path)
+        self.executor = ftmo_executor.MT5Executor(LiveConfig.SYMBOL_FTMO, LiveConfig.MAGIC_NUMBER, sl_scale = LiveConfig.STOP_LOSS)
         self.model_handler = model_loader.ModelHandler() # 自动加载训练好的模型
 
         # 1. 设置参数
@@ -383,6 +250,7 @@ class LiveBot:
         )
         #strategy
         self.brain = FtmoBrain(
+            executor= self.executor,
             trade_risk=LiveConfig.TRADE_RISK, 
             max_layers=LiveConfig.MAX_LAYERS,
             holdbar=LiveConfig.HOLD_BAR,
@@ -397,6 +265,26 @@ class LiveBot:
         # 记录一下初始化后的最后一根时间
         initial_df = self.data_feed.get_latest_data()
         self.last_candle_time = initial_df.iloc[-1]["open_time_date_utc"] if not initial_df.empty else None
+
+    def _log_startup_info(self, log_path):
+        """
+        [新增] 打印本次运行的详细环境信息
+        """
+        self.logger.info("=" * 60)
+        self.logger.info(f"🚀 LIVE BOT SESSION STARTED")
+        self.logger.info(f"📅 Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.logger.info(f"📂 Log File: {log_path}")
+        self.logger.info(f"📊 Target Symbol: {LiveConfig.SYMBOL_FTMO}")
+        self.logger.info(f"🔗 Data Source: {LiveConfig.SYMBOL_BINANCE}")
+        self.logger.info("-" * 20 + " PARAMETERS " + "-" * 20)
+        
+        # 自动遍历 Config 类的所有参数
+        for key in dir(LiveConfig):
+            if not key.startswith("__"):
+                val = getattr(LiveConfig, key)
+                self.logger.info(f"{key.ljust(20)}: {val}")
+        
+        self.logger.info("=" * 60)
 
     def run_step(self):
         """
@@ -415,20 +303,16 @@ class LiveBot:
         
         if self.last_candle_time == current_candle_time:
             # 时间没变，说明没有新 K 线收盘 -> 跳过
-            pass# return 
+            return 
             
         self.logger.info(f"✨ New Candle Closed: {current_candle_time} | Buffer Size: {len(df)}")
         
         # 2. 特征工程 & 模型预测
         try:
             # A. 特征计算 (FeatureFactory)
-            print("after rename:", df.head(5))
-            print("columns:", df.columns.tolist())
             # 使用 FeatureFactory 生成特征
             self.factory.generate(df)
 
-            df = df[-self.model_handler.window -1 :]    #only keep the last window
-            
             # B. 计算动态阈值 (复用 common.py 逻辑)
             # 这会生成 threshold 和 stop_threshold 列
             df = common.calculate_thresholds(df)
@@ -436,13 +320,15 @@ class LiveBot:
             # C. 模型推理
             # ModelHandler 内部会进行 TimeSeriesWindowDataset 处理和归一化
             # 注意：predict 返回的是包含 pred 和 pred_prob 的 DataFrame
-            df_pred, _ = self.model_handler.predict(df)
+            inference_df = df.iloc[-(self.model_handler.window + 200):]
+            df_pred, _ = self.model_handler.predict(inference_df)
             
             # 获取最新一根 K 线的预测结果
             last_row = df_pred.iloc[-1]
             pred_signal = last_row["pred"]
             pred_prob = last_row["pred_prob"]
             current_price = last_row["close"]
+            stop_threshold_pct = last_row["stop_threshold"]
             
             self.logger.info(f"Predict: Signal={pred_signal}, Prob={pred_prob:.4f}, Price={current_price}")
             
@@ -452,6 +338,7 @@ class LiveBot:
             traceback.print_exc()
             return
 
+        self.executor.update_context(stop_threshold_pct)
         # 3. 获取 MT5 当前状态
         curr_dir, curr_layers, curr_vol = self.executor.get_current_state() #sync state here
         self.logger.info(f"MT5 State: Dir={curr_dir}, Layers={curr_layers}, Vol={curr_vol}")
@@ -466,20 +353,8 @@ class LiveBot:
         )
 
         # 5. Brain 决策
-        action = self.brain.decide(state)
-        
-        if action.action == ActionType.HOLD:
-            self.logger.info("Decision: HOLD")
-        else:
-            self.logger.info(f"Decision: {action.action} -> TargetDir: {action.target_dir}")
-            
-            # 6. 执行交易
-            self.executor.execute_order(
-                action_type=action.action,
-                target_dir=action.target_dir,
-                target_pct=action.target_pct
-            )
-        
+        self.brain.decide(state)
+
         # 更新时间戳，防止重复执行
         self.last_candle_time = current_candle_time
 
