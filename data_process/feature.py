@@ -109,7 +109,7 @@ class FeatureMA(FeatureBase):
                 self.features.append(slope_col)
 
     def generate(self,df:pd.DataFrame):
-        kline_col='open_time_utc'
+        kline_col='open_time_date_utc'
         price_col='close'
         # 1) 标准化时间为 datetime64[ns, UTC]
         tmp = df[[kline_col]].dropna().copy()

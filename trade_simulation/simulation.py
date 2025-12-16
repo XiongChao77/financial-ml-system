@@ -19,7 +19,7 @@ from trade_simulation import cus_analyzer, cus_comminfo, model_loader, result_an
 from trade_simulation.strategy.bt_ftmo import FtmoStrategy
 
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
-logger = setup_logger(log_name='trade' ,log_path= log_file, console_level =logging.DEBUG, record_level = logging.DEBUG)
+logger = setup_logger(log_name='trade' ,log_path= log_file, console_level =logging.INFO, record_level = logging.DEBUG)
 
 class TradeResult:
     def __init__(self) -> None:
@@ -67,12 +67,12 @@ def main():
     # 直接读取 CSV，假设其中已包含所有特征列和时间列
     df = pd.read_csv(data_path)
     # 【关键】检查时间列是否存在
-    if "open_time_utc" not in df.columns:
-        logger.error("CRITICAL: 'open_time_utc' column missing.")
+    if "open_time_date_utc" not in df.columns:
+        logger.error("CRITICAL: 'open_time_date_utc' column missing.")
         sys.exit(1)
     # 【关键】解析时间列
     # 不再调用 attach_attr，避免重复计算和潜在的数据修改
-    df["open_time_utc"] = pd.to_datetime(df["open_time_utc"], utc=True)
+    df["open_time_date_utc"] = pd.to_datetime(df["open_time_date_utc"], utc=True)
 
     # -----------------------------------------------------------
     # 2. 封装的模型预测 (一行代码搞定加载和推理)
@@ -94,7 +94,7 @@ def main():
         df_with_pred = df_with_pred.dropna(subset=["pred", "threshold", "stop_threshold"]).copy()
 
         logger.record(
-            f"Backtest range: {df_with_pred['open_time_utc'].min()} to {df_with_pred['open_time_utc'].max()}"
+            f"Backtest range: {df_with_pred['open_time_date_utc'].min()} to {df_with_pred['open_time_date_utc'].max()}"
         )
 
     except Exception as e:
@@ -119,7 +119,7 @@ def main():
 
     data = PandasDataWithPred(
         dataname=df_with_pred,
-        datetime="open_time_utc",
+        datetime="open_time_date_utc",
         open="open",
         high="high",
         low="low",
@@ -157,8 +157,8 @@ def main():
     trade_logs = cerebro.trade_logs
 
     # ========== 转 K线 JSON ==========
-    candles = df[["open_time_utc", "open", "high", "low", "close"]].copy()
-    candles.rename(columns={"open_time_utc": "time"}, inplace=True)
+    candles = df[["open_time_date_utc", "open", "high", "low", "close"]].copy()
+    candles.rename(columns={"open_time_date_utc": "time"}, inplace=True)
     candles["time"] = candles["time"].apply(lambda dt: int(dt.timestamp()))
     candles_json = candles.to_dict(orient="records")
 

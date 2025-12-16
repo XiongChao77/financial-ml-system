@@ -80,7 +80,7 @@ class BinanceDataFeed:
             # Binance API 返回结构: 
             # [Open time, Open, High, Low, Close, Volume, Close time, Quote asset vol, Number of trades, Taker buy base vol, Taker buy quote vol, Ignore]
             cols = [
-                "open_time_ms", "open", "high", "low", "close", "volume", 
+                "open_time_ms_utc", "open", "high", "low", "close", "volume", 
                 "close_time_ms", "quote_asset_volume", "number_of_trades", 
                 "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
             ]
@@ -93,8 +93,8 @@ class BinanceDataFeed:
             df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
             
             # 时间处理 (转换为 UTC)
-            df["open_time_utc"] = pd.to_datetime(df["open_time_ms"], unit='ms', utc=True)
-            df["close_time_utc"] = pd.to_datetime(df["close_time_ms"], unit='ms', utc=True)
+            df["open_time_date_utc"] = pd.to_datetime(df["open_time_ms_utc"], unit='ms', utc=True)
+            df["close_time_ms_utc"] = pd.to_datetime(df["close_time_ms"], unit='ms', utc=True)
             
             # 移除未闭合的最新一根K线 (实盘决策通常基于已完成的K线)
             # Binance 返回的最后一根通常是正在进行的
@@ -284,7 +284,7 @@ class LiveBot:
             return
 
         # 检查是否是新 K 线
-        current_candle_time = df.iloc[-1]["open_time_utc"]
+        current_candle_time = df.iloc[-1]["open_time_date_utc"]
         if self.last_candle_time == current_candle_time:
             return # 还没收盘，或者是同一根K线
         
