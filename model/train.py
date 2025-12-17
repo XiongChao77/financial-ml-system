@@ -15,10 +15,11 @@ import argparse, json, os, sys, math
 import numpy as np
 import pandas as pd
 
-import torch
+import torch,time
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
+from torch.utils.data import WeightedRandomSampler
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
@@ -146,7 +147,7 @@ def main():
     ap.add_argument("--window", type=int, default=common.CANDLESTICK_NUM)
     ap.add_argument("--train_ratio", type=float, default=0.7)
     ap.add_argument("--val_ratio", type=float, default=0.15)
-    ap.add_argument("--epochs", type=int, default=100)
+    ap.add_argument("--epochs", type=int, default=5)  #100
     ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
@@ -161,6 +162,7 @@ def main():
         choices=["cnn", "lstm", "transformer, xgboost"], # 【修改】添加 transformer
         help="Model architecture: cnn, lstm, or transformer",
     )
+    ap.add_argument("--lstm_dropout", type=float, default=0.5)
     ap.add_argument("--lstm_hidden", type=int, default=80, help="LSTM 隐藏层维度")
     ap.add_argument("--lstm_layers", type=int, default=2, help="LSTM 层数")
     ap.add_argument("--bidirectional", action='store_true', help="使用双向 LSTM")  #store_true/store_false
@@ -184,9 +186,6 @@ def main():
     # 1) 读数据（需按时间升序）
     data_path = common.train_data_path
     df = pd.read_csv(data_path)
-    split_idx = int(len(df) * common.model_train_rate)
-    # 切分数据
-    train_df = df.iloc[:split_idx]
 
     # 4) 窗口化 -> [M, T, F], [M]
     T = args.window
@@ -234,6 +233,23 @@ def main():
     ds_va = SeqDataset(full_ds.X[s_va:e_va].numpy(), full_ds.y[s_va:e_va].numpy())
     ds_te = SeqDataset(full_ds.X[s_te:e_te].numpy(), full_ds.y[s_te:e_te].numpy())
 
+    # 8) 类别权重（直接用 y_tr 计算，无需遍历 DataLoader）
+    y_tr = full_ds.y[s_tr:e_tr].numpy()
+    classes = np.unique(y_tr)
+    cw_balanced = compute_class_weight(class_weight="balanced", classes=classes, y=y_tr)    #cw_dampened = np.sqrt(cw_balanced) doesn't work out
+    class_weights = torch.tensor(cw_balanced, dtype=torch.float32, device=device)
+    logger.record(
+        "Class weights: {}".format({int(c): float(w) for c, w in zip(classes, cw_balanced)})
+    )
+
+    # # 1. 计算每个样本的采样权重 (震荡样本权重低，趋势样本权重高)
+    # y_tr_tensor = torch.tensor(y_tr, dtype=torch.long, device=device)
+    # weights_tensor = class_weights[y_tr_tensor]
+    # sample_weights = weights_tensor.cpu().tolist()
+
+    # 2. 创建采样器
+    # sampler = WeightedRandomSampler(sample_weights, len(sample_weights))
+
     dl_tr = DataLoader(
         ds_tr, batch_size=args.batch_size, shuffle=True, pin_memory=is_cude_available
     )
@@ -242,15 +258,6 @@ def main():
     )
     dl_te = DataLoader(
         ds_te, batch_size=args.batch_size, shuffle=False, pin_memory=is_cude_available
-    )
-
-    # 8) 类别权重（直接用 y_tr 计算，无需遍历 DataLoader）
-    y_tr = full_ds.y[s_tr:e_tr].numpy()
-    classes = np.unique(y_tr)
-    cw = compute_class_weight(class_weight="balanced", classes=classes, y=y_tr)
-    class_weights = torch.tensor(cw, dtype=torch.float32, device=device)
-    logger.record(
-        "Class weights: {}".format({int(c): float(w) for c, w in zip(classes, cw)})
     )
 
     # 9) 模型/优化器/调度器（原逻辑保持不变）
@@ -264,7 +271,7 @@ def main():
             hidden_size=args.lstm_hidden,
             num_layers=args.lstm_layers,
             n_classes=len(classes),
-            p_drop=args.dropout,
+            p_drop=args.lstm_dropout,
             bidirectional=args.bidirectional
         ).to(device)
     elif args.model_type == "transformer": # 【新增】
@@ -303,8 +310,17 @@ def main():
             n_classes=len(classes), 
             p_drop=args.dropout
         ).to(device)
-    focal_alpha = class_weights # 或者 torch.tensor([1.0, 0.3, 1.0]).to(device)
-    criterion = FocalLoss(alpha=focal_alpha, gamma=2.0).to(device)
+    # 通过手动调节不同类别的权重，来补偿数据集中各类样本数量的不平衡.1.惩罚“多数类”的偷懒 2.强制放大“少数类”的错误
+    # 提升少数类的recall
+    # focal_alpha = torch.tensor([
+    #     1.5 * class_weights[0],
+    #     0.5 * class_weights[1],
+    #     1.5 * class_weights[2]
+    # ], device=device)
+    # 通过手动调节不同类别的权重，来补偿数据集中各类样本数量的不平衡.1.惩罚“多数类”的偷懒 2.强制放大“少数类”的错误
+    # 提升少数类的recall
+    criterion = FocalLoss(alpha=class_weights, gamma=2.0).to(device) 
+    # criterion = nn.CrossEntropyLoss(weight=class_weights) #中立裁判，不偏袒任何一类
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )

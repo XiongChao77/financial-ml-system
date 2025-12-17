@@ -40,8 +40,8 @@ def setup_logger(log_name:str, log_path,console_level:int =logging.INFO,record_l
         logger.handlers = []
 
     # 统一格式字符串
-    # log_format = "%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s"
-    log_format = "%(levelname)s - %(message)s"
+    log_format = "%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s"
+    # log_format = "%(levelname)s - %(message)s"
 
     # --- 1. 控制台处理程序 (StreamHandler) ---
     ch = logging.StreamHandler()
