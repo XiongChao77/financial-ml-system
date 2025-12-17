@@ -10,6 +10,18 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, '..'))
 from data_process import common #
 
+def prepare_market_numeric_columns(df):
+    """
+    Ensure OHLCV columns are numeric.
+    This is a preprocessing step, not analysis.
+    """
+    numeric_cols = ["open", "high", "low", "close", "volume"]
+    df = df.copy()
+    df[numeric_cols] = df[numeric_cols].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    return df
+
 def get_market_anatomy(df):
     """
     对市场数据进行解剖，量化多空差异
@@ -105,12 +117,129 @@ def get_market_anatomy(df):
     print(f"   • Kurtosis (峰度): {kurt:.4f} (>{3} 说明是肥尾分布，极端行情多)")
     print("="*60)
 
+def analyze_label_distribution_by_params(
+    df_raw,
+    candlestick_num,
+    predict_num_list,
+    vol_multiplier_list,
+    stop_multiplier_rate_list,
+    min_threshold,
+):
+    """
+    扫描不同标签参数组合下的 label 分布情况
+    用于理解：规则如何切分市场
+    """
+    records = []
+
+    for predict_num in predict_num_list:
+        for vol_mul in vol_multiplier_list:
+            for stop_rate in stop_multiplier_rate_list:
+
+                df = df_raw.copy()
+
+                common.attach_label(
+                    df,
+                    candlestick_num=candlestick_num,
+                    predict_num=predict_num,
+                    vol_multiplier=vol_mul,
+                    stop_multiplier_rate=stop_rate,
+                    min_threshold=min_threshold,
+                )
+
+                counts = df["label"].value_counts().to_dict()
+                total = len(df)
+
+                record = {
+                    "predict_num": predict_num,
+                    "vol_multiplier": vol_mul,
+                    "stop_multiplier_rate": stop_rate,
+                    "total": total,
+                    "long_cnt": counts.get(common.Signal.LONG, 0),
+                    "short_cnt": counts.get(common.Signal.SHORT, 0),
+                    "neutral_cnt": counts.get(common.Signal.NEUTRAL, 0),
+                }
+
+                # 比例
+                record["long_pct"] = record["long_cnt"] / total
+                record["short_pct"] = record["short_cnt"] / total
+                record["neutral_pct"] = record["neutral_cnt"] / total
+
+                # 一个很有用的综合指标：有效信号占比
+                record["active_pct"] = (
+                    record["long_pct"] + record["short_pct"]
+                )
+
+                records.append(record)
+
+    return pd.DataFrame(records)
+
+def run_label_sensitivity_analysis(df):
+    """
+    Analyze label distribution under different parameter ranges.
+    """
+
+    vol_multipliers = common.float_range(0.6, 1.2 , 0.05)
+    min_thresholds = common.float_range(0.008, 0.012, 0.001)
+    stop_rates = common.float_range(0.3, 0.6, 0.1)
+
+    records = []
+
+    for vol_mul in vol_multipliers:
+        for min_th in min_thresholds:
+            for stop_rate in stop_rates:
+
+                df_tmp = df.copy()
+
+                common.attach_label(
+                    df_tmp,
+                    candlestick_num=common.CANDLESTICK_NUM,
+                    predict_num=common.PREDICT_NUM,
+                    vol_multiplier=vol_mul,
+                    stop_multiplier_rate=stop_rate,
+                    min_threshold=min_th,
+                )
+
+                counts = df_tmp["label"].value_counts().to_dict()
+                total = len(df_tmp)
+
+                record = {
+                    "vol_multiplier": vol_mul,
+                    "min_threshold": min_th,
+                    "stop_multiplier_rate": stop_rate,
+
+                    "total": total,
+                    "long_cnt": counts.get(common.Signal.LONG, 0),
+                    "short_cnt": counts.get(common.Signal.SHORT, 0),
+                    "neutral_cnt": counts.get(common.Signal.NEUTRAL, 0),
+                }
+
+                record["long_pct"] = record["long_cnt"] / total
+                record["short_pct"] = record["short_cnt"] / total
+                record["neutral_pct"] = record["neutral_cnt"] / total
+                record["active_pct"] = (
+                    record["long_pct"] + record["short_pct"]
+                )
+
+                records.append(record)
+
+    stats_df = pd.DataFrame(records)
+
+    out_path = os.path.join(
+        os.path.dirname(__file__),
+        "label_distribution_param_surface.csv",
+    )
+    stats_df.to_csv(out_path, index=False)
+
+    print("\n📊 Label distribution sensitivity (head):")
+    print(stats_df.head())
+
+    return stats_df
+
 if __name__ == "__main__":
-    # 读取您的原始数据
     df = pd.read_csv(common.origin_data_path)
-    # 简单清洗
     df = df.dropna()
-    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
-    
-    get_market_anatomy(df)
+
+    # df = prepare_market_numeric_columns(df)
+    # get_market_anatomy(df)
+
+    run_label_sensitivity_analysis(df)
