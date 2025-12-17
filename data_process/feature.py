@@ -11,42 +11,17 @@ class FeatureBase(ABC):
     def __init__(self, **kwargs): 
         self.params = kwargs
         self.features :list[str]= []
-    def _normalize(self, X: np.ndarray, full_feature_cols: list[str], target_feature_cols: list[str], feature_base:str = 'close') -> None:
-        """
-        向量化标准化方法。
-        自动寻找 close 和当前实例 features 的索引，并进行 Z-Score 变种标准化。
-        """
-        # 1. 获取索引
-        try:
-            base_idx = full_feature_cols.index(feature_base)
-        except ValueError:
-            raise ValueError(f"full_feature_cols must contain {feature_base} for normalization reference.")
-        #获取目标列索引
-        target_indices = [full_feature_cols.index(f) for f in target_feature_cols if f in full_feature_cols]
-        
+    def _normalize(self, X, feature_cols, target_feature_cols, feature_base, factory):
+        target_indices = [factory._feature_index[f] for f in target_feature_cols]
         if not target_indices:
             return
-
-        # 2. 向量化计算 (利用 NumPy 广播机制)
-        # X shape: (M, T, F) -> (样本数, 时间步, 特征数)
-        
-        # 提取 close 列: (M, T)
-        base_data = X[:, :, base_idx]
-
-        # 计算窗口内的统计量 (沿着时间轴 axis=1)
-        # keepdims=True 保持形状为 (M, 1), 方便后续广播
-        mu = np.nanmean(base_data, axis=1, keepdims=True)
-        sigma = np.nanstd(base_data, axis=1, keepdims=True)
-
-        # 计算分母: (M, 1)
-        denom = sigma + 0.1 * np.abs(mu) + EPS
-
+        mu, denom = factory.get_base_stats(feature_base)
         # 广播计算: (M, T, F_sub) - (M, 1, 1) / (M, 1, 1)
         # 注意：mu 和 denom 需要增加一个维度以匹配特征维度 F
         X[:, :, target_indices] = (X[:, :, target_indices] - mu[:, :, np.newaxis]) / denom[:, :, np.newaxis]
     @abstractmethod
     def generate(self,df:pd.DataFrame) -> None: ...
-    def normalize(self, X: np.ndarray, feature_cols: list[str]) : pass
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory) : pass
     @abstractmethod
     def min_history_request(self, kline_interval_ms:int = None) -> int: ...
 """
@@ -76,8 +51,8 @@ class FeatureMACD(FeatureBase):
         out['MACD_DIF'] = dif
         out['MACD_DEA'] = dea
         out['MACD'] = macd
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
-        self._normalize(X, feature_cols , self.features , feature_base = "MACD_DEA")
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        self._normalize(X, feature_cols , self.features , feature_base = "MACD_DEA", factory = factory)
     def min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 MACD 所需的最小历史 K 线数量。
@@ -276,8 +251,8 @@ class FeatureMA(FeatureBase):
                     slope = slope.where(valid_ma & valid_slope, np.nan)
                 out[slope_col] = slope
 
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
-        self._normalize(X, feature_cols , self.features , "close")
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        self._normalize(X, feature_cols , self.features , "close", factory= factory)
     def min_history_request(self, kline_interval_ms: int) -> int:
         """
         [实现] 根据当前 K 线周期，计算模型所需的最少历史 K 线数量
@@ -343,7 +318,7 @@ class FeatureRsi(FeatureBase):
             valid = close.expanding().count() >= self.period
             out[col] = out[col].where(valid, np.nan)
         self.features = [col]
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         """
         RSI 范围 [0, 100]。
         处理：(RSI / 100) - 0.5
@@ -424,7 +399,7 @@ class FeatureKdj(FeatureBase):
             out[k_col] = out[k_col].where(valid_rsv, np.nan)
             out[d_col] = out[d_col].where(valid_rsv, np.nan)
             out[j_col] = out[j_col].where(valid_rsv, np.nan)
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         #KDJ 是 0-100 指标，使用简单缩放
         target_indices = [feature_cols.index(f) for f in self.features if f in feature_cols]
         if not target_indices: return
@@ -469,8 +444,8 @@ class FeatureVolMa(FeatureBase):
             df[f'VOL_ratio_{w}'] = df['volume'] / (vol_ma.replace(0, np.nan))
             self.features.extend([f'VOL_MA_{w}', f'VOL_ratio_{w}'])
             
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
-        self._normalize(X, feature_cols , self.ma_features , feature_base = 'volume')
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        self._normalize(X, feature_cols , self.ma_features , feature_base = 'volume', factory= factory)
     def min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算成交量均线所需的最小历史 K 线数量。
@@ -500,8 +475,8 @@ class FeatureQavMa(FeatureBase):
             df[f'QAV_MA_{w}'] = qav_ma
             df[f'QAV_ratio_{w}'] = df['quote_asset_volume'] / (qav_ma.replace(0, np.nan))
             self.features.extend([f'QAV_MA_{w}', f'QAV_ratio_{w}'])
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
-        self._normalize(X, feature_cols , self.qa_features , feature_base = 'quote_asset_volume')
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        self._normalize(X, feature_cols , self.qa_features , feature_base = 'quote_asset_volume', factory = factory)
     def min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算成交额均线 (QAV MA) 所需的最小历史 K 线数量。
@@ -525,8 +500,8 @@ class FeatureOBV(FeatureBase):
         sign = np.where(close > close.shift(1), 1,
             np.where(close < close.shift(1), -1, 0))
         df['OBV'] = (sign * df['volume']).cumsum()
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
-        self._normalize(X, feature_cols , self.features , feature_base = self.features[0])  #Self-Normalization
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        self._normalize(X, feature_cols , self.features , feature_base = self.features[0], factory= factory)  #Self-Normalization
     def min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 OBV 所需的最小历史 K 线数量。
@@ -547,8 +522,8 @@ class FeaturePVT(FeatureBase):
     def generate(self,df):
         pct = df['close'].pct_change()
         df['PVT'] = (pct * df['volume']).cumsum()
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
-        self._normalize(X, feature_cols , self.features , feature_base = self.features[0])  #Self-Normalization
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        self._normalize(X, feature_cols , self.features , feature_base = self.features[0], factory= factory)  #Self-Normalization
     def min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 PVT 所需的最小历史 K 线数量。
@@ -574,8 +549,8 @@ class FeatureWAP(FeatureBase):
             pv = df['close'] * df['volume']
             vwap = pv.rolling(w).sum() / df['volume'].rolling(w).sum()
             df[f'VWAP_{w}'] = vwap
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
-        self._normalize(X, feature_cols , self.features , feature_base = 'close')
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        self._normalize(X, feature_cols , self.features , feature_base = 'close', factory= factory)
     def min_history_request(self, kline_interval_ms:int = None) -> int:
             """
             计算滚动 VWAP 所需的最小历史 K 线数量。
@@ -629,7 +604,7 @@ class FeatureMFI(FeatureBase):
         neg_sum = pd.Series(neg).rolling(self.mfi_window).sum()
         mfi = 100 - (100 / (1 + pos_sum / (neg_sum.replace(0, np.nan))))
         df['MFI'] = mfi
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         """
         MFI 范围固定为 [0, 100]。
         处理方式：直接除以 100，将其映射到 [0, 1] 区间。
@@ -663,12 +638,12 @@ class FeatureATS(FeatureBase):
     def generate(self,df):
         # ==== 2. 平均每笔成交量 ====
         df['ATS'] = df['volume'] / (df['number_of_trades'].replace(0, np.nan))
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         """
         ATS 代表单笔成交力度。
         我们需要捕捉的是它相对于自身历史水平的波动（Z-Score）。
         """
-        self._normalize(X=X, full_feature_cols=feature_cols, target_feature_cols=self.features, feature_base='ATS')  # <--- 必须自缩放
+        self._normalize(X=X, feature_cols=feature_cols, target_feature_cols=self.features, feature_base='ATS', factory= factory)  # <--- 必须自缩放
     def min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算平均单笔成交量 (ATS) 所需的最小历史 K 线数量。
@@ -726,7 +701,7 @@ class FeatureCandle(FeatureBase):
         # 注意：加密货币 24h 交易 gap 很多时候是 0，但在维护或其他情况会有
         df['gap'] = (o - c.shift(1)) / c.shift(1)
 
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         """
         分层归一化策略：
         1. Magnitude: 自缩放 (Z-Score)，消除价格绝对值影响。
@@ -741,7 +716,7 @@ class FeatureCandle(FeatureBase):
         
         for feat in self.feat_magnitude:
             # 这里的 base 就是特征自己
-            self._normalize(X, feature_cols, [feat], feature_base=feat)
+            self._normalize(X, feature_cols, [feat], feature_base=feat, factory= factory)
 
         # 2. 处理比例类 (Ratios) -> Center at 0
         # 将 [0, 1] 映射到 [-0.5, 0.5]
@@ -777,11 +752,11 @@ class FeatureOrigin(FeatureBase):
         self.quote_base_features  = ['taker_buy_quote_volume', 'quote_asset_volume' ]   #the basic is quote_asset
         self.self_based_features = ['number_of_trades']
     def generate(self,df:pd.DataFrame):     pass
-    def normalize(self, X: np.ndarray, feature_cols: list[str]):
-        self._normalize(X, feature_cols , self.price_base_features , feature_base = "close")
-        self._normalize(X, feature_cols , self.volume_base_features , feature_base = "volume")
-        self._normalize(X, feature_cols , self.quote_base_features , feature_base = "quote_asset_volume")
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        self._normalize(X, feature_cols , self.price_base_features , feature_base = "close", factory= factory)
+        self._normalize(X, feature_cols , self.volume_base_features , feature_base = "volume", factory= factory)
+        self._normalize(X, feature_cols , self.quote_base_features , feature_base = "quote_asset_volume", factory= factory)
         for f in self.self_based_features:
-            self._normalize(X, feature_cols , [f] , feature_base = f)
+            self._normalize(X, feature_cols , [f] , feature_base = f, factory= factory)
     def min_history_request(self, kline_interval_ms:int = None) -> int:
         return 1

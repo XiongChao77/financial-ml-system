@@ -33,11 +33,7 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process import common
 from model.data_loader import TimeSeriesWindowDataset
 #   model
-from model.cnn import CNN1D
-from model.lstm import LSTM1D
-from model.transformer_v1 import Transformer1D
-from model.transformer_v2 import Transformer1D_V2
-from model.xgb import XGBoostAdapter
+from model.model_factory import ModelFactory
 
 def set_seed(seed=42):
     import random
@@ -147,7 +143,7 @@ def main():
     ap.add_argument("--window", type=int, default=common.CANDLESTICK_NUM)
     ap.add_argument("--train_ratio", type=float, default=0.7)
     ap.add_argument("--val_ratio", type=float, default=0.15)
-    ap.add_argument("--epochs", type=int, default=5)  #100
+    ap.add_argument("--epochs", type=int, default=4)  #100
     ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
@@ -155,18 +151,16 @@ def main():
     ap.add_argument("--patience", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42)
     # === 模型选择 ===
-    ap.add_argument(
-        "--model_type",
-        type=str,
-        default="lstm",
-        choices=["cnn", "lstm", "transformer, xgboost"], # 【修改】添加 transformer
-        help="Model architecture: cnn, lstm, or transformer",
-    )
-    ap.add_argument("--lstm_dropout", type=float, default=0.5)
+    ap.add_argument( "--model_type", type=str, default="lstm", choices=["cnn", "lstm", "transformer", "xgboost"],
+                    help="Model architecture: cnn, lstm, or transformer", )
+    ap.add_argument("--model_version", type=int, default=4)  #100
+    ap.add_argument("--lstm_dropout", type=float, default=0.3)
+    ap.add_argument("--lstm_head_dropout", type=float, default=0.2)
     ap.add_argument("--lstm_hidden", type=int, default=80, help="LSTM 隐藏层维度")
     ap.add_argument("--lstm_layers", type=int, default=2, help="LSTM 层数")
     ap.add_argument("--bidirectional", action='store_true', help="使用双向 LSTM")  #store_true/store_false
-    # === 【新增】Transformer 参数 ===
+    ap.add_argument("--lstm_readout", type=str, default="meanmax", choices=['last' , 'meanmax' , 'attn', 'mix'], help="mix only for v4!")
+    ap.add_argument("--lstm_head", type=str, default="mlp", choices=['linear' , 'mlp'], help="")    #test mlp + attn
     ap.add_argument("--trans_d_model", type=int, default=64, help="Transformer 内部维度 (d_model)")
     ap.add_argument("--trans_nhead", type=int, default=8, help="Attention 头数 (d_model 必须能被此数整除)")
     ap.add_argument("--trans_layers", type=int, default=3, help="Transformer Encoder 层数")
@@ -264,59 +258,52 @@ def main():
     feat_cols = full_ds.feature_names
     channel = full_ds.feature_count
     logger.warning(f"Final Features num:{len(feat_cols)},: {feat_cols}")  # 可选：打印查看
-    if args.model_type == "lstm":
-        logger.record(f"Initializing LSTM (hidden={args.lstm_hidden}, layers={args.lstm_layers}, bidirectional={args.bidirectional})...")
-        model = LSTM1D(
-            input_size=channel,
-            hidden_size=args.lstm_hidden,
-            num_layers=args.lstm_layers,
-            n_classes=len(classes),
-            p_drop=args.lstm_dropout,
-            bidirectional=args.bidirectional
-        ).to(device)
-    elif args.model_type == "transformer": # 【新增】
-        logger.record(f"Initializing Transformer (d_model={args.trans_d_model}, nhead={args.trans_nhead}, layers={args.trans_layers})...")
-        # 检查 d_model 是否能被 nhead 整除
-        if args.trans_d_model % args.trans_nhead != 0:
-            raise ValueError(f"trans_d_model ({args.trans_d_model}) must be divisible by trans_nhead ({args.trans_nhead})")
-            
-        model = Transformer1D_V2(
-            input_size=channel,
-            n_classes=len(classes),
-            d_model=args.trans_d_model,
-            nhead=args.trans_nhead,
-            num_layers=args.trans_layers,
-            dim_feedforward=args.trans_dim_feedforward,
-            dropout=args.dropout,
-            max_len=args.window # 位置编码的最大长度需 >= 窗口长度
-        ).to(device)
-    elif args.model_type == "xgboost":
-        logger.info(f"Initializing XGBoost (depth={args.xgb_depth}, est={args.xgb_estimators})...")
-        # 计算展平后的维度 Input Dim = Window * Features
-        input_dim = T * len(feat_cols)
-        model = XGBoostAdapter(
-            input_dim=input_dim,
-            n_classes=len(classes),
-            params={
-                'max_depth': args.xgb_depth,
-                'n_estimators': args.xgb_estimators,
-                'learning_rate': args.lr
-            }
-        )
-    else:
-        logger.record("Initializing CNN...")
-        model = CNN1D(
-            channel=channel, 
-            n_classes=len(classes), 
-            p_drop=args.dropout
-        ).to(device)
-    # 通过手动调节不同类别的权重，来补偿数据集中各类样本数量的不平衡.1.惩罚“多数类”的偷懒 2.强制放大“少数类”的错误
-    # 提升少数类的recall
-    # focal_alpha = torch.tensor([
-    #     1.5 * class_weights[0],
-    #     0.5 * class_weights[1],
-    #     1.5 * class_weights[2]
-    # ], device=device)
+    logger.record(
+        f"Initializing model: type={args.model_type}, version={args.model_version}"
+    )  
+    model = ModelFactory.build_for_training(
+        model_type=args.model_type,
+        model_version=args.model_version,
+        device=device,
+
+        # ===============================
+        # 通用输入 / 标签信息
+        # ===============================
+        input_size=channel,            # LSTM / Transformer / CNN 的输入通道数
+        n_classes=len(classes),         # 分类数（所有模型通用）
+
+        # ===============================
+        # LSTM 系列参数（仅 LSTM 使用）
+        # ===============================
+        hidden_size=args.lstm_hidden,
+        num_layers=args.lstm_layers,
+        bidirectional=args.bidirectional,
+        lstm_dropout=args.lstm_dropout ,  # V3: backbone dropout
+        head_dropout=args.lstm_head_dropout,  # V3: head dropout
+        p_drop=args.lstm_dropout,
+        readout=args.lstm_readout,              # V3 only：时序读出方式
+        head=args.lstm_head,                  # V3 only：保持 alpha tail
+
+        # ===============================
+        # Transformer 系列参数（仅 Transformer 使用）
+        # ===============================
+        d_model=args.trans_d_model,
+        nhead=args.trans_nhead,
+        num_layers_transformer=args.trans_layers,
+        dim_feedforward=args.trans_dim_feedforward,
+        dropout=args.dropout,
+        max_len=args.window,             # 位置编码长度 >= window
+
+        # ===============================
+        # XGBoost 系列参数（仅 XGB 使用）
+        # ===============================
+        input_dim=T * len(feat_cols),    # flatten 后的输入维度
+        xgb_params={
+            "max_depth": args.xgb_depth,
+            "n_estimators": args.xgb_estimators,
+            "learning_rate": args.lr,
+        },
+    )
     # 通过手动调节不同类别的权重，来补偿数据集中各类样本数量的不平衡.1.惩罚“多数类”的偷懒 2.强制放大“少数类”的错误
     # 提升少数类的recall
     criterion = FocalLoss(alpha=class_weights, gamma=2.0).to(device) 
@@ -407,46 +394,14 @@ def main():
         },
         os.path.join(common.TEMPORARY_DIR, "torch_model_train_info.pt"),
     )
-    meta = {
-        "feature_cols": feat_cols,
-        "label_col": args.label_col,
-        "classes": classes.tolist(),
-        "window": T,
-    }
-    with open(
-        os.path.join(common.TEMPORARY_DIR, "torch_model_train_meta.json"),
-        "w",
-        encoding="utf-8",
-    ) as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
 
-# 1. 保存模型权重 (保持不变)
-    torch.save({
-        "state_dict": model.state_dict(),
-        "classes": classes.tolist(),
-        "channel": channel,
-        "window": T,
-        "feature_cols": feat_cols,
-        "label_col": args.label_col
-    }, os.path.join(common.TEMPORARY_DIR, "torch_model_train_info.pt"))
-
-    # 2. 【修改此处】保存元数据 (Meta JSON)
-    # 我们将 args.model_type 和 LSTM 参数写入这里
-    meta = {
-        "model_type": args.model_type,  # 核心：记录是 'cnn' 还是 'lstm'
-        "feature_cols": feat_cols,
-        "label_col": args.label_col,
-        "classes": classes.tolist(),
-        "window": T,
-        # 如果是 LSTM，记录其架构参数，方便推理时重建
-        "lstm_hidden": getattr(args, 'lstm_hidden', 64),
-        "lstm_layers": getattr(args, 'lstm_layers', 2),
-        "bidirectional": getattr(args, 'bidirectional', False), # 保存这个状态
-        "trans_d_model": getattr(args, 'trans_d_model', 128),
-        "trans_nhead": getattr(args, 'trans_nhead', 4),
-        "trans_layers": getattr(args, 'trans_layers', 2),
-        "trans_dim_feedforward": getattr(args, 'trans_dim_feedforward', 512)
-    }
+    # ===== 保存 meta（模型自描述）=====
+    meta = model.export_meta(
+        feature_cols=feat_cols,
+        label_col=args.label_col,
+        classes=classes.tolist(),
+        window=T,
+    )
 
     with open(os.path.join(common.TEMPORARY_DIR, "torch_model_train_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)

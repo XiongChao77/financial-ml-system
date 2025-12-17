@@ -23,9 +23,9 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-VOL_MULTIPLIER = 0.8
+VOL_MULTIPLIER = 0.6
 # 最小硬阈值 (覆盖手续费+滑点)
-MIN_THRESHOLD = 0.01  # 0.25%
+MIN_THRESHOLD = 0.008  # 0.25%
 STOP_MULTIPLIER_RATE = 0.5
 # label_decrease_weak =1 
 # label_increase_weak = 3
@@ -121,7 +121,7 @@ def attach_label(df,
 
     df['label'] = df['label'].astype(int)
 
-    df['return_rate'] = pct_final
+    df['return_rate'] = pct_final   #must be drop when train!!!
         
     return df
 
@@ -183,6 +183,21 @@ def data_analyze(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PRE
     # max_down: 未来窗口内可能承受的最大亏损率
     df['max_down'] = (future_rolling_min - df['close']) / df['close']
 
+def float_range(start, end, step):
+    """
+    Like range(), but for float.
+    Inclusive of end (with tolerance).
+    """
+    values = []
+    v = start
+    eps = step / 10
+
+    while v <= end + eps:
+        values.append(round(v, 10))
+        v += step
+
+    return values
+
 FEATURE_CONFIG:list[FeatureBase] = [
     FeatureMACD(fast=12, slow=26, signal=9),
     FeatureMA(weeks=[7,25], days=[5, 10, 20], bars = [], method='sma', strict=True, add_slope = False, slope_method='reg', slope_weeks= 2),
@@ -200,15 +215,45 @@ FEATURE_CONFIG:list[FeatureBase] = [
 ]
 
 class FeatureFactory:
-    def __init__(self, config_list:list[FeatureBase] = FEATURE_CONFIG):
-        self.features:list[FeatureBase] = config_list
-        # for f in config_list:
-        #     self.features.append(f.feature(f.parameters))
+    def __init__(self, config_list):
+        self.features = config_list
+        self._X = None
+        self._feature_index = None
+        self._base_stats_pool = None
+
     def generate(self,df):
         for f in self.features:     f.generate(df)
+
+    def _prepare_normalize_context(self, X, feature_cols):
+        self._X = X
+        self._feature_cols = tuple(feature_cols)
+        self._feature_index = {f: i for i, f in enumerate(feature_cols)}
+        self._base_stats_pool = {}
+
+    def get_base_stats(self, base_feature):
+        if self._X is None or self._feature_index is None:
+            raise RuntimeError("prepare_normalize_context() must be called first")
+
+        base_idx = (
+            self._feature_index[base_feature]
+            if isinstance(base_feature, str)
+            else base_feature
+        )
+
+        if base_idx not in self._base_stats_pool:
+            base = self._X[:, :, base_idx]
+            mu = np.nanmean(base, axis=1, keepdims=True)
+            sigma = np.nanstd(base, axis=1, keepdims=True)
+            denom = sigma + 0.1 * np.abs(mu) + EPS
+            self._base_stats_pool[base_idx] = (mu, denom)
+
+        return self._base_stats_pool[base_idx]
+
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
+        self._prepare_normalize_context(X, feature_cols)
         for f in self.features:
-            f.normalize(X, feature_cols)
+            f.normalize(X, feature_cols, self)
+
     def get_global_min_history(self, kline_interval_ms:int) -> int:
         """遍历所有已注册特征，返回其中最大的历史需求"""
         return max([f.min_history_request(kline_interval_ms) for f in self.features])
