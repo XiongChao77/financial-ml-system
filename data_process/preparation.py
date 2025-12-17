@@ -43,8 +43,8 @@ def main():
     test_df  = df.iloc[split_idx:]
     # 写入文件
     os.makedirs(TEMPORARY_DIR , exist_ok=True)
-    # train_df.to_csv(train_data_path, index=False, encoding="utf-8")
-    # test_df.to_csv(test_data_path, index=False, encoding="utf-8")
+    train_df.to_csv(train_data_path, index=False, encoding="utf-8")
+    test_df.to_csv(test_data_path, index=False, encoding="utf-8")
     return df
 
 if __name__ == "__main__":

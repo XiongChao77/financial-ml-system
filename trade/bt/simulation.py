@@ -13,8 +13,6 @@ sys.path.append(os.path.join(current_work_dir, "..",'..'))
 
 # 引入自定义模块
 from data_process.common import *
-from model.train import CNN1D
-from model.data_loader import TimeSeriesWindowDataset
 from model import model_loader
 from trade.bt import cus_analyzer, cus_comminfo, result_analyze
 
@@ -50,7 +48,7 @@ class Parameters:
         self.cash = 10000
         self.stop_loss = 2  # should be 1-10   stop_loss = self.data.stop_threshold[0]*self.params.stop_loss
         self.take_profit = 0.99 #止盈. 0 - n倍
-        self.position_ratio = 0.99     #0-1
+        self.position_ratio = 0.4     #0-1
 
 
 def main():
@@ -82,7 +80,9 @@ def main():
         # 初始化处理类
         handler = model_loader.ModelHandler()
         # 执行预测，获取结果和指标
-        df_with_pred, model_stats = handler.predict(df)
+        df_with_pred, model_stats = handler.predict(df)#, min_thresh= 0.3)
+        # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
+        # exit()
         # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
         df_with_pred = df_with_pred.dropna(subset=["pred"]).copy()
 
@@ -224,14 +224,10 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     start_cash = strat.broker.startingcash
     dist_to_start_pct = (global_min_equity - start_cash) / start_cash
     # 3. 打印日志
-    logger.info(f"FTMO LINE | Min Equity: ${global_min_equity:.2f}")
-    logger.info(f"          | Dist to Start: {dist_to_start_pct*100:.2f}% (Limit: -10%)")
+    logger.info(f"FTMO LINE | Dist to Start: {dist_to_start_pct*100:.2f}% (Limit: -10%)")
 
     if dist_to_start_pct < -0.10:
         logger.warning("❌ FAILED: 账户曾经跌破初始本金的 10%！")
-    else:
-        logger.info("✅ PASSED: 总资金风控通过")
-
     # 在日志中打印
     logger.info(f"RISK(Daily)| Worst Day: {max_daily_dd*100:.2f}% ({max_daily_date}) | >4% Days: {violation_days}")
 
@@ -289,12 +285,18 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     # 空头胜率
     short_win_rate = (short_won / short_total * 100) if short_total > 0 else 0.0
 
+    # 获取仓位信息 (CusAnalyzer 已经计算好了)
+    avg_pos = perf.get("avg_pos_ratio", 0)
+    max_pos = perf.get("max_pos_ratio", 0)
+    p95_pos = perf.get("p95_pos_ratio", 0)
 
     # summary 输出
     logger.info("-" * 80)
     logger.info(f"SUMMARY | GrossRet: {gross_return*100:.2f}% | CAGR: {cagr*100:.2f}% | "
-                f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | calmar: {calmar:.2f}")
-    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% | commission: {commission}%")
+                f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | Calmar: {calmar:.2f}")
+    # 【新增】打印仓位暴露信息
+    logger.info(f"EXPOSURE| Avg Pos: {avg_pos*100:.2f}% | Max Pos: {max_pos*100:.2f}% | P95 Pos: {p95_pos*100:.2f}% | Position: {Parameters().position_ratio}")
+    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% | Commission: {commission}%")
     logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
     logger.info("-" * 80)

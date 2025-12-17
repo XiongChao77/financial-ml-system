@@ -68,8 +68,9 @@ class TimeSeriesWindowDataset(Dataset):
         X3d = _as_strided_windows(values, window) # [M, T, F]
         y_all = labels[window-1:]
         
-        FeatureFactory(FEATURE_CONFIG).normalize(X3d , clean_feature_cols)
-        FeatureOrigin().normalize(X3d , clean_feature_cols)
+        feature_factory = FeatureFactory(FEATURE_CONFIG)
+        feature_factory.normalize(X3d , clean_feature_cols)
+        FeatureOrigin().normalize(X3d , clean_feature_cols, feature_factory)
 
         # 3. 转换为 PyTorch Tensor
         self.X = torch.from_numpy(X3d)

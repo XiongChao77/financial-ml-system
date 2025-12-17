@@ -4,13 +4,9 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report, f1_score, accuracy_score, precision_score, recall_score
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
-MODEL_PATH = os.path.join(current_work_dir, '..', 'model', "torch_model_train_info.pt")
-META_PATH  = os.path.join(current_work_dir, '..', 'model', "torch_model_train_meta.json")
 # 引入自定义模块
 from data_process.common import *
-from model.cnn import CNN1D
-from model.lstm import LSTM1D
-from model.transformer_v2 import Transformer1D_V2
+from model.model_factory import ModelFactory
 from model.data_loader import TimeSeriesWindowDataset 
 # -----------------------------------------------------------------------------
 # Encapsulated Model Handler
@@ -37,123 +33,280 @@ class ModelHandler:
         self.window = int(self.meta["window"])
         self.classes = self.meta["classes"]
         self.label_col = self.meta.get("label_col", "label")
-        self.model_type = self.meta.get("model_type", "cnn") # 默认为 cnn
+        # 仅用于日志
+        self.model_type = self.meta["model_type"]
+        self.model_version = self.meta.get("model_version", "unknown")
 
     def _load_model(self):
-        if not os.path.exists(self.model_path):
-            raise FileNotFoundError(f"Model file not found: {self.model_path}")
+        self.logger.record(
+            f"Loading model: {self.model_type.upper()} "
+            f"(version={self.model_version}) on {self.device}..."
+        )
 
-        self.logger.record(f"Loading {self.model_type.upper()} model on {self.device}...")
-        
-        # 加载权重状态字典
-        state = torch.load(self.model_path, map_location=self.device)
-        channel = state.get("channel", len(self.feature_cols))
-        n_classes = len(state.get("classes", self.classes))
-
-        # 根据类型初始化模型架构
-        if self.model_type == "lstm":
-            hidden_size = self.meta.get("lstm_hidden", 64)
-            num_layers = self.meta.get("lstm_layers", 2)
-            bidirectional = self.meta.get("bidirectional", 2)
-            self.model = LSTM1D(
-                input_size=channel,
-                hidden_size=hidden_size,
-                num_layers=num_layers,
-                n_classes=n_classes,
-                p_drop=0.0,
-                bidirectional = bidirectional
-            )
-        elif self.model_type == "transformer":
-            # 读取 Transformer 特有参数 (默认值需与 train.py 保持一致)
-            d_model = self.meta.get("trans_d_model", 64)
-            nhead = self.meta.get("trans_nhead", 4)
-            num_layers = self.meta.get("trans_layers", 2)
-            dim_feedforward = self.meta.get("trans_dim_feedforward", 256)
-            
-            self.model = Transformer1D_V2(
-                input_size=channel,
-                n_classes=n_classes,
-                d_model=d_model,
-                nhead=nhead,
-                num_layers=num_layers,
-                dim_feedforward=dim_feedforward,
-                dropout=0.0, # 推理时关闭 dropout
-                max_len=self.window # 必须 >= 训练时的 window size
-            ) 
-        else:
-            self.model = CNN1D(
-                channel=channel, 
-                n_classes=n_classes, 
-                p_drop=0.0
-            )
-            
-        self.model.load_state_dict(state["state_dict"])
-        self.model.to(self.device)
+        self.model, _ = ModelFactory.load_from_checkpoint(
+            model_path=self.model_path,
+            meta_path=self.meta_path,
+            device=self.device,
+        )
         self.model.eval()
 
-    def predict(self, df, batch_size=1024):
+    def predict(self, df, batch_size=1024, diff_thresh=0.05, min_thresh = 0.3):
         """
-        输入原始 DataFrame，输出包含预测结果的 DataFrame 和 评估指标
+        执行推理，并支持基于概率差值的策略增强。
+        
+        :param df: 输入的 DataFrame (包含原始特征)
+        :param batch_size: 批处理大小
+        :param diff_thresh: (float or None) 概率差阈值。
+                            - 如果为 None: 使用原始 Argmax 逻辑（选概率最大的）。
+                            - 如果为 float (如 0.15): 使用策略逻辑 P(多) - P(空) > 阈值。
+        :return: (df_out, stats) 
+                 df_out 包含 'pred', 'pred_prob' 以及详细的概率列 'net_score', 'prob_long' 等
         """
-        self.logger.record("Starting inference pipeline...")
+        self.logger.record(f"Starting inference pipeline (Strategy Threshold={diff_thresh}, min_thresh={min_thresh})...")
         
         # 1. 准备数据
+        # TimeSeriesWindowDataset 会处理窗口化和归一化
         ds = TimeSeriesWindowDataset(
             df=df, 
             feature_cols=self.feature_cols, 
             label_col=self.label_col, 
             window=self.window
         )
+        self.logger.info("TimeSeriesWindowDataset finished")
+
         dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
-        # 2. 推理循环
-        preds, confs = [], []
+        # 2. 推理循环 (获取原始 Logits -> Probabilities)
+        probs_list = []
         with torch.no_grad():
             for xb, _ in dl:
                 xb = xb.to(self.device)
-                logits = self.model(xb)
+                # 兼容 LSTM 可能需要的 lengths 参数 (虽然 batch_first=True 通常不需要)
+                if getattr(self.model, "supports_lengths", False):
+                    logits = self.model(xb, lengths=None)
+                else:
+                    logits = self.model(xb)
+                
+                # Softmax 归一化为概率 (0~1)
                 probs = torch.softmax(logits, dim=1).cpu().numpy()
-                preds.append(probs.argmax(axis=1))
-                confs.append(probs.max(axis=1))
+                probs_list.append(probs)
 
-        if not preds:
+        if not probs_list:
             self.logger.warning("No predictions generated!")
             return df, {}
 
-        preds = np.concatenate(preds)
-        confs = np.concatenate(confs)
+        # 拼接所有批次: Shape [Total_Samples, 3]
+        probs_all = np.concatenate(probs_list)
 
-        # 3. 结果对齐 (TimeSeriesWindowDataset 从 window-1 开始产生输出)
+        # 3. 提取分量并计算 Net Score
+        # 假设类别顺序是 0:Short, 1:Neutral, 2:Long (请确保与 train.py 一致)
+        p_short = probs_all[:, 0]   # 下跌概率
+        p_neutral = probs_all[:, 1] # 震荡概率
+        p_long = probs_all[:, 2]    # 上涨概率
+        
+        # 净多头得分: P(涨) - P(跌)
+        net_score = p_long - p_short
+
+        # 4. 生成最终信号 (Pred)
+        if diff_thresh is not None:
+            # === 策略模式 (基于差值) ===
+            # 默认全为 1 (震荡)
+            final_pred = np.full(len(probs_all), int(Signal.NEUTRAL))
+            final_conf = np.zeros(len(probs_all))
+            
+            # Case A: 做多 (得分 > 阈值)
+            mask_long = (net_score > diff_thresh) & (p_long > min_thresh)
+            final_pred[mask_long] = int(Signal.LONG)
+            final_conf[mask_long] = net_score[mask_long] # 置信度 = 净得分
+            
+            # Case B: 做空 (得分 < -阈值)
+            mask_short = (net_score < -diff_thresh) & (p_short > min_thresh)
+            final_pred[mask_short] = int(Signal.SHORT)
+            final_conf[mask_short] = -net_score[mask_short] # 置信度 = 绝对值
+            
+            # Case C: 震荡 (中间区域)
+            # 置信度可以是 p_neutral 或者 0，这里用 0 表示“无方向”
+            mask_neutral = (final_pred == int(Signal.NEUTRAL))
+            final_conf[mask_neutral] = 0.0 
+            
+        else:
+            # === 原始模式 (Argmax) ===
+            final_pred = probs_all.argmax(axis=1)
+            final_conf = probs_all.max(axis=1)
+
+        # 5. 结果对齐 (TimeSeriesWindowDataset 从 window-1 开始产生输出)
         valid_idx = df.index[self.window-1:]
         
-        # 截断以匹配长度（防止数据尾部对其问题）
-        min_len = min(len(valid_idx), len(preds))
+        # 截断以匹配长度（防止数据尾部对齐问题）
+        min_len = min(len(valid_idx), len(final_pred))
         valid_idx = valid_idx[:min_len]
-        preds = preds[:min_len]
-        confs = confs[:min_len]
+        
+        # 切片数据
+        final_pred = final_pred[:min_len]
+        final_conf = final_conf[:min_len]
+        p_short = p_short[:min_len]
+        p_neutral = p_neutral[:min_len]
+        p_long = p_long[:min_len]
+        net_score = net_score[:min_len]
 
-        # 4. 写入 DataFrame
+        # 6. 写入 DataFrame
         df_out = df.copy()
-        df_out['pred'] = np.nan
-        df_out['pred_prob'] = np.nan
-        df_out.loc[valid_idx, 'pred'] = preds
-        df_out.loc[valid_idx, 'pred_prob'] = confs
+        
+        # 初始化新列 (如果不存在)
+        cols_to_add = ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']
+        for c in cols_to_add:
+            df_out[c] = np.nan
+            
+        df_out.loc[valid_idx, 'pred'] = final_pred
+        df_out.loc[valid_idx, 'pred_prob'] = final_conf
+        df_out.loc[valid_idx, 'prob_short'] = p_short
+        df_out.loc[valid_idx, 'prob_neutral'] = p_neutral
+        df_out.loc[valid_idx, 'prob_long'] = p_long
+        df_out.loc[valid_idx, 'net_score'] = net_score
 
-        # 5. 计算评估指标 (如果有标签)
+        # 7. 计算评估指标 (如果原始 df 有标签)
         stats = {}
         if self.label_col in df_out.columns:
             # 只评估有效预测部分
             df_valid = df_out.loc[valid_idx]
-            y_true = df_valid[self.label_col].values.astype(int)
-            y_pred = df_valid['pred'].values.astype(int)
-            stats = self.evaluate_performance(y_true, y_pred) # 使用你脚本中已有的函数
+            # 过滤掉标签为 NaN 的行 (如果有)
+            df_valid = df_valid.dropna(subset=[self.label_col])
+            
+            if not df_valid.empty:
+                y_true = df_valid[self.label_col].values.astype(int)
+                y_pred = df_valid['pred'].values.astype(int)
+                stats = self.evaluate_performance(y_true, y_pred)
         
-        # 删除 NaN 行（可选，取决于是否需要保留前面的数据用于绘图，回测通常需要保留）
-        # df_out.dropna(subset=['pred'], inplace=True) 
-        
-        self.logger.record(f"Inference complete. Valid samples: {len(preds)}")
+        self.logger.record(f"Inference complete. Valid samples: {len(final_pred)}")
         return df_out, stats
     
+    def scan_thresholds(self, df, thresholds=[0.05, 0.1, 0.15, 0.2, 0.25, 0.3], batch_size=1024):
+        """
+        一次性扫描多个阈值，对比模型性能。
+        
+        原理：
+        1. 只做一次推理 (Inference Once)，获取原始概率。
+        2. 在内存中循环应用不同的 diff_thresh 逻辑。
+        3. 计算每个阈值下的开单密度、精准率、召回率。
+        """
+        self.logger.record(f"🔍 Scanning thresholds: {thresholds}...")
+        
+        # 1. 准备数据 & 推理 (复用 Dataset 逻辑)
+        ds = TimeSeriesWindowDataset(
+            df=df, 
+            feature_cols=self.feature_cols, 
+            label_col=self.label_col, 
+            window=self.window
+        )
+        # shuffle=False 保证顺序一致
+        dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
+
+        # 2. 获取原始概率 (Probabilities)
+        probs_list = []
+        self.model.eval()
+        with torch.no_grad():
+            for xb, _ in dl:
+                xb = xb.to(self.device)
+                # 兼容不同模型接口
+                if getattr(self.model, "supports_lengths", False):
+                    logits = self.model(xb, lengths=None)
+                else:
+                    logits = self.model(xb)
+                
+                # Softmax 转概率
+                probs = torch.softmax(logits, dim=1).cpu().numpy()
+                probs_list.append(probs)
+        
+        if not probs_list:
+            self.logger.warning("No predictions generated!")
+            return pd.DataFrame()
+
+        # 拼接所有批次: [N, 3]
+        probs_all = np.concatenate(probs_list)
+        
+        # 3. 对齐真实标签 (y_true)
+        # TimeSeriesWindowDataset 从 window-1 开始产生输出
+        valid_idx = df.index[self.window-1:]
+        
+        # 截断以防止长度不匹配
+        min_len = min(len(valid_idx), len(probs_all))
+        valid_idx = valid_idx[:min_len]
+        probs_all = probs_all[:min_len]
+        
+        # 检查是否有标签用于评估
+        if self.label_col not in df.columns:
+            self.logger.warning("No label column found in df, cannot evaluate performance.")
+            return pd.DataFrame()
+            
+        y_true = df.loc[valid_idx, self.label_col].values.astype(int)
+
+        # 4. 预计算净得分 (Net Score)
+        # 假设 0:Short, 1:Neutral, 2:Long
+        p_short = probs_all[:, 0]
+        p_long = probs_all[:, 2]
+        net_score = p_long - p_short # 范围 [-1, 1]
+
+        # 5. 循环评估每个阈值
+        results = []
+        
+        for th in thresholds:
+            # 初始化预测为 1 (震荡)
+            preds = np.full(len(y_true), int(Signal.NEUTRAL))
+            
+            # 应用阈值逻辑
+            preds[net_score > th] = int(Signal.LONG)
+            preds[net_score < -th] = int(Signal.SHORT)
+            
+            # 计算指标
+            # output_dict=True 返回字典方便提取
+            report = classification_report(y_true, preds, output_dict=True, zero_division=0)
+            
+            # 统计开单数量 (非震荡的单子)
+            n_short = np.sum(preds == int(Signal.SHORT))
+            n_long = np.sum(preds == int(Signal.LONG))
+            total_signals = n_short + n_long
+            coverage = total_signals / len(y_true)
+            
+            # 提取关键指标
+            res_row = {
+                "Threshold": th,
+                "Signals": total_signals,   # 开单总数
+                "Coverage": coverage,       # 覆盖率 (开单频率)
+                
+                # 精确率 (Precision): 做的单子里有多少是对的？
+                "Prec_Short": report[str(int(Signal.SHORT))]['precision'],
+                "Prec_Long": report[str(int(Signal.LONG))]['precision'],
+                
+                # 召回率 (Recall): 所有的机会抓住了多少？
+                "Rec_Short": report[str(int(Signal.SHORT))]['recall'],
+                "Rec_Long": report[str(int(Signal.LONG))]['recall'],
+                
+                # 综合 F1 (宏平均)
+                "Macro_F1": report['macro avg']['f1-score']
+            }
+            results.append(res_row)
+
+        # 6. 生成汇总 DataFrame
+        df_res = pd.DataFrame(results)
+        
+        # 打印 ASCII 表格
+        print("\n" + "="*80)
+        print("📊 Threshold Scan Report (寻找最佳 Diff Threshold)")
+        print("="*80)
+        # 格式化打印
+        print(df_res.to_string(formatters={
+            'Threshold': '{:.2f}'.format,
+            'Coverage': '{:.2%}'.format,
+            'Prec_Short': '{:.2%}'.format,
+            'Prec_Long': '{:.2%}'.format,
+            'Rec_Short': '{:.2%}'.format,
+            'Rec_Long': '{:.2%}'.format,
+            'Macro_F1': '{:.4f}'.format
+        }))
+        print("="*80 + "\n")
+        
+        return df_res
+
     def evaluate_performance(self, y_true, y_pred, labels=None):
         """
         生成符合要求的 Test Report 格式日志
