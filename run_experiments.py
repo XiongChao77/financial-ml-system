@@ -6,11 +6,16 @@ from model import train
 from trade.bt import simulation
 
 def main():
+    begin_time = time.time()
+    preparation_start_time = begin_time
     # preparation.main()
-    # train.main()
-    simulation.main()
+    train_start_time = time.time()
+    train.main()
+    simulation_start_time = time.time()
+    # simulation.main()
+    end_time = time.time()
+    print(f": preparation run_time: {(train_start_time - preparation_start_time):.4f} s | train run_time: {(simulation_start_time - train_start_time):.4f} s "
+          f"| simulation run_time: {(end_time - simulation_start_time):.4f} s |total : {(end_time - begin_time):.4f} s")
 
 if __name__ == "__main__":
-    start_time = time.time()
     main()
-    print(f": run_time: {(time.time() - start_time):.4f} s")

@@ -8,6 +8,12 @@ from data_process.common import *
 
 def main():
     df = pd.read_csv(origin_data_path)
+
+    # === 修改处：只取后一半数据 ===
+    # 适用于实盘模拟（最新的数据更有价值）
+    # start_idx = len(df) // 3
+    # df = df.iloc[start_idx:].reset_index(drop=True)
+
     attach_attr(df)
     attach_label(df)
     # ---------------- 统计输出 ----------------
@@ -37,8 +43,8 @@ def main():
     test_df  = df.iloc[split_idx:]
     # 写入文件
     os.makedirs(TEMPORARY_DIR , exist_ok=True)
-    train_df.to_csv(train_data_path, index=False, encoding="utf-8")
-    test_df.to_csv(test_data_path, index=False, encoding="utf-8")
+    # train_df.to_csv(train_data_path, index=False, encoding="utf-8")
+    # test_df.to_csv(test_data_path, index=False, encoding="utf-8")
     return df
 
 if __name__ == "__main__":
