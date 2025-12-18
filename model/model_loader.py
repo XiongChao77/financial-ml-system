@@ -50,30 +50,40 @@ class ModelHandler:
         )
         self.model.eval()
 
-    def predict(self, df, batch_size=1024, diff_thresh=0.05, min_thresh = 0.3):
+    def predict(self, df, is_live=True, batch_size=1024, diff_thresh=None, min_thresh=0.3):
         """
         执行推理，并支持基于概率差值的策略增强。
         
         :param df: 输入的 DataFrame (包含原始特征)
+        :param is_live: 是否为实盘模式。
+                        - True (实盘): 优化内存，仅输出最后一根 K 线的信号。
+                        - False (回测): 记录索引映射，确保信号与时间轴严格对齐。
         :param batch_size: 批处理大小
-        :param diff_thresh: (float or None) 概率差阈值。
-                            - 如果为 None: 使用原始 Argmax 逻辑（选概率最大的）。
-                            - 如果为 float (如 0.15): 使用策略逻辑 P(多) - P(空) > 阈值。
+        :param diff_thresh: 概率差阈值 (P_long - P_short)。
+        :param min_thresh: 最小概率门槛，确保胜率。
         :return: (df_out, stats) 
-                 df_out 包含 'pred', 'pred_prob' 以及详细的概率列 'net_score', 'prob_long' 等
+                 df_out 包含完整 K 线及 'pred', 'pred_prob', 'net_score' 等列
         """
-        self.logger.record(f"Starting inference pipeline (Strategy Threshold={diff_thresh}, min_thresh={min_thresh})...")
+        self.logger.record(f"Starting inference pipeline (Mode={'Live' if is_live else 'Backtest'}, diff_thresh={diff_thresh})...")
         
-        # 1. 准备数据
-        # TimeSeriesWindowDataset 会处理窗口化和归一化
+        # 1. 准备数据：传入 is_live 标志以控制索引记录逻辑
         ds = TimeSeriesWindowDataset(
             df=df, 
             feature_cols=self.feature_cols, 
             label_col=self.label_col, 
-            window=self.window
+            window=self.window,
+            is_live=is_live
         )
-        self.logger.info("TimeSeriesWindowDataset finished")
+        
+        # 检查是否产生了有效窗口（可能因为数据太短或全部不连续而被丢弃）
+        if len(ds) == 0:
+            self.logger.warning("No valid windows generated after continuity check!")
+            df_empty = df.copy()
+            for c in ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']:
+                df_empty[c] = np.nan
+            return df_empty, {}
 
+        self.logger.info(f"Dataset created. Valid windows: {len(ds)}")
         dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
         # 2. 推理循环 (获取原始 Logits -> Probabilities)
@@ -81,103 +91,78 @@ class ModelHandler:
         with torch.no_grad():
             for xb, _ in dl:
                 xb = xb.to(self.device)
-                # 兼容 LSTM 可能需要的 lengths 参数 (虽然 batch_first=True 通常不需要)
                 if getattr(self.model, "supports_lengths", False):
                     logits = self.model(xb, lengths=None)
                 else:
                     logits = self.model(xb)
                 
-                # Softmax 归一化为概率 (0~1)
                 probs = torch.softmax(logits, dim=1).cpu().numpy()
                 probs_list.append(probs)
 
-        if not probs_list:
-            self.logger.warning("No predictions generated!")
-            return df, {}
-
-        # 拼接所有批次: Shape [Total_Samples, 3]
+        # 拼接所有批次结果
         probs_all = np.concatenate(probs_list)
-
-        # 3. 提取分量并计算 Net Score
-        # 假设类别顺序是 0:Short, 1:Neutral, 2:Long (请确保与 train.py 一致)
         p_short = probs_all[:, 0]   # 下跌概率
         p_neutral = probs_all[:, 1] # 震荡概率
         p_long = probs_all[:, 2]    # 上涨概率
-        
-        # 净多头得分: P(涨) - P(跌)
-        net_score = p_long - p_short
+        net_score = p_long - p_short # 净得分
 
-        # 4. 生成最终信号 (Pred)
+        # 3. 生成最终信号逻辑
         if diff_thresh is not None:
-            # === 策略模式 (基于差值) ===
-            # 默认全为 1 (震荡)
             final_pred = np.full(len(probs_all), int(Signal.NEUTRAL))
             final_conf = np.zeros(len(probs_all))
             
-            # Case A: 做多 (得分 > 阈值)
+            # 做多逻辑
             mask_long = (net_score > diff_thresh) & (p_long > min_thresh)
             final_pred[mask_long] = int(Signal.LONG)
-            final_conf[mask_long] = net_score[mask_long] # 置信度 = 净得分
+            final_conf[mask_long] = net_score[mask_long]
             
-            # Case B: 做空 (得分 < -阈值)
+            # 做空逻辑
             mask_short = (net_score < -diff_thresh) & (p_short > min_thresh)
             final_pred[mask_short] = int(Signal.SHORT)
-            final_conf[mask_short] = -net_score[mask_short] # 置信度 = 绝对值
-            
-            # Case C: 震荡 (中间区域)
-            # 置信度可以是 p_neutral 或者 0，这里用 0 表示“无方向”
-            mask_neutral = (final_pred == int(Signal.NEUTRAL))
-            final_conf[mask_neutral] = 0.0 
-            
+            final_conf[mask_short] = -net_score[mask_short]
         else:
-            # === 原始模式 (Argmax) ===
             final_pred = probs_all.argmax(axis=1)
             final_conf = probs_all.max(axis=1)
 
-        # 5. 结果对齐 (TimeSeriesWindowDataset 从 window-1 开始产生输出)
-        valid_idx = df.index[self.window-1:]
-        
-        # 截断以匹配长度（防止数据尾部对齐问题）
-        min_len = min(len(valid_idx), len(final_pred))
-        valid_idx = valid_idx[:min_len]
-        
-        # 切片数据
-        final_pred = final_pred[:min_len]
-        final_conf = final_conf[:min_len]
-        p_short = p_short[:min_len]
-        p_neutral = p_neutral[:min_len]
-        p_long = p_long[:min_len]
-        net_score = net_score[:min_len]
-
-        # 6. 写入 DataFrame
+        # 4. 【核心修复】：精准对齐与回填
+        # 创建副本并初始化新列为 NaN，确保不连续的“空洞”被保留以进行持仓管理
         df_out = df.copy()
-        
-        # 初始化新列 (如果不存在)
-        cols_to_add = ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']
-        for c in cols_to_add:
+        cols_to_init = ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']
+        for c in cols_to_init:
             df_out[c] = np.nan
-            
-        df_out.loc[valid_idx, 'pred'] = final_pred
-        df_out.loc[valid_idx, 'pred_prob'] = final_conf
-        df_out.loc[valid_idx, 'prob_short'] = p_short
-        df_out.loc[valid_idx, 'prob_neutral'] = p_neutral
-        df_out.loc[valid_idx, 'prob_long'] = p_long
-        df_out.loc[valid_idx, 'net_score'] = net_score
+        
+        if not is_live:
+            # === 回测模式：通过 ds.indices 将信号“钉”在正确的原始时间戳上 ===
+            if ds.indices is not None:
+                # 确保索引和预测值长度对齐
+                valid_len = min(len(ds.indices), len(final_pred))
+                active_indices = ds.indices[:valid_len]
+                
+                df_out.loc[active_indices, 'pred'] = final_pred[:valid_len]
+                df_out.loc[active_indices, 'pred_prob'] = final_conf[:valid_len]
+                df_out.loc[active_indices, 'prob_short'] = p_short[:valid_len]
+                df_out.loc[active_indices, 'prob_neutral'] = p_neutral[:valid_len]
+                df_out.loc[active_indices, 'prob_long'] = p_long[:valid_len]
+                df_out.loc[active_indices, 'net_score'] = net_score[:valid_len]
+        else:
+            # === 实盘模式：仅回填最新一根 K 线的结果 ===
+            if len(final_pred) > 0:
+                last_idx = df.index[-1]
+                df_out.at[last_idx, 'pred'] = final_pred[-1]
+                df_out.at[last_idx, 'pred_prob'] = final_conf[-1]
+                df_out.at[last_idx, 'net_score'] = net_score[-1]
 
-        # 7. 计算评估指标 (如果原始 df 有标签)
+        # 5. 计算评估指标 (仅在非实盘且包含标签列时执行)
         stats = {}
-        if self.label_col in df_out.columns:
-            # 只评估有效预测部分
-            df_valid = df_out.loc[valid_idx]
-            # 过滤掉标签为 NaN 的行 (如果有)
-            df_valid = df_valid.dropna(subset=[self.label_col])
-            
+        if not is_live and self.label_col in df_out.columns:
+            # 仅评估有预测值且有标签的部分
+            df_valid = df_out.dropna(subset=['pred', self.label_col])
             if not df_valid.empty:
                 y_true = df_valid[self.label_col].values.astype(int)
                 y_pred = df_valid['pred'].values.astype(int)
                 stats = self.evaluate_performance(y_true, y_pred)
         
-        self.logger.record(f"Inference complete. Valid samples: {len(final_pred)}")
+        self.logger.record(f"Inference complete. Valid signals: {len(final_pred)}")
         return df_out, stats
     
     def scan_thresholds(self, df, thresholds=[0.05, 0.1, 0.15, 0.2, 0.25, 0.3], batch_size=1024):
@@ -196,7 +181,8 @@ class ModelHandler:
             df=df, 
             feature_cols=self.feature_cols, 
             label_col=self.label_col, 
-            window=self.window
+            window=self.window,
+            is_live = False,
         )
         # shuffle=False 保证顺序一致
         dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)

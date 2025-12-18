@@ -1,330 +1,248 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-1D-CNN (causal) for 256x9 time-series -> 3-class trend classification
---------------------------------------------------------------------
-- 输入: 连续时间序列 CSV（按时间升序），包含 9 个数值特征列 + label(0/1/2)
-- 窗口: 每个样本为 256×9（末端时刻的 label 作为该样本标签）
-- 切分: 按时间顺序 70%/15%/15% -> Train/Val/Test
-- 相对化: 每个窗口内，价格组与成交量组分别按最大值缩放到100（按列名分组）
-- 模型: 因果卷积 1D-CNN + GAP + FC
-- 评估: classification_report、macro-F1、混淆矩阵
-"""
 
-import argparse, json, os, sys, math
+import os
+import sys
+import json
+import logging
+import torch
+import torch.nn as nn
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass, field, asdict
+from typing import Optional, Union, List, Dict
+from tqdm import tqdm
+from collections import Counter
 
-import torch,time
-import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
-from torch.utils.data import WeightedRandomSampler
-
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from sklearn.utils.class_weight import compute_class_weight
-from collections import Counter
-import logging
-from tqdm import tqdm
 
+# 路径设置
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process import common
 from model.data_loader import TimeSeriesWindowDataset
-#   model
 from model.model_factory import ModelFactory
 
-def set_seed(seed=42):
-    import random
+# ==============================================================================
+# 1. 配置定义 (Configuration)
+# ==============================================================================
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+@dataclass
+class DataConfig:
+    csv_path: str = common.train_data_path
+    feature_cols: list = field(default_factory=list)
+    label_col: str = "label"
+    window: int = common.CANDLESTICK_NUM
+    train_ratio: float = 0.7
+    val_ratio: float = 0.15
+    batch_size: int = 128
 
+@dataclass
+class TrainConfig:
+    epochs: int = 4
+    lr: float = 3e-4
+    weight_decay: float = 1e-4
+    patience: int = 20
+    seed: int = 42
+    save_dir: str = common.TEMPORARY_DIR
 
-def chrono_split_idx(n: int, train_ratio=0.7, val_ratio=0.15):
-    n_tr = int(n * train_ratio)
-    n_va = int(n * val_ratio)
-    tr = np.arange(0, n_tr)
-    va = np.arange(n_tr, n_tr + n_va)
-    te = np.arange(n_tr + n_va, n)
-    return tr, va, te
+@dataclass
+class LSTMConfig:
+    model_type: str = "lstm"
+    model_version: int = 4
+    hidden_size: int = 80
+    num_layers: int = 2
+    bidirectional: bool = False
+    lstm_dropout: float = 0.3
+    head_dropout: float = 0.2
+    p_drop: float = 0.3
+    readout: str = ['last' , 'meanmax' , 'attn', 'mix'][1]
+    head: str = ['linear' , 'mlp'][1]
+    in_locked_p: float = 0.0               # V4 locked dropout on inputs
+    out_locked_p: float = 0.0              # V4 locked dropout on LSTM outputs (before pooling)
+    input_norm: bool = True                # V4 LayerNorm on input features
+    input_proj_dim: int | None = None      # V4 optional projection before LSTM
+    logit_clip: float | None = None        # V4 
 
+@dataclass
+class TransformerConfig:
+    model_type: str = "transformer"
+    model_version: int = 1
+    d_model: int = 128
+    nhead: int = 8
+    num_layers: int = 4
+    dim_feedforward: int = 512
+    dropout: float = 0.3
+    attn_dropout: float = 0.1
+    drop_path: float = 0.05
+    max_len: Optional[int] = None
+    use_alibi: bool = False
+    pos_encoding: str = "none"
+    cls_token: bool = False
+    readout: str = "mix"
+    head: str = "linear"
+    ffn_type: str = "swiglu"
 
-def chrono_split_by_window_ends(M: int, train_ratio=0.7, val_ratio=0.15):
-    """返回 (tr_start,tr_stop), (va_start,va_stop), (te_start,te_stop) on window-ends."""
-    n_tr = int(M * train_ratio)
-    n_va = int(M * val_ratio)
-    tr = (0, n_tr)
-    va = (n_tr, n_tr + n_va)
-    te = (n_tr + n_va, M)
-    return tr, va, te
+@dataclass
+class ConvLSTMConfig:
+    model_type: str = "conv_lstm"
+    model_version: int = 1
+    d_model: int = 96
+    conv_layers: int = 3
+    conv_kernel: int = 5
+    conv_dropout: float = 0.10
+    conv_dilations: str = ""
+    lstm_hidden: int = 64
+    lstm_layers: int = 2
+    bidirectional: bool = True
+    lstm_dropout: float = 0.2
+    input_norm: bool = True
+    in_locked_p: float = 0.05
+    out_locked_p: float = 0.05
+    head_dropout: float = 0.2
+    readout: str = "mix"
+    head: str = "linear"
+    logit_clip: Optional[float] = None
+    p_drop: Optional[float] = None
 
+@dataclass
+class XGBoostConfig:
+    model_type: str = "xgboost"
+    model_version: int = 1
+    xgb_depth: int = 6
+    xgb_estimators: int = 100
+    learning_rate: float = 3e-4
 
-class SeqDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = torch.from_numpy(X)  # [M, T, F]
-        self.y = torch.from_numpy(y)  # [M]
+@dataclass
+class CNNConfig:
+    model_type: str = "cnn"
+    model_version: int = 1
+    p_drop: float = 0.3
+    tau: float = 16.0
+    use_tpool: bool = False
+# ==============================================================================
+# 2. 工厂 (Factory)
+# ==============================================================================
 
-    def __len__(self):
-        return self.X.shape[0]
+class ModelConfigFactory:
+    @staticmethod
+    def get_default_config(model_type: str):
+        if model_type == "lstm":        return LSTMConfig()
+        if model_type == "transformer": return TransformerConfig()
+        if model_type == "conv_lstm":   return ConvLSTMConfig()
+        if model_type == "xgboost":     return XGBoostConfig()
+        if model_type == "cnn":         return CNNConfig()
+        raise ValueError(f"Unknown model_type: {model_type}")
 
-    def __getitem__(self, i):
-        return self.X[i], self.y[i]
+# ==============================================================================
+# 3. 核心逻辑 (Core Logic)
+# ==============================================================================
 
-
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.gamma = gamma
-        self.reduction = reduction
-        # alpha 应为 tensor，对应 [class_0_weight, class_1_weight, class_2_weight]
-        self.register_buffer('alpha', alpha) 
-
-    def forward(self, inputs, targets):
-        # inputs: [N, C] (logits)
-        # targets: [N]
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-ce_loss) # 预测正确的概率
-        
-        # 核心公式： (1 - pt)^gamma * log(pt)
-        # 当 pt 接近 1 (预测很准) 时，权重趋近 0
-        # 当 pt 接近 0 (预测很难) 时，权重趋近 1
-        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-
-        if self.alpha is not None:
-            alpha_t = self.alpha[targets]
-            focal_loss = alpha_t * focal_loss
-
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        else:
-            return focal_loss
-
-
-penalty_matrix = [
-    [1.0, 1, 1],  # true=0, pred=0/1/2
-    [1.0, 1.0, 1.0],  # true=1, pred=0/1/2
-    [1, 1, 1.0],  # true=2, pred=0/1/2
-]
-
-
-# ========== 训练/评估 ==========
-@torch.no_grad()
-def eval_epoch(model, loader, device, criterion):
-    model.eval()
-    total_loss, y_true, y_pred = 0.0, [], []
-    for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)
-        logits = model(xb)
-        loss = criterion(logits, yb)
-        total_loss += loss.item() * xb.size(0)
-        y_pred.append(logits.argmax(1).cpu().numpy())
-        y_true.append(yb.cpu().numpy())
-    if not y_true:
-        return float("nan"), np.array([]), np.array([])
-    y_true = np.concatenate(y_true)
-    y_pred = np.concatenate(y_pred)
-    return total_loss / len(loader.dataset), y_true, y_pred
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", required=False, help="按时间升序的 CSV 文件路径")
-    ap.add_argument(
-        "--feature_cols", default="", help="逗号分隔;留空则用默认9列 + 其它数值列"
-    )
-    ap.add_argument("--label_col", default="label")
-    ap.add_argument("--window", type=int, default=common.CANDLESTICK_NUM)
-    ap.add_argument("--train_ratio", type=float, default=0.7)
-    ap.add_argument("--val_ratio", type=float, default=0.15)
-    ap.add_argument("--epochs", type=int, default=4)  #100
-    ap.add_argument("--batch_size", type=int, default=128)
-    ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--weight_decay", type=float, default=1e-4)
-    ap.add_argument("--dropout", type=float, default=0.3)
-    ap.add_argument("--patience", type=int, default=20)
-    ap.add_argument("--seed", type=int, default=42)
-    # === 模型选择 ===
-    ap.add_argument( "--model_type", type=str, default="lstm", choices=["cnn", "lstm", "transformer", "xgboost"],
-                    help="Model architecture: cnn, lstm, or transformer", )
-    ap.add_argument("--model_version", type=int, default=4)  #100
-    ap.add_argument("--lstm_dropout", type=float, default=0.3)
-    ap.add_argument("--lstm_head_dropout", type=float, default=0.2)
-    ap.add_argument("--lstm_hidden", type=int, default=80, help="LSTM 隐藏层维度")
-    ap.add_argument("--lstm_layers", type=int, default=2, help="LSTM 层数")
-    ap.add_argument("--bidirectional", action='store_true', help="使用双向 LSTM")  #store_true/store_false
-    ap.add_argument("--lstm_readout", type=str, default="meanmax", choices=['last' , 'meanmax' , 'attn', 'mix'], help="mix only for v4!")
-    ap.add_argument("--lstm_head", type=str, default="mlp", choices=['linear' , 'mlp'], help="")    #test mlp + attn
-    ap.add_argument("--trans_d_model", type=int, default=64, help="Transformer 内部维度 (d_model)")
-    ap.add_argument("--trans_nhead", type=int, default=8, help="Attention 头数 (d_model 必须能被此数整除)")
-    ap.add_argument("--trans_layers", type=int, default=3, help="Transformer Encoder 层数")
-    ap.add_argument("--trans_dim_feedforward", type=int, default=256, help="FFN 中间层维度")
-    # ================
-    #  xgboost 特有参数
-    ap.add_argument("--xgb_depth", type=int, default=6)
-    ap.add_argument("--xgb_estimators", type=int, default=100)
-    args = ap.parse_args()
-
-    logger = common.setup_logger(log_name='train', log_path=os.path.join(common.TEMPORARY_DIR, 'training.log'))
-    set_seed(args.seed)
+def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
+    """
+    接收配置对象，执行训练。
+    """
+    # 0. 初始化环境
+    logger = common.setup_logger(log_name='train', log_path=os.path.join(train_cfg.save_dir, 'training.log'))
+    set_seed(train_cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Device:{device}")
-    is_cude_available = device == "cuda"
+    logger.info(f"Device: {device} | Model: {model_cfg.model_type} version: {model_cfg.model_version}")
 
-    # 1) 读数据（需按时间升序）
-    data_path = common.train_data_path
-    df = pd.read_csv(data_path)
-
-    # 4) 窗口化 -> [M, T, F], [M]
-    T = args.window
-    logger.info(f"Using TimeSeriesWindowDataset for windowing and scaling...")
+    # 1. 准备数据
+    df = pd.read_csv(data_cfg.csv_path)
+    logger.info(f"Using TimeSeriesWindowDataset with window={data_cfg.window}...")
     
-    # 实例化 TimeSeriesWindowDataset，它在内部完成了窗口划分和 t=0 缩放
-    feat_cols = [col for col in df.columns]
-    logger.info(f"Features num:{len(feat_cols)},: {feat_cols}")  # 可选：打印查看
-    full_ds = TimeSeriesWindowDataset(
-        df=df, feature_cols=feat_cols, label_col=args.label_col, window=T
-    )
+    feature_cols = data_cfg.feature_cols if data_cfg.feature_cols else list(df.columns)
+    logger.info(f"Features num:{len(feature_cols)},: {feature_cols}")
 
+    full_ds = TimeSeriesWindowDataset(
+        df=df, feature_cols=feature_cols, label_col=data_cfg.label_col, window=data_cfg.window
+    )
     # ========== 【新增】调用保存 Debug 数据 ==========
     # 保存目录设置在 exported_project_files/model/debug_data 下
     if False:
         debug_dir = os.path.join(common.TEMPORARY_DIR, "debug_data")
-        full_ds.save_debug_data(debug_dir)
+        full_ds.save_debug_data(debug_dir, False)
         exit()
 
     if False:
         full_ds.inspect_final_data()
         exit()
-    # ===============================================
 
-    # # === 【新增】核心优化：全量数据预加载到 GPU ===
+    # 显存预加载优化
     logger.info(f"Pre-loading entire dataset to {device}...")
-    # # 直接修改 Dataset 内部的 Tensor，将其移动到 GPU
-    # full_ds.X = full_ds.X.to(device)
+    # full_ds.X = full_ds.X.to(device) # 根据显存情况开启
     # full_ds.y = full_ds.y.to(device)
     logger.info("Data loaded to VRAM.")
 
-    # 可用窗口数量 M
     M = len(full_ds)
-    logger.info(f"Total windows (M) = {M}, window = {T}, F = {len(feat_cols)}")
+    logger.info(f"Total windows (M) = {M}, window = {data_cfg.window}")
 
-    # 3) 按“窗口末端”做时间切分，并构建一次性 Dataset/DataLoader
-    tr_rng, va_rng, te_rng = chrono_split_by_window_ends(
-        M, args.train_ratio, args.val_ratio
-    )
-    s_tr, e_tr = tr_rng
-    s_va, e_va = va_rng
-    s_te, e_te = te_rng
+    # 2. 切分数据
+    tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
+    
+    ds_tr = SeqDataset(full_ds.X[tr_rng[0]:tr_rng[1]].numpy(), full_ds.y[tr_rng[0]:tr_rng[1]].numpy())
+    ds_va = SeqDataset(full_ds.X[va_rng[0]:va_rng[1]].numpy(), full_ds.y[va_rng[0]:va_rng[1]].numpy())
+    ds_te = SeqDataset(full_ds.X[te_rng[0]:te_rng[1]].numpy(), full_ds.y[te_rng[0]:te_rng[1]].numpy())
 
-    ds_tr = SeqDataset(full_ds.X[s_tr:e_tr].numpy(), full_ds.y[s_tr:e_tr].numpy())
-    ds_va = SeqDataset(full_ds.X[s_va:e_va].numpy(), full_ds.y[s_va:e_va].numpy())
-    ds_te = SeqDataset(full_ds.X[s_te:e_te].numpy(), full_ds.y[s_te:e_te].numpy())
-
-    # 8) 类别权重（直接用 y_tr 计算，无需遍历 DataLoader）
-    y_tr = full_ds.y[s_tr:e_tr].numpy()
-    classes = np.unique(y_tr)
-    cw_balanced = compute_class_weight(class_weight="balanced", classes=classes, y=y_tr)    #cw_dampened = np.sqrt(cw_balanced) doesn't work out
+    # 3. 计算权重
+    y_tr_np = full_ds.y[tr_rng[0]:tr_rng[1]].numpy()
+    classes = np.unique(y_tr_np)
+    cw_balanced = compute_class_weight("balanced", classes=classes, y=y_tr_np)
     class_weights = torch.tensor(cw_balanced, dtype=torch.float32, device=device)
-    logger.record(
-        "Class weights: {}".format({int(c): float(w) for c, w in zip(classes, cw_balanced)})
-    )
+    logger.record(f"Class weights: {dict(zip(classes, cw_balanced))}")
 
-    # # 1. 计算每个样本的采样权重 (震荡样本权重低，趋势样本权重高)
-    # y_tr_tensor = torch.tensor(y_tr, dtype=torch.long, device=device)
-    # weights_tensor = class_weights[y_tr_tensor]
-    # sample_weights = weights_tensor.cpu().tolist()
+    # 4. DataLoader
+    dl_tr = DataLoader(ds_tr, batch_size=data_cfg.batch_size, shuffle=True, pin_memory=(device.type=="cuda"))
+    dl_va = DataLoader(ds_va, batch_size=data_cfg.batch_size, shuffle=False, pin_memory=(device.type=="cuda"))
+    dl_te = DataLoader(ds_te, batch_size=data_cfg.batch_size, shuffle=False, pin_memory=(device.type=="cuda"))
 
-    # 2. 创建采样器
-    # sampler = WeightedRandomSampler(sample_weights, len(sample_weights))
+    # 5. 构建模型 (参数解包)
+    logger.record(f"Initializing model: type={model_cfg.model_type}, version={model_cfg.model_version}")
+    
+    params = asdict(model_cfg)
+    m_type = params.pop('model_type')
+    m_ver = params.pop('model_version')
+    
+    # 默认值修正 logic
+    if hasattr(model_cfg, 'max_len') and params['max_len'] is None:
+        params['max_len'] = data_cfg.window
 
-    dl_tr = DataLoader(
-        ds_tr, batch_size=args.batch_size, shuffle=True, pin_memory=is_cude_available
-    )
-    dl_va = DataLoader(
-        ds_va, batch_size=args.batch_size, shuffle=False, pin_memory=is_cude_available
-    )
-    dl_te = DataLoader(
-        ds_te, batch_size=args.batch_size, shuffle=False, pin_memory=is_cude_available
-    )
+    # 特殊处理 XGBoost
+    if m_type == 'xgboost':
+        model = ModelFactory.build_for_training(
+            model_type=m_type, model_version=m_ver, device=device,
+            input_size=full_ds.feature_count, n_classes=len(classes),
+            input_dim=data_cfg.window * full_ds.feature_count, 
+            xgb_params=params
+        )
+    else:
+        model = ModelFactory.build_for_training(
+            model_type=m_type, model_version=m_ver, device=device,
+            input_size=full_ds.feature_count, n_classes=len(classes),
+            **params
+        )
 
-    # 9) 模型/优化器/调度器（原逻辑保持不变）
-    feat_cols = full_ds.feature_names
-    channel = full_ds.feature_count
-    logger.warning(f"Final Features num:{len(feat_cols)},: {feat_cols}")  # 可选：打印查看
-    logger.record(
-        f"Initializing model: type={args.model_type}, version={args.model_version}"
-    )  
-    model = ModelFactory.build_for_training(
-        model_type=args.model_type,
-        model_version=args.model_version,
-        device=device,
+    # 6. 训练准备
+    criterion = FocalLoss(alpha=class_weights, gamma=2.0).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=4)
 
-        # ===============================
-        # 通用输入 / 标签信息
-        # ===============================
-        input_size=channel,            # LSTM / Transformer / CNN 的输入通道数
-        n_classes=len(classes),         # 分类数（所有模型通用）
-
-        # ===============================
-        # LSTM 系列参数（仅 LSTM 使用）
-        # ===============================
-        hidden_size=args.lstm_hidden,
-        num_layers=args.lstm_layers,
-        bidirectional=args.bidirectional,
-        lstm_dropout=args.lstm_dropout ,  # V3: backbone dropout
-        head_dropout=args.lstm_head_dropout,  # V3: head dropout
-        p_drop=args.lstm_dropout,
-        readout=args.lstm_readout,              # V3 only：时序读出方式
-        head=args.lstm_head,                  # V3 only：保持 alpha tail
-
-        # ===============================
-        # Transformer 系列参数（仅 Transformer 使用）
-        # ===============================
-        d_model=args.trans_d_model,
-        nhead=args.trans_nhead,
-        num_layers_transformer=args.trans_layers,
-        dim_feedforward=args.trans_dim_feedforward,
-        dropout=args.dropout,
-        max_len=args.window,             # 位置编码长度 >= window
-
-        # ===============================
-        # XGBoost 系列参数（仅 XGB 使用）
-        # ===============================
-        input_dim=T * len(feat_cols),    # flatten 后的输入维度
-        xgb_params={
-            "max_depth": args.xgb_depth,
-            "n_estimators": args.xgb_estimators,
-            "learning_rate": args.lr,
-        },
-    )
-    # 通过手动调节不同类别的权重，来补偿数据集中各类样本数量的不平衡.1.惩罚“多数类”的偷懒 2.强制放大“少数类”的错误
-    # 提升少数类的recall
-    criterion = FocalLoss(alpha=class_weights, gamma=2.0).to(device) 
-    # criterion = nn.CrossEntropyLoss(weight=class_weights) #中立裁判，不偏袒任何一类
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=4
-    )
-
-    # 10) 训练循环（早停基于 val_loss）
+    # 7. 训练循环
     best_val, best_state, wait = float("inf"), None, 0
-    for epoch in range(1, args.epochs + 1):
+    
+    for epoch in range(1, train_cfg.epochs + 1):
         model.train()
         tr_loss, tr_total = 0.0, 0
-        for xb, yb in tqdm(dl_tr, desc=f"Epoch {epoch}/{args.epochs}", ncols=100):
+        
+        for xb, yb in tqdm(dl_tr, desc=f"Epoch {epoch}/{train_cfg.epochs}", ncols=100):
             xb, yb = xb.to(device), yb.to(device)
             logits = model(xb)
             loss = criterion(logits, yb)
 
+            # 【修复1】恢复 set_to_none=True
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -332,75 +250,64 @@ def main():
 
             tr_loss += loss.item() * xb.size(0)
             tr_total += xb.size(0)
+            
         tr_loss /= max(1, tr_total)
-
         va_loss, yv_true, yv_pred = eval_epoch(model, dl_va, device, criterion)
+        
         scheduler.step(va_loss)
-        va_f1 = (
-            f1_score(yv_true, yv_pred, average="macro")
-            if len(yv_true)
-            else float("nan")
-        )
-        logger.info(
-            f"Epoch {epoch:03d} | tr_loss {tr_loss:.4f} | va_loss {va_loss:.4f} | va_macroF1 {va_f1:.4f}"
-        )
+        va_f1 = f1_score(yv_true, yv_pred, average="macro") if len(yv_true) else float("nan")
+        
+        logger.info(f"Epoch {epoch:03d} | tr_loss {tr_loss:.4f} | va_loss {va_loss:.4f} | va_macroF1 {va_f1:.4f}")
 
         if va_loss < best_val - 1e-6:
-            best_val, best_state, wait = (
-                va_loss,
-                {k: v.cpu().clone() for k, v in model.state_dict().items()},
-                0,
-            )
+            best_val = va_loss
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            wait = 0
         else:
             wait += 1
-            if wait >= args.patience:
-                logger.record("Early stopping. epoch {epoch}")
+            if wait >= train_cfg.patience:
+                logger.record(f"Early stopping. epoch {epoch}")
                 break
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
+    if best_state: model.load_state_dict(best_state)
 
-    # 11) 测试集评估 + 保存
-    te_loss, yt_true, yt_pred = eval_epoch(model, dl_te, device, criterion)
+    # 8. 测试与保存
+    _, yt_true, yt_pred = eval_epoch(model, dl_te, device, criterion)
     logger.record("\n=== Test Report ===")
     logger.record(classification_report(yt_true, yt_pred, digits=4))
     logger.record("Test macro-F1:{}".format(f1_score(yt_true, yt_pred, average="macro")))
 
-    # 计算测试集中每个标签的真实占比
-    # 假设你的真实标签在 yt_true 里
+    # 【修复2】恢复 Test Set Label Proportion 统计日志
     counts = Counter(yt_true)
     total = sum(counts.values())
     classes_sorted = sorted(counts.keys())
     true_pct = {c: counts[c] / total for c in classes_sorted}
-
     logger.record("\n=== True label proportion (Test set) ===")
     for c in classes_sorted:
         logger.record(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
 
+    # 【修复3】恢复混淆矩阵保存
     cm = confusion_matrix(yt_true, yt_pred, labels=classes)
     pd.DataFrame(
         cm, index=[f"true_{c}" for c in classes], columns=[f"pred_{c}" for c in classes]
-    ).to_csv(os.path.join(common.TEMPORARY_DIR, "confmat_cnn.csv"), index=True)
+    ).to_csv(os.path.join(train_cfg.save_dir, "confmat_cnn.csv"), index=True)
     logger.info("Saved confusion matrix -> confmat_cnn.csv")
 
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "classes": classes.tolist(),
-            "channel": channel,
-            "window": T,
-            "feature_cols": feat_cols,
-            "label_col": args.label_col,
-        },
-        os.path.join(common.TEMPORARY_DIR, "torch_model_train_info.pt"),
-    )
+    torch.save({
+        "state_dict": model.state_dict(),
+        "classes": classes.tolist(),
+        "channel": full_ds.feature_count,
+        "window": data_cfg.window,
+        "feature_cols": full_ds.feature_names,
+        "label_col": data_cfg.label_col,
+    }, os.path.join(train_cfg.save_dir, "torch_model_train_info.pt"))
 
     # ===== 保存 meta（模型自描述）=====
     meta = model.export_meta(
-        feature_cols=feat_cols,
-        label_col=args.label_col,
+        feature_cols=full_ds.feature_names,
+        label_col=data_cfg.label_col,
         classes=classes.tolist(),
-        window=T,
+        window=data_cfg.window,
     )
 
     with open(os.path.join(common.TEMPORARY_DIR, "torch_model_train_meta.json"), "w", encoding="utf-8") as f:
@@ -408,6 +315,79 @@ def main():
     logger.info("Saved model -> torch_model_train_info.pt")
     logger.info("Saved meta  -> torch_model_train_meta.json")
 
+# ==============================================================================
+# 4. 辅助函数
+# ==============================================================================
+
+def set_seed(seed):
+    import random
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
+
+def chrono_split_by_window_ends(M, tr_r, va_r):
+    n_tr = int(M * tr_r); n_va = int(M * va_r)
+    return (0, n_tr), (n_tr, n_tr + n_va), (n_tr + n_va, M)
+
+class SeqDataset(Dataset):
+    def __init__(self, X, y): self.X=torch.from_numpy(X); self.y=torch.from_numpy(y)
+    def __len__(self): return self.X.shape[0]
+    def __getitem__(self, i): return self.X[i], self.y[i]
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        self.register_buffer('alpha', alpha) 
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        if self.alpha is not None: alpha_t = self.alpha[targets]; focal_loss = alpha_t * focal_loss
+        if self.reduction == 'mean': return focal_loss.mean()
+        elif self.reduction == 'sum': return focal_loss.sum()
+        else: return focal_loss
+
+import torch.nn.functional as F
+
+@torch.no_grad()
+def eval_epoch(model, loader, device, criterion):
+    model.eval()
+    tl, yt, yp = 0.0, [], []
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device)
+        logits = model(xb)
+        tl += criterion(logits, yb).item() * xb.size(0)
+        yp.append(logits.argmax(1).cpu().numpy())
+        yt.append(yb.cpu().numpy())
+    if not yt: return float("nan"), np.array([]), np.array([])
+    return tl/len(loader.dataset), np.concatenate(yt), np.concatenate(yp)
+
+def main():
+    # 示例：直接在这里配置参数，取代了命令行参数
+    
+    # 1. 数据配置
+    d_cfg = DataConfig(
+        batch_size=128
+    )
+    
+    # 2. 训练配置
+    t_cfg = TrainConfig(
+        epochs=4,
+        lr=3e-4
+    )
+    
+    # 3. 模型配置 (在此处切换模型)
+    # m_cfg = ModelConfigFactory.get_default_config("transformer")
+    # m_cfg.d_model = 128
+    
+    m_cfg = ModelConfigFactory.get_default_config("lstm")
+    
+    print(f"Training {m_cfg.model_type}...")
+    run_training(d_cfg, t_cfg, m_cfg)
+# ==============================================================================
+# 5. 调用入口 (Main Entry)
+# ==============================================================================
 
 if __name__ == "__main__":
     main()

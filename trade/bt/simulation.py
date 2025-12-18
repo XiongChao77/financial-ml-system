@@ -80,18 +80,33 @@ def main():
         # 初始化处理类
         handler = model_loader.ModelHandler()
         # 执行预测，获取结果和指标
-        df_with_pred, model_stats = handler.predict(df)#, min_thresh= 0.3)
+        df_with_pred, model_stats = handler.predict(df, is_live = False)#, min_thresh= 0.3)
+        # exit()
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()
         # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
-        df_with_pred = df_with_pred.dropna(subset=["pred"]).copy()
+        # 2. 【核心修改】：寻找第一个有效预测的索引
+        # 这样可以跳过最开始特征还没算出来的“预热期”
+        # 但会保留中间因为时间不连续产生的 NaN “空洞”
+        if True:
+            df_with_pred = df_with_pred.dropna(subset=["pred"]).copy()
+        else:
+            irst_valid_idx = df_with_pred['pred'].first_valid_index()
+
+            if first_valid_idx is not None:
+                # 从第一个信号开始，保留后续所有行（包含中间的 NaN）
+                df_with_pred = df_with_pred.loc[first_valid_idx:].copy()
+                logger.record(f"Backtest starts from first signal at {df_with_pred.index[0]}")
+            else:
+                logger.error("No valid predictions found in the entire dataset!")
+                sys.exit(1)
 
         # B. 【关键修改】调用封装函数计算动态阈值
         # 这会自动在 df_with_pred 中生成 'threshold' 和 'stop_threshold' 两列
         # 且使用的参数 (VOL_MULTIPLIER 等) 默认与 common.py 中定义的训练参数完全一致
         df_with_pred = calculate_thresholds(df_with_pred)
 
-        # C. 过滤无效数据 (过滤掉 pred 为空 或 阈值为 NaN 的行)
+        # 不过滤，保持与实盘一致
         df_with_pred = df_with_pred.dropna(subset=["pred", "threshold", "stop_threshold"]).copy()
 
         logger.record(
