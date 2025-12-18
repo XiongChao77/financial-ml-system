@@ -8,7 +8,7 @@ from trade.bt import simulation
 def main():
     begin_time = time.time()
     preparation_start_time = begin_time
-    # preparation.main()
+    preparation.main()
     train_start_time = time.time()
     train.main()
     simulation_start_time = time.time()
