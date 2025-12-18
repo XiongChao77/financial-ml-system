@@ -8,7 +8,8 @@ from model.models.model_base import BaseTimeSeriesModel
 from model.models.lstm import LSTM1D_V1          
 from model.models.lstm_v2 import LSTM1D_V2      # V2
 from model.models.lstm_v3 import LSTM1D_V3      # V3  > V1 > V2
-from model.models.lstm_v4 import LSTM1D_V4      # 
+from model.models.lstm_v4 import LSTM1D_V4      #
+from model.models.conv_lstm_v1 import ConvLSTM1D_V1
 from model.models.cnn import CNN1D_V1
 from model.models.transformer_v1 import Transformer1D_V1
 from model.models.transformer_v2 import Transformer1D_V2
@@ -30,8 +31,9 @@ class ModelFactory:
     model_list = [
         LSTM1D_V1,
         LSTM1D_V2,
-        LSTM1D_V3,
-        LSTM1D_V4,
+        LSTM1D_V3,  #good
+        LSTM1D_V4,  #good
+        ConvLSTM1D_V1,
         CNN1D_V1,
         Transformer1D_V1,
         Transformer1D_V2,

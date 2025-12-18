@@ -201,7 +201,7 @@ def float_range(start, end, step):
 FEATURE_CONFIG:list[FeatureBase] = [
     FeatureMACD(fast=12, slow=26, signal=9),
     FeatureMA(weeks=[7,25], days=[5, 10, 20], bars = [], method='sma', strict=True, add_slope = False, slope_method='reg', slope_weeks= 2),
-    FeatureRsi(period=14, price_col='close', strict=True, prefix='RSI'),
+    # FeatureRsi(period=14, price_col='close', strict=True, prefix='RSI'),
     FeatureKdj(n=9, m1=3, m2=3, high_col='high', low_col='low',  close_col='close', strict=True, prefix='KDJ'),
     FeatureVolMa(vol_ma_windows = (5, 10, 20)),
     FeatureQavMa(vol_ma_windows = (5, 10, 20)),

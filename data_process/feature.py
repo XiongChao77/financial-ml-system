@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import os
 
-EPS = 1e-6 # 防止除以 0
+EPS = 1e-6 # 防止除以 0. 1e-6比-e-9更好，尽量用可用的较大值，减少数据爆炸
 
 #All features should be based on this
 class FeatureBase(ABC):
@@ -288,13 +288,14 @@ class FeatureRsi(FeatureBase):
         self.price_col = kwargs.get('price_col', 'close')
         self.strict = kwargs.get('strict', True)# 严格型：窗口未满为 NaN；宽松型：尽早给值
         self.prefix = kwargs.get('prefix', "RSI")
+        self.features = [f"{self.prefix}_{self.period}"]
     def generate(self,df:pd.DataFrame):
         """
         Wilder 风格 RSI（使用 EWM, alpha=1/period）
         输出列：{prefix}_{period}
         """
 
-        out = df.copy()
+        out = df
         close = out[self.price_col].astype(float)
 
         delta = close.diff()
@@ -317,7 +318,6 @@ class FeatureRsi(FeatureBase):
         if self.strict:
             valid = close.expanding().count() >= self.period
             out[col] = out[col].where(valid, np.nan)
-        self.features = [col]
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         """
         RSI 范围 [0, 100]。

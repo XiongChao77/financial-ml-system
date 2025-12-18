@@ -17,104 +17,157 @@ LOW_CORRELATION_FEATURES = ['number_of_trades','quote_asset_volume', 'taker_buy_
 # ====================================================================
 class TimeSeriesWindowDataset(Dataset):
     def __init__(
-        self, 
-        df: pd.DataFrame, 
-        feature_cols: List[str], 
-        label_col: str = None, 
-        window: int = CANDLESTICK_NUM
+            self,
+            df: pd.DataFrame,
+            feature_cols: List[str],
+            label_col: str = None,
+            window: int = CANDLESTICK_NUM,
+            is_live: bool = False,
     ):
-        # === 过滤逻辑：必须在提取 values 之前执行 ===
+        self.is_live = is_live
+        time_col = 'open_time_ms_utc'
+        
+        # 1. 基础检查
+        if time_col not in df.columns:
+            raise ValueError(f"Dataset 必须包含 '{time_col}' 列以进行时间连续性检查！")
+
+        # 2. 列准备
         clean_feature_cols = [col for col in feature_cols if col not in DROP_FEATURES]
         self.feature_names = clean_feature_cols
         self.feature_count = len(clean_feature_cols)
-        
+
+        cols_to_extract = list(clean_feature_cols)
         has_label = (label_col is not None) and (label_col in df.columns)
-        # === 3. 构建提取列列表 ===
-        cols_to_extract = clean_feature_cols.copy()
-        if has_label:
-            cols_to_extract.append(label_col)
-        # === 【修复 1】: 彻底清洗 NaN ===
-        # 这一步至关重要！任何技术指标产生的 NaN 都会导致训练崩溃
-        df_clean = df[cols_to_extract].copy()
-        
-        # 检查是否有 NaN
-        nan_rows = df_clean[df_clean.isnull().any(axis=1)]
+        if has_label: cols_to_extract.append(label_col)
+        if time_col not in cols_to_extract: cols_to_extract.append(time_col)
 
-        if not nan_rows.empty:
-            print(f"Warning: Found {nan_rows.shape[0]} rows containing NaNs (Total NaNs: {df_clean.isnull().sum().sum()}).")
-            
-            # 【新增调试输出】打印前 5 行和后 5 行包含 NaN 的数据，或只打印后 10 行。
-            # 这里选择打印后 10 行，因为技术指标的 NaN 通常出现在时间序列的前端。
-            # print("\n--- Last 10 rows containing NaNs before dropping ---")
-            # print(nan_rows.tail(10).to_string())
-            # print("----------------------------------------------------\n")
-            
-            df_clean.dropna(inplace=True)
-            df_clean.reset_index(drop=True, inplace=True)
-            print(f"--- Data Length after Drop: {len(df_clean)}---")
-            if df_clean.empty:
-                 raise RuntimeError("Dataset became empty after dropping NaNs. Check TA windows.")
-
-        values = df_clean[clean_feature_cols].to_numpy(dtype=np.float32, copy=True)   # [N, F]
-        if has_label:
-            labels = df_clean[label_col].astype(int).to_numpy()
-        else:
-            # 如果没有标签，生成全 0 的伪标签，长度与 values 一致
-            # 这样 DataLoader 可以正常工作，但取出的 y 是无意义的
-            labels = np.zeros(len(df_clean), dtype=int)
-        # === 过滤逻辑结束 ===
+        # 3. 统一清洗 (仅保留一份 df_work 节省内存)
+        df_work = df[cols_to_extract].copy()
         
-        # 1. 划分窗口 (Partitioning)
+        # 回测模式下记录原始索引映射
+        if not self.is_live:
+            df_work['orig_index'] = df.index
+        
+        df_work.dropna(inplace=True)
+        df_work.reset_index(drop=True, inplace=True)
+        print(f"--- Data Length after Drop: {len(df_work)}---")
+        if df_work.empty:
+            raise RuntimeError("Dataset became empty after dropping NaNs.")
+
+        # 4. 提取基础 array
+        values = df_work[clean_feature_cols].to_numpy(dtype=np.float32)
+        timestamps = df_work[time_col].to_numpy(dtype=np.int64)
+
+        # 5. 窗口化
         X3d = _as_strided_windows(values, window) # [M, T, F]
-        y_all = labels[window-1:]
-        
-        feature_factory = FeatureFactory(FEATURE_CONFIG)
-        feature_factory.normalize(X3d , clean_feature_cols)
-        FeatureOrigin().normalize(X3d , clean_feature_cols, feature_factory)
+        time_windows = _as_strided_windows(timestamps.reshape(-1, 1), window).squeeze(-1)
 
-        # 3. 转换为 PyTorch Tensor
-        self.X = torch.from_numpy(X3d)
-        self.y = torch.from_numpy(y_all)
+        assert X3d.shape[0] == time_windows.shape[0], "特征与时间窗口不一致！"
+
+        if False:
+            # 6. 连续性检查逻辑
+            global_diffs = np.diff(timestamps)
+            expected_interval = np.median(global_diffs) if len(global_diffs) > 0 else 0
+            
+            # A. 全局检查 (Window内缺失 <= 5)
+            global_actual_span = time_windows[:, -1] - time_windows[:, 0]
+            global_ideal_span = (window - 1) * expected_interval
+            mask_global = ((global_actual_span - global_ideal_span) / (expected_interval + 1e-9)) <= 5.1
+
+            # B. 尾部检查 (末端10个缺失 <= 2)
+            check_tail_count = 10
+            if window > check_tail_count:
+                tail_actual_span = time_windows[:, -1] - time_windows[:, -(check_tail_count + 1)]
+                tail_ideal_span = check_tail_count * expected_interval
+                mask_tail = ((tail_actual_span - tail_ideal_span) / (expected_interval + 1e-9)) <= 2.1
+            else:
+                mask_tail = True
+
+            valid_mask = mask_global & mask_tail
+        else:
+                    # === 回退逻辑 ===
+                    # 创建一个全为 True 的掩码，即保留所有窗口
+                    valid_mask = np.ones(len(X3d), dtype=bool)
+                    print("⚠️ [Continuity] Check SKIPPED (check_continuity=False). All windows kept.")
+        # 7. 【关键步骤】：执行统一过滤
+        original_count = len(X3d)
+        X3d_filtered = X3d[valid_mask]
+        
+        # 处理标签
+        labels = df_work[label_col].values[window-1:] if has_label else np.zeros(original_count)
+        y_filtered = labels[valid_mask]
+
+        # 处理索引映射
+        if not self.is_live:
+            all_window_indices = df_work['orig_index'].values[window-1:]
+            self.indices = all_window_indices[valid_mask]
+        else:
+            self.indices = None
+
+        # 打印过滤信息
+        dropped = original_count - len(X3d_filtered)
+        if dropped > 0:
+            print(f"⚠️ [Continuity] Dropped {dropped} windows. Remaining: {len(X3d_filtered)} ({len(X3d_filtered)/original_count:.2%})")
+        # 【新增：安全性检查】
+        if len(X3d_filtered) == 0:
+            raise RuntimeError("经过时间连续性检查后，没有任何窗口活下来！请检查数据质量。")
+        # 8. 归一化 (在过滤后的数据上执行)
+        feature_factory = FeatureFactory(FEATURE_CONFIG)
+        feature_factory.normalize(X3d_filtered, clean_feature_cols)
+        FeatureOrigin().normalize(X3d_filtered, clean_feature_cols, feature_factory)
+
+        # 9. 最终赋值给 Tensor
+        self.X = torch.from_numpy(X3d_filtered)
+        self.y = torch.from_numpy(y_filtered).long() # 确保标签是 long 类型
 
     def __len__(self): return self.X.shape[0]
     def __getitem__(self, i): return self.X[i], self.y[i]
 
-    # ========== 【新增】 保存处理后数据的方法 ==========
-    def save_debug_data(self, output_dir: str):
+# ========== 【修改】 增加 save_file 参数控制是否落盘 ==========
+    def save_debug_data(self, output_dir: str, save_file: bool = True):
         """
-        将处理后的 Tensor 数据保存到文件，用于检查归一化结果。
-        1. debug_full_tensor.pt: 完整的 (M, T, F) 数据
-        2. debug_snapshot_last_step.csv: 每个窗口最后一个时间步的数据 (M, F) -> 最直观，用来查错
+        检查并保存处理后的数据。
+        
+        Args:
+            output_dir (str): 输出目录路径
+            save_file (bool): 如果为 True，则保存 .pt 和 .csv 文件；
+                              如果为 False，仅在控制台打印统计信息 (用于快速 Debug)。
         """
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-
-        print(f"\n[Debug] Saving processed data to {output_dir} ...")
-
-        # 1. 保存完整的 Tensor 数据
-        torch.save({
-            "X": self.X,
-            "y": self.y,
-            "features": self.feature_names
-        }, os.path.join(output_dir, "debug_full_tensor.pt"))
-
-        # 2. 生成人类可读的 CSV (取每个窗口的最后一帧 t = window-1)
-        # 这代表了模型在做预测那个时刻看到的“归一化后”特征值
+        # 0. 预先提取最后一帧数据 (用于后续的保存或统计)
         # 形状变换: [M, T, F] -> [M, F] (取 T的最后一个索引)
         last_step_data = self.X[:, -1, :].numpy()
-        
-        df_debug = pd.DataFrame(last_step_data, columns=self.feature_names)
-        df_debug["label"] = self.y.numpy()
-        
-        csv_path = os.path.join(output_dir, "debug_snapshot_last_step.csv")
-        # **【关键修复】** 使用 float_format 确保输出足够的精度，避免 CSV 写入问题
-        df_debug.to_csv(csv_path, index_label="window_idx", float_format='%.6f')
-        
-        print(f"[Debug] Snapshot CSV saved: {csv_path}")
-        print(f"[Debug] Check this CSV to verify if values are in range [-3, 3] (approx).")
-        
+
+        # --- A. 文件保存逻辑 (仅当 save_file=True 时执行) ---
+        if save_file:
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            print(f"\n[Debug] Saving processed data to {output_dir} ...")
+
+            # 1. 保存完整的 Tensor 数据
+            torch.save({
+                "X": self.X,
+                "y": self.y,
+                "features": self.feature_names
+            }, os.path.join(output_dir, "debug_full_tensor.pt"))
+
+            # 2. 生成人类可读的 CSV
+            df_debug = pd.DataFrame(last_step_data, columns=self.feature_names)
+            df_debug["label"] = self.y.numpy()
+            
+            csv_path = os.path.join(output_dir, "debug_snapshot_last_step.csv")
+            # 使用 float_format 确保精度
+            df_debug.to_csv(csv_path, index_label="window_idx", float_format='%.6f')
+            
+            print(f"[Debug] Snapshot CSV saved: {csv_path}")
+            print(f"[Debug] Check this CSV to verify if values are in range [-3, 3] (approx).")
+        else:
+            print(f"\n[Debug] Skip saving files (save_file=False). Showing statistics only...")
+
+        # --- B. 统计检查逻辑 (始终执行) ---
         # 3. 简单统计检查 (直接打印到控制台)
         print("\n=== Data Statistics Check (Last Step) ===")
+        
         # 检查是否有 NaN
         nan_count = np.isnan(last_step_data).sum()
         print(f"Total NaNs in processed data: {nan_count}")
@@ -125,10 +178,11 @@ class TimeSeriesWindowDataset(Dataset):
         print(f"{'Feature':<25} | {'Mean':<10} | {'Std':<10} | {'Min':<10} | {'Max':<10}")
         print("-" * 75)
         for i, col in enumerate(self.feature_names):
-            # # 为了不刷屏，只打印前10个特征
-            # if i >= 10: 
-            #     print(f"... and {len(self.feature_names) - 10} more features")
+            # 防止特征太多刷屏
+            # if i >= 20: 
+            #     print(f"... and {len(self.feature_names) - 20} more features")
             #     break
+            
             col_data = last_step_data[:, i]
             print(f"{col:<25} | {col_data.mean():.4f}     | {col_data.std():.4f}     | {col_data.min():.4f}     | {col_data.max():.4f}")
         print("=========================================\n")
