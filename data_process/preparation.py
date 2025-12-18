@@ -13,9 +13,12 @@ def main():
     # 适用于实盘模拟（最新的数据更有价值）
     # start_idx = len(df) // 3
     # df = df.iloc[start_idx:].reset_index(drop=True)
-
+    # compare_labeling_quality(df)
+    # exit()
     attach_attr(df)
-    attach_label(df)
+    # attach_label(df)
+    attach_label_v2(df)
+    
     # ---------------- 统计输出 ----------------
     counts = df['label'].value_counts().sort_index()
     proportions = df['label'].value_counts(normalize=True).sort_index()

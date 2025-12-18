@@ -41,10 +41,10 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
-    epochs: int = 4
+    epochs: int = 5
     lr: float = 3e-4
     weight_decay: float = 1e-4
-    patience: int = 20
+    patience: int = 5
     seed: int = 42
     save_dir: str = common.TEMPORARY_DIR
 
@@ -52,24 +52,24 @@ class TrainConfig:
 class LSTMConfig:
     model_type: str = "lstm"
     model_version: int = 4
-    hidden_size: int = 80
+    hidden_size: int = 64
     num_layers: int = 2
-    bidirectional: bool = False
-    lstm_dropout: float = 0.3
+    bidirectional: bool = True
+    lstm_dropout: float = 0.5
     head_dropout: float = 0.2
     p_drop: float = 0.3
     readout: str = ['last' , 'meanmax' , 'attn', 'mix'][1]
     head: str = ['linear' , 'mlp'][1]
-    in_locked_p: float = 0.0               # V4 locked dropout on inputs
-    out_locked_p: float = 0.0              # V4 locked dropout on LSTM outputs (before pooling)
+    in_locked_p: float = 0.05               # V4 locked dropout on inputs
+    out_locked_p: float = 0.05              # V4 locked dropout on LSTM outputs (before pooling)
     input_norm: bool = True                # V4 LayerNorm on input features
-    input_proj_dim: int | None = None      # V4 optional projection before LSTM
+    input_proj_dim: int | None = None      # V4 optional projection before LSTM.一个可选的线性层，将原始特征维度（如 48）映射到一个新的维度 $D$ 后再送入.降维
     logit_clip: float | None = None        # V4 
 
 @dataclass
 class TransformerConfig:
     model_type: str = "transformer"
-    model_version: int = 1
+    model_version: int = 2
     d_model: int = 128
     nhead: int = 8
     num_layers: int = 4
@@ -160,6 +160,8 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
     full_ds = TimeSeriesWindowDataset(
         df=df, feature_cols=feature_cols, label_col=data_cfg.label_col, window=data_cfg.window
     )
+    logger.info(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):")
+    logger.info(f"{full_ds.feature_names}")
     # ========== 【新增】调用保存 Debug 数据 ==========
     # 保存目录设置在 exported_project_files/model/debug_data 下
     if False:
@@ -227,6 +229,7 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
 
     # 6. 训练准备
     criterion = FocalLoss(alpha=class_weights, gamma=2.0).to(device)
+    # criterion = FocalLoss(alpha=None, gamma=2.0).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=4)
 
@@ -367,22 +370,19 @@ def main():
     # 示例：直接在这里配置参数，取代了命令行参数
     
     # 1. 数据配置
-    d_cfg = DataConfig(
-        batch_size=128
-    )
+    d_cfg = DataConfig()
     
     # 2. 训练配置
-    t_cfg = TrainConfig(
-        epochs=4,
-        lr=3e-4
-    )
+    t_cfg = TrainConfig()
     
     # 3. 模型配置 (在此处切换模型)
     # m_cfg = ModelConfigFactory.get_default_config("transformer")
     # m_cfg.d_model = 128
     
-    m_cfg = ModelConfigFactory.get_default_config("lstm")
-    
+    # m_cfg = ModelConfigFactory.get_default_config("transformer")
+    m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig()][0]
+    m_cfg.model_version = 3
+
     print(f"Training {m_cfg.model_type}...")
     run_training(d_cfg, t_cfg, m_cfg)
 # ==============================================================================

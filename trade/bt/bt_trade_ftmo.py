@@ -109,6 +109,7 @@ class FtmoStrategy(BtExecutor):
                  f'滑点: {slippage:.4f}')
 
     def stop(self):
+        self.brain.stop()
         value = self.broker.getvalue()
         self.logger.record(f"Start Value: {self.broker.startingcash:2f} | End Value: {value:.2f}")
         # UI
@@ -120,8 +121,8 @@ class FtmoStrategy(BtExecutor):
         pred_prob = self.data.pred_prob[0]
 
         # 1. 数据有效性检查
-        if np.isnan(pred) or np.isnan(pred_prob):
-            return
+        current_signal = Signal.INVALID if np.isnan(pred) else Signal(int(pred))
+        current_prob = 0.0 if np.isnan(pred_prob) else float(pred_prob)
 
         self.dir = PositionDir.FLAT
         if not self.position:   #sync with stopprice
@@ -136,8 +137,8 @@ class FtmoStrategy(BtExecutor):
 
         state = MarketState(
             price=self.data.close[0],
-            signal=Signal(pred),
-            pred_prob=float(pred_prob),
+            signal=current_signal,
+            pred_prob=float(current_prob),
             position_dir=self.dir,
             layers=self.layers,
         )

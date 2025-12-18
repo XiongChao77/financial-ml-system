@@ -64,7 +64,7 @@ class TimeSeriesWindowDataset(Dataset):
 
         assert X3d.shape[0] == time_windows.shape[0], "特征与时间窗口不一致！"
 
-        if False:
+        if True:
             # 6. 连续性检查逻辑
             global_diffs = np.diff(timestamps)
             expected_interval = np.median(global_diffs) if len(global_diffs) > 0 else 0
@@ -89,28 +89,38 @@ class TimeSeriesWindowDataset(Dataset):
                     # 创建一个全为 True 的掩码，即保留所有窗口
                     valid_mask = np.ones(len(X3d), dtype=bool)
                     print("⚠️ [Continuity] Check SKIPPED (check_continuity=False). All windows kept.")
-        # 7. 【关键步骤】：执行统一过滤
+        # 7. 【核心修改】：执行统一过滤 (输入连续性 + 标签有效性)
         original_count = len(X3d)
-        X3d_filtered = X3d[valid_mask]
         
-        # 处理标签
-        labels = df_work[label_col].values[window-1:] if has_label else np.zeros(original_count)
-        y_filtered = labels[valid_mask]
+        # 先获取所有窗口对应的原始标签
+        # (df_work 已经 reset_index 了，所以 window-1: 正好对应窗口最后一根)
+        labels_all = df_work[label_col].values[window-1:] if has_label else np.zeros(original_count)
+        
+        if has_label:
+            # 创建标签有效性掩码：只有不等于 -1 的才是有效的
+            label_valid_mask = (labels_all != -1)
+            # 最终掩码 = 输入连续 & 标签有效
+            final_mask = valid_mask & label_valid_mask
+        else:
+            final_mask = valid_mask
 
-        # 处理索引映射
+        # 执行物理过滤
+        X3d_filtered = X3d[final_mask]
+        y_filtered = labels_all[final_mask]
+
+        # 处理索引映射 (用于 predict_v2 的精准回填)
         if not self.is_live:
             all_window_indices = df_work['orig_index'].values[window-1:]
-            self.indices = all_window_indices[valid_mask]
+            self.indices = all_window_indices[final_mask]
         else:
             self.indices = None
 
-        # 打印过滤信息
+        # 打印过滤信息，让我们知道丢了多少“断层”数据
         dropped = original_count - len(X3d_filtered)
         if dropped > 0:
-            print(f"⚠️ [Continuity] Dropped {dropped} windows. Remaining: {len(X3d_filtered)} ({len(X3d_filtered)/original_count:.2%})")
-        # 【新增：安全性检查】
-        if len(X3d_filtered) == 0:
-            raise RuntimeError("经过时间连续性检查后，没有任何窗口活下来！请检查数据质量。")
+            print(f"⚠️ [Dataset] Dropped {dropped} samples (Incomplete windows or Invalid labels).")
+            print(f"📊 Remaining: {len(X3d_filtered)} ({len(X3d_filtered)/original_count:.2%})")
+            
         # 8. 归一化 (在过滤后的数据上执行)
         feature_factory = FeatureFactory(FEATURE_CONFIG)
         feature_factory.normalize(X3d_filtered, clean_feature_cols)
