@@ -88,18 +88,15 @@ def main():
         # 2. 【核心修改】：寻找第一个有效预测的索引
         # 这样可以跳过最开始特征还没算出来的“预热期”
         # 但会保留中间因为时间不连续产生的 NaN “空洞”
-        if True:
-            df_with_pred = df_with_pred.dropna(subset=["pred"]).copy()
-        else:
-            irst_valid_idx = df_with_pred['pred'].first_valid_index()
+        first_valid_idx = df_with_pred['pred'].first_valid_index()
 
-            if first_valid_idx is not None:
-                # 从第一个信号开始，保留后续所有行（包含中间的 NaN）
-                df_with_pred = df_with_pred.loc[first_valid_idx:].copy()
-                logger.record(f"Backtest starts from first signal at {df_with_pred.index[0]}")
-            else:
-                logger.error("No valid predictions found in the entire dataset!")
-                sys.exit(1)
+        if first_valid_idx is not None:
+            # 从第一个信号开始，保留后续所有行（包含中间的 NaN）
+            df_with_pred = df_with_pred.loc[first_valid_idx:].copy()
+            logger.record(f"Backtest starts from first signal at {df_with_pred.index[0]}")
+        else:
+            logger.error("No valid predictions found in the entire dataset!")
+            sys.exit(1)
 
         # B. 【关键修改】调用封装函数计算动态阈值
         # 这会自动在 df_with_pred 中生成 'threshold' 和 'stop_threshold' 两列
@@ -107,7 +104,7 @@ def main():
         df_with_pred = calculate_thresholds(df_with_pred)
 
         # 不过滤，保持与实盘一致
-        df_with_pred = df_with_pred.dropna(subset=["pred", "threshold", "stop_threshold"]).copy()
+        # df_with_pred = df_with_pred.dropna(subset=["pred", "threshold", "stop_threshold"]).copy()
 
         logger.record(
             f"Backtest range: {df_with_pred['open_time_date_utc'].min()} to {df_with_pred['open_time_date_utc'].max()}"
