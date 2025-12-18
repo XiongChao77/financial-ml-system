@@ -8,12 +8,13 @@ from data_process.feature import *
 from data_process.logger    import setup_logger,setup_session_logger
 
 class Signal(IntEnum):
+    INVALID = -1
     SHORT = 0
     NEUTRAL = 1
     LONG = 2
 
 #define model
-CANDLESTICK_NUM = 136
+CANDLESTICK_NUM = 120
 PREDICT_NUM = 16
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
@@ -23,10 +24,10 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-VOL_MULTIPLIER = 0.6
+VOL_MULTIPLIER = 0.9
 # 最小硬阈值 (覆盖手续费+滑点)
-MIN_THRESHOLD = 0.008  # 0.25%
-STOP_MULTIPLIER_RATE = 0.5
+MIN_THRESHOLD = 0.01  # 0.25%
+STOP_MULTIPLIER_RATE = 0.4
 # label_decrease_weak =1 
 # label_increase_weak = 3
 model_train_rate = 0.8
@@ -35,11 +36,12 @@ PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR)
 TEMPORARY_DIR = os.path.join(PROJECT_DIR , 'output')
 PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency')
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "BTCUSDT_15m.csv")
+# origin_data_path = os.path.join(PROJECT_DATA_DIR, "BTCUSDT_15m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "BTCUSDT_5m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "ETHUSDT_15m.csv")
-# origin_data_path = os.path.join(PROJECT_DATA_DIR, "ETHUSDT_5m.csv")
+origin_data_path = os.path.join(PROJECT_DATA_DIR, "ETHUSDT_5m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "ETHUSDT_1m.csv")
-origin_data_path = os.path.join(PROJECT_DATA_DIR, "ETHUSDT_3m.csv")
+# origin_data_path = os.path.join(PROJECT_DATA_DIR, "ETHUSDT_3m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "BNBUSDT_15m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "DOGEUSDT_15m.csv")
 # origin_data_path = os.path.join(PROJECT_DATA_DIR, "DOGEUSDT_5m.csv")
@@ -47,6 +49,45 @@ DATA_PROCESS_OUT_DIR = os.path.join(DATA_PROCESS_DIR, 'output')
 train_data_path = os.path.join(TEMPORARY_DIR, "train_data.csv")
 test_data_path  = os.path.join(TEMPORARY_DIR, "test_data.csv")
 log_level = logging.INFO
+
+FEATURE_CONFIG: list[FeatureBase] = [
+    # 【动量趋势】通过快慢均线差值捕捉价格运行的速度与拐点
+    FeatureMACD(fast=12, slow=26, signal=9),
+    
+    # 【多维均线】构建基于K线根数、天数、周数的多尺度价格支撑/压力位锚点
+    FeatureMA(weeks=[7,25], days=[5, 10, 20], bars=[], method='sma', strict=True),
+    # 【均价基准】计算特定窗口内成交量加权平均价，提供比收盘价更稳定的价值中轴
+    FeatureWAP(vwap_windows=(20, 48, 96)),  #VWAP vs SMA
+    
+    # 【超买超卖】衡量近期涨跌幅的相对强弱，判断价格是否偏离统计均值过远
+    # FeatureRsi(period=14, price_col='close', strict=True, prefix='RSI'),
+    
+    # 【灵敏摆动】结合最高/最低价在窗口内的相对位置，捕捉极短期的价格反转动能
+    FeatureKdj(n=9, m1=3, m2=3, high_col='high', low_col='low', close_col='close', strict=True),
+    
+    # 【量能活跃】对比当前成交量与历史均值，识别市场参与度的爆发或萎缩
+    FeatureVolMa(vol_ma_windows=(5, 10, 20)),
+    
+    # 【资金额热度】从成交金额（Quote Asset）维度观察市场热度，补充单纯量能的不足
+    # FeatureQavMa(vol_ma_windows=(5, 10, 20)),   #VolMa vs QavMa 二选一
+    
+    # 【累积能量】通过价格涨跌方向累加成交量，观察资金的长线流入流出趋势
+    # FeatureOBV(),
+    # 【价量强度】根据价格变化百分比加权成交量，更细腻地衡量价量配合的紧密度
+    FeaturePVT(),   #OBV/PVT 二选一
+    
+    # 【资金流向】利用收盘价在极值间的相对位置衡量主动买/卖盘的净流量
+    FeatureCFM(cmf_window=20),
+    
+    # 【资金指数】结合典型价(TP)与成交量，判断资金在当前周期内的真实驱动力
+    FeatureMFI(mfi_window=14),  #MFI vs RSI 二选一
+    
+    # 【交易力度】统计平均每笔成交的量能（ATS），区分散户行为与机构大单活动
+    FeatureATS(),
+    
+    # 【微观结构】解构单根K线的实体、影线比例及跳空，捕捉最细微的多空博弈痕迹
+    FeatureCandle(),
+]
 
 def attach_attr(df):
     # 1. 基础处理
@@ -125,6 +166,161 @@ def attach_label(df,
         
     return df
 
+def attach_label_v2(df, 
+                    candlestick_num=CANDLESTICK_NUM, 
+                    predict_num=PREDICT_NUM, 
+                    vol_multiplier=VOL_MULTIPLIER,
+                    stop_multiplier_rate=STOP_MULTIPLIER_RATE,
+                    min_threshold=MIN_THRESHOLD):
+    # 0. 基础检查
+    time_col = 'open_time_ms_utc'
+    assert all(c in df.columns for c in ['close', 'high', 'low', time_col]), "数据缺少 OHLC 或时间戳"
+    
+    # 1. 计算标准时间步长和目标时间跨度
+    time_values = df[time_col].values
+    time_diffs = np.diff(time_values)
+    expected_interval = np.median(time_diffs[time_diffs > 0])
+    target_timespan = predict_num * expected_interval
+    
+    # 2. 计算动态阈值 (保持你原有的逻辑)
+    df = calculate_thresholds(df, candlestick_num, predict_num, vol_multiplier, stop_multiplier_rate, min_threshold)
+
+    # ==============================================================================
+    # 3. 【核心进化】：物理时间锚定搜索
+    # ==============================================================================
+    # 我们要找每一行对应的：当前时间 + target_timespan
+    target_times = time_values + target_timespan
+    
+    # 使用 searchsorted 找到“最接近或刚刚超过”目标时间的索引
+    # side='left' 确保我们找到的是物理时间上 >= 目标时间的第一个点
+    target_indices = np.searchsorted(time_values, target_times, side='left')
+    
+    # 边界处理：超过长度的设为无效
+    invalid_mask = target_indices >= len(df)
+    target_indices[invalid_mask] = 0 # 临时占位，稍后用 mask 过滤
+    
+    # 验证找到的 K 线与目标时间的偏差 (容忍度 0.5 个周期)
+    actual_found_times = time_values[target_indices]
+    time_gap = np.abs(actual_found_times - target_times)
+    time_valid_mask = (~invalid_mask) & (time_gap < (expected_interval * 0.5))
+
+    # 4. 获取物理对齐的未来价格
+    # 即使在第 14 行，只要时间戳对，我们就取它的 close
+    future_close = np.where(time_valid_mask, df['close'].values[target_indices], np.nan)
+    pct_final = (future_close - df['close']) / df['close']
+
+    # 5. 路径依赖检查 (止损检查)
+    # 虽然你提到行号会偏，但在断层不严重的情况下，
+    # 物理后 16 行的 rolling 依然是捕捉“这段时间内是否爆仓”的最快方式。
+    # 严谨起见，我们依然使用原本的 rolling，但最终标签由 time_valid_mask 守护。
+    future_low_min = df['low'].rolling(window=predict_num).min().shift(-predict_num)
+    future_high_max = df['high'].rolling(window=predict_num).max().shift(-predict_num)
+    
+    max_drawdown = (future_low_min - df['close']) / df['close']
+    max_runup = (future_high_max - df['close']) / df['close']
+
+    # 6. 打标签逻辑
+    # -------------------------------------------------------------------------
+    # 条件 1: 时间必须对齐 (没有掉进时空裂缝)
+    # 条件 2: 满足涨跌幅和止损限制
+    cond_long = time_valid_mask & \
+                (pct_final > df['threshold']) & \
+                (max_drawdown > -df['stop_threshold'])
+
+    cond_short = time_valid_mask & \
+                 (pct_final < -df['threshold']) & \
+                 (max_runup < df['stop_threshold'])
+    
+    # 定义标签：
+    # -1: 废弃 (时间不对齐或数据不足)
+    #  1: 震荡 (连续但无显著趋势)
+    #  0/2: 趋势
+    conditions = [
+        ~time_valid_mask, # 优先级最高，时间断层直接标记为 -1
+        cond_short,
+        cond_long
+    ]
+    choices = [Signal.INVALID, Signal.SHORT, Signal.LONG]
+    
+    df['label'] = np.select(conditions, choices, default=Signal.NEUTRAL)
+    
+    # 7. 最终清洗
+    # 预热期设为震荡或无效
+    df.iloc[:candlestick_num, df.columns.get_loc('label')] = Signal.INVALID
+    
+    # 记录收益率用于调试 (注意此时 pct_final 是物理对齐的)
+    df['return_rate'] = pct_final 
+    
+    # 过滤掉 -1 的行 (可选，也可以留给 Dataset 处理)
+    # 如果你想在这里保持 df 长度不变，就不要执行 drop
+    # 但建议在 Dataset 侧利用 label != -1 进行过滤
+    
+    df['label'] = df['label'].astype(int)
+    return df
+
+def compare_labeling_quality(df_raw, candlestick_num = CANDLESTICK_NUM, predict_num = PREDICT_NUM):
+    """
+    比较两种打标签方法的差异并输出审计报告
+    """
+    print("🚀 Starting Labeling Audit...")
+    
+    # 1. 分别运行两个版本
+    # 注意：V1 内部可能会 reset_index 或 drop 最后几行，所以我们用副本
+    df_v1 = attach_label(df_raw.copy(), candlestick_num, predict_num)
+    df_v2 = attach_label_v2(df_raw.copy(), candlestick_num, predict_num)
+    
+    # 2. 对齐数据
+    # 因为 V1 和 V2 对尾部处理可能不同，我们以时间戳作为 Key 进行合并
+    # 这样可以确保我们比较的是同一个物理时刻
+    time_col = 'open_time_ms_utc'
+    comparison = pd.merge(
+        df_v1[[time_col, 'label']].rename(columns={'label': 'v1_label'}),
+        df_v2[[time_col, 'label']].rename(columns={'label': 'v2_label'}),
+        on=time_col,
+        how='inner'
+    )
+    
+    total_common = len(comparison)
+    
+    # 3. 计算基础统计
+    matches = (comparison['v1_label'] == comparison['v2_label']).sum()
+    match_rate = matches / total_common * 100
+    
+    print(f"\n📊 --- Overall Statistics ---")
+    print(f"Total Aligned Rows: {total_common}")
+    print(f"Exact Matches:      {matches} ({match_rate:.2f}%)")
+    print(f"Mismatches:         {total_common - matches}")
+
+    # 4. 深度分析：V1 认为有效但 V2 认为无效 (纠偏分析)
+    # 这部分通常是 V2 发现时间断层后主动放弃的噪声
+    v2_invalid_but_v1_active = comparison[
+        (comparison['v2_label'] == -1) & (comparison['v1_label'] != -1)
+    ]
+    
+    print(f"\n🛡️  --- Correction Analysis ---")
+    print(f"V1 labels invalidated by V2: {len(v2_invalid_but_v1_active)}")
+    if len(v2_invalid_but_v1_active) > 0:
+        print(f"Breakdown of V1 labels that were actually 'Time Gaps':")
+        print(v2_invalid_but_v1_active['v1_label'].value_counts())
+
+    # 5. 信号转换分析 (0, 1, 2 之间的漂移)
+    # 排除掉 -1 之后，看剩下的有效信号是否一致
+    active_mask = (comparison['v1_label'] != -1) & (comparison['v2_label'] != -1)
+    active_comp = comparison[active_mask]
+    
+    if len(active_comp) > 0:
+        active_matches = (active_comp['v1_label'] == active_comp['v2_label']).sum()
+        print(f"\n🎯 --- Signal Consistency (Excluding Invalids) ---")
+        print(f"Active Signal Match Rate: {active_matches / len(active_comp) * 100:.2f}%")
+        
+        # 交叉表：直观查看 0->2 或者 1->0 这种逻辑漂移
+        cross_tab = pd.crosstab(active_comp['v1_label'], active_comp['v2_label'], 
+                                rownames=['V1 (Row-based)'], colnames=['V2 (Time-based)'])
+        print("\nConfusion Matrix (Active Signals Only):")
+        print(cross_tab)
+
+    return comparison
+
 def calculate_thresholds(df, 
                          candlestick_num: int = CANDLESTICK_NUM, 
                          predict_num: int = PREDICT_NUM, 
@@ -197,22 +393,6 @@ def float_range(start, end, step):
         v += step
 
     return values
-
-FEATURE_CONFIG:list[FeatureBase] = [
-    FeatureMACD(fast=12, slow=26, signal=9),
-    FeatureMA(weeks=[7,25], days=[5, 10, 20], bars = [], method='sma', strict=True, add_slope = False, slope_method='reg', slope_weeks= 2),
-    # FeatureRsi(period=14, price_col='close', strict=True, prefix='RSI'),
-    FeatureKdj(n=9, m1=3, m2=3, high_col='high', low_col='low',  close_col='close', strict=True, prefix='KDJ'),
-    FeatureVolMa(vol_ma_windows = (5, 10, 20)),
-    FeatureQavMa(vol_ma_windows = (5, 10, 20)),
-    FeatureOBV(),
-    FeaturePVT(),
-    FeatureWAP(vwap_windows = (20, 48, 96)),
-    FeatureCFM(cmf_window = 20),
-    FeatureMFI(mfi_window=14),
-    FeatureATS(), #FeatureContainer(FeatureATS),
-    FeatureCandle(),
-]
 
 class FeatureFactory:
     def __init__(self, config_list):
