@@ -18,7 +18,6 @@ from trade.bt import cus_analyzer, cus_comminfo, result_analyze
 
 from trade.bt.bt_trade_ftmo import FtmoStrategy
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
-logger, _= setup_session_logger(sub_folder='simulation',file_level = logging.DEBUG)
 
 class TradeResult:
     def __init__(self) -> None:
@@ -51,7 +50,7 @@ class Parameters:
         self.position_ratio = 0.4     #0-1
 
 
-def main():
+def main(logger:logging.Logger):
     args = Parameters()
     logger.info(
         f"Backtest settings: Short={args.allow_short}, Long={args.allow_long}, Thresh={args.thresh}, commission={args.commission}"
@@ -93,7 +92,7 @@ def main():
         if first_valid_idx is not None:
             # 从第一个信号开始，保留后续所有行（包含中间的 NaN）
             df_with_pred = df_with_pred.loc[first_valid_idx:].copy()
-            logger.record(f"Backtest starts from first signal at {df_with_pred.index[0]}")
+            logger.info(f"Backtest starts from first signal at {df_with_pred.index[0]}")
         else:
             logger.error("No valid predictions found in the entire dataset!")
             sys.exit(1)
@@ -165,7 +164,7 @@ def main():
     # 5. 结果统计
     # UI
     # 封装统计数据 (合并回测数据和模型指标)
-    statistics = generate_backtest_report(strat, model_stats, commission=args.commission, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
+    statistics = generate_backtest_report(logger, strat, model_stats, commission=args.commission, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
 
     trade_logs = cerebro.trade_logs
 
@@ -200,7 +199,7 @@ def safe_get(d, keys, default=0):
     return cur if cur != {} else default
 
 
-def generate_backtest_report(strat, model_stats, save_path, commission):
+def generate_backtest_report(logger,strat, model_stats, save_path, commission):
     """
     修复版报告生成器：
     1. 修正 Profit Factor 计算公式 (Gross Won / Gross Lost)
@@ -368,8 +367,9 @@ def generate_backtest_report(strat, model_stats, save_path, commission):
     return ui_stats
 
 if __name__ == "__main__":
+    logger, _= setup_session_logger(sub_folder='simulation',file_level = logging.DEBUG)
     start_time = time.time()
-    main()
+    main(logger)
     end_time = time.time()
     run_time = end_time - start_time
     logger.info(f": run_time: {run_time:.4f} s")

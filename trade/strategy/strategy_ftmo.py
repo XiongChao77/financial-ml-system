@@ -257,36 +257,36 @@ class FtmoBrain(Brain):
         renewal_count = np.sum(durations > max_hold_num)
         renewal_rate = renewal_count / len(durations)
 
-        self.logger.record(f"\n" + "="*40)
-        self.logger.record(f"📊 持仓延续性审计报告")
-        self.logger.record(f"总计完成交易: {len(durations)} 笔")
-        self.logger.record(f"平均持仓时长: {avg_dur:.2f} 根 K 线")
-        self.logger.record(f"最长持仓时长: {max_dur} 根 K 线")
-        self.logger.record(f"信号续期次数: {renewal_count} (持仓 > {max_hold_num} bars)")
-        self.logger.record(f"有效续期比例: {renewal_rate:.2%}")
-        self.logger.record(f"="*40 + "\n")
+        self.logger.info(f"\n" + "="*40)
+        self.logger.info(f"📊 持仓延续性审计报告")
+        self.logger.info(f"总计完成交易: {len(durations)} 笔")
+        self.logger.info(f"平均持仓时长: {avg_dur:.2f} 根 K 线")
+        self.logger.info(f"最长持仓时长: {max_dur} 根 K 线")
+        self.logger.info(f"信号续期次数: {renewal_count} (持仓 > {max_hold_num} bars)")
+        self.logger.info(f"有效续期比例: {renewal_rate:.2%}")
+        self.logger.info(f"="*40 + "\n")
 
         # 打印分布直方图 (ASCII 简易版)
         self.log_histogram(durations)
 
         if self.all_signal_streaks:
             streaks = np.array(self.all_signal_streaks)
-            self.logger.record(f"\n🎯 信号连击深度审计 (Consecutive Trend Signals)")
-            self.logger.record(f"平均连击长度: {np.mean(streaks):.2f} 根 K 线")
-            self.logger.record(f"最大连击长度: {np.max(streaks)} 根 K 线")
-            self.logger.record(f"单点爆发比例 (Length=1): {np.sum(streaks == 1) / len(streaks):.2%}")
+            self.logger.info(f"\n🎯 信号连击深度审计 (Consecutive Trend Signals)")
+            self.logger.info(f"平均连击长度: {np.mean(streaks):.2f} 根 K 线")
+            self.logger.info(f"最大连击长度: {np.max(streaks)} 根 K 线")
+            self.logger.info(f"单点爆发比例 (Length=1): {np.sum(streaks == 1) / len(streaks):.2%}")
             
             # 打印分布
             counts, bins = np.histogram(streaks, bins=[1, 2, 5, 10, 20, 50, 100])
             for i in range(len(counts)):
-                self.logger.record(f"  连击区间 [{bins[i]:>2}-{bins[i+1]:>2}]: {counts[i]} 次")
+                self.logger.info(f"  连击区间 [{bins[i]:>2}-{bins[i+1]:>2}]: {counts[i]} 次")
 
     def log_histogram(self, data):
         """打印一个简单的控制台直方图，观察分布"""
         counts, bins = np.histogram(data, bins=10)
         for i in range(len(counts)):
             bar = "█" * int(counts[i] / len(data) * 40)
-            self.logger.record(f"[{bins[i]:>3.0f} - {bins[i+1]:>3.0f} bars]: {bar} {counts[i]}")
+            self.logger.info(f"[{bins[i]:>3.0f} - {bins[i+1]:>3.0f} bars]: {bar} {counts[i]}")
 
     def execute_action(self, action: TradingAction):
 

@@ -1038,7 +1038,7 @@ class FeatureCandle(FeatureBase):
         # 3. 评分类 (Scores) [-1, 1]
         # 特征：描述倾向性，数值本身就在 0 附近
         # 处理：通常保持原样，或者做简单的 Clip 截断
-        self.feat_score = ['wick_bias', 'gap']
+        self.feat_score = ['wick_bias'] #'gap'
         
         # 汇总所有特征名，供父类使用
         self.features = self.feat_magnitude + self.feat_ratio + self.feat_score
@@ -1087,7 +1087,7 @@ class FeatureCandle(FeatureBase):
         # Gap: 跳空比例 (Open - Prev_Close) / Prev_Close
         # 注意：使用 shift(1) 获取昨收，fillna 处理第一行
         prev_close = c.shift(1).fillna(o)
-        df['gap'] = (o - prev_close) / (prev_close + EPS)
+        # df['gap'] = (o - prev_close) / (prev_close + EPS)
 
         # === 清洗 ===
         # 将计算过程中可能产生的 inf 替换为 nan，最后统一填充
@@ -1152,11 +1152,22 @@ class FeatureCandle(FeatureBase):
 class FeatureOrigin(FeatureBase):
     def __init__(self,**kwargs):
         super().__init__(**kwargs)
-        self.price_base_features = ['open', 'high', 'low', 'close']
-        self.volume_base_features = ['taker_buy_base_volume', 'volume'] # feature used as basic must be the last!!!
-        self.quote_base_features  = ['taker_buy_quote_volume', 'quote_asset_volume' ]   #the basic is quote_asset
-        self.self_based_features = ['number_of_trades']
-    def generate(self,df:pd.DataFrame):     pass
+        self.price_base_features = ['open', 'high', 'low', 'close']#[]
+        self.volume_base_features = ['taker_buy_base_volume', 'volume']#[] # feature used as basic must be the last!!!
+        self.quote_base_features  = ['taker_buy_quote_volume', 'quote_asset_volume']#[]   #the basic is quote_asset
+        self.self_based_features = ['number_of_trades']#[]
+        # for f in ['open', 'high', 'low', 'close']:
+        #     self.price_base_features.append(f'base_{f}')
+        # for f in ['taker_buy_base_volume', 'volume']:
+        #     self.volume_base_features.append(f'base_{f}')
+        # for f in ['taker_buy_quote_volume', 'quote_asset_volume']:
+        #     self.quote_base_features.append(f'base_{f}')
+        # for f in ['number_of_trades']:
+        #     self.self_based_features.append(f'base_{f}')
+    def generate(self,df:pd.DataFrame, kline_interval_ms: int = None):
+        # for f in self.factory.base_features:
+        #     df[f'base_{f}'] = df[f]
+        pass
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         self._normalize_z_score(X, feature_cols , self.price_base_features , feature_base = "close", factory= factory)
         self._normalize_z_score(X, feature_cols , self.volume_base_features , feature_base = "volume", factory= factory)
@@ -1191,6 +1202,7 @@ FEATURE_CONFIG_LIST = [
     (FeatureATS, {}),
     # 4. K线形态类
     (FeatureCandle, {}),
+    (FeatureOrigin, {}),
 ]
 
 class FeatureFactory:
@@ -1202,6 +1214,7 @@ class FeatureFactory:
         self._feature_index = None
         self._base_stats_pool = None
         self.feature_list :list[FeatureBase] = []
+        self.base_features= ['open', 'high', 'low', 'close', 'taker_buy_base_volume', 'volume','taker_buy_quote_volume', 'quote_asset_volume','number_of_trades']
         for cls, params in feature_conf_list:
             # 使用 **params 将字典解包为关键字参数传递给构造函数
             instance = cls(factory = self,kline_interval_ms=kline_interval_ms, **params) 
@@ -1209,6 +1222,11 @@ class FeatureFactory:
 
     def generate(self,df):
         for f in self.feature_list:     f.generate(df, self._kline_interval_ms)
+        # cols_to_drop = [c for c in self.base_features if c in df.columns]
+        # if cols_to_drop:
+        #     df.drop(columns=cols_to_drop, inplace=True)
+        #     _logger.debug(f"Dropped base features: {cols_to_drop}")
+        # return df
 
     def _prepare_normalize_context(self, X, feature_cols):
         self._X = X
