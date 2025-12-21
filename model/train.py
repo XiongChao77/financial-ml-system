@@ -151,9 +151,9 @@ def main():
     ap.add_argument("--patience", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42)
     # === 模型选择 ===
-    ap.add_argument( "--model_type", type=str, default="lstm", choices=["cnn", "lstm", "transformer", "xgboost"],
+    ap.add_argument( "--model_type", type=str, default="cnn", choices=["cnn", "lstm", "transformer", "xgboost"],
                     help="Model architecture: cnn, lstm, or transformer", )
-    ap.add_argument("--model_version", type=int, default=4)  #100
+    ap.add_argument("--model_version", type=int, default=1)  #100
     ap.add_argument("--lstm_dropout", type=float, default=0.3)
     ap.add_argument("--lstm_head_dropout", type=float, default=0.2)
     ap.add_argument("--lstm_hidden", type=int, default=80, help="LSTM 隐藏层维度")
@@ -171,32 +171,31 @@ def main():
     ap.add_argument("--xgb_estimators", type=int, default=100)
     args = ap.parse_args()
 
-    logger = common.setup_logger(log_name='train', log_path=os.path.join(common.TEMPORARY_DIR, 'training.log'))
+    logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device:{device}")
     is_cude_available = device == "cuda"
 
     # 1) 读数据（需按时间升序）
-    data_path = common.train_data_path
-    df = pd.read_csv(data_path)
+    df = common.load_train_df()
 
     # 4) 窗口化 -> [M, T, F], [M]
     T = args.window
-    logger.info(f"Using TimeSeriesWindowDataset for windowing and scaling...")
+    logger.info(f"Using TimeSeriesWindowDataset for windowing and scaling.Origin data len {len(df)}")
     
     # 实例化 TimeSeriesWindowDataset，它在内部完成了窗口划分和 t=0 缩放
     feat_cols = [col for col in df.columns]
     logger.info(f"Features num:{len(feat_cols)},: {feat_cols}")  # 可选：打印查看
     full_ds = TimeSeriesWindowDataset(
-        df=df, feature_cols=feat_cols, label_col=args.label_col, window=T
+        df=df, kline_interval_ms= common.load_interval_ms() ,feature_cols=feat_cols, label_col=args.label_col, window=T
     )
 
     # ========== 【新增】调用保存 Debug 数据 ==========
     # 保存目录设置在 exported_project_files/model/debug_data 下
     if False:
-        debug_dir = os.path.join(common.TEMPORARY_DIR, "debug_data")
-        full_ds.save_debug_data(debug_dir)
+        debug_dir = os.path.join(common.PROJECT_DATA_DIR, "debug_data")
+        full_ds.save_debug_data(debug_dir, save_file= False)
         exit()
 
     if False:
@@ -232,7 +231,7 @@ def main():
     classes = np.unique(y_tr)
     cw_balanced = compute_class_weight(class_weight="balanced", classes=classes, y=y_tr)    #cw_dampened = np.sqrt(cw_balanced) doesn't work out
     class_weights = torch.tensor(cw_balanced, dtype=torch.float32, device=device)
-    logger.record(
+    logger.info(
         "Class weights: {}".format({int(c): float(w) for c, w in zip(classes, cw_balanced)})
     )
 
@@ -258,7 +257,7 @@ def main():
     feat_cols = full_ds.feature_names
     channel = full_ds.feature_count
     logger.warning(f"Final Features num:{len(feat_cols)},: {feat_cols}")  # 可选：打印查看
-    logger.record(
+    logger.info(
         f"Initializing model: type={args.model_type}, version={args.model_version}"
     )  
     model = ModelFactory.build_for_training(
@@ -354,7 +353,7 @@ def main():
         else:
             wait += 1
             if wait >= args.patience:
-                logger.record("Early stopping. epoch {epoch}")
+                logger.info("Early stopping. epoch {epoch}")
                 break
 
     if best_state is not None:
@@ -362,9 +361,9 @@ def main():
 
     # 11) 测试集评估 + 保存
     te_loss, yt_true, yt_pred = eval_epoch(model, dl_te, device, criterion)
-    logger.record("\n=== Test Report ===")
-    logger.record(classification_report(yt_true, yt_pred, digits=4))
-    logger.record("Test macro-F1:{}".format(f1_score(yt_true, yt_pred, average="macro")))
+    logger.info("\n=== Test Report ===")
+    logger.info(classification_report(yt_true, yt_pred, digits=4))
+    logger.info("Test macro-F1:{}".format(f1_score(yt_true, yt_pred, average="macro")))
 
     # 计算测试集中每个标签的真实占比
     # 假设你的真实标签在 yt_true 里
@@ -373,9 +372,9 @@ def main():
     classes_sorted = sorted(counts.keys())
     true_pct = {c: counts[c] / total for c in classes_sorted}
 
-    logger.record("\n=== True label proportion (Test set) ===")
+    logger.info("\n=== True label proportion (Test set) ===")
     for c in classes_sorted:
-        logger.record(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
+        logger.info(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
 
     cm = confusion_matrix(yt_true, yt_pred, labels=classes)
     pd.DataFrame(
