@@ -14,7 +14,7 @@ sys.path.append(os.path.join(current_work_dir, "..", '..' , '..'))
 
 # 引入自定义模块
 from data_process import common
-from data_process.common import FeatureFactory, FEATURE_CONFIG
+from data_process.common import FeatureFactory, FEATURE_CONFIG_LIST
 from model import model_loader
 from trade.strategy.strategy_ftmo import FtmoBrain, MarketState, PositionDir, ActionType, Signal
 from trade.market.ftmo import ftmo_executor
@@ -221,11 +221,9 @@ class BinanceDataFeed:
 class LiveBot:
     def __init__(self):
         self.logger, log_path = common.setup_session_logger(
-                    log_root=common.TEMPORARY_DIR, 
                     sub_folder='market_ftmo_sessions',
                     symbol=LiveConfig.SYMBOL_FTMO
                 )
-        self.logger = common.setup_logger(log_name='ftmo_live', log_path=os.path.join(common.TEMPORARY_DIR, 'market_ftmo'))
         
         self.logger.info("Initializing Live Bot...")
 
@@ -235,10 +233,10 @@ class LiveBot:
 
         # 1. 设置参数
         self.interval_ms = LiveConfig.TIMEFRAME * 60 * 1000 
-        self.factory = FeatureFactory(FEATURE_CONFIG)
+        self.factory = FeatureFactory(FEATURE_CONFIG_LIST, self.interval_ms)
         
         # 2. 计算历史需求 (数量)
-        self.min_bars_needed = self.factory.get_global_min_history(self.interval_ms)
+        self.min_bars_needed = self.factory.get_global_min_history()
         self.logger.info(f"History Required: {self.min_bars_needed} bars")
         
         # 3. 初始化数据源 (带缓存)
@@ -321,7 +319,7 @@ class LiveBot:
             # ModelHandler 内部会进行 TimeSeriesWindowDataset 处理和归一化
             # 注意：predict 返回的是包含 pred 和 pred_prob 的 DataFrame
             inference_df = df.iloc[-(self.model_handler.window + 200):]
-            df_pred, _ = self.model_handler.predict(inference_df)
+            df_pred, _ = self.model_handler.predict(inference_df, self.interval_ms)
             
             # 获取最新一根 K 线的预测结果
             last_row = df_pred.iloc[-1]
