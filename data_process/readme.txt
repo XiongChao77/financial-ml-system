@@ -1,3 +1,78 @@
+-----归一化方法-------------
+· Min–Max Scaling
+    x' = (x - min) / (max - min)
+    特点：
+    映射到固定区间（通常 [0,1]）。保留相对顺序。对极值极其敏感；一旦出现新极值，历史映射失效。
+    适用：
+    已知严格上下界的物理量；像素值；bounded 指标（如 RSI/KDJ）。
+· Max-Abs Scaling
+    x' = x / max(|x|)
+    特点：
+    保留正负号；不平移中心；对极值敏感但比 Min–Max 稍稳。
+    适用：
+    稀疏特征；文本/工程特征；对称分布数据。
+· Z-Score Standardization
+    z = (x - μ) / σ
+    特点：
+    零均值、单位方差；表达“偏离常态的程度”；强烈抑制环境波动；隐含分布稳定假设。
+    适用：
+    信号类特征（returns、momentum、residual、indicator change）；线性模型、NN。
+· Robust Scaling（Median / IQR）
+    z = (x - median) / IQR
+    特点：
+    对极值和重尾分布鲁棒；不依赖均值和方差；不高斯化。
+    适用：
+    金融收益率；成交量；存在异常点的时间序列。
+· Ratio Scaling（相对基准）
+    x' = x / base  | (x - base) / base
+    特点：
+    无量纲；直接表达相对水平；不做分布假设；不中心化。
+    适用：
+    价格结构类特征（MA/close、VWAP/close、volume/vol_ma）。
+· Log Scaling
+    x' = log(x)
+    log(x / base)
+    特点：
+    压缩重尾；将乘法关系转为加法；尺度稳定；数值更平滑。
+    适用：
+    成交量、成交额、价格比例、波动率、规模型特征。
+· Rank / Quantile Normalization
+    x → rank → U(0,1)
+    特点：
+    强鲁棒；统一分布；只保留排序信息；不可逆；丢失幅度信息。
+    适用：
+    横截面因子；alpha 排序；long–short 选股。
+· L2 / Unit Vector Normalization
+    x' = x / ||x||
+    特点：
+    只保留方向信息；忽略幅度；强调相似性。
+    适用：
+    embedding；相似度计算；聚类（极少用于金融时序）。
+    
+
+!!!!!!!指标处理必须非常小心，一旦破坏指标分布，就完全失去意义，甚至变成了噪声!!!!!!!!
+1. 保护“零轴语义”（Zero-Point Integrity）
+2. 保护“组内协方差”（Intra-group Coherence）
+3. 保护“价格骨架”（Price Skeleton Structure）
+---------------Price--------------
+因为价格在不同周期的值区别很大，不适合归一化后直接输入模型。可以以价格为基础构造指标
+两类指标： 数值/变化率
+数值：  1.rolling Min–Max  只保留了相对位置。必须补充波动率信息。
+            同时这么做需要把所有基于价格的指标都放进来，open/hign/low/close/MA
+                ！发现问题-z score训练效果更好。也就是说即使是价格类数据也不必强行保持正值。数据在模型中正负代表的含义是学习得到的，而不是符号本身带来的。所以一切从是否表征清晰，是否容易学习出发！
+        2.以close为基础取相对位置，处理完所有价格指标，最后再把范围等比例缩放到[0,1]。结构一致性极强，可能要优于 rolling Min–Max
+比率：  1.标准 returns（逐根变化）:r_t = (P_t - P_{t-1}) / P_{t-1} . only close is enough. 不做缩放处理.或者使用tanh/clip 压缩极值。不能使用Z-Score，它会改变0的语义
+            增加returns均线用来表征当前波动是否剧烈。 基于9/25/99等长度构造均线
+                1.绝对收益均线： vol_t = EMA(|r_t|, N)
+                2.vol_t = EMA(r_t², N)
+---------------Volume--------------
+数值：  定义放量基准: V_ref(t) = mean(top K volumes in window [t-T, t-1])
+        定义放量强度指标: vol_event_ratio(t) = volume_t / V_ref(t)
+        用于表征当前成交量是否放量/缩量.通过和历史最高成交量比较，表征当前放量程度。
+        相比使用均值的方式有什么好处？ 答：均值受到最近成交量的影响较大，即使是均值的10倍，也可能只是一般的成交量。这个特征对于放量事件的检查更加清晰
+比率:   忽略
+
+
 ·Step 1：Rank IC（快速判断是否有方向感）
 
 如果 IC < 0 且不稳定 → 大概率因子无效
