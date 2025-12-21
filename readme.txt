@@ -1,6 +1,6 @@
 ################################ environment ########################################
 pip3 install torch torchvision
-pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4 pytorch-ignite  colorlog backtrader
+pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4 pytorch-ignite  colorlog backtrader pyarrow
 
 
 ################################ how to use ########################################
@@ -31,6 +31,12 @@ pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook j
 ·如何降低回撤？
     降低持仓比例，或是动态调整持仓比例.盈利时可以重仓交易，亏损时轻仓交易
     提升夏普比率，降低单位收益的风险.
+做量化交易，带单邀请的人，可以吃带单分成和手续费
+***********************坑*************************
+指标计算：
+FeatureCandle/FeatureKdj/FeatureCFM/MFI在极端行情为0或nan，需要处理成有意义的值
+归一化:让一组feature基于同一个base归一化，以保留相对特征.但是之前 mu_base, sigma_base 这两个值都用了base的，mu必须使用当前特征的，否则均值不为0.sigma使用sigma_base也会损失部分统计分布特性
+      对于价格/成交量等绝对值指标，如果使用Z-score归一化，将会有负值，这明显不符合预期.
 
 ***********************坑*********************************
 遇到了数据对齐问题，回测的预测值和标签index发生了偏差，几天的测试结果全部无效
@@ -220,5 +226,6 @@ Step 3：继续滚动...
 
 为什么选它： 你可以在报名时调整参数（比如用“更低的分润”换取“更大的回撤空间”）。这对量化风控很有用。
 ****************************************************************************
+
 
 
