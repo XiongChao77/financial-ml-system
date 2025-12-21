@@ -1,22 +1,68 @@
-import os,sys,time,logging
+import os, sys, time, logging, argparse
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
-from data_process import preparation,common
+from data_process import preparation, common
 from model import train
 from trade.bt import simulation
 
 def main():
-    # logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
+    # 1. 配置参数解析器：支持长短选项
+    parser = argparse.ArgumentParser(description="Quant Trading Pipeline Control")
+    
+    parser.add_argument('-p', '--prep', action='store_true', 
+                        help='Execute data preparation stage')
+    parser.add_argument('-t', '--train', action='store_true', 
+                        help='Execute model training stage')
+    parser.add_argument('-s', '--sim', action='store_true', 
+                        help='Execute backtest simulation stage')
+    parser.add_argument('-a', '--all', action='store_true', 
+                        help='Execute all stages')
+
+    args = parser.parse_args()
+
+    # 2. 补全类型提示
+    logger: logging.Logger
+    logger, _ = common.setup_session_logger(sub_folder='experiment', file_level=logging.DEBUG)
+    
+    # 是否开启全流程
+    run_all = args.all
+    
     begin_time = time.time()
-    preparation_start_time = begin_time
-    preparation.main()
-    train_start_time = time.time()
-    train.main()
-    simulation_start_time = time.time()
-    # simulation.main()
+    stats = {"preparation": 0.0, "train": 0.0, "simulation": 0.0}
+
+    # --- 阶段 1: Preparation ---
+    if args.prep or run_all:
+        logger.info(">>> [1/3] Starting Preparation...")
+        start = time.time()
+        preparation.main(logger)
+        stats["preparation"] = time.time() - start
+
+    # --- 阶段 2: Train ---
+    if args.train or run_all:
+        logger.info(">>> [2/3] Starting Training...")
+        start = time.time()
+        train.main(logger)
+        stats["train"] = time.time() - start
+
+    # --- 阶段 3: Simulation ---
+    if args.sim or run_all:
+        logger.info(">>> [3/3] Starting Simulation...")
+        start = time.time()
+        simulation.main(logger)
+        stats["simulation"] = time.time() - start
+
     end_time = time.time()
-    print(f": preparation run_time: {(train_start_time - preparation_start_time):.4f} s | train run_time: {(simulation_start_time - train_start_time):.4f} s "
-          f"| simulation run_time: {(end_time - simulation_start_time):.4f} s |total : {(end_time - begin_time):.4f} s")
+    total_time = end_time - begin_time
+
+    # 3. 打印精简的耗时报告
+    msg = (f"Run Summary | "
+           f"Prep: {stats['preparation']:.2f}s | "
+           f"Train: {stats['train']:.2f}s | "
+           f"Sim: {stats['simulation']:.2f}s | "
+           f"Total: {total_time:.2f}s")
+    print("\n" + "="*len(msg))
+    print(msg)
+    print("="*len(msg))
 
 if __name__ == "__main__":
     main()
