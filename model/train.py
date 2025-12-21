@@ -145,28 +145,28 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
     接收配置对象，执行训练。
     """
     # 0. 初始化环境
-    logger = common.setup_logger(log_name='train', log_path=os.path.join(train_cfg.save_dir, 'training.log'))
+    logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
     set_seed(train_cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device} | Model: {model_cfg.model_type} version: {model_cfg.model_version}")
 
     # 1. 准备数据
-    df = pd.read_csv(data_cfg.csv_path)
-    logger.info(f"Using TimeSeriesWindowDataset with window={data_cfg.window}...")
+    df = common.load_train_df()
+    logger.info(f"Using TimeSeriesWindowDataset with window={data_cfg.window} Origin data len {len(df)}...")
     
     feature_cols = data_cfg.feature_cols if data_cfg.feature_cols else list(df.columns)
     logger.info(f"Features num:{len(feature_cols)},: {feature_cols}")
 
     full_ds = TimeSeriesWindowDataset(
-        df=df, feature_cols=feature_cols, label_col=data_cfg.label_col, window=data_cfg.window
+        df=df, kline_interval_ms= common.load_interval_ms() , feature_cols=feature_cols, label_col=data_cfg.label_col, window=data_cfg.window
     )
     logger.info(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):")
     logger.info(f"{full_ds.feature_names}")
     # ========== 【新增】调用保存 Debug 数据 ==========
     # 保存目录设置在 exported_project_files/model/debug_data 下
     if False:
-        debug_dir = os.path.join(common.TEMPORARY_DIR, "debug_data")
-        full_ds.save_debug_data(debug_dir, False)
+        debug_dir = os.path.join(common.PROJECT_DATA_DIR, "debug_data")
+        full_ds.save_debug_data(debug_dir, save_file= False)
         exit()
 
     if False:
@@ -194,7 +194,7 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
     classes = np.unique(y_tr_np)
     cw_balanced = compute_class_weight("balanced", classes=classes, y=y_tr_np)
     class_weights = torch.tensor(cw_balanced, dtype=torch.float32, device=device)
-    logger.record(f"Class weights: {dict(zip(classes, cw_balanced))}")
+    logger.info(f"Class weights: {dict(zip(classes, cw_balanced))}")
 
     # 4. DataLoader
     dl_tr = DataLoader(ds_tr, batch_size=data_cfg.batch_size, shuffle=True, pin_memory=(device.type=="cuda"))
@@ -202,7 +202,7 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
     dl_te = DataLoader(ds_te, batch_size=data_cfg.batch_size, shuffle=False, pin_memory=(device.type=="cuda"))
 
     # 5. 构建模型 (参数解包)
-    logger.record(f"Initializing model: type={model_cfg.model_type}, version={model_cfg.model_version}")
+    logger.info(f"Initializing model: type={model_cfg.model_type}, version={model_cfg.model_version}")
     
     params = asdict(model_cfg)
     m_type = params.pop('model_type')
@@ -230,6 +230,7 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
     # 6. 训练准备
     criterion = FocalLoss(alpha=class_weights, gamma=2.0).to(device)
     # criterion = FocalLoss(alpha=None, gamma=2.0).to(device)
+    # criterion = nn.CrossEntropyLoss(weight=class_weights) #中立裁判，不偏袒任何一类
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=4)
 
@@ -269,25 +270,25 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
         else:
             wait += 1
             if wait >= train_cfg.patience:
-                logger.record(f"Early stopping. epoch {epoch}")
+                logger.info(f"Early stopping. epoch {epoch}")
                 break
 
     if best_state: model.load_state_dict(best_state)
 
     # 8. 测试与保存
     _, yt_true, yt_pred = eval_epoch(model, dl_te, device, criterion)
-    logger.record("\n=== Test Report ===")
-    logger.record(classification_report(yt_true, yt_pred, digits=4))
-    logger.record("Test macro-F1:{}".format(f1_score(yt_true, yt_pred, average="macro")))
+    logger.info("\n=== Test Report ===")
+    logger.info(classification_report(yt_true, yt_pred, digits=4))
+    logger.info("Test macro-F1:{}".format(f1_score(yt_true, yt_pred, average="macro")))
 
     # 【修复2】恢复 Test Set Label Proportion 统计日志
     counts = Counter(yt_true)
     total = sum(counts.values())
     classes_sorted = sorted(counts.keys())
     true_pct = {c: counts[c] / total for c in classes_sorted}
-    logger.record("\n=== True label proportion (Test set) ===")
+    logger.info("\n=== True label proportion (Test set) ===")
     for c in classes_sorted:
-        logger.record(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
+        logger.info(f"label {c}: {counts[c]} samples, {true_pct[c]:.4f} of total")
 
     # 【修复3】恢复混淆矩阵保存
     cm = confusion_matrix(yt_true, yt_pred, labels=classes)

@@ -18,7 +18,7 @@ from trade.bt import cus_analyzer, cus_comminfo, result_analyze
 
 from trade.bt.bt_trade_ftmo import FtmoStrategy
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
-logger = setup_logger(log_name='trade' ,log_path= log_file, console_level =logging.INFO, record_level = logging.DEBUG)
+logger, _= setup_session_logger(sub_folder='simulation',file_level = logging.DEBUG)
 
 class TradeResult:
     def __init__(self) -> None:
@@ -53,7 +53,7 @@ class Parameters:
 
 def main():
     args = Parameters()
-    logger.record(
+    logger.info(
         f"Backtest settings: Short={args.allow_short}, Long={args.allow_long}, Thresh={args.thresh}, commission={args.commission}"
     )
 
@@ -64,7 +64,7 @@ def main():
         sys.exit(1)
 
     # 直接读取 CSV，假设其中已包含所有特征列和时间列
-    df = pd.read_csv(data_path)
+    df = load_test_df()
     # 【关键】检查时间列是否存在
     if "open_time_date_utc" not in df.columns:
         logger.error("CRITICAL: 'open_time_date_utc' column missing.")
@@ -80,8 +80,8 @@ def main():
         # 初始化处理类
         handler = model_loader.ModelHandler()
         # 执行预测，获取结果和指标
-        df_with_pred, model_stats = handler.predict(df, is_live = False)#, min_thresh= 0.3)
-        # exit()
+        # df_with_pred, model_stats = handler.predict(df, load_interval_ms())#, min_thresh= 0.3)
+        df_with_pred, model_stats = handler.predict_v2(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None )
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()
         # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
@@ -106,7 +106,7 @@ def main():
         # 不过滤，保持与实盘一致
         # df_with_pred = df_with_pred.dropna(subset=["pred", "threshold", "stop_threshold"]).copy()
 
-        logger.record(
+        logger.info(
             f"Backtest range: {df_with_pred['open_time_date_utc'].min()} to {df_with_pred['open_time_date_utc'].max()}"
         )
 
@@ -157,7 +157,7 @@ def main():
     cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(cus_analyzer.CusAnalyzer, _name="customize")
 
-    logger.record("Starting Backtest...")
+    logger.info("Starting Backtest...")
     results = cerebro.run()
     strat = results[0]
     # result_analyze.analyze_pnl_distribution(strat.closed_pnl)
