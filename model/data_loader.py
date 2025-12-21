@@ -258,7 +258,6 @@ class TimeSeriesWindowDataset(Dataset):
         # 8. 归一化 (在过滤后的数据上执行)
         feature_factory = common.FeatureFactory(common.FEATURE_CONFIG_LIST, kline_interval_ms)
         feature_factory.normalize(X3d_filtered, clean_feature_cols)
-        common.FeatureOrigin(factory = feature_factory).normalize(X3d_filtered, clean_feature_cols, feature_factory)
 
         # 9. 最终赋值给 Tensor
         self.X = torch.from_numpy(X3d_filtered)

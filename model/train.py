@@ -140,12 +140,11 @@ class ModelConfigFactory:
 # 3. 核心逻辑 (Core Logic)
 # ==============================================================================
 
-def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
+def run_training(logger:logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
     """
     接收配置对象，执行训练。
     """
     # 0. 初始化环境
-    logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
     set_seed(train_cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device} | Model: {model_cfg.model_type} version: {model_cfg.model_version}")
@@ -164,10 +163,10 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
     logger.info(f"{full_ds.feature_names}")
     # ========== 【新增】调用保存 Debug 数据 ==========
     # 保存目录设置在 exported_project_files/model/debug_data 下
-    if False:
+    if True:
         debug_dir = os.path.join(common.PROJECT_DATA_DIR, "debug_data")
         full_ds.save_debug_data(debug_dir, save_file= False)
-        exit()
+        # exit()
 
     if False:
         full_ds.inspect_final_data()
@@ -367,7 +366,7 @@ def eval_epoch(model, loader, device, criterion):
     if not yt: return float("nan"), np.array([]), np.array([])
     return tl/len(loader.dataset), np.concatenate(yt), np.concatenate(yp)
 
-def main():
+def main(logger:logging.Logger):
     # 示例：直接在这里配置参数，取代了命令行参数
     
     # 1. 数据配置
@@ -384,11 +383,12 @@ def main():
     m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig()][0]
     m_cfg.model_version = 3
 
-    print(f"Training {m_cfg.model_type}...")
-    run_training(d_cfg, t_cfg, m_cfg)
+    logger.info(f"Training {m_cfg.model_type}...")
+    run_training(logger,d_cfg, t_cfg, m_cfg)
 # ==============================================================================
 # 5. 调用入口 (Main Entry)
 # ==============================================================================
 
 if __name__ == "__main__":
-    main()
+    logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
+    main(logger)
