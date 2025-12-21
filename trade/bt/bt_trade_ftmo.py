@@ -110,7 +110,7 @@ class FtmoStrategy(BtExecutor):
 
     def stop(self):
         value = self.broker.getvalue()
-        self.logger.record(f"Start Value: {self.broker.startingcash:2f} | End Value: {value:.2f}")
+        self.logger.info(f"Start Value: {self.broker.startingcash:2f} | End Value: {value:.2f}")
         # UI
         self.cerebro.trade_logs = self.trade_logs
 
