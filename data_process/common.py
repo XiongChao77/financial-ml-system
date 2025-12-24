@@ -24,7 +24,7 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-VOL_MULTIPLIER = 0.9
+VOL_MULTIPLIER = 1
 # 最小硬阈值 (覆盖手续费+滑点)
 MIN_THRESHOLD = 0.01  # 0.25%
 STOP_MULTIPLIER_RATE = 0.4
@@ -43,7 +43,7 @@ os.makedirs(PERSISTENCE_DIR, exist_ok=True)
 
 PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency')
 symbol = 'ETHUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
-interval = '3m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+interval = '1m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{symbol}_{interval}.csv")
 train_data_path = os.path.join(TEMPORARY_DIR, "train_data.csv")
 test_data_path  = os.path.join(TEMPORARY_DIR, "test_data.csv")

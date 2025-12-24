@@ -35,6 +35,21 @@ OUTPUT_COLUMNS = [
     "taker_buy_base_volume", "taker_buy_quote_volume"
 ]
 
+def parse_date_to_ms(date_str: str) -> int:
+    """将日期字符串转换为 UTC 毫秒时间戳"""
+    if not date_str:
+        return 0
+    # 支持两种常见格式
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            # 强制设为 UTC
+            dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid date format: {date_str}. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS")
+
 def interval_to_ms(interval: str) -> int:
     unit = interval[-1]
     value = int(interval[:-1])
@@ -216,19 +231,26 @@ class BinanceDownloader:
         print(f"   >> [{desc}] Range: {ms_to_dt(start_ms)} -> {ms_to_dt(end_ms)} (Total {total_chunks} reqs)")
 
     # There are cases where exchange data is missing in binance
-    def repair_and_update(self, execute_update=False, replace = False):
+    def repair_and_update(self, execute_update=False, replace = False, start_time_str=None):
         print(f"\n{'='*20} Start Processing: {self.symbol} {'='*20}")
-        
+
+        # 解析起始时间
+        start_ms = 0
+        if start_time_str:
+            start_ms = parse_date_to_ms(start_time_str)
+            print(f"👉 Custom start time set: {start_time_str} -> {start_ms}")
+
         if not os.path.exists(self.csv_path) and execute_update == True:
             # 新文件模式
-            print("File not found, starting full download...")
+            print(f"File not found, starting download from {'Genesis' if start_ms == 0 else ms_to_dt(start_ms)}...")
             with open(self.csv_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(OUTPUT_COLUMNS)
-                # 全量下载
+                
+                # 全量下载 (使用指定的 start_ms)
                 now = int(time.time() * 1000)
-                # 使用生成器循环写入
-                self.download_range_generator(writer, 0, now+self.interval_ms*100, desc="Full Download")
+                # 如果指定了时间，就用指定时间；否则传 0 让 generator 自动找最早数据
+                self.download_range_generator(writer, start_ms, now + self.interval_ms*100, desc="Initial Download")
             return
 
         last_valid_time = None
@@ -280,11 +302,12 @@ class BinanceDownloader:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--interval", default="30m") #e.g., "1h" – supported intervals: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+    parser.add_argument("--interval", default="6h") #e.g., "1h" – supported intervals: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
     parser.add_argument("--dir", default=PROJECT_DATA_DIR)
     parser.add_argument("--update", default = True ,action="store_true")
+    parser.add_argument("--start", default=None, help="Start Date (e.g. '2023-01-01' or '2023-01-01 12:00:00')")
     args = parser.parse_args()
     
     os.makedirs(args.dir, exist_ok=True)
     downloader = BinanceDownloader(args.symbol, args.interval, args.dir)
-    downloader.repair_and_update(execute_update=args.update, replace= True)
+    downloader.repair_and_update(execute_update=args.update, replace= True)#, start_time_str="2020-01-01")

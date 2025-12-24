@@ -55,13 +55,13 @@ class LSTMConfig:
     hidden_size: int = 64
     num_layers: int = 2
     bidirectional: bool = True
-    lstm_dropout: float = 0.5
+    lstm_dropout: float = 0.4
     head_dropout: float = 0.2
     p_drop: float = 0.3
     readout: str = ['last' , 'meanmax' , 'attn', 'mix'][1]
     head: str = ['linear' , 'mlp'][1]
     in_locked_p: float = 0.05               # V4 locked dropout on inputs
-    out_locked_p: float = 0.05              # V4 locked dropout on LSTM outputs (before pooling)
+    out_locked_p: float = 0              # V4 locked dropout on LSTM outputs (before pooling)
     input_norm: bool = True                # V4 LayerNorm on input features
     input_proj_dim: int | None = None      # V4 optional projection before LSTM.一个可选的线性层，将原始特征维度（如 48）映射到一个新的维度 $D$ 后再送入.降维
     logit_clip: float | None = None        # V4 
@@ -381,7 +381,7 @@ def main(logger:logging.Logger):
     
     # m_cfg = ModelConfigFactory.get_default_config("transformer")
     m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig()][0]
-    m_cfg.model_version = 3
+    m_cfg.model_version = 4
 
     logger.info(f"Training {m_cfg.model_type}...")
     run_training(logger,d_cfg, t_cfg, m_cfg)

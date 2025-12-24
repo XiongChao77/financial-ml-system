@@ -80,8 +80,8 @@ class LSTM1D_V4(BaseTimeSeriesModel):
         bidirectional: bool = True,
 
         # ---- Dropout interface (compat & explicit) ----
-        p_drop: float | None = None,          # deprecated alias
-        lstm_dropout: float | None = None,    # dropout between LSTM layers
+        p_drop: float | None = 0.2,          # deprecated alias
+        lstm_dropout: float | None = 0.2,    # dropout between LSTM layers
         head_dropout: float | None = None,    # dropout in head
         in_locked_p: float = 0.0,             # locked dropout on inputs
         out_locked_p: float = 0.0,            # locked dropout on LSTM outputs (before pooling)
