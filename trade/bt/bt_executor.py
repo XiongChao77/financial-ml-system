@@ -21,7 +21,7 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         self.live_trades = []
         self.closed_pnl = []
 
-    def user_order_target_percent(self, target_pct:float):
+    def user_order_target_percent(self, target_pct:float, stop_loss: float = None):
         """
         全能下单函数 (带订单追踪版):
         1. 自动计算股数
@@ -62,9 +62,9 @@ class BtExecutor(BaseExecutor,bt.Strategy):
             # 但为了逻辑统一，这里直接按 target_size 开仓
             action_size = abs(target_size)
             if target_size > 0: 
-                self._open_bracket(action_size, is_buy=True)
+                self._open_bracket(action_size, is_buy=True, stop_loss=stop_loss)
             else:
-                self._open_bracket(action_size, is_buy=False)
+                self._open_bracket(action_size, is_buy=False, stop_loss=stop_loss)
             return
 
         # === B: 同向加仓 (Increase) ===
@@ -73,7 +73,7 @@ class BtExecutor(BaseExecutor,bt.Strategy):
             is_buy = target_size > 0
             
             self.logger.debug(f'【加仓】方向:{"多" if is_buy else "空"} 数量:{action_size}, current_size:{current_size}')
-            self._open_bracket(action_size, is_buy=is_buy)
+            self._open_bracket(action_size, is_buy=is_buy, stop_loss=stop_loss)
 
         # === C: 同向减仓 (Reduce - FIFO模式) ===
         elif abs(target_size) < abs(current_size):
@@ -117,15 +117,23 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         # 因为 trade_logs 是按单(order)记的，而这里是按回合(trade)记的。
         # 通常建议单独存一个 closed_trades 列表。
 
-    def _open_bracket(self, size, is_buy):
+    def _open_bracket(self, size, is_buy, stop_loss=None):
         """执行 Bracket 下单并记录返回值"""
         price = self.data.close[0]
-        stop_loss = self.data.stop_threshold[0]*self.params.stop_loss
+        if stop_loss is None:
+            # 兼容旧逻辑：如果数据里有动态阈值则使用，没有则用默认参数
+            try:
+                threshold = self.data.stop_threshold[0]
+            except (AttributeError, IndexError):
+                threshold = 1.0
+            actual_stop_loss = threshold * self.params.stop_loss
+        else:
+            actual_stop_loss = stop_loss
 
         if is_buy:
-            stop_price = price * (1.0 - stop_loss)
+            stop_price = price * (1.0 - actual_stop_loss)
             limit_price = price * (1.0 + self.params.take_profit)
-            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, stop_loss:{stop_loss}")
+            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, actual_stop_loss:{actual_stop_loss}")
             
             # returns: [Main, Stop, Limit]
             orders = self.buy_bracket(
@@ -144,9 +152,9 @@ class BtExecutor(BaseExecutor,bt.Strategy):
             })
             
         else: # Sell
-            stop_price = price * (1.0 + stop_loss)
+            stop_price = price * (1.0 + actual_stop_loss)
             limit_price = price * (1.0 - self.params.take_profit)
-            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, stop_loss:{stop_loss}")
+            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, actual_stop_loss:{actual_stop_loss}")
             orders = self.sell_bracket(
                 size=size, 
                 price=price, 
