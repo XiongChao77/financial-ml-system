@@ -88,11 +88,10 @@ class FtmoBrain(Brain):
     ):
         self.logger = logging.getLogger("trade")
         self.bars_held = 0
-        self.max_hold_num = 1   #PREDICT_NUM
+        self.max_hold_num = holdbar   #PREDICT_NUM
         self.executor = executor
         self.trade_risk = trade_risk
         self.max_layers = max_layers
-        self.holdbar = holdbar
         self.allow_long = allow_long
         self.allow_short = allow_short
         self.thresh = thresh
@@ -101,55 +100,6 @@ class FtmoBrain(Brain):
         self.was_in_position = False   # 记录上一根 K 线是否有持仓
         self.current_signal_streak = 0
         self.all_signal_streaks = []
-
-
-    def decide(self, state: MarketState) -> TradingAction:
-
-        # -------------------------------
-        # 1. 置信度过滤
-        # -------------------------------
-        signal = state.signal
-        if self.thresh is not None and state.pred_prob < self.thresh:
-            signal = Signal.NEUTRAL
-        # -------------------------------
-        # 2. 信号 -> 目标方向
-        # -------------------------------
-        target_dir = PositionDir.FLAT
-
-        if signal == Signal.LONG and self.allow_long:
-            target_dir = PositionDir.LONG
-        elif signal == Signal.SHORT and self.allow_short:
-            target_dir = PositionDir.SHORT
-
-        action = TradingAction(ActionType.HOLD)
-
-        if state.position_dir == PositionDir.FLAT:  #当前无持仓
-            if target_dir != PositionDir.FLAT:
-                action = TradingAction(
-                    action=ActionType.OPEN,
-                    target_dir=target_dir,
-                    target_layers=1,
-                    target_pct=self.trade_risk * target_dir,
-                )
-        else:   #当前有持仓
-            if target_dir == PositionDir.FLAT:  #震荡 -> 平仓
-                action = TradingAction(ActionType.CLOSE)
-            elif target_dir != state.position_dir:  #方向反转 -> 反手
-                action = TradingAction(
-                    action=ActionType.REVERSE,
-                    target_dir=target_dir,
-                    target_layers=1,
-                    target_pct=self.trade_risk * target_dir,
-                )
-            elif state.layers < self.max_layers:  #同向 -> 加仓
-                new_layers = state.layers + 1
-                action = TradingAction(
-                    action=ActionType.PYRAMID,
-                    target_dir=state.position_dir,
-                    target_layers=new_layers,
-                    target_pct=self.trade_risk * new_layers * state.position_dir,
-                )
-        self.execute_action(action)
 
     def decide(self, state: MarketState) -> TradingAction:
         # ---------------------------------------------------------

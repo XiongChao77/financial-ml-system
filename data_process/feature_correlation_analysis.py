@@ -313,7 +313,7 @@ def main():
     for period in period_list:
         evaluate_file = os.path.join(os.path.dirname(common.origin_data_path), f"BTCUSDT_{period}.csv" )
         df_base = pd.read_csv(evaluate_file)
-        common.attach_attr(df_base)
+        common.attach_attr(df_base,common.FEATURE_CONFIG_LIST, common.load_interval_ms())
         tasks = []
         for candlestick_num in candlestick_num_range:
             for predict_num in [candlestick_num//8, candlestick_num//6, candlestick_num//4]:

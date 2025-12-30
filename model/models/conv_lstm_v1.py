@@ -219,6 +219,18 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
                 nn.Dropout(self.head_dropout),
                 nn.Linear(mid, self.n_classes),
             )
+        # ---- 修改为双头架构 ----
+        # 任务 A: Trigger (判断是否有信号) -> 2类: 0(Neutral), 1(Action)
+        self.head_trigger = nn.Sequential(
+            nn.Dropout(self.head_dropout),
+            nn.Linear(feat_dim, 2)
+        )
+        
+        # 任务 B: Direction (判断方向) -> 2类: 0(Short), 1(Long)
+        self.head_direction = nn.Sequential(
+            nn.Dropout(self.head_dropout),
+            nn.Linear(feat_dim, 2)
+        )
 
     @staticmethod
     def _make_mask(lengths: torch.Tensor, T: int) -> torch.Tensor:
@@ -231,7 +243,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
             return torch.cat((h_n[-2], h_n[-1]), dim=1)
         return h_n[-1]
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused=False) -> torch.Tensor:
         """
         x: [B,T,F]
         lengths: [B] optional
@@ -300,12 +312,38 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
             raise RuntimeError(f"Unknown readout={self.readout}")
 
         feat = self.norm(feat)
-        logits = self.classifier(feat)
+        # 分别计算两个任务的 Logits
+        logits_trig = self.head_trigger(feat)    # [B, 2]
+        logits_dir = self.head_direction(feat)  # [B, 2]
 
         if self.logit_clip is not None:
-            logits = torch.clamp(logits, -self.logit_clip, self.logit_clip)
+            logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
+            logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        return logits
+        # 🌟 升级后的融合逻辑
+        if return_fused:
+            # 1. 计算各头概率 (Softmax)
+            p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
+            p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
+            
+            # 2. 合成 3 类概率 (Hierarchical Fusion)
+            # p_neutral(1) = p_hold
+            # p_short(0)   = p_act * p_short_in_act
+            # p_long(2)    = p_act * p_long_in_act
+            p_neutral = p_trig[:, 0]
+            p_act     = p_trig[:, 1]
+            p_short   = p_act * p_dir[:, 0]
+            p_long    = p_act * p_dir[:, 1]
+            
+            # 拼接成 [B, 3] 顺序: [Short(0), Neutral(1), Long(2)]
+            fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
+            
+            # 3. 生成预测标签 (基于合成概率的 argmax 确保与概率对齐)
+            fused_preds = torch.argmax(fused_probs, dim=1)
+            
+            return fused_preds, fused_probs # 🌟 返回元组
+        
+        return logits_trig, logits_dir
 
     # ---------- meta ----------
     def export_meta(self, **extra) -> dict:
