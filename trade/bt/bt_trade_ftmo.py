@@ -4,6 +4,7 @@ from datetime import timezone
 import numpy as np
 from trade.bt.bt_executor import BtExecutor
 from trade.strategy.strategy_ftmo import FtmoBrain,MarketState,TradingAction,ActionType,PositionDir,Signal
+from data_process import common
 # --- Strategy ---
 class FtmoStrategy(BtExecutor):
     params = dict(
@@ -23,6 +24,14 @@ class FtmoStrategy(BtExecutor):
         self.dir = 0  # 当前持仓方向: 1(多), -1(空), 0(无)
         self.layers = 0  # 当前加仓层数
         self.trade_logs = []
+        # 🌟 新增：用于校验的数据容器
+        self.all_preds = []
+        self.all_labels = []
+        self.audit_results = {}
+        self.audit_results['long_total'] = 0
+        self.audit_results['long_correct'] = 0
+        self.audit_results['short_total'] = 0
+        self.audit_results['short_correct'] = 0
         self.params.trade_risk = self.params.position_ratio * self.params.trade_risk
         self.brain = FtmoBrain(
             self,
@@ -112,6 +121,19 @@ class FtmoStrategy(BtExecutor):
         self.brain.stop()
         value = self.broker.getvalue()
         self.logger.info(f"Start Value: {self.broker.startingcash:2f} | End Value: {value:.2f}")
+        # 🌟 新增：在回测结束时打印输入准确性校验报告
+        if self.all_preds:
+            from sklearn.metrics import classification_report, f1_score
+            y_true = np.array(self.all_labels)
+            y_pred = np.array(self.all_preds)
+            
+            self.logger.info("\n" + "🔍" + "="*25 + " Strategy Input Integrity Check " + "="*25)
+            self.logger.info("\n" + classification_report(y_true, y_pred, digits=4))
+            
+            input_f1 = f1_score(y_true, y_pred, average='macro')
+            self.logger.info(f"📊 Final Input Macro-F1: {input_f1:.4f}")
+            self.logger.info("="*75 + "\n")
+        self._print_audit_report()
         # UI
         self.cerebro.trade_logs = self.trade_logs
 
@@ -119,6 +141,13 @@ class FtmoStrategy(BtExecutor):
         # 获取预测结果
         pred = self.data.pred[0]
         pred_prob = self.data.pred_prob[0]
+        label = self.data.label[0]
+
+        self._audit_label_integrity(lookback=common.PREDICT_NUM)
+        # 🌟 新增：收集非空数据用于校验
+        if not np.isnan(pred) and not np.isnan(label):
+            self.all_preds.append(int(pred))
+            self.all_labels.append(int(label))
 
         # 1. 数据有效性检查
         current_signal = Signal.INVALID if np.isnan(pred) else Signal(int(pred))
@@ -148,3 +177,47 @@ class FtmoStrategy(BtExecutor):
         # # 强制最后平仓
         # if len(self.data) - 1 == len(self) - 1 and self.position:
         #     self.close()
+
+    def _audit_label_integrity(self, lookback=120):
+        """
+        封装的校验函数：对比 [当前价格] 与 [lookback 根 K 线前的价格及标签]
+        """
+        if len(self) <= lookback:
+            return
+
+        past_label = self.data.label[-lookback]
+        past_price = self.data.close[-lookback]
+        current_price = self.data.close[0]
+
+        # 校验做多标签 (Label 2)
+        if past_label == common.Signal.LONG:
+            self.audit_results['long_total'] += 1
+            if current_price > past_price:
+                self.audit_results['long_correct'] += 1
+        
+        # 校验做空标签 (Label 0)
+        elif past_label == common.Signal.SHORT:
+            self.audit_results['short_total'] += 1
+            if current_price < past_price:
+                self.audit_results['short_correct'] += 1
+
+    def _print_audit_report(self):
+        """打印审计总结"""
+        self.logger.info("\n" + "🔍" * 5 + " 数据标签对齐审计 (Integrity Audit) " + "🔍" * 5)
+        
+        for side in ['long', 'short']:
+            correct = self.audit_results[f'{side}_correct']
+            total = self.audit_results[f'{side}_total']
+            acc = (correct / total * 100) if total > 0 else 0
+            icon = "📈" if side == 'long' else "📉"
+            self.logger.info(f"{icon} {side.upper()} Label 一致性: {acc:.2f}% ({correct}/{total})")
+        
+        # 深度诊断建议
+        total_acc = (self.audit_results['long_correct'] + self.audit_results['short_correct']) / \
+                    (max(1, self.audit_results['long_total'] + self.audit_results['short_total']))
+        
+        if total_acc < 0.99:
+            self.logger.error("🚨 警告：标签一致性低于 99%！数据处理阶段可能存在 index shift。")
+        else:
+            self.logger.info("✅ 标签对齐校验通过。")
+        self.logger.info("=" * 55 + "\n")           

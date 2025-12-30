@@ -31,7 +31,11 @@ pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook j
 ·如何降低回撤？
     降低持仓比例，或是动态调整持仓比例.盈利时可以重仓交易，亏损时轻仓交易
     提升夏普比率，降低单位收益的风险.
-做量化交易，带单邀请的人，可以吃带单分成和手续费
+数据处理：
+    如何选择标签？基于时间/空间
+    数据清洗
+    采样
+    特征
 ***********************坑*************************
 指标计算：
 FeatureCandle/FeatureKdj/FeatureCFM/MFI在极端行情为0或nan，需要处理成有意义的值

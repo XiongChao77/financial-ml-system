@@ -121,12 +121,7 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         """执行 Bracket 下单并记录返回值"""
         price = self.data.close[0]
         if stop_loss is None:
-            # 兼容旧逻辑：如果数据里有动态阈值则使用，没有则用默认参数
-            try:
-                threshold = self.data.stop_threshold[0]
-            except (AttributeError, IndexError):
-                threshold = 1.0
-            actual_stop_loss = threshold * self.params.stop_loss
+            actual_stop_loss = 0.1
         else:
             actual_stop_loss = stop_loss
 

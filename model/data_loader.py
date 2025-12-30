@@ -1,8 +1,7 @@
-# data_loader.py (新文件)
-from typing import List
+from typing import List,Optional,Tuple
 import numpy as np
 import pandas as pd
-import torch,os,logging
+import torch,os,logging,hashlib
 from torch.utils.data import Dataset
 from data_process import common
 
@@ -15,399 +14,356 @@ LOW_CORRELATION_FEATURES = ['number_of_trades','quote_asset_volume', 'taker_buy_
 # ====================================================================
 # --- 2. TimeSeriesWindowDataset CLASS ---
 # ====================================================================
-class TimeSeriesWindowDataset(Dataset):
+class TimeSeriesWindowDataset(torch.utils.data.Dataset):
     def __init__(
             self,
-            df: pd.DataFrame,
-            kline_interval_ms: int,
-            feature_cols: List[str],
+            df: pd.DataFrame = None,
+            feature_config_list = common.FEATURE_CONFIG_LIST,
+            kline_interval_ms: int = None,
+            feature_cols: List[str] = None,
             label_col: str = None,
             window: int = common.CANDLESTICK_NUM,
+            stride: int = 1,
             is_live: bool = False,
+            cache_path: Optional[str] = None,
+            use_cache: bool = False
     ):
-        self.is_live = is_live
-        time_col = 'open_time_ms_utc'
         self.logger = logging.getLogger()
-        # 1. 基础检查
-        if time_col not in df.columns:
-            raise ValueError(f"Dataset 必须包含 '{time_col}' 列以进行时间连续性检查！")
+        self.is_live = is_live
+        self.stride = stride
+        self.window = window
+        self.kline_interval_ms = kline_interval_ms
+        self.feature_cols_requested = feature_cols  # 记录请求的特征列表
+        self.label_col = label_col
+        self.time_col = 'open_time_ms_utc'
+        self.factory = common.FeatureFactory(feature_config_list, self.kline_interval_ms)
 
-        # 2. 列准备
-        clean_feature_cols = [col for col in feature_cols if col not in DROP_FEATURES]
-        self.feature_names = clean_feature_cols
-        self.feature_count = len(clean_feature_cols)
 
-        cols_to_extract = list(clean_feature_cols)
-        has_label = (label_col is not None) and (label_col in df.columns)
-        if has_label: cols_to_extract.append(label_col)
-        if time_col not in cols_to_extract: cols_to_extract.append(time_col)
+        # 🌟 核心修改：增加特征过滤逻辑
+        if feature_cols is not None:
+            # 由于 self.factory.all_feature_list 已是一维列表，直接转 set 进行高效匹配
+            available_features = set(self.factory.all_feature_list)
+            # 过滤请求列表：只保留 Factory 确实能够生成的特征
+            filtered_cols = [f for f in feature_cols if f in available_features]
+            # 如果有特征被剔除，打印警告以便排查配置问题
+            if len(filtered_cols) < len(feature_cols):
+                missing = set(feature_cols) - available_features
+                self.logger.warning(f"🚫 过滤掉 Factory 未定义的特征: {missing}")
+            # 更新请求参数，确保后续 _prepare_data 和缓存校验使用的是过滤后的列表
+            feature_cols = filtered_cols
+            self.feature_cols_requested = feature_cols 
 
-        # 3. 统一清洗 (仅保留一份 df_work 节省内存)
-        df_work = df[cols_to_extract].copy()
+        # --- 1. Load from Cache ---
+        if use_cache and cache_path and os.path.exists(cache_path):
+            if self._load_from_cache(cache_path):
+                self.logger.warning(f"🚀 参数匹配，成功从缓存加载: {cache_path}")
+                return
+            else:
+                self.logger.info("🔄 参数已变更或缓存失效，将重新处理原始数据...")
+
+        # --- 2. Process Data ---
+        if df is None or feature_cols is None:
+            raise ValueError("Data and feature_cols must be provided if cache is not found.")
+
+        self.logger.info("⚙️ Cache not found or invalid. Processing raw data...")
         
-        if True:
-            # --- 🔍 智能审计逻辑：区分冷启动与中间异常 ---
+        # A. Data Preparation & Audit
+        df_work, clean_features = self._prepare_data(df, feature_cols, label_col)
+        self.feature_names = clean_features
+        self.feature_count = len(clean_features)
 
-            # 1. 找出所有包含 NaN 的行
-            nan_mask = df_work.isna().any(axis=1)
-            df_nan = df_work[nan_mask].copy()
+        # B. Window Generation
+        X3d, time_windows = self._generate_windows(df_work)
 
-            if not df_nan.empty:
-                cold_start_count = 0
-                middle_gap_count = 0
+        # C. Filter & Align (Continuity + Labels)
+        X_filtered, y_filtered, final_indices = self._filter_and_align(
+            df_work, X3d, time_windows, label_col
+        )
+
+        # D. Finalize (Normalization & Tensor Conversion)
+        self._finalize_dataset(X_filtered, y_filtered, final_indices)
+
+        # --- 3. Save to Cache ---
+        if use_cache and cache_path:
+            self._save_to_cache(cache_path)
+
+    def _save_to_cache(self, path: str):
+        """保存处理后的数据及所有关键初始化参数"""
+        data_to_save = {
+            "X": self.X,
+            "y": self.y,
+            "indices": self.indices,
+            "feature_names": self.feature_names,
+            "feature_count": self.feature_count,
+            # 关键参数快照
+            "stride": self.stride,
+            "window": self.window,
+            "kline_interval_ms": self.kline_interval_ms,
+            "label_col": self.label_col,
+            "feature_cols_requested": self.feature_cols_requested,
+            "symbol": common.symbol,
+            "interval": common.interval,
+        }
+        torch.save(data_to_save, path)
+        self.logger.info(f"💾 数据处理完成，缓存已更新至: {path}")
+
+    def _load_from_cache(self, path: str) -> bool:
+        """从磁盘加载并校验参数一致性"""
+        try:
+            checkpoint = torch.load(path, weights_only=False) 
+            
+            # --- 严格参数比对逻辑 ---
+            # 1. 基础标量参数校验
+            mismatch_reasons = []
+            if self.stride != checkpoint.get("stride"):
+                mismatch_reasons.append(f"stride ({checkpoint.get('stride')} -> {self.stride})")
+            
+            if self.window != checkpoint.get("window"):
+                mismatch_reasons.append(f"window ({checkpoint.get('window')} -> {self.window})")
+            
+            if self.kline_interval_ms != checkpoint.get("kline_interval_ms"):
+                mismatch_reasons.append(f"interval ({checkpoint.get('kline_interval_ms')} -> {self.kline_interval_ms})")
+            
+            if self.label_col != checkpoint.get("label_col"):
+                mismatch_reasons.append(f"label_col ({checkpoint.get('label_col')} -> {self.label_col})")
+
+            if common.symbol != checkpoint.get("symbol"):
+                mismatch_reasons.append(f"symbol ({checkpoint.get('symbol')} -> {common.symbol})")
+
+            if common.interval != checkpoint.get("interval"):
+                mismatch_reasons.append(f"interval ({checkpoint.get('interval')} -> {common.interval})")
+
+            # 2. 特征列表校验 (内容与顺序)
+            cached_features = checkpoint.get("feature_cols_requested", [])
+            if self.feature_cols_requested != cached_features:
+                mismatch_reasons.append("feature_cols (列表内容或顺序已变更)")
+
+            # 如果有任何不匹配，返回 False 触发重算
+            if mismatch_reasons:
+                self.logger.warning(f"⚠️ 缓存参数不匹配: {', '.join(mismatch_reasons)}")
+                return False
                 
-                # 记录每种类型的异常详情
-                gap_details = [] 
-                
-                self.logger.debug(f"📊 [Data Audit] 总计检测到 {len(df_nan)} 行数据包含 NaN")
+            # 参数完全一致，执行赋值
+            self.X = checkpoint["X"]
+            self.y = checkpoint["y"]
+            self.indices = checkpoint["indices"]
+            self.feature_names = checkpoint["feature_names"]
+            self.feature_count = checkpoint["feature_count"]
+            return True
 
-                # 预先计算每列的第一个有效索引（First Valid Index）
-                # 这是区分冷启动的关键线索
-                first_valid_indices = {col: df_work[col].first_valid_index() for col in clean_feature_cols}
+        except Exception as e:
+            self.logger.error(f"❌ 缓存加载失败: {e}")
+            return False
 
-                for idx, row in df_nan.iterrows():
-                    actual_nan_cols = row.index[row.isna()].tolist()
-                    
-                    is_middle_gap = False
-                    cols_middle_gap = []
-                    cols_cold_start = []
+    # ----------------------------------------------------------------
+    # --- Internal Pipeline Methods ---
+    # ----------------------------------------------------------------
 
-                    for col in actual_nan_cols:
-                        first_idx = first_valid_indices.get(col)
-                        
-                        # 如果当前索引比该列第一个有效值还要早，就是冷启动
-                        if first_idx is None or idx < first_idx:
-                            cols_cold_start.append(col)
-                        else:
-                            # 否则，这就是“中间空洞”，属于异常！
-                            is_middle_gap = True
-                            cols_middle_gap.append(col)
-
-                    if is_middle_gap:
-                        middle_gap_count += 1
-                        gap_details.append(f"   - 行号 {idx:6d} | 时间: {row[time_col]} | ❌ 异常空洞列: {cols_middle_gap}")
-                    else:
-                        cold_start_count += 1
-
-                # --- 汇报结果 ---
-                self.logger.debug(f"✅ 冷启动缺失: {cold_start_count} 行 (属于正常计算窗口等待)")
-                self.logger.debug(f"🚨 中间异常缺失: {middle_gap_count} 行 (请检查数据源或特征逻辑!)")
-
-                if gap_details:
-                    self.logger.debug("📍 中间异常详情 (前 20 条):")
-                    for detail in gap_details[:20]:
-                        self.logger.debug(detail)
-
-                # 汇总受灾特征
-                self.logger.debug("🧐 缺失特征分布:")
-                missing_stats = df_nan.isna().sum()
-                for col_name, count in missing_stats[missing_stats > 0].items():
-                    type_str = "冷启动" if idx < (first_valid_indices.get(col_name) or 0) else "可能含异常"
-                    self.logger.debug(f"   - [{col_name:15s}]: 缺失 {count:6d} 行")
-
+    def _prepare_data(self, df: pd.DataFrame, feature_cols: List[str], label_col: str):
+        """
+        分两阶段清洗数据：
+        1. 剔除开头的冷启动 NaN (预期内)
+        2. 剔除中间和末尾的异常 NaN (风险项)
+        """
+        # --- 基础列筛选 ---
+        clean_features = [c for c in feature_cols if c not in DROP_FEATURES]
+        cols = clean_features + ([label_col] if label_col and label_col in df.columns else []) + [self.time_col]
         
-        # 回测模式下记录原始索引映射
+        df_work = df[cols].copy()
         if not self.is_live:
             df_work['orig_index'] = df.index
+
+        total_rows = len(df_work)
+        self.logger.debug(f"📊 [Data Clean] 开始清洗数据，原始总行数: {total_rows}")
+
+        # --- 第一部分：删除起始的冷启动 NaN ---
+        # 逻辑：找到第一行没有任何 NaN 的位置，删除它之前的所有行
+        is_valid_row = df_work.notna().all(axis=1)
+        if is_valid_row.any():
+            first_valid_idx_label = is_valid_row.idxmax()  # 找到第一个全 True 的索引标签
+            first_valid_loc = df_work.index.get_loc(first_valid_idx_label) # 获取该标签的物理位置
+            
+            if first_valid_loc > 0:
+                df_work = df_work.iloc[first_valid_loc:].copy()
+                self.logger.debug(f"✂️ [Step 1] 剔除头部冷启动: {first_valid_loc} 行 (由于指标预热等原因)")
+            else:
+                self.logger.debug(f"✅ [Step 1] 无头部冷启动数据。")
+        else:
+            raise RuntimeError("❌ [Data Clean] 错误：数据集中没有任何一行是完整的！请检查特征计算逻辑。")
+
+        # --- 第二部分：删除中间或末尾的 NaN (异常空洞) ---
+        before_gap_clean = len(df_work)
+        df_work.dropna(inplace=True) # 此时剩下的都是中间或末尾的 NaN
+        after_gap_clean = len(df_work)
         
-        df_work.dropna(inplace=True)
+        gap_count = before_gap_clean - after_gap_clean
+        if gap_count > 0:
+            # 中间空洞通常意味着数据源质量问题，建议用 WARNING 或 ERROR 级别
+            self.logger.error(f"🚨 [Step 2] 发现并剔除中间/末尾异常空洞: {gap_count} 行！请检查数据源完整性。")
+        else:
+            self.logger.debug(f"✅ [Step 2] 未发现中间空洞。")
+
+        # --- 最终重置索引 ---
         df_work.reset_index(drop=True, inplace=True)
-        self.logger.debug(f"--- Data Length after Drop: {len(df_work)}---")
-        if df_work.empty:
-            raise RuntimeError("Dataset became empty after dropping NaNs.")
+        self.logger.info(f"✨ [Data Clean] 清洗完成: {total_rows} -> {len(df_work)} 行 (总计剔除 {total_rows - len(df_work)} 行)")
 
-        # 4. 提取基础 array
-        values = df_work[clean_feature_cols].to_numpy(dtype=np.float32)
-        timestamps = df_work[time_col].to_numpy(dtype=np.int64)
+        return df_work, clean_features
 
-        # 5. 窗口化
-        X3d = _as_strided_windows(values, window) # [M, T, F]
-        time_windows = _as_strided_windows(timestamps.reshape(-1, 1), window).squeeze(-1)
+    def _generate_windows(self, df_work: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+        """Creates 3D windows using custom stride."""
+        values = df_work[self.feature_names].to_numpy(dtype=np.float32)
+        timestamps = df_work[self.time_col].to_numpy(dtype=np.int64)
 
-        assert X3d.shape[0] == time_windows.shape[0], "特征与时间窗口不一致！"
+        X3d = _as_strided_windows(values, self.window, self.stride)
+        time_windows = _as_strided_windows(timestamps.reshape(-1, 1), self.window, self.stride).squeeze(-1)
+        return X3d, time_windows
 
-        if True:
-            # 6. 连续性检查逻辑 (优化版)
-            # 直接使用从 JSON 读取的精确值
-            interval_ms = kline_interval_ms
-
-            # A. 全局检查 (Window内缺失 <= 5)
-            global_actual_span = time_windows[:, -1] - time_windows[:, 0]
-            # 使用物理标准计算理想跨度
-            global_ideal_span = (window - 1) * interval_ms
-            mask_global = (global_actual_span - global_ideal_span) <= (5.1 * interval_ms)
-
-            # B. 尾部检查 (末端 10 个缺失 <= 2)
-            check_tail_count = 10
-            if window > check_tail_count:
-                tail_actual_span = time_windows[:, -1] - time_windows[:, -(check_tail_count + 1)]
-                tail_ideal_span = check_tail_count * interval_ms
-                mask_tail = (tail_actual_span - tail_ideal_span) <= (2 * interval_ms)
-            else:
-                mask_tail = True
-
-            valid_mask = mask_global & mask_tail
-        else:
-            # === 回退逻辑 ===
-            # 创建一个全为 True 的掩码，即保留所有窗口
-            valid_mask = np.ones(len(X3d), dtype=bool)
-            self.logger.debug("⚠️ [Continuity] Check SKIPPED (check_continuity=False). All windows kept.")
-        # 7. 【核心修改】：执行统一过滤 (输入连续性 + 标签有效性)
+    def _filter_and_align(self, df_work, X3d, time_windows, label_col):
+        """
+        过滤逻辑增强：
+        1. 全局检查：窗口内总缺失不能超过 5 个 K 线。
+        2. 尾部检查：窗口内最后 10 个数据必须完全连续（零缺失）。
+        3. 标签对齐：支持 stride。
+        """
         original_count = len(X3d)
+        has_label = (label_col is not None) and (label_col in df_work.columns)
+        interval = self.kline_interval_ms
+
+        # --- A. 连续性掩码计算 ---
         
-        # 先获取所有窗口对应的原始标签
-        # (df_work 已经 reset_index 了，所以 window-1: 正好对应窗口最后一根)
-        labels_all = df_work[label_col].values[window-1:] if has_label else np.zeros(original_count)
+        # 1. 全局跨度检查 (允许一定程度的中间空洞)
+        global_actual_span = time_windows[:, -1] - time_windows[:, 0]
+        global_ideal_span = (self.window - 1) * interval
+        mask_global = (global_actual_span - global_ideal_span) <= (5.1 * interval)
+
+        # 2. 严格的尾部检查 (最后 10 根 K 线)
+        # 需求：最后 10 个数据内有缺失则丢弃。
+        # 跨度计算公式：最后 1 根的时间 - 倒数第 11 根的时间，理想跨度应为 10 * interval
+        check_tail_count = 10
+        # 提取最后 11 个时间戳（包含 10 个间隔）
+        tail_actual_span = time_windows[:, -1] - time_windows[:, -(check_tail_count + 1)]
+        tail_ideal_span = check_tail_count * interval
         
+        # 【零容忍逻辑】：实际跨度必须 <= 理想跨度 (考虑到 int64 精度，这里用 <= 即可)
+        # 如果实际跨度 > 理想跨度，说明中间至少有一个 GAP
+        mask_tail = (tail_actual_span <= tail_ideal_span)
+
+        valid_mask = mask_global & mask_tail
+
+        # --- B. 标签与索引对齐 (支持 Stride) ---
         if has_label:
-            # 创建标签有效性掩码：只有不等于 -1 的才是有效的
-            label_valid_mask = (labels_all != common.Signal.INVALID)
-            # 最终掩码 = 输入连续 & 标签有效
-            final_mask = valid_mask & label_valid_mask
+            # 选出每个窗口末尾行对应的标签
+            raw_labels = df_work[label_col].values[self.window - 1 :: self.stride]
+            labels_all = raw_labels[:original_count]
+            # 最终掩码 = 连续性合格 & 标签有效
+            final_mask = valid_mask & (labels_all != common.Signal.INVALID)
         else:
+            labels_all = np.zeros(original_count)
             final_mask = valid_mask
-        if True:
-            # ---------------------------------------------------------
-            # 🔍 【时空全显】打印异常窗口内的每一根 K 线时间戳
-            # ---------------------------------------------------------
-            # 找到被 mask_global 或 mask_tail 拦截的索引
-            failed_indices = np.where(~valid_mask)[0]
 
-            if len(failed_indices) > 0:
-                self.logger.debug(f"\n🚨 [CRITICAL AUDIT] 发现 {len(failed_indices)} 个异常窗口。")
-                
-                # 为了防止刷屏，我们只展示前 2 个被拦截的窗口明细
-                for window_idx in failed_indices[:2]:
-                    # 提取该窗口内的所有 136 个时间戳
-                    internal_timestamps = time_windows[window_idx] 
-                    
-                    self.logger.debug(f"\n📂 窗口索引: {window_idx} (明细清单):")
-                    self.logger.debug(f"{'Step':>5} | {'Row_in_df':>10} | {'Timestamp_ms':>15} | {'Diff_with_prev'}")
-                    self.logger.debug("-" * 65)
-
-                    for step in range(len(internal_timestamps)):
-                        curr_t = internal_timestamps[step]
-                        # 计算与上一根的差值
-                        diff_str = ""
-                        if step > 0:
-                            diff = curr_t - internal_timestamps[step-1]
-                            diff_str = f"<- {diff} ms"
-                            # 如果差值不是 interval_ms，高亮标注
-                            if diff != interval_ms:
-                                diff_str += " ⚠️ [GAP DETECTED]"
-                        
-                        # 计算该数据在 df_work 中的实际行号
-                        actual_row = window_idx + step
-                        self.logger.debug(f"{step:5d} | {actual_row:10d} | {curr_t:15d} | {diff_str}")
-                    
-                    self.logger.debug(f"\n[Summary] 窗口 {window_idx}: 理想跨度 {global_ideal_span} | 实际跨度 {global_actual_span[window_idx]}")
-                
-                if len(failed_indices) > 2:
-                    self.logger.debug(f"\n... 还有 {len(failed_indices)-2} 个异常窗口未展开明细。")
-            
-            self.logger.debug("\n" + "="*80 + "\n")
-
-        if True:
-            # ---------------------------------------------------------
-            # 🔍 增强 Debug：追踪被过滤的行号与原因
-            # ---------------------------------------------------------
-            # 建立原始索引参考 (窗口最后一根 K 线在 df_work 中的位置)
-            all_indices = np.arange(window - 1, window - 1 + original_count)
-            
-            # 1. 找出被连续性检查 (valid_mask) 过滤掉的行
-            mask_continuity_dropped = ~valid_mask
-            if np.any(mask_continuity_dropped):
-                dropped_idx = all_indices[mask_continuity_dropped]
-                df_dropped_cont = df_work.iloc[dropped_idx]
-                self.logger.debug(f"❌ [Debug] 因时间不连续被过滤: {len(df_dropped_cont)} 行")
-                # 打印前 5 条详细信息
-                for i, (idx, row) in enumerate(df_dropped_cont.head(40).iterrows()):
-                    self.logger.debug(f"   行号: {idx} | 时间: {row[time_col]} | 原因: 时间跨度异常")
-
-            # 2. 找出被标签有效性 (label_valid_mask) 过滤掉的行
-            if has_label:
-                mask_label_dropped = ~label_valid_mask
-                if np.any(mask_label_dropped):
-                    # 注意：这里我们只看通过了连续性检查但标签无效的，或者看全部标签无效的
-                    dropped_idx = all_indices[mask_label_dropped]
-                    df_dropped_label = df_work.iloc[dropped_idx]
-                    self.logger.debug(f"⚠️ [Debug] 因标签为 INVALID(-1) 被过滤: {len(df_dropped_label)} 行")
-                    # 打印前 5 条详细信息
-                    for i, (idx, row) in enumerate(df_dropped_label.head(40).iterrows()):
-                        self.logger.debug(f"   行号: {idx} | 时间: {row[time_col]} | 标签值: {row[label_col]}")
-
-        # 3. 统计最终留存情况
-        self.logger.info(f"✅ 过滤汇总: 原始 {original_count} -> 连续性过滤后 {np.sum(valid_mask)} -> 最终剩余 {np.sum(final_mask)}")
-        # 执行物理过滤
-        X3d_filtered = X3d[final_mask]
-        y_filtered = labels_all[final_mask]
-
-        # 处理索引映射 (用于 predict_v2 的精准回填)
+        # 索引对齐
+        final_indices = None
         if not self.is_live:
-            all_window_indices = df_work['orig_index'].values[window-1:]
-            self.indices = all_window_indices[final_mask]
-        else:
-            self.indices = None
+            raw_orig = df_work['orig_index'].values[self.window - 1 :: self.stride]
+            final_indices = raw_orig[:original_count][final_mask]
 
-        # 打印过滤信息，让我们知道丢了多少“断层”数据
-        dropped = original_count - len(X3d_filtered)
-        if dropped > 0:
-            self.logger.warning(f"⚠️ [Dataset] Dropped {dropped} samples (Incomplete windows or Invalid labels).")
-            self.logger.warning(f"📊 Remaining: {len(X3d_filtered)} ({len(X3d_filtered)/original_count:.2%})")
-            
-        # 8. 归一化 (在过滤后的数据上执行)
-        feature_factory = common.FeatureFactory(common.FEATURE_CONFIG_LIST, kline_interval_ms)
-        feature_factory.normalize(X3d_filtered, clean_feature_cols)
-
-        # 9. 最终赋值给 Tensor
-        self.X = torch.from_numpy(X3d_filtered)
-        self.y = torch.from_numpy(y_filtered).long() # 确保标签是 long 类型
-
-    def __len__(self): return self.X.shape[0]
-    def __getitem__(self, i): return self.X[i], self.y[i]
-
-# ========== 【修改】 增加 save_file 参数控制是否落盘 ==========
-    def save_debug_data(self, output_dir: str, save_file: bool = True):
-        """
-        检查并保存处理后的数据。
+        self.logger.info(f"✅ 过滤汇总: 原始 {original_count} -> 尾部严检后剩余 {np.sum(final_mask)}")
         
-        Args:
-            output_dir (str): 输出目录路径
-            save_file (bool): 如果为 True，则保存 .pt 和 .csv 文件；
-                              如果为 False，仅在控制台打印统计信息 (用于快速 Debug)。
+        return X3d[final_mask], labels_all[final_mask], final_indices
+
+    def _finalize_dataset(self, X_filtered, y_filtered, final_indices):
+        """Normalization and conversion to Tensors."""
+        self.factory.normalize(X_filtered, self.feature_names)
+
+        self.X = torch.from_numpy(X_filtered)
+        self.y = torch.from_numpy(y_filtered).long()
+        self.indices = final_indices
+        # --- 自动打印统计信息供 Review ---
+        if not self.is_live:
+            self.print_feature_stats()
+    # ----------------------------------------------------------------
+    # --- 调试与数据复核方法 ---
+    # ----------------------------------------------------------------
+
+    def print_feature_stats(self):
         """
-        # 0. 预先提取最后一帧数据 (用于后续的保存或统计)
-        # 形状变换: [M, T, F] -> [M, F] (取 T的最后一个索引)
+        打印所有特征的统计信息 (Mean, Std, Min, Max)，用于 review 归一化效果。
+        参考之前的逻辑，主要查看窗口最后一帧 (Last Step) 的分布。
+        """
+        if self.X is None or self.X.shape[0] == 0:
+            self.logger.warning("⚠️ 没有数据可以进行统计复核。")
+            return
+
+        # 提取最后一帧数据 [Batch, Feature]
+        # X 的形状是 [N, Window, Feature]
         last_step_data = self.X[:, -1, :].numpy()
-
-        # --- A. 文件保存逻辑 (仅当 save_file=True 时执行) ---
-        if save_file:
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-
-            self.logger.info(f"\n[Debug] Saving processed data to {output_dir} ...")
-
-            # 1. 保存完整的 Tensor 数据
-            torch.save({
-                "X": self.X,
-                "y": self.y,
-                "features": self.feature_names
-            }, os.path.join(output_dir, "debug_full_tensor.pt"))
-
-            # 2. 生成人类可读的 CSV
-            df_debug = pd.DataFrame(last_step_data, columns=self.feature_names)
-            df_debug["label"] = self.y.numpy()
-            
-            csv_path = os.path.join(output_dir, "debug_snapshot_last_step.csv")
-            # 使用 float_format 确保精度
-            df_debug.to_csv(csv_path, index_label="window_idx", float_format='%.6f')
-            
-            self.logger.debug(f"[Debug] Snapshot CSV saved: {csv_path}")
-            self.logger.debug(f"[Debug] Check this CSV to verify if values are in range [-3, 3] (approx).")
-        else:
-            self.logger.debug(f"\n[Debug] Skip saving files (save_file=False). Showing statistics only...")
-
-        # --- B. 统计检查逻辑 (始终执行) ---
-        # 3. 简单统计检查 (直接打印到控制台)
-        self.logger.debug("\n=== Data Statistics Check (Last Step) ===")
         
-        # 检查是否有 NaN
-        nan_count = np.isnan(last_step_data).sum()
-        self.logger.debug(f"Total NaNs in processed data: {nan_count}")
-        if nan_count > 0:
-            self.logger.debug("!!! WARNING: NaNs found in processed data. Check scaling logic! !!!")
+        self.logger.info("\n" + "="*90)
+        self.logger.info(f"📊 数据处理复核 (特征统计 - 最后一帧) | 样本数: {len(last_step_data)}")
+        self.logger.info("-" * 90)
+        self.logger.info(f"{'Feature Name':<35} | {'Mean':>10} | {'Std':>10} | {'Min':>10} | {'Max':>10}")
+        self.logger.info("-" * 90)
+
+        for i, name in enumerate(self.feature_names):
+            feat_slice = last_step_data[:, i]
+            mean_v = np.mean(feat_slice)
+            std_v  = np.std(feat_slice)
+            min_v  = np.min(feat_slice)
+            max_v  = np.max(feat_slice)
+            
+            # 使用简单的颜色或符号提醒异常值 (例如 std 远离 1 或 mean 远离 0)
+            alert = " ⚠️" if abs(mean_v) > 0.1 or abs(std_v - 1.0) > 0.2 else ""
+            
+            self.logger.info(
+                f"{name:<35} | {mean_v:10.4f} | {std_v:10.4f} | {min_v:10.4f} | {max_v:10.4f}{alert}"
+            )
         
-        # 打印前几列的均值方差，确认是否接近 0 和 1
-        self.logger.debug(f"{'Feature':<25} | {'Mean':<10} | {'Std':<10} | {'Min':<10} | {'Max':<10}")
-        self.logger.debug("-" * 75)
-        for i, col in enumerate(self.feature_names):
-            # 防止特征太多刷屏
-            # if i >= 20: 
-            #     self.logger.debug(f"... and {len(self.feature_names) - 20} more features")
-            #     break
-            
-            col_data = last_step_data[:, i]
-            self.logger.debug(f"{col:<25} | {col_data.mean():.4f}     | {col_data.std():.4f}     | {col_data.min():.4f}     | {col_data.max():.4f}")
-        self.logger.debug("=========================================\n")
+        self.logger.info("="*90 + "\n")
 
-    # ========== 【新增】 最终数据异常值检测方法 ==========
-    def inspect_final_data(self, clip_limit: float = 5.0):
-            """
-            检查最终的 self.X 数据中是否存在超出给定 Z-Score 限制的异常值。
-            打印 Nan/Inf 出现的位置，并按绝对值打印最大的 5 个异常值。
-            """
-            self.logger.debug(f"\n--- Starting Final Data Outlier Inspection (Limit: +/- {clip_limit:.1f}) ---")
-            
-            # 转换为 NumPy 数组进行检查
-            X_np = self.X.numpy()
-            
-            # 1. 检查 NaN 或 Inf
-            nan_or_inf_mask = np.isnan(X_np) | np.isinf(X_np)
-            if nan_or_inf_mask.any():
-                self.logger.debug("🚨 CRITICAL ERROR: Found NaN or Inf values in the final processed data (self.X).")
-                nan_loc = np.where(nan_or_inf_mask)
-                if nan_loc[0].size > 0:
-                    f_idx = nan_loc[2][0]
-                    self.logger.debug(f"  -> First NaN/Inf detected at Window: {nan_loc[0][0]}, Feature: {self.feature_names[f_idx]}")
-                
-            # 2. 检查 Z-Score Outliers (超过 ±clip_limit)
-            is_outlier = (X_np > clip_limit) | (X_np < -clip_limit)
-            outlier_locs = np.where(is_outlier)
-            
-            if outlier_locs[0].size > 0:
-                self.logger.debug(f"⚠️ WARNING: Found {outlier_locs[0].size} total outliers exceeding +/- {clip_limit:.1f}.")
-                
-                # --- 新增逻辑: 排序并打印最大的 5 个异常值 ---
-                
-                # 1. 提取所有异常值
-                # 使用 outlier_locs 数组作为索引，提取对应的值
-                outlier_values = X_np[outlier_locs]
-                
-                # 2. 获取按绝对值排序的索引 (降序)
-                sorted_indices = np.argsort(np.abs(outlier_values))[::-1]
-                
-                self.logger.debug(f"--- Top {min(5, sorted_indices.size)} Largest Outliers (by Magnitude) ---")
-                
-                # 3. 打印前 5 个最大异常值的位置
-                for i in range(min(5, sorted_indices.size)):
-                    
-                    # 获取在 outlier_locs 数组中的原始索引
-                    original_outlier_idx = sorted_indices[i] 
-                    
-                    # 使用原始索引获取三维坐标
-                    w_idx, t_idx, f_idx = (outlier_locs[0][original_outlier_idx],
-                                        outlier_locs[1][original_outlier_idx],
-                                        outlier_locs[2][original_outlier_idx])
-                    
-                    value = outlier_values[original_outlier_idx]
-                    feature_name = self.feature_names[f_idx]
-                    
-                    self.logger.debug(f"  [TOP {i+1}] Window: {w_idx:<5} | Bar: {t_idx:<3} | Feature: {feature_name:<20} | Value: {value:.4f}")
+    def __len__(self):
+        return self.X.shape[0]
 
-            else:
-                self.logger.debug("✅ All data points are within the +/- limit. Data quality is good.")
-                
-            self.logger.debug("-" * 40)
-
-def _as_strided_windows(a2d: np.ndarray, window: int, stride: int = 1) -> np.ndarray:
+    def __getitem__(self, i):
+        return self.X[i], self.y[i]
+def should_regenerate_cache(cache_path, data_path, feature_file, data_cfg):
     """
-    Turn [N, F] into overlapping [M, T, F] with custom stride S.
-    M = (N - T) // S + 1
+    通过校验文件修改时间和配置哈希，决定是否需要重新生成缓存。
     """
-    S = max(1, int(stride)) # 确保步长至少为 1
-    N, F = a2d.shape
-    M = (N - window) // S + 1 # 计算新的样本数量 M
+    if not os.path.exists(cache_path):
+        return True # 缓存不存在，必须生成
+
+    # 1. 检查文件修改时间 (mtime)
+    # 如果原始数据 CSV 或特征定义文件 feature.py 在缓存之后被修改过，则失效
+    cache_mtime = os.path.getmtime(cache_path)
+    if os.path.getmtime(data_path) > cache_mtime:
+        return True
+    if os.path.getmtime(feature_file) > cache_mtime:
+        return True
+
+    # 2. 检查关键配置是否改变 (Hash 校验)
+    # 将影响数据生成的参数转为字符串并计算哈希
+    config_str = f"{data_cfg.window}_{data_cfg.feature_cols}_{data_cfg.label_col}"
+    current_hash = hashlib.md5(config_str.encode()).hexdigest()
     
-    if M <= 0:
-        raise ValueError(f"Data length {N} must be >= window {window}.")
+    # 这里建议在生成缓存时，顺便存一个 .hash 文件
+    hash_path = cache_path + ".hash"
+    if not os.path.exists(hash_path):
+        return True
+    
+    with open(hash_path, "r") as f:
+        old_hash = f.read().strip()
+    
+    return current_hash != old_hash
+    
+# --- Global Utility ---
+def _as_strided_windows(a2d: np.ndarray, window: int, stride: int = 1) -> np.ndarray:
+    S = max(1, int(stride))
+    N, F = a2d.shape
+    M = (N - window) // S + 1
+    if M <= 0: return np.empty((0, window, F))
     
     s0, s1 = a2d.strides
-    
-    # 关键修改：样本轴（第一个维度 M）的步长现在是 s0 * S
     view = np.lib.stride_tricks.as_strided(
-        a2d, 
-        shape=(M, window, F), 
-        strides=(s0 * S, s0, s1), # <--- 引入步长 S
-        writeable=False
+        a2d, shape=(M, window, F), strides=(s0 * S, s0, s1), writeable=False
     )
     return view.copy()

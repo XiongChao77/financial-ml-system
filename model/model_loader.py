@@ -12,12 +12,17 @@ from model.data_loader import TimeSeriesWindowDataset
 # Encapsulated Model Handler
 # -----------------------------------------------------------------------------
 class ModelHandler:
-    def __init__(self, device=None):
+    def __init__(self, device=None, loss_fun = ''):
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = logging.getLogger("trade")
         
-        self.meta_path = os.path.join(TEMPORARY_DIR, "torch_model_train_meta.json")
-        self.model_path = os.path.join(TEMPORARY_DIR, "torch_model_train_info.pt")
+        if loss_fun == 'Best_F1': 
+            suffix = 'Best_F1'
+        else:
+            suffix = 'Best_Loss'
+        
+        self.meta_path = os.path.join(TEMPORARY_DIR, f"model_{suffix.lower()}_meta.json")
+        self.model_path = os.path.join(TEMPORARY_DIR, f"model_{suffix.lower()}_info.pt")
         
         self._load_metadata()
         self._load_model()
@@ -36,6 +41,15 @@ class ModelHandler:
         # 仅用于日志
         self.model_type = self.meta["model_type"]
         self.model_version = self.meta.get("model_version", "unknown")
+        raw_config = self.meta.get("feature_config_list", [])
+        self.feature_config_list = []
+        for class_name, params in raw_config:
+            # 由于使用了 from common import *，我们可以直接从 globals() 中找
+            if class_name in globals():
+                cls = globals()[class_name] 
+                self.feature_config_list.append((cls, params))
+            else:
+                self.logger.error(f"❌ 特征类 {class_name} 在当前命名空间未定义！")
 
     def _load_model(self):
         self.logger.info(
@@ -50,123 +64,8 @@ class ModelHandler:
         )
         self.model.eval()
 
-    def predict(self, df, kline_interval_ms, batch_size=1024, diff_thresh=None, min_thresh = 0.3):
-        """
-        执行推理，并支持基于概率差值的策略增强。
-        
-        :param df: 输入的 DataFrame (包含原始特征)
-        :param is_live: 是否为实盘模式。
-                        - True (实盘): 优化内存，仅输出最后一根 K 线的信号。
-                        - False (回测): 记录索引映射，确保信号与时间轴严格对齐。
-        :param batch_size: 批处理大小
-        :param diff_thresh: 概率差阈值 (P_long - P_short)。
-        :param min_thresh: 最小概率门槛，确保胜率。
-        :return: (df_out, stats) 
-                 df_out 包含完整 K 线及 'pred', 'pred_prob', 'net_score' 等列
-        """
-        self.logger.info(f"Starting inference pipeline (Strategy Threshold={diff_thresh}, min_thresh={min_thresh})...")
-        
-        # 1. 准备数据：传入 is_live 标志以控制索引记录逻辑
-        ds = TimeSeriesWindowDataset(
-            df=df, 
-            kline_interval_ms = kline_interval_ms,
-            feature_cols=self.feature_cols, 
-            label_col=self.label_col, 
-            window=self.window,
-            is_live=is_live
-        )
-        
-        # 检查是否产生了有效窗口（可能因为数据太短或全部不连续而被丢弃）
-        if len(ds) == 0:
-            self.logger.warning("No valid windows generated after continuity check!")
-            df_empty = df.copy()
-            for c in ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']:
-                df_empty[c] = np.nan
-            return df_empty, {}
-
-        self.logger.info(f"Dataset created. Valid windows: {len(ds)}")
-        dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
-
-        # 2. 推理循环 (获取原始 Logits -> Probabilities)
-        probs_list = []
-        with torch.no_grad():
-            for xb, _ in dl:
-                xb = xb.to(self.device)
-                if getattr(self.model, "supports_lengths", False):
-                    logits = self.model(xb, lengths=None)
-                else:
-                    logits = self.model(xb)
-                
-                probs = torch.softmax(logits, dim=1).cpu().numpy()
-                probs_list.append(probs)
-
-        # 拼接所有批次结果
-        probs_all = np.concatenate(probs_list)
-        p_short = probs_all[:, 0]   # 下跌概率
-        p_neutral = probs_all[:, 1] # 震荡概率
-        p_long = probs_all[:, 2]    # 上涨概率
-        net_score = p_long - p_short # 净得分
-
-        # 3. 生成最终信号逻辑
-        if diff_thresh is not None:
-            final_pred = np.full(len(probs_all), int(Signal.NEUTRAL))
-            final_conf = np.zeros(len(probs_all))
-            
-            # 做多逻辑
-            mask_long = (net_score > diff_thresh) & (p_long > min_thresh)
-            final_pred[mask_long] = int(Signal.LONG)
-            final_conf[mask_long] = net_score[mask_long]
-            
-            # 做空逻辑
-            mask_short = (net_score < -diff_thresh) & (p_short > min_thresh)
-            final_pred[mask_short] = int(Signal.SHORT)
-            final_conf[mask_short] = -net_score[mask_short]
-        else:
-            final_pred = probs_all.argmax(axis=1)
-            final_conf = probs_all.max(axis=1)
-
-        # 4. 【核心修复】：精准对齐与回填
-        # 创建副本并初始化新列为 NaN，确保不连续的“空洞”被保留以进行持仓管理
-        df_out = df.copy()
-        cols_to_init = ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']
-        for c in cols_to_init:
-            df_out[c] = np.nan
-        
-        if not is_live:
-            # === 回测模式：通过 ds.indices 将信号“钉”在正确的原始时间戳上 ===
-            if ds.indices is not None:
-                # 确保索引和预测值长度对齐
-                valid_len = min(len(ds.indices), len(final_pred))
-                active_indices = ds.indices[:valid_len]
-                
-                df_out.loc[active_indices, 'pred'] = final_pred[:valid_len]
-                df_out.loc[active_indices, 'pred_prob'] = final_conf[:valid_len]
-                df_out.loc[active_indices, 'prob_short'] = p_short[:valid_len]
-                df_out.loc[active_indices, 'prob_neutral'] = p_neutral[:valid_len]
-                df_out.loc[active_indices, 'prob_long'] = p_long[:valid_len]
-                df_out.loc[active_indices, 'net_score'] = net_score[:valid_len]
-        else:
-            # === 实盘模式：仅回填最新一根 K 线的结果 ===
-            if len(final_pred) > 0:
-                last_idx = df.index[-1]
-                df_out.at[last_idx, 'pred'] = final_pred[-1]
-                df_out.at[last_idx, 'pred_prob'] = final_conf[-1]
-                df_out.at[last_idx, 'net_score'] = net_score[-1]
-
-        # 5. 计算评估指标 (仅在非实盘且包含标签列时执行)
-        stats = {}
-        if not is_live and self.label_col in df_out.columns:
-            # 仅评估有预测值且有标签的部分
-            df_valid = df_out.dropna(subset=['pred', self.label_col])
-            if not df_valid.empty:
-                y_true = df_valid[self.label_col].values.astype(int)
-                y_pred = df_valid['pred'].values.astype(int)
-                stats = self.evaluate_performance(y_true, y_pred)
-        
-        self.logger.info(f"Inference complete. Valid samples: {len(final_pred)}")
-        return df_out, stats
-
-    def predict_v2(self, df, kline_interval_ms, is_live=True, batch_size=1024, diff_thresh=None, min_thresh=0.3):
+    def predict_v2(self, df, kline_interval_ms, is_live=True, batch_size=2048, diff_thresh=None, min_thresh=0.3, stride =1,
+                   cache_path = '', use_cache= False):
         """
         执行推理，并支持基于概率差值的策略增强。
         
@@ -186,10 +85,14 @@ class ModelHandler:
         ds = TimeSeriesWindowDataset(
             df=df, 
             kline_interval_ms = kline_interval_ms,
+            feature_config_list = self.feature_config_list,
             feature_cols=self.feature_cols, 
             label_col=self.label_col, 
             window=self.window,
-            is_live=is_live
+            is_live=is_live,
+            stride= stride,
+            cache_path = cache_path,
+            use_cache = use_cache,
         )
         
         # 检查是否产生了有效窗口（可能因为数据太短或全部不连续而被丢弃）
@@ -208,13 +111,11 @@ class ModelHandler:
         with torch.no_grad():
             for xb, _ in dl:
                 xb = xb.to(self.device)
-                if getattr(self.model, "supports_lengths", False):
-                    logits = self.model(xb, lengths=None)
-                else:
-                    logits = self.model(xb)
+                # 🌟 调用升级后的模型，直接获取标签和合成概率
+                _, fused_probs = self.model(xb, return_fused=True) 
                 
-                probs = torch.softmax(logits, dim=1).cpu().numpy()
-                probs_list.append(probs)
+                # 转换回 numpy 以便后续处理
+                probs_list.append(fused_probs.cpu().numpy())
 
         # 拼接所有批次结果
         probs_all = np.concatenate(probs_list)
