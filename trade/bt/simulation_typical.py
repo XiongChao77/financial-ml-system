@@ -44,7 +44,7 @@ class Parameters:
         self.allow_short = True
         self.allow_long = True
         self.thresh: float =None#None#0.5#None#0.45
-        self.commission = 0.1   # 0.1 = 0.1%  .can't be 0
+        self.commission = 0.0001   # 0.1 = 0.1%  .can't be 0
         self.cash = 10000
         self.stop_loss = 2  # should be 1-10   stop_loss = self.data.stop_threshold[0]*self.params.stop_loss
         self.take_profit = 0.99 #止盈. 0 - n倍
@@ -58,8 +58,8 @@ def main(logger:logging.Logger):
     )
 
     # 1. 数据加载
-    symbol = 'BTCUSDT'
-    interval = '6h'
+    symbol = 'ETHUSDT'
+    interval = '1m'
     origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{symbol}_{interval}.csv")
     data_path = origin_data_path
     if not os.path.exists(data_path):
@@ -76,14 +76,14 @@ def main(logger:logging.Logger):
 
     # 4. Backtrader 执行
     cerebro = bt.Cerebro(runonce=False,cheat_on_open=True)
-    if 0:
+    if 1:
         cerebro.addstrategy(
             TurtleStrategy,
             entry_period=20, # System 1
             exit_period=10,
             risk_per_unit=0.01 # 1% per unit
         )
-    if 1:
+    if 0:
         # simulation_typical.py 
         cerebro.addstrategy(
             MaCrossoverStrategy,
@@ -107,7 +107,7 @@ def main(logger:logging.Logger):
     cerebro.adddata(data)
     cerebro.broker.setcash(args.cash)
     cerebro.broker.addcommissioninfo(
-        cus_comminfo.CommInfo_Cryptocurrency(commission=args.commission, leverage =1)
+        cus_comminfo.CommInfo_Cryptocurrency(commission=args.commission, leverage =5)
     )
     # cerebro.broker.set_coc(True)  #
 

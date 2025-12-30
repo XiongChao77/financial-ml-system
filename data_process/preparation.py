@@ -7,7 +7,7 @@ sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 
 
-def main(logger:logging.Logger):
+def main(feature_config_list, logger:logging.Logger):
     file = common.origin_data_path
     # 1. 获取周期字符串并转为毫秒
     interval_str = get_interval_from_filename(file)
@@ -31,8 +31,8 @@ def main(logger:logging.Logger):
     # df = common.clean_data_quality_auto(df,logger)  
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
-    common.attach_label_v2(df, interval_ms=interval_ms)
-    common.attach_attr(df, interval_ms)
+    common.attach_label(df, interval_ms=interval_ms)
+    common.attach_attr(df, feature_config_list , interval_ms)
     # ---------------- 统计输出 ----------------
     counts = df['label'].value_counts().sort_index()
     proportions = df['label'].value_counts(normalize=True).sort_index()
@@ -110,4 +110,4 @@ def get_interval_ms(interval_str: str) -> int:
 if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     logger, _ = common.setup_session_logger(sub_folder='data_process')
-    main(logger)
+    main(common.FEATURE_CONFIG_LIST ,logger)

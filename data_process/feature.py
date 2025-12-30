@@ -276,7 +276,7 @@ class FeatureMA(FeatureBase):
             # 周线斜率（保持原行为）
             if self.add_slope:
                 slope_col = f"{'SLOPE_DIFF_' if self.method=='diff' else 'SLOPE_REG_'}{ma_w_col}_{self.slope_weeks}W"
-                # self.features.append(slope_col)   #no need for normalize
+                self.features.append(slope_col)   #no need for normalize
 
     def _calculate_klines_count(self, kline_interval_ms: float):
         """
@@ -472,7 +472,6 @@ class FeatureRsi(FeatureBase):
         valid = close.expanding().count() >= self.period
         out[col] = np.where(valid, rsi_values, np.nan)
             
-        self.features = [col]
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         """
         RSI 范围 [0, 100]。
@@ -597,6 +596,7 @@ class FeatureVolMa(FeatureBase):
         for w in self.vol_ma_windows:
             self.ma_features.append(f'VOL_MA_{w}')
             self.ma_features_ratio.append(f'VOL_ratio_{w}')
+            self.features.extend([f'VOL_MA_{w}', f'VOL_ratio_{w}'])
     def generate(self,df:pd.DataFrame, kline_interval_ms:int):
         # ==== 1. 成交量均线 + 比值 ====
         for w in self.vol_ma_windows:
@@ -611,7 +611,6 @@ class FeatureVolMa(FeatureBase):
             )
             # 将比值限制在 [0, 50] 之间，防止极端离群值破坏特征分布
             df[f'VOL_ratio_{w}'] = df[f'VOL_ratio_{w}'].clip(upper=50.0)
-            self.features.extend([f'VOL_MA_{w}', f'VOL_ratio_{w}'])
             
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         self._normalize_z_score(X, feature_cols , self.ma_features , feature_base = 'volume', factory= factory)
@@ -846,6 +845,7 @@ class FeatureCFM(FeatureBase):
     def __init__(self,**kwargs):
         super().__init__(**kwargs)
         self.cmf_window:int = kwargs.get('cmf_window', 20)
+        self.features = ['CMF']
     def generate(self, df: pd.DataFrame, kline_interval_ms: int):
         # 1. 计算价格区间
         range_hl = df['high'] - df['low']
@@ -865,7 +865,6 @@ class FeatureCFM(FeatureBase):
         # 5. 🌟 再次防护：如果 20 根线内完全没成交量，结果也赋值为 0
         df['CMF'] = np.where(vol_sum == 0, 0.0, mfv_sum / (vol_sum + EPS))
         
-        self.features = ['CMF']
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 Chaikin Money Flow (CMF) 所需的最小历史 K 线数量。
@@ -984,7 +983,6 @@ class FeatureVolumeEvent(FeatureBase):
         for w in self.windows:
             self.features.append(f'vol_event_ratio_{w}')
             self.features.append(f'vol_event_flag_{w}')
-        self.register_features(self.features)
 
     def generate(self, df: pd.DataFrame, kline_interval_ms: int):
         # 确保传入的是 float64 类型的 Numpy 数组
@@ -1149,6 +1147,162 @@ class FeatureCandle(FeatureBase):
         # 返回模型窗口大小，确保 Z-Score 计算有足够的样本数
         return max(base_dependency, int(model_window))
 
+class FeatureDonchian(FeatureBase):
+    """
+    唐奇安通道 (Donchian Channels):
+    Upper Band = Highest High of N periods
+    Lower Band = Lowest Low of N periods
+    Middle Band = (Upper + Lower) / 2
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.period = kwargs.get('period', 20)
+        self.prefix = kwargs.get('prefix', 'DONCHIAN')
+        self.features = [
+            f"{self.prefix}_UPPER_{self.period}",
+            f"{self.prefix}_LOWER_{self.period}",
+            f"{self.prefix}_MIDDLE_{self.period}"
+        ]
+
+    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+        
+        # 计算滚动最高与最低
+        upper = high.rolling(window=self.period).max()
+        lower = low.rolling(window=self.period).min()
+        middle = (upper + lower) / 2
+        
+        df[self.features[0]] = upper
+        df[self.features[1]] = lower
+        df[self.features[2]] = middle
+
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        # 使用 SCS 保持价格骨架的一致性，将绝对价格转化为比例关系
+        # self._normalize_scs(X, feature_cols, self.features, "close")
+        self._normalize_z_score(X, feature_cols , self.features , feature_base = "close", factory= factory)
+
+    def _min_history_request(self, kline_interval_ms: int = None) -> int:
+        return self.period
+
+class FeatureKeltner(FeatureBase):
+    """
+    肯特纳通道 (Keltner Channels):
+    Middle Band = EMA(Close, N)
+    Upper Band = Middle + Multiplier * ATR(N)
+    Lower Band = Middle - Multiplier * ATR(N)
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.period = kwargs.get('period', 20)
+        self.multiplier = kwargs.get('multiplier', 2.0)
+        self.prefix = kwargs.get('prefix', 'KELTNER')
+        self.features = [
+            f"{self.prefix}_UPPER_{self.period}",
+            f"{self.prefix}_LOWER_{self.period}",
+            f"{self.prefix}_MIDDLE_{self.period}"
+        ]
+
+    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
+        close = df['close'].astype(float)
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+        
+        # 1. 计算中轨 (EMA)
+        middle = close.ewm(span=self.period, adjust=False).mean()
+        
+        # 2. 计算 ATR (Average True Range)
+        tr = np.maximum((high - low), 
+                        np.maximum(abs(high - close.shift(1)), 
+                                   abs(low - close.shift(1))))
+        atr = tr.rolling(window=self.period).mean()
+        
+        # 3. 计算上下轨
+        upper = middle + (self.multiplier * atr)
+        lower = middle - (self.multiplier * atr)
+        
+        df[self.features[0]] = upper
+        df[self.features[1]] = lower
+        df[self.features[2]] = middle
+
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        # 同样使用 SCS 归一化，保护通道几何形态
+        # self._normalize_scs(X, feature_cols, self.features, "close")
+        self._normalize_z_score(X, feature_cols , self.features , feature_base = "close", factory= factory)
+
+    def _min_history_request(self, kline_interval_ms: int = None) -> int:
+        # EMA 需要约 4 倍周期进行预热收敛
+        return int(self.period * 4)
+
+class FeatureBoll(FeatureBase):
+    """
+    Bollinger Bands (布林带):
+    Middle Band = SMA(Close, N)
+    Upper Band = Middle + Multiplier * StdDev(Close, N)
+    Lower Band = Middle - Multiplier * StdDev(Close, N)
+    Bandwidth = (Upper - Lower) / Middle  (波动率量化)
+    %B = (Close - Lower) / (Upper - Lower) (价格在通道内的位置)
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.period = kwargs.get('period', 20)
+        self.multiplier = kwargs.get('multiplier', 2.0)
+        self.prefix = kwargs.get('prefix', 'BOLL')
+        
+        # 价格通道特征
+        self.price_features = [
+            f"{self.prefix}_UPPER_{self.period}",
+            f"{self.prefix}_LOWER_{self.period}",
+            f"{self.prefix}_MIDDLE_{self.period}"
+        ]
+        # 无量纲衍生特征
+        self.ratio_features = [
+            f"{self.prefix}_BW_{self.period}", # Bandwidth: 描述波动率挤压
+            f"{self.prefix}_PB_{self.period}"  # %B: 描述价格相对位置
+        ]
+        self.features = self.price_features + self.ratio_features
+
+    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
+        close = df['close'].astype(float)
+        
+        # 1. 计算中轨 (SMA) 和滚动标准差
+        middle = close.rolling(window=self.period).mean()
+        std = close.rolling(window=self.period).std()
+        
+        # 2. 计算上下轨
+        upper = middle + (self.multiplier * std)
+        lower = middle - (self.multiplier * std)
+        
+        # 3. 计算 Bandwidth (带宽) - 衡量波动率大小
+        bandwidth = (upper - lower) / (middle + EPS)
+        
+        # 4. 计算 %B - 价格在通道中的相对位置 (0=下轨, 1=上轨)
+        percent_b = (close - lower) / (upper - lower + EPS)
+        
+        df[self.price_features[0]] = upper
+        df[self.price_features[1]] = lower
+        df[self.price_features[2]] = middle
+        df[self.ratio_features[0]] = bandwidth
+        df[self.ratio_features[1]] = percent_b
+
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        # A. 通道价格类：使用 Z-Score 与收盘价对齐
+        self._normalize_z_score(X, feature_cols, self.price_features, feature_base="close", factory=factory)
+        
+        # B. 百分比位置 %B: 范围约在 [0, 1]，进行中心化处理
+        pb_idx = [factory._feature_index[f] for f in [self.ratio_features[1]] if f in factory._feature_index]
+        if pb_idx:
+            X[:, :, pb_idx] = X[:, :, pb_idx] - 0.5
+            
+        # C. 带宽 BW: 是正数且具有长尾特征，使用 log1p 压制
+        bw_idx = [factory._feature_index[f] for f in [self.ratio_features[0]] if f in factory._feature_index]
+        if bw_idx:
+            X[:, :, bw_idx] = np.log1p(X[:, :, bw_idx])
+
+    def _min_history_request(self, kline_interval_ms: int = None) -> int:
+        # SMA 基础窗口
+        return self.period
+    
 class FeatureOrigin(FeatureBase):
     def __init__(self,**kwargs):
         super().__init__(**kwargs)
@@ -1156,6 +1310,7 @@ class FeatureOrigin(FeatureBase):
         self.volume_base_features = ['taker_buy_base_volume', 'volume']#[] # feature used as basic must be the last!!!
         self.quote_base_features  = ['taker_buy_quote_volume', 'quote_asset_volume']#[]   #the basic is quote_asset
         self.self_based_features = ['number_of_trades']#[]
+        self.features = self.price_base_features + self.volume_base_features + self.quote_base_features + self.self_based_features
         # for f in ['open', 'high', 'low', 'close']:
         #     self.price_base_features.append(f'base_{f}')
         # for f in ['taker_buy_base_volume', 'volume']:
@@ -1183,15 +1338,23 @@ class FeatureOrigin(FeatureBase):
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         return 1
 
+#均线 动量 结构
+#01000001110001111  过拟合风险
+#01000010000010011
 FEATURE_CONFIG_LIST = [
-    # 1. 你定义的成交量爆发特征 (窗口 512，对比前 2 强)
+    # 1. 自定义的成交量爆发特征 (窗口 512，对比前 2 强)
     (FeatureVolumeEvent, {"windows": [5000, 1500], "top_k": 3}),
     # 2. 价格趋势与指标类
     (FeatureMACD, {"fast": 12, "slow": 26, "signal": 9}),
     (FeatureMA, {  "weeks": [7, 25],  "days": [5, 10, 20],  "bars": [],  "method": 'sma',  "strict": True,  "add_slope": False }),
     (FeatureRsi, {"period": 14, "price_col": 'close', "strict": True, "prefix": 'RSI'}),
     (FeatureKdj, {"n": 9, "m1": 3, "m2": 3, "strict": True, "prefix": 'KDJ'}),
-    # 3. 量能与成交活跃度类
+    # #价格通道类，2选1
+    (FeatureDonchian, {"period": 20}),
+    (FeatureKeltner, {"period": 20, "multiplier":2 }),
+    (FeatureBoll, {"period": 20}),
+
+    # # 3. 量能与成交活跃度类
     (FeatureVolMa, {"vol_ma_windows": (5, 10, 20)}),
     (FeatureQavMa, {"vol_ma_windows": (5, 10, 20)}),  #tired,rview this later
     (FeatureOBV, {}),
@@ -1207,6 +1370,7 @@ FEATURE_CONFIG_LIST = [
 
 class FeatureFactory:
     def __init__(self, feature_conf_list:list[dict[FeatureBase:[]]], kline_interval_ms:int):
+        self.all_feature_list = []  #feature names
         self.feature_map :dict[FeatureBase:[str]]= {}
         self.price_features = {}
         self._kline_interval_ms = kline_interval_ms
@@ -1219,6 +1383,7 @@ class FeatureFactory:
             # 使用 **params 将字典解包为关键字参数传递给构造函数
             instance = cls(factory = self,kline_interval_ms=kline_interval_ms, **params) 
             self.feature_list.append(instance)
+            self.all_feature_list.extend(instance.features)
 
     def generate(self,df):
         for f in self.feature_list:     f.generate(df, self._kline_interval_ms)

@@ -30,22 +30,25 @@ class PandasDataWithPred(bt.feeds.PandasData):
         "pred_prob",
         "threshold",       # 动态止盈阈值
         "stop_threshold",  # 动态止损阈值
+        'label',
     )
     params = (
         ("pred", -1),
         ("pred_prob", -1),
         ("threshold", -1),      # 自动匹配列名
         ("stop_threshold", -1), # 自动匹配列名
+        ("label", -1),
     )
 
 class Parameters:
     def __init__(self):
         self.allow_short = True
         self.allow_long = True
+        self.holdbar = 1#PREDICT_NUM
         self.thresh: float =None#None#0.5#None#0.45
         self.commission = 0.05   # 0.1 = 0.1%  .can't be 0
         self.cash = 10000
-        self.stop_loss = 2  # should be 1-10   stop_loss = self.data.stop_threshold[0]*self.params.stop_loss
+        self.stop_loss = 0.5  # 0-1
         self.take_profit = 0.99 #止盈. 0 - n倍
         self.position_ratio = 0.4     #0-1
 
@@ -57,19 +60,14 @@ def main(logger:logging.Logger):
     )
 
     # 1. 数据加载
-    data_path = test_data_path
-    if not os.path.exists(data_path):
-        logger.error(f"Data file not found: {data_path}")
-        sys.exit(1)
-
     # 直接读取 CSV，假设其中已包含所有特征列和时间列
     df = load_test_df()
     # 【关键】检查时间列是否存在
-    if "open_time_date_utc" not in df.columns:
-        logger.error("CRITICAL: 'open_time_date_utc' column missing.")
-        sys.exit(1)
-    # 【关键】解析时间列
-    # 不再调用 attach_attr，避免重复计算和潜在的数据修改
+    # if "open_time_date_utc" not in df.columns:
+    #     logger.error("CRITICAL: 'open_time_date_utc' column missing.")
+    #     sys.exit(1)
+    # # 【关键】解析时间列
+    # # 不再调用 attach_attr，避免重复计算和潜在的数据修改
     df["open_time_date_utc"] = pd.to_datetime(df["open_time_date_utc"], utc=True)
 
     # -----------------------------------------------------------
@@ -77,10 +75,11 @@ def main(logger:logging.Logger):
     # -----------------------------------------------------------
     try:
         # 初始化处理类
-        handler = model_loader.ModelHandler()
+        handler = model_loader.ModelHandler(loss_fun='Best_F1') #Best_F1/Best_Loss
         # 执行预测，获取结果和指标
         # df_with_pred, model_stats = handler.predict(df, load_interval_ms())#, min_thresh= 0.3)
-        df_with_pred, model_stats = handler.predict_v2(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None )
+        df_with_pred, model_stats = handler.predict_v2(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None,
+                                                       cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()
         # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
@@ -120,7 +119,7 @@ def main(logger:logging.Logger):
     cerebro = bt.Cerebro(runonce=False,cheat_on_open=True)
     cerebro.addstrategy(
         FtmoStrategy,
-        holdbar=4,
+        holdbar=args.holdbar,
         allow_short=args.allow_short,
         allow_long=args.allow_long,
         thresh=args.thresh,
@@ -138,7 +137,7 @@ def main(logger:logging.Logger):
         close="close",
         volume="volume",
         threshold="threshold",
-        stop_threshold="stop_threshold",
+        label = "label",
         openinterest=-1,
         nocase=True,
     )
@@ -146,7 +145,7 @@ def main(logger:logging.Logger):
     cerebro.adddata(data)
     cerebro.broker.setcash(args.cash)
     cerebro.broker.addcommissioninfo(
-        cus_comminfo.CommInfo_Cryptocurrency(commission=args.commission, leverage =10)
+        cus_comminfo.CommInfo_Cryptocurrency(commission=args.commission, leverage =1)
     )
     # cerebro.broker.set_coc(True)  #
 
@@ -367,7 +366,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, commission):
     return ui_stats
 
 if __name__ == "__main__":
-    logger, _= setup_session_logger(sub_folder='simulation',file_level = logging.DEBUG)
+    logger, _= setup_session_logger(sub_folder='simulation',console_level= logging.INFO, file_level = logging.DEBUG)
     start_time = time.time()
     main(logger)
     end_time = time.time()
