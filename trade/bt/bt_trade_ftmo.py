@@ -178,7 +178,7 @@ class FtmoStrategy(BtExecutor):
         # if len(self.data) - 1 == len(self) - 1 and self.position:
         #     self.close()
 
-    def _audit_label_integrity(self, lookback=120):
+    def _audit_label_integrity(self, lookback=common.CANDLESTICK_NUM):
         """
         封装的校验函数：对比 [当前价格] 与 [lookback 根 K 线前的价格及标签]
         """

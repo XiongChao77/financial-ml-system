@@ -22,6 +22,7 @@ pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook j
         uvicorn UI.backend.main:app --reload
     quant-ui:
         cd Quant\UI\quant-ui
+        npm install
         npm run dev
 
 ***********************ideas*********************************

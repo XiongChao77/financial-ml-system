@@ -1,7 +1,7 @@
 import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts'; 
 import './style.css';
 
-const API_BASE = "http://127.0.0.1:8000/run_backtest";
+const API_BASE = "http://100.90.15.23/run_backtest";
 
 // --- 全局变量 ---
 let chart;         // 图表实例
