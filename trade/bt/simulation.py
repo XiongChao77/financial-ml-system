@@ -44,7 +44,7 @@ class Parameters:
     def __init__(self):
         self.allow_short = True
         self.allow_long = True
-        self.holdbar = 1#PREDICT_NUM
+        self.holdbar = 16#PREDICT_NUM
         self.thresh: float =None#None#0.5#None#0.45
         self.commission = 0.05   # 0.1 = 0.1%  .can't be 0
         self.cash = 10000
@@ -79,7 +79,7 @@ def main(logger:logging.Logger):
         # 执行预测，获取结果和指标
         # df_with_pred, model_stats = handler.predict(df, load_interval_ms())#, min_thresh= 0.3)
         df_with_pred, model_stats = handler.predict_v2(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None,
-                                                       cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
+                                                       cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = True )
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()
         # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
@@ -168,7 +168,9 @@ def main(logger:logging.Logger):
     trade_logs = cerebro.trade_logs
 
     # ========== 转 K线 JSON ==========
-    candles = df[["open_time_date_utc", "open", "high", "low", "close"]].copy()
+    candles = df_with_pred[["open_time_date_utc", "open", "high", "low", "close", "volume", "pred", "label"]].copy()
+    candles["pred"] = candles["pred"].fillna(0.0)
+    candles["label"] = candles["label"].fillna(-1).astype(int)
     candles.rename(columns={"open_time_date_utc": "time"}, inplace=True)
     candles["time"] = candles["time"].apply(lambda dt: int(dt.timestamp()))
     candles_json = candles.to_dict(orient="records")

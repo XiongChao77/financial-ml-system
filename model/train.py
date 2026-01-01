@@ -43,15 +43,15 @@ class DataConfig:
 @dataclass
 class TrainConfig:
     epochs: int = 30
-    lr: float = 8e-5    #3e-4
+    lr: float = 3e-4    #3e-4
     weight_decay: float = 2e-3
     patience: int = 5
     seed: int = 42
     save_dir: str = common.TEMPORARY_DIR
-    stride = 4
-    use_cache = True
-    lambda_trig: float = 1.0  # Trigger 任务权重
-    lambda_dir: float = 0.1   # Direction 任务权重 (设为 0 即可实现第一阶段只练 Trigger)
+    stride = 16
+    use_cache = False
+    lambda_trig: float = 0.5  # Trigger 任务权重
+    lambda_dir: float = 1   # Direction 任务权重 (设为 0 即可实现第一阶段只练 Trigger)
 
 @dataclass
 class LSTMConfig:
@@ -309,7 +309,7 @@ def train_engine(
     y_trig = (y_raw != 1).astype(int) 
     cw_trig = compute_class_weight("balanced", classes=np.array([0, 1]), y=y_trig)
     weights_trig = torch.tensor(cw_trig, dtype=torch.float32, device=device)
-    weights_trig[1] = weights_trig[1] * 1.1 # 调整对 Action 类的重视，目标越小，多数类的Recall越高
+    # weights_trig[1] = weights_trig[1] * 1.1 # 调整对 Action 类的重视，目标越小，多数类的Recall越高
 
     # B. 为 Direction 任务计算权重 (0: Short, 1: Long)
     mask_dir = (y_raw != 1)
@@ -716,7 +716,7 @@ def main(feature_config_list, logger:logging.Logger):
     # m_cfg.d_model = 128
     
     # m_cfg = ModelConfigFactory.get_default_config("transformer")
-    m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig()][2]
+    m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig()][3]
     # m_cfg.model_version = 1
 
     logger.info(f"Training {m_cfg.model_type}...")
@@ -727,9 +727,8 @@ def main(feature_config_list, logger:logging.Logger):
 
 if __name__ == "__main__":
     logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
-    # 1. 准备冠军 Mask (第 8 代的最佳适应度组合)
-    best_mask_str = "01000001110001111"
-    # best_mask_str = "01000010000010011"   #过拟合风险最低
+    # best_mask_str =   "0000001011100011"
+    best_mask_str =     "0100001111101011"
     mask = [int(bit) for bit in best_mask_str]
 
     # 2. 按照 GA 脚本的逻辑拆分

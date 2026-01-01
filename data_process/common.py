@@ -14,8 +14,8 @@ class Signal(IntEnum):
     LONG = 2
 
 #define model
-CANDLESTICK_NUM = 120
-PREDICT_NUM = 4
+CANDLESTICK_NUM = 160   #160 best for LSTM
+PREDICT_NUM = 16
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
 乘数 (Multiplier),阈值位置,含义
@@ -24,15 +24,15 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-VOL_MULTIPLIER = 0.7
+VOL_MULTIPLIER = 1.2
 # 最小硬阈值 (覆盖手续费+滑点)
-MIN_THRESHOLD = 0.0001  # 0.25%  fee: 0.05%
-STOP_MULTIPLIER_RATE = 0.8 #最大回撤相较收益率的比值
+MIN_THRESHOLD = 0.005  # 0.25%  fee: 0.05%
+STOP_MULTIPLIER_RATE = 0.5 #最大回撤相较收益率的比值
 # label_decrease_weak =1 
 # label_increase_weak = 3
 model_train_rate = 0.8
-symbol = 'ETHUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
-interval = '15m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+symbol = 'BTCUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
+interval = '5m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 log_level = logging.INFO
 
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -138,7 +138,10 @@ def attach_label(df,
                 
     cond_short = final_valid_mask & (pct_final < -df['threshold']) & \
                  (abs(max_ru / pct_final) < stop_multiplier_rate)
-    
+
+    # cond_long = final_valid_mask & (pct_final > df['threshold'])
+                
+    # cond_short = final_valid_mask & (pct_final < -df['threshold'])
     # 将 ~final_valid_mask 放在第一位，确保断层直接变 -1
     conditions = [~final_valid_mask, cond_short, cond_long]
     choices = [Signal.INVALID, Signal.SHORT, Signal.LONG]
