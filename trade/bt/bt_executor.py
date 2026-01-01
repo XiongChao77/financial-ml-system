@@ -121,7 +121,7 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         """执行 Bracket 下单并记录返回值"""
         price = self.data.close[0]
         if stop_loss is None:
-            actual_stop_loss = 0.1
+            actual_stop_loss = 0.99
         else:
             actual_stop_loss = stop_loss
 

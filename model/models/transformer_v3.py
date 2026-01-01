@@ -446,21 +446,21 @@ class Transformer1D_V3(BaseTimeSeriesModel):
 
         self.out_norm = nn.LayerNorm(feat_dim)
 
-        # head
-        if self.head_type == "linear":
-            self.head = nn.Sequential(
-                nn.Dropout(self.dropout),
-                nn.Linear(feat_dim, self.n_classes),
-            )
-        else:
-            mid = max(64, self.d_model)
-            self.head = nn.Sequential(
+        mid = max(64, self.d_model)
+        self.head_trigger = nn.Sequential(
                 nn.Dropout(self.dropout),
                 nn.Linear(feat_dim, mid),
                 nn.GELU(),
                 nn.Dropout(self.dropout),
-                nn.Linear(mid, self.n_classes),
+                nn.Linear(mid, 2),
             )
+        self.head_direction = nn.Sequential(
+            nn.Dropout(self.dropout),
+            nn.Linear(feat_dim, mid),
+            nn.GELU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(mid, 2),
+        )
 
     @staticmethod
     def _make_mask(lengths: torch.Tensor, T: int) -> torch.Tensor:
@@ -468,7 +468,7 @@ class Transformer1D_V3(BaseTimeSeriesModel):
         idx = torch.arange(T, device=device).unsqueeze(0)
         return idx < lengths.unsqueeze(1)
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused = False) -> torch.Tensor:
         """
         x: [B, T, F]
         lengths optional: [B]
@@ -559,12 +559,36 @@ class Transformer1D_V3(BaseTimeSeriesModel):
             raise RuntimeError(f"Unknown readout={self.readout}")
 
         feat = self.out_norm(feat)
-        logits = self.head(feat)
+        # 🌟 修改点 2：分别计算双头 Logits
+        logits_trig = self.head_trigger(feat)    # [B, 2]
+        logits_dir = self.head_direction(feat)  # [B, 2]
 
         if self.logit_clip is not None:
-            logits = torch.clamp(logits, -self.logit_clip, self.logit_clip)
+            logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
+            logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        return logits
+        # 🌟 修改点 3：固化融合逻辑 (与 ConvLSTM_V1 保持同步)
+        if return_fused:
+            # 1. 计算各头概率 (Softmax)
+            p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
+            p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
+            
+            # 2. 合成 3 类概率
+            # p_neutral(1) = p_hold
+            # p_short(0)   = p_act * p_short_in_act
+            # p_long(2)    = p_act * p_long_in_act
+            p_neutral = p_trig[:, 0]
+            p_act     = p_trig[:, 1]
+            p_short   = p_act * p_dir[:, 0]
+            p_long    = p_act * p_dir[:, 1]
+            
+            # 拼接成 [B, 3] 顺序: [Short(0), Neutral(1), Long(2)]
+            fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
+            fused_preds = torch.argmax(fused_probs, dim=1)
+            
+            return fused_preds, fused_probs
+        
+        return logits_trig, logits_dir
 
     # -------------------------
     # meta / checkpoint

@@ -15,34 +15,71 @@ class FeatureBase(ABC):
         self.kline_interval_ms:int = kwargs.get('kline_interval_ms', None)
     #方差和均值做除数区别:方差会放大小波动，缩小大波动
 
-    def _normalize_old(self, X, feature_cols, target_feature_cols, feature_base, factory):
-        target_indices = [factory._feature_index[f] for f in target_feature_cols]
-        if not target_indices:
-            return
-        mu, denom = factory.get_base_stats(feature_base)
-        # 广播计算: (M, T, F_sub) - (M, 1, 1) / (M, 1, 1)
-        # 注意：mu 和 denom 需要增加一个维度以匹配特征维度 F
-        X[:, :, target_indices] = (X[:, :, target_indices] - mu[:, :, np.newaxis]) / denom[:, :, np.newaxis]
     def _normalize_z_score(self, X, feature_cols, target_feature_cols, feature_base, factory):
         target_indices = [factory._feature_index[f] for f in target_feature_cols]
         if not target_indices:
             return
-
-        # 1. 获取基准列的波动率 (Sigma)
-        # sigma_base 形状通常为 (M, 1) -> 我们需要它变为 (M, 1, 1) 以匹配 X (M, T, F)
+        mu_base, sigma_base = factory.get_base_stats(feature_base)
+        mu_base_3d = mu_base[:, :, np.newaxis] if mu_base.ndim == 2 else mu_base.reshape(-1, 1, 1)
+        denom = sigma_base[:, :, np.newaxis] 
+        X[:, :, target_indices] = np.where(
+            denom > EPS,
+            (X[:, :, target_indices] - mu_base_3d) / denom,
+            0.0
+        )
+    def _normalize_z_score_group(self, X, feature_cols, target_feature_cols, feature_base, factory):
+        target_indices = [factory._feature_index[f] for f in target_feature_cols]
+        if not target_indices:
+            return
         mu_base, sigma_base = factory.get_base_stats(feature_base)
         denom = sigma_base[:, :, np.newaxis] 
-
-        # 2. 核心改进：一次性计算 target 区域内所有特征各自的 mu
-        # X[:, :, target_indices] 的形状是 (M, T, len(target_indices))
-        # 我们沿时间轴 (axis=1) 计算均值
         mu_self = np.nanmean(X[:, :, target_indices], axis=1, keepdims=True)
-
-        # 3. 向量化赋值
-        # 这里的计算会同时跨样本、跨时间和跨特征列进行广播
         X[:, :, target_indices] = np.where(
             denom > EPS,
             (X[:, :, target_indices] - mu_self) / denom,
+            0.0
+        )
+        # X[:, :, target_indices] = np.clip(X[:, :, target_indices], -5.0, 5.0)
+
+    def _normalize_winsorized_z_score_group(self, X, feature_cols, target_feature_cols, feature_base, factory):
+        target_indices = [factory._feature_index[f] for f in target_feature_cols]
+        if not target_indices:
+            return
+        vals = X[:, :, target_indices]
+        
+        # 1. 🌟 预处理：在算统计量前，先把原始值限制在 1% ~ 99% 分位数之间
+        # 这样可以防止极端插针拉大标准差
+        p_low = np.nanpercentile(vals, 1, axis=1, keepdims=True)
+        p_high = np.nanpercentile(vals, 99, axis=1, keepdims=True)
+        vals_clipped = np.clip(vals, p_low, p_high)
+        
+        mu_base, sigma_base = factory.get_base_stats(feature_base)
+        denom = sigma_base[:, :, np.newaxis] 
+        mu_self = np.nanmean(vals_clipped, axis=1, keepdims=True)
+        X[:, :, target_indices] = np.where(
+            denom > EPS,
+            (vals_clipped - mu_self) / denom,
+            0.0
+        )
+
+    def _normalize_winsorized_z_score(self, X, feature_cols, target_feature_cols, factory):
+        target_indices = [factory._feature_index[f] for f in target_feature_cols]
+        vals = X[:, :, target_indices]
+        
+        # 1. 🌟 预处理：在算统计量前，先把原始值限制在 1% ~ 99% 分位数之间
+        # 这样可以防止极端插针拉大标准差
+        p_low = np.nanpercentile(vals, 1, axis=1, keepdims=True)
+        p_high = np.nanpercentile(vals, 99, axis=1, keepdims=True)
+        vals_clipped = np.clip(vals, p_low, p_high)
+        
+        # 2. 基于“温顺”后的数据计算统计量
+        mu_win = np.nanmean(vals_clipped, axis=1, keepdims=True)
+        sigma_win = np.nanstd(vals_clipped, axis=1, keepdims=True)
+        
+        # 3. 用“温顺”的统计量去归一化“原始”数据（或者也归一化温顺数据）
+        X[:, :, target_indices] = np.where(
+            sigma_win > EPS,
+            (vals_clipped - mu_win) / sigma_win,
             0.0
         )
 
@@ -228,7 +265,8 @@ class FeatureMACD(FeatureBase):
         out['MACD_DEA'] = dea
         out['MACD'] = macd
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        self._normalize_group_min_max(X, feature_cols , self.features , symmetric = True)
+        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = "MACD", factory = factory)
+        # self._normalize_group_min_max(X, feature_cols , self.features , symmetric = True)
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 MACD 所需的最小历史 K 线数量。
@@ -252,162 +290,167 @@ class FeatureMACD(FeatureBase):
 - 仅对“周均线”计算斜率，保持原函数语义不变
 """
 class FeatureMA(FeatureBase):
-    def __init__(self,**kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.weeks = kwargs.get('weeks', [7,25])
+        self.weeks = kwargs.get('weeks', [7, 25])
         self.days = kwargs.get('days', [5, 10, 20])
         self.bars = kwargs.get('bars', [7, 25, 99])
-        self.method = kwargs.get('method', 'sma') # 'sma' 或 'ema'
-        self.strict = kwargs.get('strict', True)# 严格型：窗口未满为 NaN；宽松型：尽早给值
+        self.method = kwargs.get('method', 'sma').upper()
+        self.strict = kwargs.get('strict', True)
         self.add_slope = kwargs.get('add_slope', False)
-        self.slope_method = kwargs.get('slope_method', 'reg')# 'diff' 或 'reg'
-        self.slope_weeks = kwargs.get('slope_weeks', 2)     # 斜率回看窗口（单位：周）
-        # 注册特征名
-        # 1. 注册原生 K 线均线 (如 SMA_7B)
-        for b in self.bars:
-            ma_col = f"{self.method.upper()}_{b}B"
-            self.features.append(ma_col)
-        for d in self.days:
-            ma_col = f"{'SMA' if self.method=='sma' else 'EMA'}_{d}D"
-            self.features.append(ma_col)
-        for w in self.weeks:
-            ma_w_col = f"{'SMA' if self.method=='sma' else 'EMA'}_{w}W"
-            self.features.append(ma_w_col)
-            # 周线斜率（保持原行为）
-            if self.add_slope:
-                slope_col = f"{'SLOPE_DIFF_' if self.method=='diff' else 'SLOPE_REG_'}{ma_w_col}_{self.slope_weeks}W"
-                self.features.append(slope_col)   #no need for normalize
+        self.slope_method = kwargs.get('slope_method', 'reg')
+        self.slope_weeks = kwargs.get('slope_weeks', 2)  # 斜率回看基准周期
+        
+        self.absolute_features = []
+        self.ratio_features = []
 
-    def _calculate_klines_count(self, kline_interval_ms: float):
+        # 1. 统一注册逻辑：遍历三个维度 (Bars, Days, Weeks)
+        # 维度配置：(列表, 后缀名)
+        dimensions = [
+            (self.bars, "B"),
+            (self.days, "D"),
+            (self.weeks, "W")
+        ]
+
+        for val_list, suffix in dimensions:
+            for v in val_list:
+                # 注册均线值
+                ma_col = f"{self.method}_{v}{suffix}"
+                self.features.append(ma_col)
+                self.absolute_features.append(ma_col)
+                
+                # 注册斜率
+                if self.add_slope:
+                    prefix = "SLOPE_DIFF" if self.slope_method == 'diff' else "SLOPE_REG"
+                    slope_col = f"{prefix}_{ma_col}_{self.slope_weeks}W"
+                    self.features.append(slope_col)
+                    self.ratio_features.append(slope_col)
+
+    def _calculate_klines_count(self, kline_interval_ms: float) -> tuple[int, int]:
         """
-        [纯数学计算] 根据给定的周期毫秒数，计算每天和每周包含多少根 K 线。
-        不再依赖 DataFrame。
+        [纯数学计算] 根据给定的 K 线周期毫秒数，计算每天和每周包含多少根 K 线。
+        kline_interval_ms: e.g., 900000 (15m), 60000 (1m)
+        返回: (klines_per_day, klines_per_week)
         """
         if kline_interval_ms <= 0:
-            # 默认保底值 (假设 15m)
+            # 默认保底值 (假设为 15m 周期: 24*4=96)
             return 96, 96 * 7
             
         one_day_ms = 24 * 60 * 60 * 1000
         one_week_ms = 7 * one_day_ms
 
-        # 使用 round 确保浮点精度误差不会导致向下取整错误
+        # 使用 round 确保由于浮点数微小误差（如 14.99999）导致的取整错误
         klines_per_day = max(int(round(one_day_ms / kline_interval_ms)), 1)
         klines_per_week = max(int(round(one_week_ms / kline_interval_ms)), 1)
         
         return klines_per_day, klines_per_week
-    
-    def generate(self,df:pd.DataFrame, kline_interval_ms:int):
-        price_col='close'
 
-        interval_ms = kline_interval_ms
-        klines_per_day, klines_per_week = self._calculate_klines_count(interval_ms)
+    def _slope_reg_vectorized(self, series: pd.Series, steps: int, strict: bool = True) -> pd.Series:
+        """
+        [优化] 向量化线性回归斜率计算。
+        通过预计算 x 的统计量，将 O(N*W) 的滑动窗口回归简化为 O(N) 的向量运算。
+        series: 均线序列 (pd.Series)
+        steps:  回看窗口根数 (int)
+        strict: 如果窗口内数据不足 steps 根，是否返回 NaN
+        """
+        if steps <= 1: 
+            return pd.Series(np.nan, index=series.index)
+        
+        # 1. 预计算 x 轴（时间轴）的常量
+        # x = [0, 1, 2, ..., steps-1]
+        n = float(steps)
+        x_mean = (n - 1) / 2.0
+        # x 的方差和 sum(x^2) 的简化公式
+        var_x = (n * (n**2 - 1)) / 12.0
+        
+        # 2. 向量化计算 y 的和 以及 x*y 的和
+        # 我们使用 cumsum 来模拟 rolling_sum
+        y_filled = series.fillna(0)
+        s1 = y_filled.cumsum()
+        s2 = s1.cumsum()
+        
+        # sum_y = 当前点的累计和 - steps 之前的累计和
+        sum_y = s1 - s1.shift(steps)
+        
+        # 利用双重累加和计算 sum(i * y_i)
+        # 物理意义：s2 包含了 y 的加权历史信息
+        shift_s1 = s1.shift(steps)
+        shift_s2 = s2.shift(steps)
+        weighted_sum_rev = (s2 - shift_s2) - steps * shift_s1
+        sum_xy = (steps * sum_y) - weighted_sum_rev
+        
+        # 3. 最小二乘法公式: slope = Cov(x, y) / Var(x)
+        y_mean = sum_y / n
+        slope = (sum_xy - n * x_mean * y_mean) / var_x
+        
+        # 4. 严格模式处理 (NaN 填充)
+        if strict:
+            # 只有当窗口内实际非空数据达到 steps 时才有效
+            valid = series.rolling(window=steps).count() >= steps
+            slope = slope.where(valid, np.nan)
+            
+        return slope
 
-        out = df
-        close = out[price_col].astype(float)
-
+    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
+        klines_per_day, klines_per_week = self._calculate_klines_count(kline_interval_ms)
+        close = df['close'].astype(float)
         m = self.method.lower()
-        if m not in ('sma', 'ema'):
-            raise ValueError("method 只能为 'sma' 或 'ema'")
 
-        # ---- 通用均线计算子函数 ----
-        def _ma(series: pd.Series, window: int) -> pd.Series:
+        # ---- 内部工具函数 ----
+        def _get_ma(series, window):
             if m == 'sma':
-                min_p = window if self.strict else 1
-                return series.rolling(window=window, min_periods=min_p).mean()
+                return series.rolling(window=window, min_periods=window if self.strict else 1).mean()
             else:
                 ema = series.ewm(span=window, adjust=False).mean()
                 if self.strict:
-                    counts = series.expanding(min_periods=1).count()
-                    ema = ema.where(counts >= window, np.nan)
+                    ema = ema.where(series.expanding().count() >= window, np.nan)
                 return ema
 
-        # ---- 斜率函数（仅用于周均线）----
-        def _slope_diff(series: pd.Series, steps: int) -> pd.Series:
-            """用 steps 根（≈ slope_weeks 周）差分近似斜率；返回每根K线的平均变化量"""
-            if steps <= 0:
-                return pd.Series(np.nan, index=series.index)
-            return (series - series.shift(steps)) / steps
-
-        # [优化] 向量化线性回归斜率计算 (Double Cumsum)
-        def _slope_reg_vectorized(series: pd.Series, steps: int) -> pd.Series:
+        def _get_slope(series, steps):
             if steps <= 1: return pd.Series(np.nan, index=series.index)
-            
-            n = float(steps)
-            x_mean = (n - 1) / 2.0
-            var_x = (n * (n**2 - 1)) / 12.0
-            
-            y_filled = series.fillna(0)
-            s1 = y_filled.cumsum()
-            s2 = s1.cumsum()
-            
-            sum_y = s1 - s1.shift(steps)
-            shift_s1 = s1.shift(steps)
-            shift_s2 = s2.shift(steps)
-            
-            # 计算 sum(x*y)
-            weighted_sum_rev = (s2 - shift_s2) - steps * shift_s1
-            sum_xy = (steps * sum_y) - weighted_sum_rev
-            
-            y_mean = sum_y / n
-            slope = (sum_xy - n * x_mean * y_mean) / var_x
-            
-            if self.strict:
-                valid = series.rolling(steps).count() >= steps
-                slope = slope.where(valid, np.nan)
-            return slope
-
-        # 计算 —— 原生 K 线均线 (新增)
-        # 这里直接按根数计算，不随时间周期缩放
-        for b in self.bars:
-            b = int(b)
-            if b <= 0: continue
-            ma_b = _ma(close, b)
-            ma_col = f"{self.method.upper()}_{b}B"
-            out[ma_col] = ma_b
-
-        # 3) 计算 —— 日线均线（新增）
-        for d in self.days:
-            d = int(d)
-            if d <= 0:
-                continue
-            window_d = max(klines_per_day * d, 1)
-            ma_d = _ma(close, window_d)
-            if m == 'sma':
-                ma_col = f"SMA_{d}D"
+            if self.slope_method == 'diff':
+                # 使用你要求的百分比变化率逻辑
+                return (series / series.shift(steps).replace(0, np.nan) - 1.0) / steps
             else:
-                ma_col = f"EMA_{d}D"
-            out[ma_col] = ma_d
+                # 线性回归斜率（建议也在此基础上进行百分比处理，或保持原样配合自缩放归一化）
+                return self._slope_reg_vectorized(series, steps, self.strict)
 
-        # 4) 计算 —— 周线均线（原有）
-        for w in self.weeks:
-            w = int(w)
-            if w <= 0:
-                continue
-            window_w = max(klines_per_week * w, 1)
-            ma_w = _ma(close, window_w)
-            ma_w_col = f"{'SMA' if m=='sma' else 'EMA'}_{w}W"
-            out[ma_w_col] = ma_w
-            
-            # 周线斜率（保持原行为）
-            if self.add_slope:
-                steps = max(int(round(klines_per_week * float(self.slope_weeks))), 1)
+        # 2. 统一生成逻辑
+        dimensions = [
+            (self.bars, "B", 1),
+            (self.days, "D", klines_per_day),
+            (self.weeks, "W", klines_per_week)
+        ]
 
-                if self.slope_method == 'diff':
-                    slope = _slope_diff(ma_w, steps)
-                    slope_col = f"SLOPE_DIFF_{ma_w_col}_{self.slope_weeks}W"
-                elif self.slope_method == 'reg':
-                    slope = _slope_reg_vectorized(ma_w, steps)
-                    slope_col = f"SLOPE_REG_{ma_w_col}_{self.slope_weeks}W"
-                else:
-                    raise ValueError("slope_method 只能为 'diff' 或 'reg'")
-                if self.strict:
-                    valid_ma = ma_w.notna()
-                    valid_slope = ma_w.rolling(steps).count() >= steps
-                    slope = slope.where(valid_ma & valid_slope, np.nan)
-                out[slope_col] = slope
+        for val_list, suffix, multiplier in dimensions:
+            for v in val_list:
+                window = max(int(round(v * multiplier)), 1)
+                ma_col = f"{self.method}_{v}{suffix}"
+                
+                # 计算并存储均线
+                df[ma_col] = _get_ma(close, window)
+                
+                # 计算并存储斜率
+                if self.add_slope:
+                    # 斜率的回看步长统一以 slope_weeks 为准，或者你也可以改为以 v 为准
+                    steps = max(int(round(klines_per_week * float(self.slope_weeks))), 1)
+                    slope_col = f"{'SLOPE_DIFF' if self.slope_method == 'diff' else 'SLOPE_REG'}_{ma_col}_{self.slope_weeks}W"
+                    
+                    df[slope_col] = _get_slope(df[ma_col], steps)
 
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        self._normalize_z_score(X, feature_cols , self.features , "close", factory= factory)
+        """
+        统一归一化逻辑
+        """
+        # 均线值：跟随 close 波动，进行组归一化，解决“海拔”问题
+        if self.absolute_features:
+            self._normalize_z_score_group(X, feature_cols, self.absolute_features, "close", factory=factory)
+        
+        # 斜率：每个斜率的波动率差异极大，强制使用自缩放 + 长尾压制
+        # if self.ratio_features:
+        #     for f in self.ratio_features:
+        #         # 🌟 这里使用带 suppress=True 的自缩放版本，防止分母塌陷和极端值
+        #         self._normalize_z_score_group(X, feature_cols, [f], f, factory=factory, suppress=True)
     def _min_history_request(self, kline_interval_ms: int) -> int:
         """
         [实现] 根据当前 K 线周期，计算模型所需的最少历史 K 线数量
@@ -613,8 +656,8 @@ class FeatureVolMa(FeatureBase):
             df[f'VOL_ratio_{w}'] = df[f'VOL_ratio_{w}'].clip(upper=50.0)
             
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        self._normalize_z_score(X, feature_cols , self.ma_features , feature_base = 'volume', factory= factory)
-        # self._normalize_z_score(X, feature_cols , self.ma_features_ratio , feature_base = self.ma_features_ratio[0], factory= factory)
+        self._normalize_z_score_group(X, feature_cols , self.ma_features , feature_base = 'volume', factory= factory)
+        self._normalize_z_score_group(X, feature_cols , self.ma_features_ratio , feature_base = self.ma_features_ratio[-1], factory= factory)
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算成交量均线所需的最小历史 K 线数量。
@@ -632,75 +675,117 @@ class FeatureVolMa(FeatureBase):
 class FeatureQavMa(FeatureBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # 默认窗口建议包含短、中、长，例如 (5, 20, 60)
-        self.vol_ma_windows: list = kwargs.get('vol_ma_windows', (5, 20, 60))
-        self.slope_step = kwargs.get('slope_step', 3)  # 斜率步长，越大越迟钝/稳健
+        # 1. 获取配置项
+        self.windows = kwargs.get('windows', [7, 25, 99])    # 支持多个窗口长度
+        self.add_surge = kwargs.get('add_surge', True)      # 是否生成爆发比率 (Intensity)
+        self.add_slope = kwargs.get('add_slope', True)      # 是否生成趋势斜率 (Consistency)
+        self.add_bias = kwargs.get('add_bias', True)        # 是否生成 VWAP 偏离 (Cost)
+        self.slope_step = kwargs.get('slope_step', 3)       # 斜率计算跨度
         
-        self.level_stack_features = [] # 方案 A
-        self.gradient_features = []    # 方案 B
-        self.ratio_features = []       # 原始比率
-        self.vwap_features = ['VWAP_Inside_Ratio', 'VWAP_Close_Dev']
+        self.surge_features = []
+        self.slope_features = []
+        self.bias_features = []
 
-        # 预注册特征名
-        if len(self.vol_ma_windows) >= 2:
-            # 方案 A: 构造相邻窗口的层级，如 MA5/MA20
-            for i in range(len(self.vol_ma_windows) - 1):
-                self.level_stack_features.append(f'QAV_Stack_{self.vol_ma_windows[i]}_{self.vol_ma_windows[i+1]}')
-        
-        for w in self.vol_ma_windows:
-            self.gradient_features.append(f'QAV_Grad_{w}')
-            self.ratio_features.append(f'QAV_ratio_{w}')
+        # 2. 预注册特征名
+        for w in self.windows:
+            if self.add_surge:
+                col = f'QAV_SURGE_{w}'
+                self.features.append(col)
+                self.surge_features.append(col)
             
-        self.features = (self.level_stack_features + self.gradient_features + 
-                         self.ratio_features + self.vwap_features)
+            if self.add_slope:
+                col = f'QAV_SLOPE_{w}'
+                self.features.append(col)
+                self.slope_features.append(col)
+        
+        if self.add_bias:
+            # VWAP Bias 通常只需要一个（代表当前与成交均价的偏离）
+            col = 'VWAP_BIAS'
+            self.features.append(col)
+            self.bias_features.append(col)
+
+    def _slope_reg_vectorized(self, series: pd.Series, steps: int) -> pd.Series:
+        """
+        [无 Log 稳健版] 最小二乘法线性回归斜率
+        使用全窗口数据进行拟合，彻底消除端点噪声。
+        """
+        if steps <= 1: return pd.Series(np.nan, index=series.index)
+        
+        n = float(steps)
+        # x 轴坐标是 [0, 1, 2, ..., n-1]
+        x_mean = (n - 1) / 2.0
+        var_x = (n * (n**2 - 1)) / 12.0 # x 的方差
+        
+        # 向量化计算 y 的统计量
+        y_filled = series.fillna(0)
+        s1 = y_filled.cumsum()
+        s2 = s1.cumsum()
+        
+        sum_y = s1 - s1.shift(steps)
+        shift_s1 = s1.shift(steps)
+        shift_s2 = s2.shift(steps)
+        
+        # 利用累加和性质计算 sum(x*y)
+        weighted_sum_rev = (s2 - shift_s2) - steps * shift_s1
+        sum_xy = (steps * sum_y) - weighted_sum_rev
+        
+        # 斜率公式: Beta = Cov(x,y) / Var(x)
+        y_mean = sum_y / n
+        slope = (sum_xy - n * x_mean * y_mean) / var_x
+        
+        # 🌟 关键：因为没有用 log，为了保持不同价格/成交量下的可比性
+        # 我们将斜率“标准化”：即 这里的 slope 代表的是 相对于均值的变动比例
+        # 这样 100 变成 110 和 10 变成 11 的斜率在量纲上才一致
+        return slope / (y_mean + EPS)
 
     def generate(self, df: pd.DataFrame, kline_interval_ms: int):
-        # 1. 计算 VWAP 及其衍生特征
-        vwap = np.where(df['volume'] > 0, df['quote_asset_volume'] / df['volume'], df['close'])
-        range_hl = df['high'] - df['low']
-        df['VWAP_Inside_Ratio'] = np.where(range_hl > EPS, ((vwap - df['low']) / range_hl) - 0.5, 0.0)
-        df['VWAP_Close_Dev'] = (vwap / df['close']) - 1
+        qav = df['quote_asset_volume'].astype(float)
+        vol = df['volume'].astype(float)
+        close = df['close'].astype(float)
 
-        # 2. 计算各窗口均线 (作为中间变量，不直接存入 self.features)
-        ma_series = {}
-        for w in self.vol_ma_windows:
-            ma_val = df['quote_asset_volume'].rolling(w).mean()
-            ma_series[w] = ma_val
+        # 1. 计算均线基础 (预计算，减少循环内的重复计算)
+        for w in self.windows:
+            ma_qav = qav.rolling(w).mean()
             
-            # 计算原始比率
-            df[f'QAV_ratio_{w}'] = np.where(ma_val > EPS, df['quote_asset_volume'] / ma_val, 0.0)
+            # --- 爆发比率 (Surge): 当前成交额 / 均值 ---
+            if self.add_surge:
+                df[f'QAV_SURGE_{w}'] = np.where( ma_qav > EPS,  qav / ma_qav, 1.0 )
+            
+            # --- 趋势斜率 (Slope): 取对数后再算斜率，解决 QAV 长尾问题 ---
+            if self.add_slope:
+                # 🌟 这里不再是简单的 (ma - ma.shift)
+                # 而是使用回归函数，拟合过去 slope_step 长度内 ma_qav 的走向
+                # 这样即使最后一根 K 线是插针，由于前面几根线的支撑，斜率也不会乱跳
+                df[f'QAV_SLOPE_{w}'] = self._slope_reg_vectorized(ma_qav, self.slope_step)
 
-            # --- 方案 B: 量能偏离度 (不灵敏斜率) ---
-            # 使用 shift(slope_step) 跨步计算，捕捉中线趋势而非随机波动
-            prev_ma = ma_val.shift(self.slope_step)
-            df[f'QAV_Grad_{w}'] = np.where(prev_ma > EPS, (ma_val / prev_ma) - 1, 0.0)
-
-        # --- 方案 A: 量能层级 (Level Stack) ---
-        # 描述量能是在收缩还是扩张
-        if len(self.vol_ma_windows) >= 2:
-            for i in range(len(self.vol_ma_windows) - 1):
-                w_short, w_long = self.vol_ma_windows[i], self.vol_ma_windows[i+1]
-                col_name = f'QAV_Stack_{w_short}_{w_long}'
-                df[col_name] = np.where(ma_series[w_long] > EPS, ma_series[w_short] / ma_series[w_long], 1.0)
+        # 2. 计算 VWAP 偏离度 (Bias)
+        if self.add_bias:
+            # VWAP = 成交额 / 成交量 (这里是单根 K 线的成交均价)
+            # 如果没有成交量，vwap 设为 0
+            vwap = np.where(vol > EPS, qav / vol, 0.0)
+            # 只有当 vwap > 0 时才计算偏离度，否则直接设为 0.0
+            # 这样即使没有成交，特征值也是平稳的，不会产生 inf 或 nan
+            df['VWAP_BIAS'] = np.where( vwap > EPS,  (close / vwap) - 1.0,   0.0)
 
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        """
-        按照 SKSS 原则进行分布保护
-        """
-        # 1. 方案 A (Level Stack): 它是均线的比值，通常在 1.0 附近波动
-        # 使用 SCS 结构化缩放，基准设为 None，即在组内进行 Min-Max
-        if self.level_stack_features:
-            self._normalize_group_min_max(X, feature_cols, self.level_stack_features, symmetric=False)
+        # 1. 爆发比率组：波动极大，长尾重，必须开启 suppress=True
+        if self.surge_features:
+            for f in self.surge_features:
+                self._normalize_z_score_group(X, feature_cols, [f], factory=factory,feature_base=f)
 
-        # 2. 方案 B (Gradient) & VWAP_Dev: 它们是变化率，基于 0 对称
-        # 使用对称缩放，固定零轴在 0.5
-        kinetic_group = self.gradient_features + ['VWAP_Close_Dev']
-        self._normalize_group_min_max(X, feature_cols, kinetic_group, symmetric=True)
+        # 2. 趋势斜率组：log1p 后的斜率波动稳定，常规归一化即可
+        if self.slope_features:
+            # 斜率可以放在一起组归一化，因为它们量纲相同（百分比变化）
+            self._normalize_z_score_group(X, feature_cols, self.slope_features, 
+                                          feature_base=self.slope_features[0], factory=factory)
 
-        # 3. 原始比率 (Ratios): 长尾分布，使用 log1p 压制
-        ratio_indices = [self.factory._feature_index[f] for f in self.ratio_features if f in self.factory._feature_index]
-        if ratio_indices:
-            X[:, :, ratio_indices] = np.log1p(np.maximum(X[:, :, ratio_indices], 0.0))
+        # 3. VWAP 偏离组：百分比变化量，单独归一化.范围 [-1,1]
+        if self.bias_features:  
+            self._normalize_z_score_group(X, feature_cols, self.bias_features, 
+                                          feature_base='VWAP_BIAS', factory=factory)
+            
+        # 4. 别忘了最后的物理保护
+        # X[:, :, indices] = np.clip(X[:, :, indices], -5.0, 5.0) # 在 FeatureFactory 层做或者在这里做都行
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         # 需要最大窗口 + 斜率步长作为预热
@@ -726,25 +811,7 @@ class FeatureOBV(FeatureBase):
         df['OBV'] = obv_raw
 
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        """
-        OBV 的无量纲化：
-        使用成交量的均值作为标尺，然后进行对称组缩放。
-        """
-        target_indices = [self.factory._feature_index['OBV']]
-        
-        # 1. 获取成交量的均值 mu (M, 1, 1)
-        mu_vol, _ = self.factory.get_base_stats('volume')
-        mu_vol = mu_vol[:, :, np.newaxis]
-
-        # 2. 无量纲化：OBV / mu_volume
-        if np.any(mu_vol == 0):
-            raise ValueError("OBV Normalization Error: Volume mean is zero.")
-            
-        X[:, :, target_indices] = X[:, :, target_indices] / mu_vol
-
-        # 3. 最后进行对称组缩放 [-0.5, 0.5]
-        # 这一步会处理 OBV 的长尾并锚定零轴
-        self._normalize_group_min_max(X, feature_cols, self.features, symmetric=True)
+        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = self.features[0], factory= factory)  #Self-Normalization
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 OBV 所需的最小历史 K 线数量。
@@ -764,22 +831,27 @@ class FeaturePVT(FeatureBase):
         self.features = ['PVT']
 
     def generate(self, df: pd.DataFrame, kline_interval_ms: int):
-        # 1. 计算原始 PVT
-        pct = df['close'].pct_change()
-        pvt_raw = (pct * df['volume']).cumsum()
+        # 1. 计算价格变动率 (pct_change)
+        # 注意：df['close'] 必须先转为 float，避免类型问题
+        close = df['close'].astype(float)
+        volume = df['quote_asset_volume'].astype(float) # 建议用成交额 QAV 代替 VOL
         
-        # 2. 无量纲化：除以 Volume
-        # 得到：单位成交量下的累积收益贡献
-        pvt_unit = np.where(df['volume'] > 0, pvt_raw / df['volume'], 0.0)
-
-        # 3. 长尾压制：对称对数压缩 (Symmetric Log)
-        # 这样既压制了 20% 涨幅带来的脉冲，又保留了正负号
-        df['PVT'] = np.sign(pvt_unit) * np.log1p(np.abs(pvt_unit))
+        pct = close.pct_change().fillna(0)
+        
+        # 2. 计算当前增量：变动率 * 成交量
+        incremental_pvt = pct * volume
+        
+        # 3. 累加得到标准 PVT
+        # pvt_raw 是一个带有“记忆”的长序列
+        pvt_raw = incremental_pvt.cumsum()
+        
+        # 4. 存储到 DataFrame
+        df['PVT'] = pvt_raw
 
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # 4. 最后执行对称组缩放，将分布锁定在 [-0.5, 0.5]
         # 此时由于经过了 log1p，数据的有效信息会在这个区间内分布得非常均匀
-        self._normalize_group_min_max(X, feature_cols, self.features, symmetric=True)
+        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = 'quote_asset_volume', factory= factory)  #Self-Normalization
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 PVT 所需的最小历史 K 线数量。
@@ -795,36 +867,68 @@ class FeaturePVT(FeatureBase):
     
 # ==== VWAP（滚动） ====
 class FeatureWAP(FeatureBase):
-    def __init__(self,**kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.vwap_windows:list = kwargs.get('vwap_windows', (20, 48, 96))
-        for w in self.vwap_windows:
-            self.features.append(f'VWAP_{w}')
-    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
-        # 1. 预计算 PV，避免在循环中重复计算
-        pv = df['close'] * df['volume']
+        # 获取窗口配置，默认使用你喜欢的 7, 25, 99 风格（或者是你指定的 20, 48, 96）
+        self.vwap_windows: list = kwargs.get('vwap_windows', (20, 48, 96))
+        self.add_bias: bool = kwargs.get('add_bias', True)  # 是否生成偏离度特征
         
+        self.absolute_features = []  # 原始价格量纲特征
+        self.ratio_features = []     # 偏离度百分比特征
+
         for w in self.vwap_windows:
-            rolling_vol = df['volume'].rolling(w).sum()
-            rolling_pv = pv.rolling(w).sum()
+            # 1. 注册原始 VWAP
+            vwap_col = f'VWAP_{w}'
+            self.features.append(vwap_col)
+            self.absolute_features.append(vwap_col)
             
-            # 2. 识别有效区域：既要有足够的窗口，成交量又要大于 0
-            # rolling_vol.notna() 过滤掉冷启动期
-            # rolling_vol > 0 过滤掉无成交期
-            valid_mask = (rolling_vol > 0) & (rolling_vol.notna())
+            # 2. 注册 VWAP Bias
+            if self.add_bias:
+                bias_col = f'VWAP_Bias_{w}'
+                self.features.append(bias_col)
+                self.ratio_features.append(bias_col)
+
+    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
+        # 使用 QAV (quote_asset_volume) 代替 price * volume，含金量更高
+        qav = df['quote_asset_volume'].astype(float)
+        vol = df['volume'].astype(float)
+        close = df['close'].astype(float)
+
+        for w in self.vwap_windows:
+            # 计算滚动窗口内的总成交额和总成交量
+            rolling_qav = qav.rolling(w).sum()
+            rolling_vol = vol.rolling(w).sum()
             
-            # 3. 初始化为 NaN (比初始化为 0 更利于后续 ffill 或审计)
-            vwap = pd.Series(np.nan, index=df.index)
+            # 🌟 计算原始 VWAP：成交额 / 成交量
+            # 安全防护：如果窗口内无成交量，VWAP 暂设为当前 close (或者 NaN)
+            vwap_series = np.where(rolling_vol > EPS, rolling_qav / rolling_vol, close)
+            vwap_col = f'VWAP_{w}'
+            df[vwap_col] = vwap_series
             
-            # 4. 赋值
-            vwap[valid_mask] = rolling_pv[valid_mask] / rolling_vol[valid_mask]
-            
-            # 5. 如果你确实希望无成交的地方是 0 而不是 NaN：
-            vwap[rolling_vol == 0] = 0.0
-            
-            df[f'VWAP_{w}'] = vwap
+            # 🌟 计算 VWAP Bias：(当前价 / 平均成本) - 1
+            if self.add_bias:
+                bias_col = f'VWAP_Bias_{w}'
+                # 只有在 vwap 有效且大于 0 时计算偏离
+                df[bias_col] = np.where(
+                    vwap_series > EPS, 
+                    (close / vwap_series) - 1.0, 
+                    0.0
+                )
+
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        self._normalize_scs(X, feature_cols, self.features, feature_base='close')
+        """
+        按照物理意义对齐进行归一化
+        """
+        # 1. 原始 VWAP：属于价格量纲，必须和 close 挂钩进行组归一化
+        if self.absolute_features:
+            self._normalize_z_score_group(X, feature_cols, self.absolute_features, "close", factory=factory)
+        
+        # 2. VWAP Bias：属于百分比量纲，波动较小且平稳，单独归一化
+        if self.ratio_features:
+            self._normalize_z_score_group(X, feature_cols, self.ratio_features, self.ratio_features[-1], factory=factory)
+            # for f in self.ratio_features:
+            #     # 偏离度通常在 [-0.1, 0.1] 之间，使用自缩放即可
+            #     self._normalize_z_score_group(X, feature_cols, [f], f, factory=factory)
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
             """
             计算滚动 VWAP 所需的最小历史 K 线数量。
@@ -842,86 +946,129 @@ class FeatureWAP(FeatureBase):
 # ==== CMF ====
 #如果价格在收盘时处于当根 K 线的高位，并且成交量放大，那就说明机构在“吸筹”；反之则是“派发”
 class FeatureCFM(FeatureBase):
-    def __init__(self,**kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.cmf_window:int = kwargs.get('cmf_window', 20)
-        self.features = ['CMF']
-    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
-        # 1. 计算价格区间
-        range_hl = df['high'] - df['low']
+        # 支持传入多个窗口，例如 (10, 20, 60)
+        self.cmf_windows: list = kwargs.get('cmf_windows', [10, 20, 60])
         
-        # 2. 🌟 按照你的理解：若无波动 (一字线)，MFM 赋值为 0
-        # 这里的 EPS 只是为了消灭 RuntimeWarning，逻辑会被 np.where 完美覆盖
-        mfm = np.where(range_hl == 0, 0.0, 
-                       ((df['close'] - df['low']) - (df['high'] - df['close'])) / (range_hl + EPS))
-        
-        # 3. 计算资金流成交量 (MFV)
-        mfv = mfm * df['volume']
-        
-        # 4. 计算窗口内的累积值
-        mfv_sum = mfv.rolling(self.cmf_window).sum()
-        vol_sum = df['volume'].rolling(self.cmf_window).sum()
-        
-        # 5. 🌟 再次防护：如果 20 根线内完全没成交量，结果也赋值为 0
-        df['CMF'] = np.where(vol_sum == 0, 0.0, mfv_sum / (vol_sum + EPS))
-        
-    def _min_history_request(self, kline_interval_ms:int = None) -> int:
-        """
-        计算 Chaikin Money Flow (CMF) 所需的最小历史 K 线数量。
-        逻辑：基于 cmf_window，并增加缓冲区以确保滚动求和逻辑的统计稳定性。
-        """
-        # 1. 基础窗口需求 (例如默认的 20)
-        base_window = self.cmf_window
-        
-        # 2. 增加 50% 的缓冲区 (Warmup Buffer)
-        # 确保在第一个推理窗口之前，指标已有足够的背景样本
-        # 例如 20 * 1.5 = 30 根
-        return int(base_window * 1.5)
+        self.ratio_features = []
+        for w in self.cmf_windows:
+            col = f'CMF_{w}'
+            self.features.append(col)
+            self.ratio_features.append(col)
 
-# ==== MFI ====
-class FeatureMFI(FeatureBase):
-    def __init__(self,**kwargs):
-        super().__init__(**kwargs)
-        self.mfi_window:int = kwargs.get('mfi_window', 14)
-        self.features = ['MFI']
-    def generate(self,df:pd.DataFrame, kline_interval_ms:int):
-        tp = (df['high'] + df['low'] + df['close']) / 3
-        mf = tp * df['volume']
-        pos = np.where(tp > tp.shift(1), mf, 0)
-        neg = np.where(tp < tp.shift(1), mf, 0)
-        pos_sum = pd.Series(pos).rolling(self.mfi_window).sum()
-        neg_sum = pd.Series(neg).rolling(self.mfi_window).sum()
-        mfi = np.where(neg_sum == 0, 100.0, 100.0 - (100.0 / (1.0 + pos_sum / (neg_sum))))
-        # 3. 补充一个细节：如果上涨和下跌都是 0 (比如停盘或没成交量)，给 50 中性值
-        mfi = np.where((pos_sum == 0) & (neg_sum == 0), 50.0, mfi)
-        df['MFI'] = mfi
+    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
+        close = df['close'].astype(float)
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+        volume = df['volume'].astype(float) # 如果你想更进阶，这里可以换成 quote_asset_volume
+        
+        range_hl = high - low
+        
+        # 1. 计算乘数 (Money Flow Multiplier)
+        # 逻辑：((收盘-最低) - (最高-收盘)) / (最高-最低)
+        # 本质是看收盘价在 K 线振幅中的相对站位
+        mfm = np.where(range_hl > EPS, 
+                       ((close - low) - (high - close)) / range_hl, 
+                       0.0)
+        
+        # 2. 计算资金流成交量 (MFV)
+        mfv = mfm * volume
+        
+        # 3. 循环计算不同窗口的 CMF
+        for w in self.cmf_windows:
+            mfv_sum = mfv.rolling(w).sum()
+            vol_sum = volume.rolling(w).sum()
+            
+            # CMF = 窗口内 MFV 总和 / 窗口内总成交量. 范围 [-1, 1]
+            df[f'CMF_{w}'] = np.where(vol_sum > EPS, mfv_sum / vol_sum, 0.0)
+
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         """
-        MFI 范围固定为 [0, 100]。
-        处理方式：直接除以 100，将其映射到 [0, 1] 区间。
-        （可选：再减去 0.5 映射到 [-0.5, 0.5] 以实现零均值化）
+        🚀 CMF 的归一化建议：
+        CMF 已经是无量纲的比率（-1.0 到 1.0），且均值通常接近 0。
+        建议使用自缩放归一化，捕捉其超买超卖的震荡信号。
         """
-        # 1. 找到 MFI 列的索引
-        target_indices = [feature_cols.index(f) for f in self.features if f in feature_cols]
-        
-        if not target_indices:
-            return
+        # self._normalize_z_score_group(X, feature_cols, self.ratio_features, self.ratio_features[0], factory=factory)  #根据测试单独归一化更好
+        if self.ratio_features:
+            for f in self.ratio_features:
+                # 这种震荡指标不需要和 close 挂钩，单独进行 Z-Score 即可
+                self._normalize_z_score_group(X, feature_cols, [f], f, factory=factory)
 
-        # 2. 简单缩放
-        # MFI / 100.0  -> 范围 [0, 1]
-        # (MFI / 100.0) - 0.5 -> 范围 [-0.5, 0.5] (推荐，配合 tanh 激活函数更好)
-        X[:, :, target_indices] = (X[:, :, target_indices] / 100.0) - 0.5
-    def _min_history_request(self, kline_interval_ms:int = None) -> int:
-        """
-        计算资金流量指数 (MFI) 所需的最小历史 K 线数量。
-        逻辑：基于 mfi_window，增加缓冲区以确保滚动求和逻辑的稳定性。
-        """
-        # 1. 基础窗口需求 (例如默认的 14)
-        base_window = self.mfi_window
+    def _min_history_request(self, kline_interval_ms: int = None) -> int:
+        # 取最大的窗口并增加缓冲区
+        max_w = max(self.cmf_windows) if self.cmf_windows else 20
+        return int(max_w * 1.5)
+
+# ==== MFI 衡量资金在流入还是流出，以及流出的力度有多大====
+class FeatureMFI(FeatureBase):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # 延续黄金周期思路，支持多窗口配置
+        self.mfi_windows: list = kwargs.get('mfi_windows', [14, 25, 99])
         
-        # 2. 增加缓冲区 (建议 1.5 倍至 2 倍)
-        # 确保在第一个推理窗口之前，数据已足以生成稳定的指标分布
-        return int(base_window * 2)
+        self.ratio_features = []
+        for w in self.mfi_windows:
+            col = f'MFI_{w}'
+            self.features.append(col)
+            self.ratio_features.append(col)
+
+    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
+        # 1. 基础数据准备 (建议使用 QAV 以获取更真实的资金流信息)
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+        close = df['close'].astype(float)
+        volume = df['quote_asset_volume'].astype(float) 
+
+        # 2. 计算典型价格 Typical Price (TP) 和 资金流 (MF)
+        tp = (high + low + close) / 3.0
+        mf = tp * volume
+        
+        # 3. 确定流入与流出方向
+        tp_diff = tp.diff()
+        # tp_diff > 0 为流入，tp_diff < 0 为流出
+        pos_mf = np.where(tp_diff > 0, mf, 0.0)
+        neg_mf = np.where(tp_diff < 0, mf, 0.0)
+        
+        # 转换为 Series 方便滑动窗口运算
+        pos_mf_series = pd.Series(pos_mf, index=df.index)
+        neg_mf_series = pd.Series(neg_mf, index=df.index)
+
+        # 4. 多窗口占比计算
+        for w in self.mfi_windows:
+            p_sum = pos_mf_series.rolling(w).sum()
+            n_sum = neg_mf_series.rolling(w).sum()
+            
+            # 总资金流：流入 + 流出
+            total_mf = p_sum + n_sum
+            
+            # --- 核心改造：占比版公式 ---
+            # 如果总资金流大于 0，计算流入占比；否则给中性值 50.0
+            # 这里使用了 np.divide 的 where 参数，能完美规避除零警告，且无需 EPS
+            mfi = np.divide(
+                100.0 * p_sum, 
+                total_mf, 
+                out=np.full_like(p_sum, 50.0), # 默认填充中性值
+                where=total_mf > 0
+            )
+            
+            df[f'MFI_{w}'] = mfi
+
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        """
+        🚀 零均值对称归一化：将 [0, 100] 映射到 [-0.5, 0.5]
+        这能让模型更敏锐地识别“流入占优”还是“流出占优”
+        """
+        for f in self.ratio_features:
+            if f in feature_cols:
+                idx = feature_cols.index(f)
+                # 线性映射：(val / 100) - 0.5
+                X[:, :, idx] = (X[:, :, idx] / 100.0) - 0.5
+
+    def _min_history_request(self, kline_interval_ms: int = None) -> int:
+        max_w = max(self.mfi_windows) if self.mfi_windows else 14
+        return int(max_w * 2.1)
+    
 class FeatureATS(FeatureBase):
     def __init__(self,**kwargs):
         super().__init__(**kwargs)
@@ -933,7 +1080,7 @@ class FeatureATS(FeatureBase):
         """
         ATS 代表单笔成交力度。
         """
-        self._normalize_volume_rlc(X, feature_cols, self.features, feature_base='ATS')
+        self._normalize_z_score_group(X=X, feature_cols=feature_cols, target_feature_cols=self.features, feature_base='ATS', factory= factory)  # <--- 必须自缩放
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算平均单笔成交量 (ATS) 所需的最小历史 K 线数量。
@@ -977,12 +1124,13 @@ class FeatureVolumeEvent(FeatureBase):
         super().__init__(**kwargs)
         self.windows = kwargs.get('windows', [5000, 1500, 500])
         self.top_k = kwargs.get('top_k', 3)
-        
+        self.ratio_features = []
         # 动态注册所有特征
         self.features = []
         for w in self.windows:
             self.features.append(f'vol_event_ratio_{w}')
             self.features.append(f'vol_event_flag_{w}')
+            self.ratio_features.append(f'vol_event_ratio_{w}')
 
     def generate(self, df: pd.DataFrame, kline_interval_ms: int):
         # 确保传入的是 float64 类型的 Numpy 数组
@@ -1013,7 +1161,7 @@ class FeatureVolumeEvent(FeatureBase):
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # Event-level feature.
         # Do NOT normalize / z-score / center.
-        pass
+        self._normalize_z_score_group(X, feature_cols , self.ratio_features , feature_base = self.ratio_features[0], factory= factory)
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         # 必须返回所有窗口中最大的那个，确保初始化数据足够
@@ -1180,7 +1328,7 @@ class FeatureDonchian(FeatureBase):
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # 使用 SCS 保持价格骨架的一致性，将绝对价格转化为比例关系
         # self._normalize_scs(X, feature_cols, self.features, "close")
-        self._normalize_z_score(X, feature_cols , self.features , feature_base = "close", factory= factory)
+        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = "close", factory= factory)
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         return self.period
@@ -1228,7 +1376,7 @@ class FeatureKeltner(FeatureBase):
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # 同样使用 SCS 归一化，保护通道几何形态
         # self._normalize_scs(X, feature_cols, self.features, "close")
-        self._normalize_z_score(X, feature_cols , self.features , feature_base = "close", factory= factory)
+        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = "close", factory= factory)
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         # EMA 需要约 4 倍周期进行预热收敛
@@ -1287,7 +1435,7 @@ class FeatureBoll(FeatureBase):
 
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # A. 通道价格类：使用 Z-Score 与收盘价对齐
-        self._normalize_z_score(X, feature_cols, self.price_features, feature_base="close", factory=factory)
+        self._normalize_z_score_group(X, feature_cols, self.price_features, feature_base="close", factory=factory)
         
         # B. 百分比位置 %B: 范围约在 [0, 1]，进行中心化处理
         pb_idx = [factory._feature_index[f] for f in [self.ratio_features[1]] if f in factory._feature_index]
@@ -1324,11 +1472,20 @@ class FeatureOrigin(FeatureBase):
         #     df[f'base_{f}'] = df[f]
         pass
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        self._normalize_z_score(X, feature_cols , self.price_base_features , feature_base = "close", factory= factory)
-        self._normalize_z_score(X, feature_cols , self.volume_base_features , feature_base = "volume", factory= factory)
-        self._normalize_z_score(X, feature_cols , self.quote_base_features , feature_base = "quote_asset_volume", factory= factory)
+        self._normalize_z_score_group(X, feature_cols , self.price_base_features , feature_base = "close", factory= factory)
+        self._normalize_z_score_group(X, feature_cols , self.volume_base_features , feature_base = "volume", factory= factory)
+        self._normalize_z_score_group(X, feature_cols , self.quote_base_features , feature_base = "quote_asset_volume", factory= factory)
         for f in self.self_based_features:
             self._normalize_z_score(X, feature_cols , [f] , feature_base = f, factory= factory)
+
+    def delete(self, df: pd.DataFrame):
+        """
+        🌟 核心任务：从 DataFrame 中删除所有原始特征。
+        目的是为了防止绝对数值污染特征矩阵或节省内存。
+        """
+        # 使用 errors='ignore' 确保即使某些列不存在也不会报错
+        df.drop(columns=self.features, inplace=True, errors='ignore')
+        # self.logger.debug(f"已清理原始特征列: {self.features}")
     # def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
     #     self._normalize_group_min_max(X, feature_cols , self.price_base_features)
     #     self._normalize_volume_rlc(X, feature_cols , self.volume_base_features , feature_base = "volume")
@@ -1345,8 +1502,9 @@ FEATURE_CONFIG_LIST = [
     # 1. 自定义的成交量爆发特征 (窗口 512，对比前 2 强)
     (FeatureVolumeEvent, {"windows": [5000, 1500], "top_k": 3}),
     # 2. 价格趋势与指标类
-    (FeatureMACD, {"fast": 12, "slow": 26, "signal": 9}),
-    (FeatureMA, {  "weeks": [7, 25],  "days": [5, 10, 20],  "bars": [],  "method": 'sma',  "strict": True,  "add_slope": False }),
+    (FeatureMACD, {"fast": 6, "slow": 13, "signal": 5}),   #（12，26，9），（6，13，5）或（10，20，7） {'fast': 21, 'slow': 55, 'signal': 13}
+    # "weeks": [7, 25],  "days": [5, 10, 20,50],  "bars": [7,25,36,99,150,200,300,400,500,600,800,1000,1300,1500,1800,2000,2500,3000] sma(适合趋势)/ema
+    (FeatureMA, {  "weeks": [7, 25],  "days": [],  "bars": [7,25,99],  "method": 'ema',  "strict": True,  "add_slope": True}), #slope 值搭配使用
     (FeatureRsi, {"period": 14, "price_col": 'close', "strict": True, "prefix": 'RSI'}),
     (FeatureKdj, {"n": 9, "m1": 3, "m2": 3, "strict": True, "prefix": 'KDJ'}),
     # #价格通道类，2选1
@@ -1356,13 +1514,13 @@ FEATURE_CONFIG_LIST = [
 
     # # 3. 量能与成交活跃度类
     (FeatureVolMa, {"vol_ma_windows": (5, 10, 20)}),
-    (FeatureQavMa, {"vol_ma_windows": (5, 10, 20)}),  #tired,rview this later
+    (FeatureQavMa, {"windows": (7, 25, 99)}),  #tired,rview this later
     (FeatureOBV, {}),
     (FeaturePVT, {}),
-    (FeatureWAP, {"vwap_windows": (20, 48, 96)}),
-    (FeatureCFM, {"cmf_window": 20}),
-    (FeatureMFI, {"mfi_window": 14}),
-    (FeatureATS, {}),
+    (FeatureWAP, {"vwap_windows": (7, 25, 99), "add_bias": True}),
+    (FeatureCFM, {"cmf_windows": (7, 25, 99)}),
+    (FeatureMFI, {"mfi_windows": (14, 25, 99)}),
+    # (FeatureATS, {}), #负作用
     # 4. K线形态类
     (FeatureCandle, {}),
     (FeatureOrigin, {}),
@@ -1444,15 +1602,11 @@ class FeatureFactory:
         self.group_stats[group_key] = (group_mu, group_std)
         return group_mu, group_std
 
-    def _normalize_price_features(self):
-        pass
-
     def normalize(self, X: np.ndarray, feature_cols: list[str]):
         self._prepare_normalize_context(X, feature_cols)
         for f in self.feature_list:
             f.normalize(X, feature_cols, self)
-        self._normalize_price_features()
-
+    
     def get_global_min_history(self) -> int:
         """遍历所有已注册特征，返回其中最大的历史需求"""
         return max([f.min_history_request(self._kline_interval_ms) for f in self.feature_list])

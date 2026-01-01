@@ -184,19 +184,29 @@ class LSTM1D_V4(BaseTimeSeriesModel):
 
         # ---------- head ----------
         if self.head_type == "linear":
-            self.classifier = nn.Sequential(
+            self.head_trigger = nn.Sequential(
                 nn.Dropout(self.head_dropout),
-                nn.Linear(feat_dim, n_classes)
+                nn.Linear(feat_dim, 2)
+            )
+            self.head_direction = nn.Sequential(
+                nn.Dropout(self.head_dropout),
+                nn.Linear(feat_dim, 2)
             )
         else:
-            # modest MLP (watch for alpha dilution)
             mid = max(32, self.hidden_size)
-            self.classifier = nn.Sequential(
+            self.head_trigger = nn.Sequential(
                 nn.Dropout(self.head_dropout),
                 nn.Linear(feat_dim, mid),
                 nn.GELU(),
                 nn.Dropout(self.head_dropout),
-                nn.Linear(mid, n_classes)
+                nn.Linear(mid, 2)
+            )
+            self.head_direction = nn.Sequential(
+                nn.Dropout(self.head_dropout),
+                nn.Linear(feat_dim, mid),
+                nn.GELU(),
+                nn.Dropout(self.head_dropout),
+                nn.Linear(mid, 2)
             )
 
     @staticmethod
@@ -215,42 +225,36 @@ class LSTM1D_V4(BaseTimeSeriesModel):
             return torch.cat((h_n[-2], h_n[-1]), dim=1)  # [B, 2H]
         return h_n[-1]  # [B, H]
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused=False) -> torch.Tensor:
         """
-        x: [B, T, F]
-        lengths (optional): [B] actual lengths before padding.
-                           If provided, packing is used and pooling ignores padding.
+        🌟 增加 return_fused 参数，支持直接输出三分类指令
         """
         B, T, F = x.shape
-        assert F == self.input_size, f"Expected input_size={self.input_size}, got F={F}"
+        assert F == self.input_size
 
-        # ----- input preprocessing -----
+        # ----- 基础骨干网络 (与 V4 原版一致) -----
         x = self.in_norm(x)
         x = self.in_proj(x)
         x = self.in_locked(x)
 
-        # ----- LSTM -----
         if lengths is not None:
             lengths = lengths.to(torch.long).clamp(min=1, max=T)
             x_pack = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
             out_pack, (h_n, _) = self.lstm(x_pack)
-            out, _ = pad_packed_sequence(out_pack, batch_first=True, total_length=T)  # [B, T, D]
-            mask = self._make_mask(lengths, T)  # [B, T]
+            out, _ = pad_packed_sequence(out_pack, batch_first=True, total_length=T)
+            mask = self._make_mask(lengths, T)
         else:
             out, (h_n, _) = self.lstm(x)
             mask = None
 
         out = self.out_locked(out)
 
-        # ----- readout -----
+        # ----- Readout 逻辑 -----
         if self.readout == "last":
             feat = self._readout_last(h_n)
-
         elif self.readout == "attn":
             feat = self.attn_pool(out, mask=mask)
-
         elif self.readout in {"meanmax", "mix"}:
-            # masked mean/max pool across time
             if mask is None:
                 mean_pool = out.mean(dim=1)
                 max_pool = out.max(dim=1).values
@@ -258,7 +262,6 @@ class LSTM1D_V4(BaseTimeSeriesModel):
                 out_masked = out.masked_fill(~mask.unsqueeze(-1), 0.0)
                 denom = mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
                 mean_pool = out_masked.sum(dim=1) / denom
-
                 out_for_max = out.masked_fill(~mask.unsqueeze(-1), float("-inf"))
                 max_pool = out_for_max.max(dim=1).values
 
@@ -267,18 +270,36 @@ class LSTM1D_V4(BaseTimeSeriesModel):
             else:
                 last_feat = self._readout_last(h_n)
                 feat = torch.cat([last_feat, mean_pool, max_pool], dim=1)
-
         else:
             raise RuntimeError(f"Unhandled readout={self.readout}")
 
         feat = self.norm(feat)
-        logits = self.classifier(feat)
+
+        # 🌟 修改点 2：计算分层 Logits
+        logits_trig = self.head_trigger(feat)    # [B, 2]
+        logits_dir = self.head_direction(feat)  # [B, 2]
 
         if self.logit_clip is not None:
-            logits = torch.clamp(logits, -self.logit_clip, self.logit_clip)
+            logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
+            logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        return logits
-
+        # 🌟 修改点 3：固化的融合逻辑 (支持 predict_v2)
+        if return_fused:
+            p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
+            p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
+            
+            p_neutral = p_trig[:, 0]
+            p_act     = p_trig[:, 1]
+            p_short   = p_act * p_dir[:, 0]
+            p_long    = p_act * p_dir[:, 1]
+            
+            # 拼接成 3 分类顺序: [Short(0), Neutral(1), Long(2)]
+            fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
+            fused_preds = torch.argmax(fused_probs, dim=1)
+            
+            return fused_preds, fused_probs
+        
+        return logits_trig, logits_dir
     # ============================================================
     # meta / checkpoint interface
     # ============================================================

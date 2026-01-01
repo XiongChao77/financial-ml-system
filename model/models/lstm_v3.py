@@ -99,19 +99,31 @@ class LSTM1D_V3(BaseTimeSeriesModel):
         self.norm = nn.LayerNorm(feat_dim)
 
         if head == "linear":
-            self.classifier = nn.Sequential(
+            # 任务 A: Trigger (是否有信号) -> [Hold, Action]
+            self.head_trigger = nn.Sequential(
                 nn.Dropout(head_dropout),
-                nn.Linear(feat_dim, n_classes)
+                nn.Linear(feat_dim, 2)
+            )
+            # 任务 B: Direction (信号方向) -> [Short, Long]
+            self.head_direction = nn.Sequential(
+                nn.Dropout(head_dropout),
+                nn.Linear(feat_dim, 2)
             )
         else:
-            # Light MLP head (kept modest to avoid alpha dilution)
             mid = max(32, hidden_size)
-            self.classifier = nn.Sequential(
+            self.head_trigger = nn.Sequential(
                 nn.Dropout(head_dropout),
                 nn.Linear(feat_dim, mid),
                 nn.GELU(),
                 nn.Dropout(head_dropout),
-                nn.Linear(mid, n_classes)
+                nn.Linear(mid, 2)
+            )
+            self.head_direction = nn.Sequential(
+                nn.Dropout(head_dropout),
+                nn.Linear(feat_dim, mid),
+                nn.GELU(),
+                nn.Dropout(head_dropout),
+                nn.Linear(mid, 2)
             )
 
     @staticmethod
@@ -122,7 +134,7 @@ class LSTM1D_V3(BaseTimeSeriesModel):
         idx = torch.arange(T, device=device).unsqueeze(0)  # [1, T]
         return idx < lengths.unsqueeze(1)  # [B, T]
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None):
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused = False):
         """
         x: [B, T, F]
         lengths (optional): [B] actual lengths before padding.
@@ -165,12 +177,37 @@ class LSTM1D_V3(BaseTimeSeriesModel):
             feat = self.attn_pool(out, mask=mask)
 
         feat = self.norm(feat)
-        logits = self.classifier(feat)
+
+        # 🌟 修改点 2：分别计算双头 Logits
+        logits_trig = self.head_trigger(feat)    # [B, 2]
+        logits_dir = self.head_direction(feat)  # [B, 2]
 
         if self.logit_clip is not None:
-            logits = torch.clamp(logits, -self.logit_clip, self.logit_clip)
+            logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
+            logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        return logits
+        # 🌟 修改点 3：增加概率融合逻辑 (Hierarchical Fusion)
+        if return_fused:
+            # 计算各头概率 (Softmax)
+            p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
+            p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
+            
+            # 合成 3 类概率
+            # Class 1 (Neutral) = p_hold
+            # Class 0 (Short)   = p_act * p_short_in_act
+            # Class 2 (Long)    = p_act * p_long_in_act
+            p_neutral = p_trig[:, 0]
+            p_act     = p_trig[:, 1]
+            p_short   = p_act * p_dir[:, 0]
+            p_long    = p_act * p_dir[:, 1]
+            
+            # 拼接顺序: [Short(0), Neutral(1), Long(2)]
+            fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
+            fused_preds = torch.argmax(fused_probs, dim=1)
+            
+            return fused_preds, fused_probs
+        
+        return logits_trig, logits_dir
 
     # ============================================================
     # meta / checkpoint interface
