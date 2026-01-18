@@ -14,7 +14,9 @@ class TurtleBrain(Brain):
         max_layers: int = 4,
         risk_per_unit: float = 0.01,
         max_daily_loss_pct: float = 0.045, # 修复：确保属性在初始化时被赋值
-        soft_limit_ratio: float = 0.6     
+        soft_limit_ratio: float = 0.6,
+        upper_limit : float = 0.7,
+        unit_pct_scale:float = 0.7
     ):
         self.executor = executor
         self.entry_period = entry_period
@@ -22,6 +24,8 @@ class TurtleBrain(Brain):
         self.atr_period = atr_period
         self.max_layers = max_layers
         self.risk_per_unit = risk_per_unit
+        self.upper_limit = upper_limit
+        self.unit_pct_scale = unit_pct_scale
         
         # 核心风控参数
         self.max_daily_loss_pct = max_daily_loss_pct # 修复：必须明确赋值
@@ -100,11 +104,10 @@ class TurtleBrain(Brain):
         # unit_size = unit_size*0.2
         unit_pct = (unit_size * current_price) / account_balance
         # 3. 强制约束占比（如 50% 上限）
-        upper_limit = 0.6
-        if unit_pct > upper_limit:
-            unit_pct = upper_limit
+        if unit_pct > self.upper_limit:
+            unit_pct = self.upper_limit
         # === 关键：同步更新实际下单的股数 ===
-        unit_pct = unit_pct*0.7
+        unit_pct = unit_pct* self.unit_pct_scale
         unit_size = (unit_pct * account_balance) / current_price
         # unit_pct = unit_pct*0.2
         
@@ -122,7 +125,7 @@ class TurtleBrain(Brain):
 
         # 4. 决策逻辑 (使用 user_order 独立下单)
         action = TradingAction(ActionType.HOLD)
-        self.logger.info(f"entry_high {last_row['entry_high']}, entry_low: {last_row['entry_low']}, exit_low: {last_row['exit_low']}, exit_high: {last_row['exit_high']}")
+        # self.logger.info(f"entry_high {last_row['entry_high']}, entry_low: {last_row['entry_low']}, exit_low: {last_row['exit_low']}, exit_high: {last_row['exit_high']}")
         if curr_dir == PositionDir.FLAT:
             if current_price > last_row['entry_high']:
                 action = TradingAction(ActionType.OPEN, PositionDir.LONG, 1, unit_pct)

@@ -27,7 +27,9 @@ class TurtleConfig:
     ATR_PERIOD     = 20
     MAX_LAYERS     = 1         # 最大加仓层数
     RISK_PER_UNIT  = 0.01      # 单笔风险 1%
-    MAX_DAILY_LOSS = 0.15      # 最大回撤限制
+    MAX_DAILY_LOSS = 0.5      # 最大回撤限制
+    UPPER_LIMIT    = 0.7
+    UNIT_PCT_SCALE = 2
     
     # 轮询间隔 (秒)
     POLL_INTERVAL  = 10
@@ -231,8 +233,8 @@ class BybitTurtleBot:
     def __init__(self, engine, is_long_account):
         self.logger, _ = setup_session_logger(
             sub_folder="BybitTurtle", 
-            console_level=logging.INFO, 
-            file_level=logging.INFO
+            console_level=logging.DEBUG, 
+            file_level=logging.DEBUG
         )
         self.engine = engine
         self.symbol = TurtleConfig.SYMBOL
@@ -249,7 +251,9 @@ class BybitTurtleBot:
             atr_period=TurtleConfig.ATR_PERIOD,
             max_layers=TurtleConfig.MAX_LAYERS,
             risk_per_unit=TurtleConfig.RISK_PER_UNIT,
-            max_daily_loss_pct=TurtleConfig.MAX_DAILY_LOSS
+            max_daily_loss_pct=TurtleConfig.MAX_DAILY_LOSS,
+            upper_limit = TurtleConfig.UPPER_LIMIT,
+            unit_pct_scale = TurtleConfig.UNIT_PCT_SCALE,
         )
         
         self.last_candle_time = None

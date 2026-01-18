@@ -13,6 +13,10 @@ class TurtleStrategy(BtExecutor):
         atr_period=20,
         max_layers=1,
         risk_per_unit=0.01,
+        max_daily_loss_pct = 0.045,
+        upper_limit = 0.7,
+        unit_pct_scale = 0.7,
+
     )
 
     def __init__(self):
@@ -25,7 +29,10 @@ class TurtleStrategy(BtExecutor):
             exit_period=self.params.exit_period,
             atr_period=self.params.atr_period,
             max_layers=self.params.max_layers,
-            risk_per_unit=self.params.risk_per_unit
+            risk_per_unit=self.params.risk_per_unit,
+            max_daily_loss_pct = self.params.max_daily_loss_pct,
+            upper_limit = self.params.upper_limit,
+            unit_pct_scale = self.params.unit_pct_scale,
         )
         
         # 仅用于审计的变量
