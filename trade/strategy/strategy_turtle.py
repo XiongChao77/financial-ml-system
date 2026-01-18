@@ -147,7 +147,7 @@ class TurtleBrain(Brain):
             else:
                 self.curr_layers = action.target_layers
                 is_buy = action.target_dir == PositionDir.LONG
-                self.logger.info(f"🐢 Order: {action.action} | Layer: {self.curr_layers} | Size_Pct: {unit_pct:.2%} | SL: {final_sl_ratio:.2%}")
+                self.logger.info(f"🐢 Order: {action.action} | is_buy: {is_buy} | Layer: {self.curr_layers} | Size_Pct: {unit_pct:.2%} | SL: {final_sl_ratio:.2%}")
                 # 改造点：使用 user_order 替代 target_percent
                 self.executor.user_order(unit_size, is_buy, stop_loss=final_sl_ratio)
         
@@ -164,19 +164,23 @@ class TurtleBrain(Brain):
         prev_row = df.iloc[-2]
         
         # --- 1. 价格跳空检测 (Price Gap) ---
-        # 定义：当前开盘价与前一根 K 线收盘价的偏离度
         current_open = last_row['open']
         prev_close = prev_row['close']
         gap_price_pct = (current_open - prev_close) / prev_close if prev_close > 0 else 0
         
-        # 使用 0.5 * ATR 作为动态价格跳空阈值
+        # 获取时间戳
+        # last_row.name 通常是当前 K 线的时间，prev_row.name 是上一根的时间
+        curr_time_str = last_row.name.strftime('%Y-%m-%d %H:%M') if hasattr(last_row.name, 'strftime') else str(last_row.name)
+        prev_time_str = prev_row.name.strftime('%Y-%m-%d %H:%M') if hasattr(prev_row.name, 'strftime') else str(prev_row.name)
+
         atr = last_row.get('atr', 0)
         price_gap_threshold = (0.5 * atr / current_open) if current_open > 0 else 0.01
 
         if abs(gap_price_pct) > price_gap_threshold:
             self.logger.warning(
-                f"⚠️ [价格跳空] {current_time} | 缺口: {gap_price_pct:.2%} | "
-                f"前收: {prev_close:.4f} -> 今开: {current_open:.4f}"
+                f"⚠️ [价格跳空] 出现于 {curr_time_str} | 缺口: {gap_price_pct:.2%} | "
+                f"时间跨度: {prev_time_str} -> {curr_time_str} | "
+                f"价格跳变: {prev_close:.4f} (前收) -> {current_open:.4f} (今开)"
             )
 
         if False:

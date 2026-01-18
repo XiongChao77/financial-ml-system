@@ -28,7 +28,7 @@ pd.set_option("display.max_colwidth", None)  # 单元格内容不截断
 class LiveConfig:
     # 交易品种映射
     SYMBOL_BINANCE = "BTCUSDT"  # 数据源品种
-    SYMBOL_FTMO = "BTCUSD"      # 交易执行品种 (FTMO通常是 BTCUSD)
+    SYMBOL_FTMO = "DOGEUSD"      # 交易执行品种 (FTMO通常是 BTCUSD)
     
     # 时间周期 (分钟)
     TIMEFRAME = 15
@@ -65,9 +65,9 @@ class BinanceDataFeed:
     BASE_URL = "https://api.binance.com/api/v3/klines"
     MAX_LIMIT_PER_REQ = 1000
     
-    def __init__(self, symbol, interval_minutes, max_len=5000):
+    def __init__(self, symbol, interval, max_len=5000):     #"1m"/"5m"/"15m"/"1h"/"4h"/"1d"
         self.symbol = symbol
-        self.interval = f"{interval_minutes}m"
+        self.interval = interval
         self.logger = logging.getLogger("BinanceFeed")
         
         # 核心：内存中的数据缓存
@@ -162,7 +162,7 @@ class BinanceDataFeed:
             df.reset_index(drop=True, inplace=True)
             
             self.local_cache = df
-            self.logger.info(f"Cache initialized with {len(df)} bars. Last: {df.iloc[-1]['open_time_date_utc']}")
+            self.logger.info(f"Cache initialized with {len(df)} bars. Last: {df.iloc[-1]['open_time_date_utc']}. Old: {df.iloc[0]['open_time_date_utc']}")
         else:
             raise RuntimeError("Failed to initialize data cache!")
 
