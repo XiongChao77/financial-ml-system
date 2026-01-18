@@ -198,6 +198,7 @@ class ModelHandler:
         ds = TimeSeriesWindowDataset(
             df=df, 
             kline_interval_ms = kline_interval_ms,
+            feature_config_list = self.feature_config_list,
             feature_cols=self.feature_cols, 
             label_col=self.label_col, 
             window=self.window,
@@ -212,15 +213,9 @@ class ModelHandler:
         with torch.no_grad():
             for xb, _ in dl:
                 xb = xb.to(self.device)
-                # 兼容不同模型接口
-                if getattr(self.model, "supports_lengths", False):
-                    logits = self.model(xb, lengths=None)
-                else:
-                    logits = self.model(xb)
-                
-                # Softmax 转概率
-                probs = torch.softmax(logits, dim=1).cpu().numpy()
-                probs_list.append(probs)
+                # 🌟 统一调用融合接口，获取 [B, 3] 的概率分布
+                _, fused_probs = self.model(xb, return_fused=True) 
+                probs_list.append(fused_probs.cpu().numpy())
         
         if not probs_list:
             self.logger.warning("No predictions generated!")

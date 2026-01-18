@@ -83,6 +83,9 @@ class BtExecutor(BaseExecutor,bt.Strategy):
             # 调用专门的减仓处理函数
             self._reduce_position_fifo(reduce_amount, is_buy_close=(current_size > 0))
 
+    def user_order(self, size, is_buy, stop_loss=None):
+        self._open_bracket(abs(size), is_buy=is_buy, stop_loss=stop_loss)
+
     def user_close(self, size=None, **kwargs):
         self.logger.debug(f"user_close ammount :{size}")
         current_size = self.position.size

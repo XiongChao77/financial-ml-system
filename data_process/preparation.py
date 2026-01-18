@@ -28,11 +28,15 @@ def main(feature_config_list, logger:logging.Logger):
     #成交量等为0的数据对价格不会有任何影响，因此去掉不会影响训练和测试;
     #在真实场景下确实有成交量为0的数据.还是选择保留
     #特征处理特别要主要成交量为0的情况。
-    # df = common.clean_data_quality_auto(df,logger)  
+    df = common.clean_data_quality_auto(df,logger)  
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
-    common.attach_label(df, interval_ms=interval_ms)
     common.attach_attr(df, feature_config_list , interval_ms)
+    common.attach_label(df, interval_ms=interval_ms)
+    # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
+    # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
+    # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
+    # common.attach_sma_7_25_crossover_label(df, interval_ms=interval_ms)
     # ---------------- 统计输出 ----------------
     counts = df['label'].value_counts().sort_index()
     proportions = df['label'].value_counts(normalize=True).sort_index()
