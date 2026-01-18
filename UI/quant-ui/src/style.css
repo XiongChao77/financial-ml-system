@@ -101,3 +101,53 @@ h2 { margin: 0 0 10px 0; font-size: 22px; }
     width: 100%;
     cursor: pointer;
 }
+
+/* 悬浮窗样式 */
+.floating-tooltip {
+    width: 180px;
+    height: auto;
+    position: absolute;
+    display: none;
+    padding: 10px;
+    box-sizing: border-box;
+    font-size: 12px;
+    color: #333;
+    background-color: rgba(255, 255, 255, 0.9);
+    text-align: left;
+    z-index: 1000;
+    top: 10px;
+    left: 10px;
+    pointer-events: none;
+    border: 1px solid #26a69a;
+    border-radius: 4px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+.tooltip-row { margin: 4px 0; }
+.win { color: #26a69a; } /* 涨 */
+.loss { color: #ef5350; } /* 跌 */
+
+/* 测量矩形框 */
+.ruler-rect {
+    position: absolute;
+    background-color: rgba(38, 166, 154, 0.2); /* 默认绿色调 */
+    border: 1px dashed #26a69a;
+    pointer-events: none;
+    display: none;
+    z-index: 50;
+}
+
+/* 测量数据标签 */
+.ruler-label {
+    position: absolute;
+    background-color: #333;
+    color: #fff;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    white-space: nowrap;
+    pointer-events: none;
+    display: none;
+    z-index: 51;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
