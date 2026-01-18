@@ -121,7 +121,8 @@ class TurtleBrain(Brain):
         final_sl_ratio = min(turtle_sl, max_sl_ratio)
 
         # 4. 决策逻辑 (使用 user_order 独立下单)
-        action = TradingAction(ActionType.HOLD) 
+        action = TradingAction(ActionType.HOLD)
+        self.logger.info(f"entry_high {last_row['entry_high']}, entry_low: {last_row['entry_low']}, exit_low: {last_row['exit_low']}, exit_high: {last_row['exit_high']}")
         if curr_dir == PositionDir.FLAT:
             if current_price > last_row['entry_high']:
                 action = TradingAction(ActionType.OPEN, PositionDir.LONG, 1, unit_pct)
