@@ -84,7 +84,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self._finalize_dataset(X_filtered, y_filtered, final_indices)
 
         # --- 3. Save to Cache ---
-        if use_cache and cache_path:
+        if cache_path:
             self._save_to_cache(cache_path)
 
     def _save_to_cache(self, path: str):
@@ -223,7 +223,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         过滤逻辑增强：
         1. 全局检查：窗口内总缺失不能超过 5 个 K 线。
         2. 尾部检查：窗口内最后 10 个数据必须完全连续（零缺失）。
-        3. 标签对齐：支持 stride。
+        3. 标签对齐：支持 stride，并区分过滤原因。
         """
         original_count = len(X3d)
         has_label = (label_col is not None) and (label_col in df_work.columns)
@@ -231,43 +231,55 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
 
         # --- A. 连续性掩码计算 ---
         
-        # 1. 全局跨度检查 (允许一定程度的中间空洞)
+        # 1. 全局跨度检查 (例如允许 5 个 K 线以内的空洞)
         global_actual_span = time_windows[:, -1] - time_windows[:, 0]
         global_ideal_span = (self.window - 1) * interval
-        mask_global = (global_actual_span - global_ideal_span) <= (5.1 * interval)
+        # 这里你可以根据注释修改允许的阈值，目前设为 0 容忍
+        mask_global = (global_actual_span <= global_ideal_span) 
 
         # 2. 严格的尾部检查 (最后 10 根 K 线)
-        # 需求：最后 10 个数据内有缺失则丢弃。
-        # 跨度计算公式：最后 1 根的时间 - 倒数第 11 根的时间，理想跨度应为 10 * interval
         check_tail_count = 10
-        # 提取最后 11 个时间戳（包含 10 个间隔）
         tail_actual_span = time_windows[:, -1] - time_windows[:, -(check_tail_count + 1)]
         tail_ideal_span = check_tail_count * interval
-        
-        # 【零容忍逻辑】：实际跨度必须 <= 理想跨度 (考虑到 int64 精度，这里用 <= 即可)
-        # 如果实际跨度 > 理想跨度，说明中间至少有一个 GAP
         mask_tail = (tail_actual_span <= tail_ideal_span)
 
-        valid_mask = mask_global & mask_tail
-
-        # --- B. 标签与索引对齐 (支持 Stride) ---
+        # --- B. 标签有效性检查 ---
         if has_label:
-            # 选出每个窗口末尾行对应的标签
             raw_labels = df_work[label_col].values[self.window - 1 :: self.stride]
             labels_all = raw_labels[:original_count]
-            # 最终掩码 = 连续性合格 & 标签有效
-            final_mask = valid_mask & (labels_all != common.Signal.INVALID)
+            mask_label = (labels_all != common.Signal.INVALID)
         else:
             labels_all = np.zeros(original_count)
-            final_mask = valid_mask
+            mask_label = np.ones(original_count, dtype=bool)
 
-        # 索引对齐
+        # --- C. 统计过滤原因 (分层统计) ---
+        # 1. 因为全局跨度不合格被踢除的
+        fail_global = np.sum(~mask_global)
+        # 2. 全局合格但尾部不连续的
+        fail_tail = np.sum(mask_global & ~mask_tail)
+        # 3. 时间校验合格但标签无效的
+        fail_label = np.sum(mask_global & mask_tail & ~mask_label)
+        
+        # 最终合并掩码
+        final_mask = mask_global & mask_tail & mask_label
+        final_count = np.sum(final_mask)
+
+        # --- D. 索引对齐 ---
         final_indices = None
         if not self.is_live:
             raw_orig = df_work['orig_index'].values[self.window - 1 :: self.stride]
             final_indices = raw_orig[:original_count][final_mask]
 
-        self.logger.info(f"✅ 过滤汇总: 原始 {original_count} -> 尾部严检后剩余 {np.sum(final_mask)}")
+        # --- E. 详细审计打印 ---
+        self.logger.info(f"📊 数据过滤审计 [窗口长度: {self.window}]:")
+        self.logger.info(f"   - 原始窗口总数: {original_count}")
+        if fail_global > 0:
+            self.logger.warning(f"   - ❌ 丢弃 (全局跨度超限): {fail_global}")
+        if fail_tail > 0:
+            self.logger.warning(f"   - ❌ 丢弃 (尾部10根不连续): {fail_tail}")
+        if fail_label > 0:
+            self.logger.warning(f"   - ❌ 丢弃 (标签无效/INVALID): {fail_label}")
+        self.logger.info(f"   - ✅ 最终保留数量: {final_count} ({final_count/original_count:.2%})")
         
         return X3d[final_mask], labels_all[final_mask], final_indices
 
@@ -315,7 +327,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             alert = " ⚠️" if abs(mean_v) > 0.1 or abs(std_v - 1.0) > 0.2 else ""
             
             self.logger.info(
-                f"{name:<35} | {mean_v:10.4f} | {std_v:10.4f} | {min_v:10.4f} | {max_v:10.4f}{alert}"
+                f"{name:<35} | {mean_v:10.4f} | {std_v:10.4f} | {min_v:10.4f} | {max_v}{alert}"
             )
         
         self.logger.info("="*90 + "\n")
@@ -366,4 +378,4 @@ def _as_strided_windows(a2d: np.ndarray, window: int, stride: int = 1) -> np.nda
     view = np.lib.stride_tricks.as_strided(
         a2d, shape=(M, window, F), strides=(s0 * S, s0, s1), writeable=False
     )
-    return view.copy()
+    return view# copy will happen in _filter_and_align X3d[final_mask]

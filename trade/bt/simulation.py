@@ -52,7 +52,6 @@ class Parameters:
         self.take_profit = 0.99 #止盈. 0 - n倍
         self.position_ratio = 0.4     #0-1
 
-
 def main(logger:logging.Logger):
     args = Parameters()
     logger.info(
@@ -79,7 +78,7 @@ def main(logger:logging.Logger):
         # 执行预测，获取结果和指标
         # df_with_pred, model_stats = handler.predict(df, load_interval_ms())#, min_thresh= 0.3)
         df_with_pred, model_stats = handler.predict_v2(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None,
-                                                       cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = True )
+                                                       cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()
         # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）

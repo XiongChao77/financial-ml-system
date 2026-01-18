@@ -44,11 +44,11 @@ class Parameters:
         self.allow_short = True
         self.allow_long = True
         self.thresh: float =None#None#0.5#None#0.45
-        self.commission = 0.0001   # 0.1 = 0.1%  .can't be 0
+        self.commission = 0.1   # 0.1 = 0.1%  .can't be 0
         self.cash = 10000
         self.stop_loss = 2  # should be 1-10   stop_loss = self.data.stop_threshold[0]*self.params.stop_loss
         self.take_profit = 0.99 #止盈. 0 - n倍
-        self.position_ratio = 0.4     #0-1
+        self.position_ratio = 0.1     #0-1
 
 
 def main(logger:logging.Logger):
@@ -58,8 +58,8 @@ def main(logger:logging.Logger):
     )
 
     # 1. 数据加载
-    symbol = 'ETHUSDT'
-    interval = '1m'
+    symbol = 'DOGEUSDT'  #BTCUSDT  ETHUSDT  DOGEUSDT SOLUSDT BNBUSDT TRXUSDT XRPUSDT  SUIUSDT ADAUSDT PEPEUSDT", "AAVEUSDT", "DOTUSDT
+    interval = '4h'
     origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{symbol}_{interval}.csv")
     data_path = origin_data_path
     if not os.path.exists(data_path):
@@ -79,7 +79,7 @@ def main(logger:logging.Logger):
     if 1:
         cerebro.addstrategy(
             TurtleStrategy,
-            entry_period=20, # System 1
+            entry_period=15, # System 1
             exit_period=10,
             risk_per_unit=0.01 # 1% per unit
         )
@@ -106,6 +106,7 @@ def main(logger:logging.Logger):
 
     cerebro.adddata(data)
     cerebro.broker.setcash(args.cash)
+    # cerebro.broker.set_checksubmit(True)
     cerebro.broker.addcommissioninfo(
         cus_comminfo.CommInfo_Cryptocurrency(commission=args.commission, leverage =5)
     )
@@ -120,10 +121,36 @@ def main(logger:logging.Logger):
     logger.info("Starting Backtest...")
     results = cerebro.run()
     strat = results[0]
-
+    statistics = generate_backtest_report(logger, strat, commission=args.commission, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
     print('\n' + "="*30)
     print("📊 策略回测统计报告")
     print("="*30)
+
+    # 获取基础数值
+    start_cash = strat.broker.startingcash
+    final_value = strat.broker.getvalue()
+    
+    # 提取回测时间跨度（用于年化计算）
+    start_date = bt.num2date(strat.datas[0].datetime.array[0])
+    end_date = bt.num2date(strat.datas[0].datetime.array[-1])
+    duration = end_date - start_date
+    # 计算总天数（含不足一天的部分）
+    total_days = max(duration.days + (duration.seconds / 86400), 1)
+
+    # === 核心计算：基于最终净值的收益率 ===
+    # 1. 总收益率 (Simple Return): (最终净值 / 初始资金) - 1
+    total_simple_return = (final_value / start_cash) - 1
+    
+    # 2. 年化收益率 (CAGR): (1 + 总收益率)^(365 / 天数) - 1
+    annualized_simple_return = (1 + total_simple_return) ** (365.0 / total_days) - 1
+
+    # === 新增：计算回测时间跨度 ===
+    # 获取第一根和最后一根K线的时间
+    start_date = bt.num2date(strat.datas[0].datetime.array[0])
+    end_date = bt.num2date(strat.datas[0].datetime.array[-1])
+    duration = end_date - start_date
+    print(f"回测区间: {start_date} 至 {end_date}")
+    print(f"总时长: {duration.days} 天 {duration.seconds // 3600} 小时")
 
     # 1. 提取回撤 (Drawdown)
     dd = strat.analyzers.dd.get_analysis()
@@ -161,6 +188,9 @@ def main(logger:logging.Logger):
     # 5. 账户最终状态
     print(f"初始资金: ${strat.broker.startingcash:.2f}")
     print(f"最终净值: ${strat.broker.getvalue():.2f}")
+    # 收益率展示
+    print(f"总收益率 (基于净值): {total_simple_return * 100:.2f}%")
+    print(f"年化收益率 (基于净值): {annualized_simple_return * 100:.2f}%")
     print("="*30 + '\n')
 
 
@@ -173,7 +203,7 @@ def safe_get(d, keys, default=0):
     return cur if cur != {} else default
 
 
-def generate_backtest_report(logger,strat, model_stats, save_path, commission):
+def generate_backtest_report(logger,strat, save_path, commission):
     """
     修复版报告生成器：
     1. 修正 Profit Factor 计算公式 (Gross Won / Gross Lost)
@@ -313,8 +343,6 @@ def generate_backtest_report(logger,strat, model_stats, save_path, commission):
         "p95_pos_ratio": perf.get("p95_pos_ratio", 0),
         "max_pos_ratio": perf.get("max_pos_ratio", 0),
         "drawdown_raw": dd,
-        # 模型预测指标（从外部传入）
-        "model_metrics": model_stats or {},
     }
     
     # 写入文件
@@ -336,7 +364,6 @@ def generate_backtest_report(logger,strat, model_stats, save_path, commission):
         "win_rate": f"{win_rate:.2f}%",
         "start_value": f"{start_value:.2f}",
         "end_value": f"{end_value:.2f}",
-        **(model_stats or {}),
     }
     return ui_stats
 

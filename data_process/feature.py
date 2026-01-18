@@ -3,6 +3,7 @@ import logging,math,os
 import pandas as pd
 import numpy as np
 from numba import njit, float64, int64
+import torch
 
 EPS = 1e-9 # 防止除以 0
 _logger = logging.getLogger()
@@ -15,31 +16,118 @@ class FeatureBase(ABC):
         self.kline_interval_ms:int = kwargs.get('kline_interval_ms', None)
     #方差和均值做除数区别:方差会放大小波动，缩小大波动
 
-    def _normalize_z_score(self, X, feature_cols, target_feature_cols, feature_base, factory):
+    def _apply_squashing(self, vals, scale, method):
+            """
+            统一的长尾压制逻辑应用器
+            vals: 已经经过 (X-mu)/sigma 处理的标准分
+            scale: 线性区半径。数值越大，压制越晚触发。
+            """
+            if method is None:
+                # 如果不压制，且 scale 为 1.0，直接返回以节省 CPU
+                return vals #if (scale == 1.0 or scale == None) else (vals / scale)
+            # 1. 🌟 动态确定信任半径 S
+            if scale is None:
+                # 取当前窗口绝对值的分位数作为 S，代表“90% 的数据分布范围”
+                scale = np.nanpercentile(np.abs(vals), 95, keepdims=True)
+                print(f"***********************{self.__class__.__name__} scale is {scale}*******************")
+                # scale = np.maximum(scale, 1.0) # 保底为 1，防止波动过小时过度放大噪声
+            else:
+                scale = scale
+            if method == 'tanh':
+                # tanh(1.0) = 0.76. 所以 scale 直接用 raw_s 即可
+                adj_scale = scale / 1.0 
+                print(f"***********************{self.__class__.__name__} tanh adj_scale is {adj_scale}*******************")
+                result = np.tanh(vals / adj_scale)
+            elif method == 'log':
+                # ln(1 + 1.22) = 0.8. 如果想让 95% 分位达到 0.8，需要除以 raw_s / 1.22
+                adj_scale = scale #* 1.22 
+                print(f"***********************{self.__class__.__name__} log adj_scale is {adj_scale}*******************")
+                result = np.sign(vals) * np.log1p(np.abs(vals / adj_scale))
+
+            # for pct in range(50, 100,5):
+            #     result_m = np.nanpercentile(np.abs(result), pct, keepdims=True)
+            #     print(f"***********************{self.__class__.__name__} {pct} scale result is {result_m}*******************")
+            # for pct in range(96, 100,1):
+            #     result_m = np.nanpercentile(np.abs(result), pct, keepdims=True)
+            #     print(f"***********************{self.__class__.__name__} {pct} scale result is {result_m}*******************")
+            return result # method=None，保持线性
+
+    def _normalize_z_score(self, X, feature_cols, target_feature_cols, feature_base, factory, scale=None, method=None):
         target_indices = [factory._feature_index[f] for f in target_feature_cols]
         if not target_indices:
             return
         mu_base, sigma_base = factory.get_base_stats(feature_base)
         mu_base_3d = mu_base[:, :, np.newaxis] if mu_base.ndim == 2 else mu_base.reshape(-1, 1, 1)
         denom = sigma_base[:, :, np.newaxis] 
-        X[:, :, target_indices] = np.where(
+        standardized = np.where(
             denom > EPS,
             (X[:, :, target_indices] - mu_base_3d) / denom,
             0.0
         )
-    def _normalize_z_score_group(self, X, feature_cols, target_feature_cols, feature_base, factory):
+        # 2. 应用倍率缩放与长尾压制
+        X[:, :, target_indices] = self._apply_squashing(standardized, scale, method)
+
+    def _normalize_z_score_group(self, X, feature_cols, target_feature_cols, factory, scale=None, method=None):
+        """
+        Group Z-Score Normalization (联合标准化)
+        逻辑：将一组特征视为一个整体，计算它们在整个窗口时间轴+特征轴上的统一均值和标准差。
+        优点：保护特征组内部的相对距离（如 Upper 与 Lower 的间距）。
+        """
+        # 1. 安全获取特征索引
+        target_indices = [factory._feature_index[f] for f in target_feature_cols if f in factory._feature_index]
+        if not target_indices:
+            return
+        
+        # 2. 提取目标组数据，形状为 (Samples, Time, Group_Features)
+        vals = X[:, :, target_indices]
+        
+        # 3. 🌟 核心计算：跨时间轴 (axis=1) 和 特征轴 (axis=2) 进行池化统计
+        # 这样每一个 Batch 样本都会得到唯一的 [1, 1, 1] 形状的统计量
+        group_mu = np.nanmean(vals, axis=(1, 2), keepdims=True)
+        group_sigma = np.nanstd(vals, axis=(1, 2), keepdims=True)
+        
+        # 4. 执行标准化计算
+        # 使用 EPS 保护，若 group 内没有任何波动 (std=0)，则结果归零
+        standardized = np.where(
+            group_sigma > EPS,
+            (vals - group_mu) / group_sigma,
+            0.0
+        )
+        X[:, :, target_indices] = self._apply_squashing(standardized, scale, method)
+
+    #method 'tanh'/'log'
+    def _normalize_signal_group(self, X, feature_cols, target_feature_cols, factory, scale=None, method=None):
+        """
+        全功能零轴锚定组缩放：
+        k: 线性区缩放因子。k 越小，线性区间越宽，压制越晚触发。
+        method: 'tanh' (映射到 -1~1) 或 'log' (Symmetric Log1p)。
+        """
+        target_indices = [factory._feature_index[f] for f in target_feature_cols if f in factory._feature_index]
+        if not target_indices: 
+            return
+        
+        # 1. 提取组数据并计算 RMS (确保零轴不偏移，组内比例一致)
+        vals = X[:, :, target_indices]
+        rms_group = np.sqrt(np.nanmean(vals**2, axis=(1, 2), keepdims=True))
+        
+        # 2. 无量纲化基础缩放
+        standardized = np.where(rms_group > EPS, vals / (rms_group + EPS), 0.0)
+
+        X[:, :, target_indices] = self._apply_squashing(standardized, scale, method)
+
+    def _normalize_z_score_rel(self, X, feature_cols, target_feature_cols, feature_base, factory, scale=None, method=None):
         target_indices = [factory._feature_index[f] for f in target_feature_cols]
         if not target_indices:
             return
         mu_base, sigma_base = factory.get_base_stats(feature_base)
         denom = sigma_base[:, :, np.newaxis] 
         mu_self = np.nanmean(X[:, :, target_indices], axis=1, keepdims=True)
-        X[:, :, target_indices] = np.where(
+        standardized = np.where(
             denom > EPS,
             (X[:, :, target_indices] - mu_self) / denom,
             0.0
         )
-        # X[:, :, target_indices] = np.clip(X[:, :, target_indices], -5.0, 5.0)
+        X[:, :, target_indices] = self._apply_squashing(standardized, scale, method)
 
     def _normalize_winsorized_z_score_group(self, X, feature_cols, target_feature_cols, feature_base, factory):
         target_indices = [factory._feature_index[f] for f in target_feature_cols]
@@ -51,14 +139,14 @@ class FeatureBase(ABC):
         # 这样可以防止极端插针拉大标准差
         p_low = np.nanpercentile(vals, 1, axis=1, keepdims=True)
         p_high = np.nanpercentile(vals, 99, axis=1, keepdims=True)
-        vals_clipped = np.clip(vals, p_low, p_high)
+        np.clip(vals, p_low, p_high, out=vals)
         
         mu_base, sigma_base = factory.get_base_stats(feature_base)
         denom = sigma_base[:, :, np.newaxis] 
-        mu_self = np.nanmean(vals_clipped, axis=1, keepdims=True)
+        mu_self = np.nanmean(vals, axis=1, keepdims=True)
         X[:, :, target_indices] = np.where(
             denom > EPS,
-            (vals_clipped - mu_self) / denom,
+            (vals - mu_self) / denom,
             0.0
         )
 
@@ -126,30 +214,6 @@ class FeatureBase(ABC):
                 feature_class.generate(df,self.kline_interval_ms)
                 return
         raise RuntimeError(f"request feature {feature_name} not exist")
-    def _normalize_group_min_max(self, X, feature_cols, target_feature_cols, symmetric=False):
-        """
-        Skeleton-Kinetic Structural Scaling (SKSS) 核心实现
-        坚决保护特征分布不被扭曲。
-        """
-        target_indices = [self.factory._feature_index[f] for f in target_feature_cols if f in self.factory._feature_index]
-        if not target_indices: return
-        
-        X_group = X[:, :, target_indices]
-
-        if symmetric:
-            # 零轴对称模式：保护 MACD/Returns 等动能指标的符号语义
-            abs_max = np.nanmax(np.abs(X_group), axis=(1, 2), keepdims=True)
-            if np.any(abs_max == 0):
-                raise ZeroDivisionError(f"SKSS Failure: Symmetric group {target_feature_cols} has no amplitude.")
-            X[:, :, target_indices] = (X_group / abs_max) * 0.5
-        else:
-            # 整体结构模式：保护价格骨架 (Level) 的相对几何间距
-            g_min = np.nanmin(X_group, axis=(1, 2), keepdims=True)
-            g_max = np.nanmax(X_group, axis=(1, 2), keepdims=True)
-            g_diff = g_max - g_min
-            if np.any(g_diff == 0):
-                raise ZeroDivisionError(f"SKSS Failure: Skeleton group {target_feature_cols} has collapsed.")
-            X[:, :, target_indices] = (X_group - g_min) / g_diff
 
     #抑制长尾
     def _normalize_volume_rlc(self, X, feature_cols, target_feature_cols, feature_base):
@@ -245,39 +309,95 @@ class FeatureBase(ABC):
     - EMA_{w} （指数移动均线，严格：窗口未满置 NaN）
 """
 class FeatureMACD(FeatureBase):
-    def __init__(self,**kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.fast:int = kwargs.get('fast', 12)
-        self.slow:int = kwargs.get('slow', 26)
-        self.signal:int = kwargs.get('signal', 9)
-        self.features = ['MACD_DIF', 'MACD_DEA', 'MACD']
-    def generate(self,df:pd.DataFrame, kline_interval_ms:int):
-        out = df
-        close = out['close'].astype(float)
-        # ---- MACD ----
+        self.fast = kwargs.get('fast', 12)
+        self.slow = kwargs.get('slow', 16)
+        self.signal = kwargs.get('signal', 9)
+        
+        prefix = f"MACD_{self.fast}_{self.slow}"
+        
+        # 1. 新增：原始绝对值特征组 (Price Unit)
+        self.macd_abs_group = [
+            f'{prefix}_DIF', 
+            f'{prefix}_DEA', 
+            f'{prefix}_HIST'
+        ]
+        
+        # 2. 现有的百分比特征组 (Percentage/Momentum)
+        self.macd_pct_group = [
+            f'{prefix}_DIF_PCT', 
+            f'{prefix}_HIST_PCT', 
+            f'{prefix}_HIST_ACCEL'
+        ]
+        
+        # 3. 独立特征 (Ratio)
+        self.sig_dist = [f'{prefix}_SIG_DIST']
+        
+        # 汇总所有特征
+        self.features = self.macd_abs_group + self.macd_pct_group + self.sig_dist
+
+    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
+        close = df['close'].astype(float)
+        prefix = f"MACD_{self.fast}_{self.slow}"
+        
+        # --- A. 基础 EMA 计算 ---
         ema_fast = close.ewm(span=self.fast, adjust=False).mean()
         ema_slow = close.ewm(span=self.slow, adjust=False).mean()
+        
+        # --- B. 计算原始绝对值指标 (DIF, DEA, HIST) ---
         dif = ema_fast - ema_slow
         dea = dif.ewm(span=self.signal, adjust=False).mean()
-        macd = 2 * (dif - dea)
+        hist = dif - dea
+        
+        df[f'{prefix}_DIF'] = dif
+        df[f'{prefix}_DEA'] = dea
+        df[f'{prefix}_HIST'] = hist
+        
+        # --- C. 计算百分比化指标 (保持原有逻辑) ---
+        # 去除分母为 0 的风险
+        dif_pct = np.where(ema_slow != 0, (ema_fast - ema_slow) / ema_slow, np.nan)
+        dif_pct_s = pd.Series(dif_pct, index=df.index)
+        dea_pct = dif_pct_s.ewm(span=self.signal, adjust=False).mean()
+        hist_pct = (dif_pct_s - dea_pct)
+        
+        df[f'{prefix}_DIF_PCT'] = dif_pct_s
+        df[f'{prefix}_HIST_PCT'] = hist_pct
+        df[f'{prefix}_HIST_ACCEL'] = hist_pct.diff().fillna(0)
+        
+        # SIG_DIST: DIF 与 DEA 的乖离度
+        df[f'{prefix}_SIG_DIST'] = np.where(
+            dea_pct != 0, 
+            (dif_pct_s - dea_pct) / np.abs(dea_pct), 
+            np.nan
+        )
 
-        out['MACD_DIF'] = dif
-        out['MACD_DEA'] = dea
-        out['MACD'] = macd
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = "MACD", factory = factory)
-        # self._normalize_group_min_max(X, feature_cols , self.features , symmetric = True)
-    def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
-        计算 MACD 所需的最小历史 K 线数量。
-        由于 EMA 需要数据预热 (Warmup) 才能收敛，
-        通常建议请求 (Slow + Signal) * 4 的长度以确保精度。
-        """        
-        # 基础周期：最慢的均线 + 信号线周期
-        base_cycle = self.slow + self.signal
-        # 乘以 4 倍用于 EMA 收敛 (Warmup Buffer)
-        # 例如 (26 + 9) * 4 = 140 根 K 线
-        return int(base_cycle * 4)
+        分层归一化策略
+        """
+        # 1. 原始绝对值组：属于价格量纲。
+        # 使用 _normalize_z_score_rel 挂钩价格基准（如 'close' 或 'high'），消除币种价格差异。
+        self._normalize_z_score_rel(
+            X, feature_cols, self.macd_abs_group, 
+            feature_base="close", factory=factory, method='log'
+        )
+        
+        # 2. MACD 动力百分比组 (DIF_PCT, HIST_PCT, ACCEL)
+        # 使用零轴锚定组缩放
+        self._normalize_signal_group(
+            X, feature_cols, self.macd_pct_group, 
+            factory=factory, scale=None, method='log'
+        )
+        
+        # 3. 处理 SIG_DIST (单独缩放，比率的比率)
+        self._normalize_signal_group(
+            X, feature_cols, self.sig_dist, 
+            factory=factory, scale=None, method='log'
+        )
+
+    def _min_history_request(self, kline_interval_ms: int = None) -> int:
+        return int((self.slow + self.signal) * 4)
         
 """
 基于时间列自动推断 1 根K线的时间长度，计算：
@@ -444,13 +564,13 @@ class FeatureMA(FeatureBase):
         """
         # 均线值：跟随 close 波动，进行组归一化，解决“海拔”问题
         if self.absolute_features:
-            self._normalize_z_score_group(X, feature_cols, self.absolute_features, "close", factory=factory)
+            self._normalize_z_score_rel(X, feature_cols, self.absolute_features, "high", factory=factory)
         
         # 斜率：每个斜率的波动率差异极大，强制使用自缩放 + 长尾压制
         # if self.ratio_features:
         #     for f in self.ratio_features:
         #         # 🌟 这里使用带 suppress=True 的自缩放版本，防止分母塌陷和极端值
-        #         self._normalize_z_score_group(X, feature_cols, [f], f, factory=factory, suppress=True)
+        #         self._normalize_z_score_rel(X, feature_cols, [f], f, factory=factory, suppress=True)
     def _min_history_request(self, kline_interval_ms: int) -> int:
         """
         [实现] 根据当前 K 线周期，计算模型所需的最少历史 K 线数量
@@ -653,11 +773,12 @@ class FeatureVolMa(FeatureBase):
                 0.0
             )
             # 将比值限制在 [0, 50] 之间，防止极端离群值破坏特征分布
-            df[f'VOL_ratio_{w}'] = df[f'VOL_ratio_{w}'].clip(upper=50.0)
+            # df[f'VOL_ratio_{w}'] = df[f'VOL_ratio_{w}'].clip(upper=50.0)
             
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        self._normalize_z_score_group(X, feature_cols , self.ma_features , feature_base = 'volume', factory= factory)
-        self._normalize_z_score_group(X, feature_cols , self.ma_features_ratio , feature_base = self.ma_features_ratio[-1], factory= factory)
+        self._normalize_volume_rlc(X, feature_cols, self.ma_features, "volume")
+        self._normalize_z_score_group(X, feature_cols , self.ma_features , factory= factory, method = 'log', scale= 3)
+        self._normalize_z_score_group(X, feature_cols , self.ma_features_ratio , factory= factory, method = 'log')
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算成交量均线所需的最小历史 K 线数量。
@@ -771,18 +892,18 @@ class FeatureQavMa(FeatureBase):
         # 1. 爆发比率组：波动极大，长尾重，必须开启 suppress=True
         if self.surge_features:
             for f in self.surge_features:
-                self._normalize_z_score_group(X, feature_cols, [f], factory=factory,feature_base=f)
+                self._normalize_z_score_rel(X, feature_cols, [f], factory=factory,feature_base=f, method= 'log')
 
         # 2. 趋势斜率组：log1p 后的斜率波动稳定，常规归一化即可
         if self.slope_features:
             # 斜率可以放在一起组归一化，因为它们量纲相同（百分比变化）
-            self._normalize_z_score_group(X, feature_cols, self.slope_features, 
-                                          feature_base=self.slope_features[0], factory=factory)
+            self._normalize_z_score_rel(X, feature_cols, self.slope_features, 
+                                          feature_base=self.slope_features[0], factory=factory, method= 'log')
 
         # 3. VWAP 偏离组：百分比变化量，单独归一化.范围 [-1,1]
         if self.bias_features:  
-            self._normalize_z_score_group(X, feature_cols, self.bias_features, 
-                                          feature_base='VWAP_BIAS', factory=factory)
+            self._normalize_z_score_rel(X, feature_cols, self.bias_features, 
+                                          feature_base='VWAP_BIAS', factory=factory, method= 'log')
             
         # 4. 别忘了最后的物理保护
         # X[:, :, indices] = np.clip(X[:, :, indices], -5.0, 5.0) # 在 FeatureFactory 层做或者在这里做都行
@@ -811,7 +932,7 @@ class FeatureOBV(FeatureBase):
         df['OBV'] = obv_raw
 
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = self.features[0], factory= factory)  #Self-Normalization
+        self._normalize_z_score_rel(X, feature_cols , self.features , feature_base = self.features[0], factory= factory, method = 'log')  #Self-Normalization
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 OBV 所需的最小历史 K 线数量。
@@ -851,7 +972,7 @@ class FeaturePVT(FeatureBase):
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # 4. 最后执行对称组缩放，将分布锁定在 [-0.5, 0.5]
         # 此时由于经过了 log1p，数据的有效信息会在这个区间内分布得非常均匀
-        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = 'quote_asset_volume', factory= factory)  #Self-Normalization
+        self._normalize_z_score_rel(X, feature_cols , self.features , feature_base = 'quote_asset_volume', factory= factory)  #Self-Normalization
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 PVT 所需的最小历史 K 线数量。
@@ -921,14 +1042,14 @@ class FeatureWAP(FeatureBase):
         """
         # 1. 原始 VWAP：属于价格量纲，必须和 close 挂钩进行组归一化
         if self.absolute_features:
-            self._normalize_z_score_group(X, feature_cols, self.absolute_features, "close", factory=factory)
+            self._normalize_z_score_rel(X, feature_cols, self.absolute_features, "high", factory=factory, method='log')
         
         # 2. VWAP Bias：属于百分比量纲，波动较小且平稳，单独归一化
         if self.ratio_features:
-            self._normalize_z_score_group(X, feature_cols, self.ratio_features, self.ratio_features[-1], factory=factory)
+            self._normalize_z_score_rel(X, feature_cols, self.ratio_features, self.ratio_features[-1], factory=factory, method='log')
             # for f in self.ratio_features:
             #     # 偏离度通常在 [-0.1, 0.1] 之间，使用自缩放即可
-            #     self._normalize_z_score_group(X, feature_cols, [f], f, factory=factory)
+            #     self._normalize_z_score_rel(X, feature_cols, [f], f, factory=factory)
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
             """
             计算滚动 VWAP 所需的最小历史 K 线数量。
@@ -989,11 +1110,11 @@ class FeatureCFM(FeatureBase):
         CMF 已经是无量纲的比率（-1.0 到 1.0），且均值通常接近 0。
         建议使用自缩放归一化，捕捉其超买超卖的震荡信号。
         """
-        # self._normalize_z_score_group(X, feature_cols, self.ratio_features, self.ratio_features[0], factory=factory)  #根据测试单独归一化更好
+        # self._normalize_z_score_rel(X, feature_cols, self.ratio_features, self.ratio_features[0], factory=factory)  #根据测试单独归一化更好
         if self.ratio_features:
             for f in self.ratio_features:
                 # 这种震荡指标不需要和 close 挂钩，单独进行 Z-Score 即可
-                self._normalize_z_score_group(X, feature_cols, [f], f, factory=factory)
+                self._normalize_z_score_rel(X, feature_cols, [f], f, factory=factory)
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         # 取最大的窗口并增加缓冲区
@@ -1080,7 +1201,7 @@ class FeatureATS(FeatureBase):
         """
         ATS 代表单笔成交力度。
         """
-        self._normalize_z_score_group(X=X, feature_cols=feature_cols, target_feature_cols=self.features, feature_base='ATS', factory= factory)  # <--- 必须自缩放
+        self._normalize_z_score_rel(X=X, feature_cols=feature_cols, target_feature_cols=self.features, feature_base='ATS', factory= factory)  # <--- 必须自缩放
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算平均单笔成交量 (ATS) 所需的最小历史 K 线数量。
@@ -1161,7 +1282,7 @@ class FeatureVolumeEvent(FeatureBase):
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # Event-level feature.
         # Do NOT normalize / z-score / center.
-        self._normalize_z_score_group(X, feature_cols , self.ratio_features , feature_base = self.ratio_features[0], factory= factory)
+        self._normalize_z_score_rel(X, feature_cols , self.ratio_features , feature_base = self.ratio_features[0], factory= factory)
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         # 必须返回所有窗口中最大的那个，确保初始化数据足够
@@ -1170,115 +1291,56 @@ class FeatureVolumeEvent(FeatureBase):
 class FeatureCandle(FeatureBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        
-        # 1. 绝对量级类 (Magnitude)
-        # 特征：数值随价格高低变化，分布无界
-        # 处理：需要 Z-Score (标准化) 或 Robust Scaling
+        # 1. 绝对量级类：受价格影响，长尾极其严重
         self.feat_magnitude = ['body', 'upper_wick', 'lower_wick', 'max_range', 'body_mom']
-        
-        # 2. 比例类 (Ratios) [0, 1]
-        # 特征：描述形状，数值在 0 到 1 之间
-        # 处理：中心化 (减去 0.5)，使其分布在 [-0.5, 0.5]
+        # 2. 比例类：已天然缩放在 [0, 1]
         self.feat_ratio = ['body_pct', 'upper_wick_pct', 'lower_wick_pct', 'close_pos', 'doji_score']
+        # 3. 评分类：描述方向，通常在 [-1, 1]
+        self.feat_score = ['wick_bias'] 
         
-        # 3. 评分类 (Scores) [-1, 1]
-        # 特征：描述倾向性，数值本身就在 0 附近
-        # 处理：通常保持原样，或者做简单的 Clip 截断
-        self.feat_score = ['wick_bias'] #'gap'
-        
-        # 汇总所有特征名，供父类使用
         self.features = self.feat_magnitude + self.feat_ratio + self.feat_score
 
     def generate(self, df: pd.DataFrame, kline_interval_ms: int = None):
-        """
-        计算基础特征，此时生成的数据包含：
-        1. 巨大的绝对值 (如 body=1000)
-        2. 0~1 的比率
-        3. 小数点后的 Score
-        """
-        # 避免修改原始 DataFrame
         o, h, l, c = df['open'], df['high'], df['low'], df['close']
 
-        # === A. 绝对量级类 (Magnitude) ===
-        # 计算基础物理量
+        # === A. 绝对量级类 ===
         df['body'] = np.abs(c - o)
         df['upper_wick'] = h - np.maximum(o, c)
         df['lower_wick'] = np.minimum(o, c) - l
-        
-        # max_range: 全天振幅
-        df['max_range'] = (h - l)
-        
-        # body_mom: 实体的变化动量 (当前实体大小 - 上一根实体大小)
-        # 注意：这里 fillna(0) 处理第一根 K 线
+        df['max_range'] = h - l
         df['body_mom'] = df['body'].diff().fillna(0)
 
-        # === B. 比例类 (Ratios) [0, 1] ===
-        # 计算分母，加上 EPS 防止一字板导致除零
-        rng = df['max_range'] + EPS
+        # === B. 比例类 [0, 1] ===
+        # 移除 EPS，改用安全触发
+        rng = df['max_range']
         
-        df['body_pct'] = df['body'] / rng
-        df['upper_wick_pct'] = df['upper_wick'] / rng
-        df['lower_wick_pct'] = df['lower_wick'] / rng
-        
-        # Close 在 K 线中的相对位置 (0=Low, 1=High)
-        df['close_pos'] = (c - l) / rng
-        
-        # 十字星评分: 实体占比越小，分数越高 (1.0 = 完美十字星)
+        # 使用 np.where 避免除零，若振幅为 0（一字板）则比例设为 0
+        df['body_pct'] = np.where(rng > 0, df['body'] / rng, 0.0)
+        df['upper_wick_pct'] = np.where(rng > 0, df['upper_wick'] / rng, 0.0)
+        df['lower_wick_pct'] = np.where(rng > 0, df['lower_wick'] / rng, 0.0)
+        df['close_pos'] = np.where(rng > 0, (c - l) / rng, 0.5) # 一字板视为中性
         df['doji_score'] = 1.0 - df['body_pct']
 
-        # === C. 评分类 (Scores) [-1, 1] ===
-        # 影线偏向: >0 上影线长(空头), <0 下影线长(多头)
+        # === C. 评分类 ===
         df['wick_bias'] = df['upper_wick_pct'] - df['lower_wick_pct']
-        
-        # Gap: 跳空比例 (Open - Prev_Close) / Prev_Close
-        # 注意：使用 shift(1) 获取昨收，fillna 处理第一行
-        prev_close = c.shift(1).fillna(o)
-        # df['gap'] = (o - prev_close) / (prev_close + EPS)
 
         # === 清洗 ===
-        # 将计算过程中可能产生的 inf 替换为 nan，最后统一填充
-        cols_to_clean = self.features
-        df[cols_to_clean] = df[cols_to_clean].replace([np.inf, -np.inf], np.nan)
-        df[cols_to_clean] = df[cols_to_clean].fillna(0)
-        
+        df[self.features] = df[self.features].replace([np.inf, -np.inf], np.nan).fillna(0)
         return df
 
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         """
-        分层归一化策略执行
-        - Magnitude 类: 使用 factory 统一获取价格均值进行无量纲化
-        - Ratio 类: 中心化到 [-0.5, 0.5]
-        - Score 类: 保持原样
+        分层压缩策略：
+        - Magnitude: 价格归一化 -> 组 Z-Score -> Log1p 压缩
+        - Ratio: 中心化到 [-0.5, 0.5] -> 可选 Log 增强
         """
-        # 1. Magnitude 类 -> 无量纲化 + 组归一化
-        mag_indices = [factory._feature_index[f] for f in self.feat_magnitude if f in feature_cols]
-        
-        if mag_indices:
-            # 使用工厂方法获取 'close' 的均值 (mu)
-            # mu 的形状自动被处理为 (Sample, 1, 1)，完美匹配广播要求
-            mu_price, _ = factory.get_base_stats('close')
-            mu_price = mu_price[:, :, np.newaxis]  # 统一升维，后续计算更简洁
-            mag_data = np.where(mu_price > EPS, X[:, :, mag_indices] / mu_price, 0.0)
-            
-            # Step B: 计算组整体统计量 (跨 Time 和 Feature 维度池化)
-            group_mu = np.nanmean(mag_data, axis=(1, 2), keepdims=True)
-            group_sigma = np.nanstd(mag_data, axis=(1, 2), keepdims=True)
-            
-            # Step C: 标准化并写回
-            X[:, :, mag_indices] = np.where(
-                group_sigma > 0,
-                (mag_data - group_mu) / group_sigma,
-                0.0
-            )
+        self._normalize_z_score_group(X,feature_cols,self.feat_magnitude, factory, method = 'log')
 
-        # 2. Ratio 类 -> Center at 0 (平移)
-        # 原始范围 [0, 1] -> 映射到 [-0.5, 0.5]
-        ratio_indices = [feature_cols.index(f) for f in self.feat_ratio if f in feature_cols]
-        if ratio_indices:
-            X[..., ratio_indices] = np.clip(X[..., ratio_indices], 0, 1) - 0.5
+        # 2. 处理 Ratio 类别
+        self._normalize_z_score_group(X,feature_cols,self.feat_ratio, factory, method = 'log')
 
-        # 3. Score 类 -> Pass (保持原样)
-        pass
+        # 3. 处理 Score 类别 (wick_bias 等)
+        self._normalize_z_score(X,feature_cols,self.feat_score, self.feat_score[0] , factory, method = 'log')
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         """
         计算 K线形态特征所需的最小历史 K 线数量。
@@ -1328,7 +1390,7 @@ class FeatureDonchian(FeatureBase):
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # 使用 SCS 保持价格骨架的一致性，将绝对价格转化为比例关系
         # self._normalize_scs(X, feature_cols, self.features, "close")
-        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = "close", factory= factory)
+        self._normalize_z_score_rel(X, feature_cols , self.features , feature_base = "high", factory= factory)
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         return self.period
@@ -1376,7 +1438,7 @@ class FeatureKeltner(FeatureBase):
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # 同样使用 SCS 归一化，保护通道几何形态
         # self._normalize_scs(X, feature_cols, self.features, "close")
-        self._normalize_z_score_group(X, feature_cols , self.features , feature_base = "close", factory= factory)
+        self._normalize_z_score_rel(X, feature_cols , self.features , feature_base = "high", factory= factory)
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         # EMA 需要约 4 倍周期进行预热收敛
@@ -1435,7 +1497,7 @@ class FeatureBoll(FeatureBase):
 
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
         # A. 通道价格类：使用 Z-Score 与收盘价对齐
-        self._normalize_z_score_group(X, feature_cols, self.price_features, feature_base="close", factory=factory)
+        self._normalize_z_score_rel(X, feature_cols, self.price_features, feature_base="high", factory=factory, method= 'log')
         
         # B. 百分比位置 %B: 范围约在 [0, 1]，进行中心化处理
         pb_idx = [factory._feature_index[f] for f in [self.ratio_features[1]] if f in factory._feature_index]
@@ -1451,47 +1513,25 @@ class FeatureBoll(FeatureBase):
         # SMA 基础窗口
         return self.period
     
-class FeatureOrigin(FeatureBase):
+class FeatureOrigin(FeatureBase):   #增加一个 taker_buy_base_volume/volume 占比参数，taker_buy_quote_volume/quote_asset_volume 占比参数
     def __init__(self,**kwargs):
         super().__init__(**kwargs)
-        self.price_base_features = ['open', 'high', 'low', 'close']#[]
+        self.price_base_features = ['open', 'high', 'close', 'low',]#[]
         self.volume_base_features = ['taker_buy_base_volume', 'volume']#[] # feature used as basic must be the last!!!
         self.quote_base_features  = ['taker_buy_quote_volume', 'quote_asset_volume']#[]   #the basic is quote_asset
         self.self_based_features = ['number_of_trades']#[]
         self.features = self.price_base_features + self.volume_base_features + self.quote_base_features + self.self_based_features
-        # for f in ['open', 'high', 'low', 'close']:
-        #     self.price_base_features.append(f'base_{f}')
-        # for f in ['taker_buy_base_volume', 'volume']:
-        #     self.volume_base_features.append(f'base_{f}')
-        # for f in ['taker_buy_quote_volume', 'quote_asset_volume']:
-        #     self.quote_base_features.append(f'base_{f}')
-        # for f in ['number_of_trades']:
-        #     self.self_based_features.append(f'base_{f}')
     def generate(self,df:pd.DataFrame, kline_interval_ms: int = None):
         # for f in self.factory.base_features:
         #     df[f'base_{f}'] = df[f]
         pass
     def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-        self._normalize_z_score_group(X, feature_cols , self.price_base_features , feature_base = "close", factory= factory)
-        self._normalize_z_score_group(X, feature_cols , self.volume_base_features , feature_base = "volume", factory= factory)
-        self._normalize_z_score_group(X, feature_cols , self.quote_base_features , feature_base = "quote_asset_volume", factory= factory)
+        self._normalize_z_score_rel(X, feature_cols , self.price_base_features , feature_base = self.price_base_features[-1], factory= factory, method= 'log')
+        self._normalize_z_score_rel(X, feature_cols , self.volume_base_features , feature_base = self.volume_base_features[-1], factory= factory, method= 'log')
+        self._normalize_z_score_rel(X, feature_cols , self.quote_base_features , feature_base = self.quote_base_features[-1], factory= factory, method= 'log')
         for f in self.self_based_features:
-            self._normalize_z_score(X, feature_cols , [f] , feature_base = f, factory= factory)
-
-    def delete(self, df: pd.DataFrame):
-        """
-        🌟 核心任务：从 DataFrame 中删除所有原始特征。
-        目的是为了防止绝对数值污染特征矩阵或节省内存。
-        """
-        # 使用 errors='ignore' 确保即使某些列不存在也不会报错
-        df.drop(columns=self.features, inplace=True, errors='ignore')
-        # self.logger.debug(f"已清理原始特征列: {self.features}")
-    # def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
-    #     self._normalize_group_min_max(X, feature_cols , self.price_base_features)
-    #     self._normalize_volume_rlc(X, feature_cols , self.volume_base_features , feature_base = "volume")
-    #     self._normalize_volume_rlc(X, feature_cols , self.quote_base_features , feature_base = "quote_asset_volume")
-    #     for f in self.self_based_features:
-    #         self._normalize_volume_rlc(X, feature_cols , [f] , feature_base = f)
+            self._normalize_z_score(X, feature_cols , [f] , feature_base = f, factory= factory, method= 'log')
+            
     def _min_history_request(self, kline_interval_ms:int = None) -> int:
         return 1
 
@@ -1500,11 +1540,11 @@ class FeatureOrigin(FeatureBase):
 #01000010000010011
 FEATURE_CONFIG_LIST = [
     # 1. 自定义的成交量爆发特征 (窗口 512，对比前 2 强)
-    (FeatureVolumeEvent, {"windows": [5000, 1500], "top_k": 3}),
+    # (FeatureVolumeEvent, {"windows": [5000, 1500], "top_k": 3}),
     # 2. 价格趋势与指标类
-    (FeatureMACD, {"fast": 6, "slow": 13, "signal": 5}),   #（12，26，9），（6，13，5）或（10，20，7） {'fast': 21, 'slow': 55, 'signal': 13}
+    (FeatureMACD, {"fast": 12, "slow": 16, "signal": 9}),   #（12，26，9），（6，13，5）或（10，20，7） {'fast': 21, 'slow': 55, 'signal': 13}
     # "weeks": [7, 25],  "days": [5, 10, 20,50],  "bars": [7,25,36,99,150,200,300,400,500,600,800,1000,1300,1500,1800,2000,2500,3000] sma(适合趋势)/ema
-    (FeatureMA, {  "weeks": [7, 25],  "days": [],  "bars": [7,25,99],  "method": 'ema',  "strict": True,  "add_slope": True}), #slope 值搭配使用
+    (FeatureMA, {  "weeks": [7, 25],  "days": [],  "bars": [7,25,99],  "method": 'sma',  "strict": True,  "add_slope": True}), #slope 值搭配使用
     (FeatureRsi, {"period": 14, "price_col": 'close', "strict": True, "prefix": 'RSI'}),
     (FeatureKdj, {"n": 9, "m1": 3, "m2": 3, "strict": True, "prefix": 'KDJ'}),
     # #价格通道类，2选1

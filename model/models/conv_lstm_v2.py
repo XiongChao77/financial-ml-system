@@ -6,6 +6,25 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from model.models.model_base import BaseTimeSeriesModel
 
 
+class GatedTaskProjection(nn.Module):
+    """
+    梯度门控投影层：通过门控机制（Sigmoid）控制共享特征流入特定任务的比例。
+    """
+    def __init__(self, in_dim: int, out_dim: int, dropout: float):
+        super().__init__()
+        self.proj = nn.Linear(in_dim, out_dim)
+        self.gate = nn.Linear(in_dim, out_dim)
+        self.norm = nn.LayerNorm(out_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, feat_dim]
+        h = self.activation(self.proj(x))
+        # 门控信号：控制哪些特征通过
+        g = torch.sigmoid(self.gate(x))
+        return self.dropout(self.norm(h * g))
+    
 class LockedDropout(nn.Module):
     """Time-consistent dropout mask over T for each sample."""
     def __init__(self, p: float):
@@ -67,7 +86,7 @@ class ConvBlock(nn.Module):
         return x + h
 
 
-class ConvLSTM1D_V1(BaseTimeSeriesModel):
+class ConvLSTM1D_V2(BaseTimeSeriesModel):
     """
     Conv + LSTM hybrid for time-series classification / alpha modeling.
 
@@ -82,7 +101,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
       - 'mix'    : last + mean + max  (recommended)
     """
     MODEL_TYPE = "conv_lstm"
-    MODEL_VERSION = 1
+    MODEL_VERSION = 2
 
     def __init__(
         self,
@@ -115,6 +134,8 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
         head: str = "linear",        # 'linear'|'mlp'
         logit_clip: float | None = None,
 
+        # [NEW] Task Projection
+        task_proj_dim: int | None = 64,  # If None, defaults to feat_dim
         # compatibility: allow pass-all params
         p_drop: float | None = None,  # alias: if provided and explicit dropouts not set
         **kwargs,
@@ -122,7 +143,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
         super().__init__()
 
         if kwargs:
-            print(f"[ConvLSTM1D_V1] Ignored kwargs: {list(kwargs.keys())}")
+            print(f"[ConvLSTM1D_V2] Ignored kwargs: {list(kwargs.keys())}")
 
         assert readout in {"last", "meanmax", "attn", "mix"}
         assert head in {"linear", "mlp"}
@@ -134,7 +155,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
                 conv_dropout = float(p_drop)
                 head_dropout = float(p_drop)
                 lstm_dropout = float(p_drop)
-                print("[ConvLSTM1D_V1] p_drop is deprecated; mapped to conv/lstm/head dropout.")
+                print("[ConvLSTM1D_V2] p_drop is deprecated; mapped to conv/lstm/head dropout.")
 
         self.input_size = int(input_size)
         self.n_classes = int(n_classes)
@@ -203,22 +224,32 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
 
         self.norm = nn.LayerNorm(feat_dim)
 
-        # ---- head ----
+        # ---- Task Projection Layers (NEW) ----
         self.head_dropout = float(head_dropout)
-        if self.head_type == "linear":
-            self.classifier = nn.Sequential(
-                nn.Dropout(self.head_dropout),
-                nn.Linear(feat_dim, self.n_classes),
-            )
-        else:
-            mid = max(64, self.hidden_size)
-            self.classifier = nn.Sequential(
-                nn.Dropout(self.head_dropout),
-                nn.Linear(feat_dim, mid),
+        self.task_proj_dim = int(task_proj_dim) if task_proj_dim is not None else feat_dim
+
+        # Define projection block structure
+        def make_proj_block(in_dim, out_dim, drop_p):
+            return nn.Sequential(
+                nn.Linear(in_dim, out_dim),
+                nn.LayerNorm(out_dim),
                 nn.GELU(),
-                nn.Dropout(self.head_dropout),
-                nn.Linear(mid, self.n_classes),
+                nn.Dropout(drop_p)
             )
+
+        # Projection for Trigger Task (Action vs Neutral)
+        self.proj_trigger = GatedTaskProjection(feat_dim, self.task_proj_dim, self.head_dropout)
+        
+        # Projection for Direction Task (Long vs Short)
+        self.proj_direction = GatedTaskProjection(feat_dim, self.task_proj_dim, self.head_dropout)
+
+        # ---- Heads ----
+        # Now heads take task_proj_dim instead of feat_dim
+        # 任务 A: Trigger
+        self.head_trigger = nn.Linear(self.task_proj_dim, 2)
+        
+        # 任务 B: Direction
+        self.head_direction = nn.Linear(self.task_proj_dim, 2)
 
     @staticmethod
     def _make_mask(lengths: torch.Tensor, T: int) -> torch.Tensor:
@@ -231,7 +262,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
             return torch.cat((h_n[-2], h_n[-1]), dim=1)
         return h_n[-1]
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused=False) -> torch.Tensor:
         """
         x: [B,T,F]
         lengths: [B] optional
@@ -300,12 +331,42 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
             raise RuntimeError(f"Unknown readout={self.readout}")
 
         feat = self.norm(feat)
-        logits = self.classifier(feat)
+        # ---- Task Specific Projections ----
+        feat_trig = self.proj_trigger(feat)   # [B, task_proj_dim]
+        feat_dir  = self.proj_direction(feat) # [B, task_proj_dim]
+
+        # ---- Heads ----
+        logits_trig = self.head_trigger(feat_trig)    # [B, 2]
+        logits_dir = self.head_direction(feat_dir)  # [B, 2]
 
         if self.logit_clip is not None:
-            logits = torch.clamp(logits, -self.logit_clip, self.logit_clip)
+            logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
+            logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        return logits
+        # 🌟 Fusion Logic
+        if return_fused:
+            # 1. 计算各头概率 (Softmax)
+            p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
+            p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
+            
+            # 2. 合成 3 类概率 (Hierarchical Fusion)
+            # p_neutral(1) = p_hold
+            # p_short(0)   = p_act * p_short_in_act
+            # p_long(2)    = p_act * p_long_in_act
+            p_neutral = p_trig[:, 0]
+            p_act     = p_trig[:, 1]
+            p_short   = p_act * p_dir[:, 0]
+            p_long    = p_act * p_dir[:, 1]
+            
+            # 拼接成 [B, 3] 顺序: [Short(0), Neutral(1), Long(2)]
+            fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
+            
+            # 3. 生成预测标签 (基于合成概率的 argmax 确保与概率对齐)
+            fused_preds = torch.argmax(fused_probs, dim=1)
+            
+            return fused_preds, fused_probs # 🌟 返回元组
+        
+        return logits_trig, logits_dir
 
     # ---------- meta ----------
     def export_meta(self, **extra) -> dict:
@@ -334,6 +395,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
             "head": self.head_type,
             "head_dropout": self.head_dropout,
             "logit_clip": self.logit_clip,
+            "task_proj_dim": self.task_proj_dim,
 
             **extra,
         }
@@ -364,6 +426,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
             head=meta.get("head", "linear"),
             head_dropout=0.0,
             logit_clip=meta.get("logit_clip", None),
+            task_proj_dim=meta.get("task_proj_dim", 64),
         )
 
         model.load_state_dict(state["state_dict"])
