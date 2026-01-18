@@ -1,15 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import os, sys,logging
-current_work_dir = os.path.dirname(__file__)
-sys.path.append(os.path.join(current_work_dir, "..",'..'))
-from data_process import common
-from trade.bt import simulation
+import os, sys
+
+from trade import simulation
 
 app = FastAPI()
-logger: logging.Logger
-logger, _ = common.setup_session_logger(sub_folder='experiment', console_level= logging.INFO,file_level=logging.DEBUG)
-result = simulation.main(logger)
+result = simulation.main()
 candles = result["candles"]
 markers = result["markers"]
 statistics = result["statistics"]
