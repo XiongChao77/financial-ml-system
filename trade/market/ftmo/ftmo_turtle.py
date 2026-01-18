@@ -6,7 +6,7 @@ import os, sys
 
 # 路径处理
 current_work_dir = os.path.dirname(__file__)
-sys.path.append(os.path.join(current_work_dir, "..", '..'))
+sys.path.append(os.path.join(current_work_dir, "..", '..', '..'))
 
 # 引入模块
 from trade.market.ftmo.market_ftmo import BinanceDataFeed
@@ -25,7 +25,7 @@ class LiveConfig:
     SYMBOL_FTMO    = "DOGEUSD" # ⚠️ 请检查 MT5 里的实际名字
     
     # 策略参数 (FTMO 稳健版)
-    TIMEFRAME      = 1   # 4小时 (240分钟)
+    TIMEFRAME      = "4h"   # 4小时 "1m"/"5m"/"15m"/"1h"/"4h"/"1d"
     ENTRY_PERIOD   = 15    # 入场周期
     EXIT_PERIOD    = 10    # 离场周期
     RISK_PER_UNIT  = 0.01  # 单笔风险 1%
@@ -33,15 +33,20 @@ class LiveConfig:
     
     # 轮询
     POLL_INTERVAL  = 5    # 秒
+    INTERVAL_MAP = {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "1h": 60,
+        "4h": 240,  # 确保 240 对应 4h
+        "1d": 1440
+    }
 
 # ================= 主程序 =================
 class TurtleLiveBot:
     def __init__(self):
         # 日志设置
-        self.logger = common.setup_logger(
-            log_name='turtle_live', 
-            log_path=os.path.join(common.TEMPORARY_DIR, 'turtle_live_session')
-        )
+        self.logger , _= common.setup_session_logger(sub_folder='turtle_live',console_level= logging.DEBUG, file_level = logging.DEBUG)
         self.logger.info("🚀 Turtle Strategy Live Bot Starting...")
 
         # 1. 初始化 MT5 执行器
@@ -68,7 +73,7 @@ class TurtleLiveBot:
         # 3. 初始化数据源 (Binance)
         self.data_feed = BinanceDataFeed(
             symbol=LiveConfig.SYMBOL_BINANCE, 
-            interval_minutes=LiveConfig.TIMEFRAME,
+            interval=LiveConfig.TIMEFRAME,
             max_len=1000 # 只需要最近几百根计算 ATR 和 通道
         )
         
@@ -112,7 +117,7 @@ class TurtleLiveBot:
 
     def start(self):
         self.logger.info("📡 Pre-fetching history data...")
-        self.data_feed.initialize_cache(200, LiveConfig.TIMEFRAME * 60 * 1000)
+        self.data_feed.initialize_cache(200,LiveConfig.INTERVAL_MAP[LiveConfig.TIMEFRAME] * 60 * 1000)
         
         self.logger.info("🟢 System Live. Polling for new candles...")
         while True:
