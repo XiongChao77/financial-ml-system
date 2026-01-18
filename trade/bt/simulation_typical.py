@@ -81,7 +81,10 @@ def main(logger:logging.Logger):
             TurtleStrategy,
             entry_period=15, # System 1
             exit_period=10,
-            risk_per_unit=0.01 # 1% per unit
+            risk_per_unit=0.01, # 1% per unit
+            max_daily_loss_pct = 0.5,
+            upper_limit = 0.7,
+            unit_pct_scale = 2,
         )
     if 0:
         # simulation_typical.py 
