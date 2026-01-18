@@ -1,5 +1,8 @@
 ------------------------Data Clean----------------------
 drop data with nan. 如果窗口内缺失的数据达到N(3)个，丢弃整个窗口
+------------------------Label----------------------------
+1.return  no constraint for move
+2.triple barrier 
 
 -----归一化方法-------------
 · Min–Max Scaling

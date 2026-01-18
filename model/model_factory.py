@@ -5,11 +5,15 @@ from model.models.model_base import BaseTimeSeriesModel
 # =============================
 # 显式 import 所有模型
 # =============================
+from model.models.xgboost_model import XGBoostAdapter
+from model.models.tcn_v1 import TCN1D_V1
+from model.models.mamba_v1 import Mamba1D_V1
 from model.models.lstm import LSTM1D_V1          
 from model.models.lstm_v2 import LSTM1D_V2      # V2
 from model.models.lstm_v3 import LSTM1D_V3      # V3  > V1 > V2
 from model.models.lstm_v4 import LSTM1D_V4      #
 from model.models.conv_lstm_v1 import ConvLSTM1D_V1
+from model.models.conv_lstm_v2 import ConvLSTM1D_V2
 from model.models.cnn import CNN1D_V1
 from model.models.transformer_v1 import Transformer1D_V1
 from model.models.transformer_v2 import Transformer1D_V2
@@ -25,15 +29,16 @@ class ModelFactory:
     - Models must inherit BaseTimeSeriesModel
     """
 
-    # =============================
-    # 写死的模型清单（你想要的）
-    # =============================
     model_list = [
+        XGBoostAdapter,
+        TCN1D_V1,
+        Mamba1D_V1,
         LSTM1D_V1,
         LSTM1D_V2,
         LSTM1D_V3,  #good
         LSTM1D_V4,  #good
         ConvLSTM1D_V1,
+        ConvLSTM1D_V2,
         CNN1D_V1,
         Transformer1D_V1,
         Transformer1D_V2,
