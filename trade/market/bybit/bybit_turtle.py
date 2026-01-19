@@ -315,10 +315,15 @@ class BybitTurtleBot:
 
     def run(self):
         self.logger.info("🚀 Bybit Turtle Strategy Started...")
-        self.logger.info(f"Target: {self.symbol} | Frame: {TurtleConfig.TIMEFRAME}min")
+        last_heartbeat = 0
         
         while not self.stop_signal:
             try:
+                # 增加心跳：每 5 分钟打印一次，证明循环没卡死
+                if time.time() - last_heartbeat > 300:
+                    self.logger.info("💓 Heartbeat: Bot is still alive and cycling...")
+                    last_heartbeat = time.time()
+                
                 self.run_step()
                 time.sleep(TurtleConfig.POLL_INTERVAL)
             except Exception as e:

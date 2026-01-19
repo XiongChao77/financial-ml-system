@@ -82,9 +82,9 @@ def main(logger:logging.Logger):
             entry_period=15, # System 1
             exit_period=10,
             risk_per_unit=0.01, # 1% per unit
-            max_daily_loss_pct = 0.5,
-            upper_limit = 0.7,
-            unit_pct_scale = 2,
+            max_daily_loss_pct = 0.1,
+            upper_limit = 0.6,
+            unit_pct_scale = 0.5,
         )
     if 0:
         # simulation_typical.py 
@@ -236,6 +236,8 @@ def generate_backtest_report(logger,strat, save_path, commission):
     max_daily_dd = perf.get('max_daily_dd', 0.0) # 例如 -0.045
     max_daily_date = perf.get('max_daily_dd_date', 'N/A')
     violation_days = perf.get('daily_dd_violation_days', 0)
+    max_violation_days = perf.get('daily_dd_max_violation_days', 0)
+    max_3_violation_days = perf.get('daily_dd_max_3_violation_days', 0)
     # 1. 获取全局最低净值
     global_min_equity = perf.get('global_min_equity', 0.0)
     # 2. 计算距离初始资金的跌幅 (FTMO Max Loss)
@@ -247,7 +249,8 @@ def generate_backtest_report(logger,strat, save_path, commission):
     if dist_to_start_pct < -0.10:
         logger.warning("❌ FAILED: 账户曾经跌破初始本金的 10%！")
     # 在日志中打印
-    logger.info(f"RISK(Daily)| Worst Day: {max_daily_dd*100:.2f}% ({max_daily_date}) | >4% Days: {violation_days}")
+    logger.info(f"RISK(Daily)| Worst Day: {max_daily_dd*100:.2f}% ({max_daily_date}) | >4% Days: {violation_days} | >5% Days: {max_violation_days}")
+    logger.info(f">3% Days: {max_3_violation_days}")
 
     if max_daily_dd < -0.05:
         logger.warning("❌ 严重警告：单日回撤已触发 FTMO 5% 违规红线！")

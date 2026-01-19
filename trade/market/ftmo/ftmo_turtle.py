@@ -46,7 +46,7 @@ class LiveConfig:
 class TurtleLiveBot:
     def __init__(self):
         # 日志设置
-        self.logger , _= common.setup_session_logger(sub_folder='turtle_live',console_level= logging.DEBUG, file_level = logging.DEBUG)
+        self.logger , _= common.setup_session_logger(sub_folder='ftmo_turtle_live',console_level= logging.DEBUG, file_level = logging.DEBUG)
         self.logger.info("🚀 Turtle Strategy Live Bot Starting...")
 
         # 1. 初始化 MT5 执行器
@@ -117,7 +117,7 @@ class TurtleLiveBot:
 
     def start(self):
         self.logger.info("📡 Pre-fetching history data...")
-        self.data_feed.initialize_cache(200,LiveConfig.INTERVAL_MAP[LiveConfig.TIMEFRAME] * 60 * 1000)
+        self.data_feed.initialize_cache(500,LiveConfig.INTERVAL_MAP[LiveConfig.TIMEFRAME] * 60 * 1000)
         
         self.logger.info("🟢 System Live. Polling for new candles...")
         while True:

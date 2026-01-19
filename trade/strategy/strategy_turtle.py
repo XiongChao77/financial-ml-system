@@ -40,21 +40,36 @@ class TurtleBrain(Brain):
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
+        # 1. 计算 TR (True Range)
         tr1 = df['high'] - df['low']
         tr2 = (df['high'] - df['close'].shift(1)).abs()
         tr3 = (df['low'] - df['close'].shift(1)).abs()
         df['tr'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         
-        # 优化 ATR 计算：SMA 种子 + Wilder 递归
-        sma_atr = df['tr'].rolling(window=self.atr_period).mean()
-        df['atr'] = df['tr'].ewm(alpha=1/self.atr_period, adjust=False).mean()
-        if len(df) >= self.atr_period:
-            df.loc[df.index[self.atr_period-1], 'atr'] = sma_atr.iloc[self.atr_period-1]
+        # 2. 严格的 Wilder's ATR 计算逻辑
+        atr_period = self.atr_period
+        df['atr'] = 0.0
+        
+        if len(df) >= atr_period:
+            # A. 计算初始种子：前 n 个 TR 的简单平均值 (SMA)
+            sma_seed = df['tr'].iloc[:atr_period].mean()
+            df.loc[df.index[atr_period-1], 'atr'] = sma_seed
+            
+            # B. 执行递归计算：Current ATR = (Prior ATR * (n-1) + Current TR) / n
+            # 由于 Pandas 的 ewm 无法在向量化计算中途识别手动修改的种子点
+            # 我们使用循环来确保每一行都基于上一行的正确值
+            tr_values = df['tr'].values
+            atr_values = df['atr'].values
+            for i in range(atr_period, len(df)):
+                atr_values[i] = (atr_values[i-1] * (atr_period - 1) + tr_values[i]) / atr_period
+            df['atr'] = atr_values
 
+        # 3. 计算唐奇安通道
         df['entry_high'] = df['high'].shift(1).rolling(window=self.entry_period).max()
         df['entry_low'] = df['low'].shift(1).rolling(window=self.entry_period).min()
         df['exit_high'] = df['high'].shift(1).rolling(window=self.exit_period).max()
         df['exit_low'] = df['low'].shift(1).rolling(window=self.exit_period).min()
+        
         return df
 
     def _update_daily_equity(self, current_time: datetime, account_balance: float):
