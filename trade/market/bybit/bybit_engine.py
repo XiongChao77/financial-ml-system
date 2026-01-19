@@ -16,7 +16,7 @@ class BybitEngine:
         self.category = "linear"
         
         # 1. HTTP 客户端 (配置中心)
-        self.http = HTTP(testnet=testnet, api_key=self.api_key, api_secret=self.hmac_secret)
+        self.http = HTTP(testnet=testnet, api_key=self.api_key, api_secret=self.hmac_secret,timeout=10,)
         
         # 2. WS 交易客户端
         self.ws_trade = WebSocketTrading(testnet=testnet, api_key=self.api_key, api_secret=self.hmac_secret)
