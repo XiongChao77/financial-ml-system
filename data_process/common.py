@@ -32,7 +32,7 @@ STOP_MULTIPLIER_RATE = 0.5
 # label_increase_weak = 3
 model_train_rate = 0.8
 symbol = 'BTCUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
-interval = '4h' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+interval = '5m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 log_level = logging.INFO
 
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
