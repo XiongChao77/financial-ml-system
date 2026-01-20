@@ -1,1 +1,1 @@
-run: uvicorn UI.backend.main:app --reload  # must run in Quant
+run: uvicorn UI.backend.main:app --host 0.0.0.0 --port 8000  # must run in Quant
