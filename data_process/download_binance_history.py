@@ -197,10 +197,10 @@ class BinanceDownloader:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Binance Batch Downloader")
     # 支持多个币种，用空格隔开
-    parser.add_argument("--symbols", nargs='+', default=["DOGEUSDT"], 
+    parser.add_argument("--symbols", nargs='+', default=["BTCUSDT"], 
                         help="List of symbols: BTCUSDT ETHUSDT ...")    #BTCUSDT  ETHUSDT  DOGEUSDT SOLUSDT BNBUSDT TRXUSDT XRPUSDT  SUIUSDT ADAUSDT
     # 支持多个时间间隔，用空格隔开
-    parser.add_argument("--intervals", nargs='+', default=["2h"], 
+    parser.add_argument("--intervals", nargs='+', default=["30m"], 
                         help="List of intervals: 1m 1h 1d ...")
     parser.add_argument("--dir", default=PROJECT_DATA_DIR)
     parser.add_argument("--update", action="store_true", default=True)

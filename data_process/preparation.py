@@ -5,7 +5,7 @@ import datetime,os,sys, re, math, json, logging
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
-
+from data_process.regime_discovery import LabelRegimeAnalyzer
 
 def main(feature_config_list, logger:logging.Logger):
     file = common.origin_data_path
@@ -32,11 +32,22 @@ def main(feature_config_list, logger:logging.Logger):
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
     common.attach_attr(df, feature_config_list , interval_ms)
-    common.attach_label(df, interval_ms=interval_ms)
+    # common.attach_label(df, interval_ms=interval_ms)
     # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
     # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
     # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
     # common.attach_sma_7_25_crossover_label(df, interval_ms=interval_ms)
+    # 4. 执行分析
+    analyzer = LabelRegimeAnalyzer(df, interval_ms, common.symbol,common.interval)
+    
+    # 定义更精细的步长以捕捉梯度变化
+    vol_range = np.linspace(0.2, 2.0, 19)
+    # vol_range = np.linspace(1.25, 1.45, 5) 
+    stop_range = np.linspace(0.3, 1.0, 8)
+    
+    analyzer.run_parameter_sweep(vol_range, stop_range)
+    analyzer.analyze_and_plot(output_dir= common.PERSISTENCE_DIR)
+    exit()
     # ---------------- 统计输出 ----------------
     counts = df['label'].value_counts().sort_index()
     proportions = df['label'].value_counts(normalize=True).sort_index()
