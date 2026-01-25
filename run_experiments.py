@@ -2,7 +2,7 @@ import os, sys, time, logging, argparse
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process import preparation, common
-import model.train_old as train
+import model.train_2head as train
 from trade.bt import simulation
 
 def main():

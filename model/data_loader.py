@@ -26,10 +26,12 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             stride: int = 1,
             is_live: bool = False,
             cache_path: Optional[str] = None,
-            use_cache: bool = False
+            use_cache: bool = False,
+            show_feature_distribution = False
     ):
         self.logger = logging.getLogger()
         self.is_live = is_live
+        self.show_feature_distribution = show_feature_distribution
         self.stride = stride
         self.window = window
         self.kline_interval_ms = kline_interval_ms
@@ -291,7 +293,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self.y = torch.from_numpy(y_filtered).long()
         self.indices = final_indices
         # --- 自动打印统计信息供 Review ---
-        if not self.is_live:
+        if self.show_feature_distribution:
             self.print_feature_stats()
     # ----------------------------------------------------------------
     # --- 调试与数据复核方法 ---

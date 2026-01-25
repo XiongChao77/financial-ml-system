@@ -29,19 +29,19 @@ class FeatureBase(ABC):
             if scale is None:
                 # 取当前窗口绝对值的分位数作为 S，代表“90% 的数据分布范围”
                 scale = np.nanpercentile(np.abs(vals), 95, keepdims=True)
-                print(f"***********************{self.__class__.__name__} scale is {scale}*******************")
+                # print(f"***********************{self.__class__.__name__} scale is {scale}*******************")
                 # scale = np.maximum(scale, 1.0) # 保底为 1，防止波动过小时过度放大噪声
             else:
                 scale = scale
             if method == 'tanh':
                 # tanh(1.0) = 0.76. 所以 scale 直接用 raw_s 即可
                 adj_scale = scale / 1.0 
-                print(f"***********************{self.__class__.__name__} tanh adj_scale is {adj_scale}*******************")
+                # print(f"***********************{self.__class__.__name__} tanh adj_scale is {adj_scale}*******************")
                 result = np.tanh(vals / adj_scale)
             elif method == 'log':
                 # ln(1 + 1.22) = 0.8. 如果想让 95% 分位达到 0.8，需要除以 raw_s / 1.22
                 adj_scale = scale #* 1.22 
-                print(f"***********************{self.__class__.__name__} log adj_scale is {adj_scale}*******************")
+                # print(f"***********************{self.__class__.__name__} log adj_scale is {adj_scale}*******************")
                 result = np.sign(vals) * np.log1p(np.abs(vals / adj_scale))
 
             # for pct in range(50, 100,5):
