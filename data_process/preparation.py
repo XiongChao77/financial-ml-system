@@ -7,7 +7,7 @@ sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 from data_process.regime_discovery import LabelRegimeAnalyzer
 
-def main(feature_config_list, logger:logging.Logger):
+def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST):
     file = common.origin_data_path
     # 1. 获取周期字符串并转为毫秒
     interval_str = get_interval_from_filename(file)
@@ -21,7 +21,6 @@ def main(feature_config_list, logger:logging.Logger):
         "predict_num": common.PREDICT_NUM,
         "vol_multiplier": common.VOL_MULTIPLIER,
         "stop_multiplier_rate": common.STOP_MULTIPLIER_RATE,
-        "min_threshold": common.MIN_THRESHOLD
     }
 
     df = pd.read_csv(file)
@@ -32,22 +31,25 @@ def main(feature_config_list, logger:logging.Logger):
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
     common.attach_attr(df, feature_config_list , interval_ms)
-    # common.attach_label(df, interval_ms=interval_ms)
-    # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
-    # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
-    # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
-    # common.attach_sma_7_25_crossover_label(df, interval_ms=interval_ms)
-    # 4. 执行分析
-    analyzer = LabelRegimeAnalyzer(df, interval_ms, common.symbol,common.interval)
-    
-    # 定义更精细的步长以捕捉梯度变化
-    vol_range = np.linspace(0.2, 2.0, 19)
-    # vol_range = np.linspace(1.25, 1.45, 5) 
-    stop_range = np.linspace(0.3, 1.0, 8)
-    
-    analyzer.run_parameter_sweep(vol_range, stop_range)
-    analyzer.analyze_and_plot(output_dir= common.PERSISTENCE_DIR)
-    exit()
+    if True:
+        common.attach_label(df, interval_ms=interval_ms)
+        # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
+    # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
+    # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
+    # # common.attach_sma_7_25_crossover_label(df, interval_ms=interval_ms)
+    else:
+        # 4. 执行分析
+        analyzer = LabelRegimeAnalyzer(df, interval_ms, common.symbol,common.interval)
+        
+        # 定义更精细的步长以捕捉梯度变化
+        vol_range = np.linspace(0.2, 2.0, 19)
+        # vol_range = np.linspace(1.25, 1.45, 5) 
+        stop_range = np.linspace(0.3, 1.0, 8)
+        
+        analyzer.run_parameter_sweep(vol_range, stop_range)
+        analyzer.analyze_and_plot(output_dir= common.PERSISTENCE_DIR)
+        analyzer.plot_null_hypothesis_comparison(output_dir= common.PERSISTENCE_DIR)
+        exit()
     # ---------------- 统计输出 ----------------
     counts = df['label'].value_counts().sort_index()
     proportions = df['label'].value_counts(normalize=True).sort_index()
@@ -72,6 +74,7 @@ def main(feature_config_list, logger:logging.Logger):
     test_df  = df.iloc[split_idx:]
 
     # 创建临时目录
+    os.makedirs(common.TEMPORARY_DIR, exist_ok=True)
     os.makedirs(common.TEMPORARY_DIR, exist_ok=True)
 
     # A. 保存 CSV 数据
@@ -125,4 +128,4 @@ def get_interval_ms(interval_str: str) -> int:
 if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     logger, _ = common.setup_session_logger(sub_folder='data_process')
-    main(common.FEATURE_CONFIG_LIST ,logger)
+    main(logger,common.FEATURE_CONFIG_LIST)

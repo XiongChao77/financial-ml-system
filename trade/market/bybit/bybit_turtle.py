@@ -165,7 +165,7 @@ class BybitTurtleExecutor:
         tickers = self.engine.http.get_tickers(category="linear", symbol=self.symbol)
         curr_price = float(tickers['result']['list'][0]['lastPrice'])
         
-        # 3. 计算止损价格 (Bybit 需要具体价格，Brain 给的是比例)
+        # 3. 计算止损价格 (Bybit 需要具体价格，BrainBase 给的是比例)
         sl_price = 0.0
         if stop_loss:
             if is_buy:
@@ -301,7 +301,7 @@ class BybitTurtleBot:
             curr_pos_size_pct = 0.1 # 只要有持仓，给个非0值让Brain知道
 
         # 4. 大脑决策
-        # 注意：Brain 内部会调用 executor.user_order 进行下单
+        # 注意：BrainBase 内部会调用 executor.user_order 进行下单
         self.brain.decide(
             df=df,
             current_time=pd.to_datetime(datetime.now()), # 或使用 server time

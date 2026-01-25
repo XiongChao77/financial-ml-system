@@ -18,7 +18,7 @@ class MT5Executor(BaseExecutor):
         mt5.symbol_select(self.symbol, True)
 
     def update_context(self, stop_threshold_pct):
-        """同步来自 Brain 的实时止损设置"""
+        """同步来自 BrainBase 的实时止损设置"""
         self.stop_threshold_pct = stop_threshold_pct
 
     def get_account_equity(self):

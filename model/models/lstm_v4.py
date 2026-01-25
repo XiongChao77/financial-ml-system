@@ -283,7 +283,7 @@ class LSTM1D_V4(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        # 🌟 修改点 3：固化的融合逻辑 (支持 predict_v2)
+        # 🌟 修改点 3：固化的融合逻辑 (支持 predict)
         if return_fused:
             p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
             p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]

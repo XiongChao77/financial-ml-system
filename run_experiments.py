@@ -2,7 +2,7 @@ import os, sys, time, logging, argparse
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process import preparation, common
-from model import train
+import model.train_old as train
 from trade.bt import simulation
 
 def main():
@@ -48,7 +48,10 @@ def main():
     if args.sim or run_all:
         logger.info(">>> [3/3] Starting Simulation...")
         start = time.time()
-        simulation.main(logger)
+        args = simulation.Parameters()
+        simulation.main(logger,args)
+        args.thresh = 0.4
+        simulation.main(logger,args)
         stats["simulation"] = time.time() - start
 
     end_time = time.time()
