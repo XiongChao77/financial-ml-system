@@ -45,7 +45,7 @@ class Parameters:
         self.allow_short = True
         self.allow_long = True
         self.holdbar = PREDICT_NUM#PREDICT_NUM
-        self.thresh: float =0.45#0.5#None#0.45
+        self.thresh: float =None#0.5#None#0.45
         self.commission = 0.05   # 0.1 = 0.1%  .can't be 0
         self.cash = 10000
         self.stop_loss = 0.5  # 0-1
