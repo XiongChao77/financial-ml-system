@@ -3,7 +3,7 @@ import logging
 from datetime import timezone
 import numpy as np
 from trade.bt.bt_executor import BtExecutor
-from trade.strategy.strategy_ftmo import FtmoBrain,MarketState,TradingAction,ActionType,PositionDir,Signal
+from trade.strategy.strategy_ml import FtmoBrain,MarketState,TradingAction,ActionType,PositionDir,Signal
 from data_process import common
 # --- Strategy ---
 class FtmoStrategy(BtExecutor):

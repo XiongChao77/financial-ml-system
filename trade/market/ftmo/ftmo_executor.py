@@ -1,7 +1,7 @@
 import MetaTrader5 as mt5
 import logging
 from trade.strategy.base_executor import BaseExecutor
-from trade.strategy.strategy_ftmo import PositionDir
+from trade.strategy.strategy_ml import PositionDir
 
 class MT5Executor(BaseExecutor):
     def __init__(self, symbol, magic):

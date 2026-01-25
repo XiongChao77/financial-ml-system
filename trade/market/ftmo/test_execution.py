@@ -9,8 +9,8 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", '..', '..'))
 
 from trade.market.ftmo.ftmo_executor import MT5Executor
-from trade.market.ftmo.market_ftmo import LiveConfig
-from trade.strategy.strategy_ftmo import PositionDir
+from Quant.trade.market.ftmo.market_ml import LiveConfig
+from trade.strategy.strategy_ml import PositionDir
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("TestExecution")

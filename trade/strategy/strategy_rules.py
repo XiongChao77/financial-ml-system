@@ -2,7 +2,7 @@ import pandas as pd
 import logging
 import math
 from datetime import datetime
-from trade.strategy.strategy_ftmo import BrainBase, TradingAction, ActionType, PositionDir
+from trade.strategy.strategy_ml import BrainBase, TradingAction, ActionType, PositionDir
 from trade.strategy.base_executor import BaseExecutor
 
 class RulesBrain(BrainBase):

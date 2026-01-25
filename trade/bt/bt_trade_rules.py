@@ -2,7 +2,7 @@ import backtrader as bt
 import pandas as pd
 from trade.bt.bt_executor import BtExecutor
 from trade.strategy.strategy_rules import RulesBrain
-from trade.strategy.strategy_ftmo import PositionDir
+from trade.strategy.strategy_ml import PositionDir
 
 class RulesStrategy(BtExecutor):
     def __init__(self):

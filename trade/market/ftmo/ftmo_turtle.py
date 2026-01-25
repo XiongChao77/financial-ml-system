@@ -9,10 +9,10 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", '..', '..'))
 
 # 引入模块
-from trade.market.ftmo.market_ftmo import BinanceDataFeed
+from Quant.trade.market.ftmo.market_ml import BinanceDataFeed
 from trade.market.ftmo.ftmo_executor import MT5Executor # 刚才写的那个类
 from trade.strategy.strategy_turtle import TurtleBrain
-from trade.strategy.strategy_ftmo import PositionDir
+from trade.strategy.strategy_ml import PositionDir
 from data_process import common
 
 # ================= 配置区域 =================

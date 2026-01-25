@@ -1,8 +1,8 @@
 import backtrader as bt
 from trade.bt.bt_executor import BtExecutor
 from trade.strategy.strategy_ma import MaCrossoverBrain, MaMarketState
-from trade.strategy.strategy_ftmo import PositionDir
-from trade.strategy.strategy_ftmo import ActionType
+from trade.strategy.strategy_ml import PositionDir
+from trade.strategy.strategy_ml import ActionType
 
 class MaCrossoverStrategy(BtExecutor):
     params = dict(

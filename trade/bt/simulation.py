@@ -16,7 +16,7 @@ from data_process.common import *
 from model import model_loader
 from trade.bt import cus_analyzer, cus_comminfo, result_analyze
 
-from trade.bt.bt_trade_ftmo import FtmoStrategy
+from trade.bt.bt_trade_ml import FtmoStrategy
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
 
 class TradeResult:
@@ -48,42 +48,52 @@ class PandasDataWithPred(bt.feeds.PandasData):
 
 def log_parameters(params_obj, logger):
     """
-    按照用户指定的格式打印 Parameters 对象的所有参数
+    自适应获取参数并按 4 个一组格式化打印
     """
-    # 将对象转换为字典
-    params_dict = vars(params_obj)
-    items = list(params_dict.items())
+    # 1. 过滤掉 Python 内置的 __xx__ 属性和方法 (callable)
+    # 这样无论参数定义在 __init__ 内还是类级别都能获取到
+    all_keys = [k for k in dir(params_obj) 
+                if not k.startswith('__') and not callable(getattr(params_obj, k))]
     
-    # 设定每行显示的参数数量，参考你给出的日志，通常每行 3-4 个
+    # 2. 按照名称排序（可选，方便在日志中快速定位）
+    # all_keys.sort() 
+
     items_per_line = 4
     
-    for i in range(0, len(items), items_per_line):
-        chunk = items[i : i + items_per_line]
-        # 格式化每一组参数为 key: value
-        para_str = " | ".join([f"{k}: {v}" for k, v in chunk])
-        # 按照你给出的格式前缀打印
+    for i in range(0, len(all_keys), items_per_line):
+        chunk_keys = all_keys[i : i + items_per_line]
+        
+        # 3. 构造 "key: value" 字符串组
+        # 使用 getattr 安全获取值
+        para_parts = []
+        for k in chunk_keys:
+            val = getattr(params_obj, k)
+            para_parts.append(f"{k}: {val}")
+            
+        para_str = " | ".join(para_parts)
+        
+        # 4. 打印，确保 "Para" 后面的空格与你的 SUMMARY/EXPOSURE 对齐
         logger.info(f"Para    | {para_str}")
 
 class Parameters:
-    def __init__(self):
-        self.allow_short = True
-        self.allow_long = True
-        self.holdbar = PREDICT_NUM#PREDICT_NUM
-        self.thresh: float =None#0.5#None#0.45
-        self.commission = 0.05   # 0.1 = 0.1%  .can't be 0
-        self.cash = 10000
-        self.stop_loss = 0.5  # 0-1
-        self.stop_loss_long = 0.03  # 0-1
-        self.stop_loss_short = 0.015  # 0-1
-        self.atr_sl_mult_long = 5 #2.5
-        self.atr_sl_mult_short = 2.5 #2.5
-        self.take_profit = 0.99 #止盈. 0 - n倍
-        self.trade_risk = 0.5     #0-1
-        self.max_daily_loss_pct = 0.025
+    allow_short = True
+    allow_long = True
+    holdbar = PREDICT_NUM#PREDICT_NUM
+    thresh: float =None#0.5#None#0.45
+    commission = 0.05   # 0.1 = 0.1%  .can't be 0
+    cash = 10000
+    stop_loss = 0.5  # 0-1
+    stop_loss_long = 0.03  # 0-1
+    stop_loss_short = 0.015  # 0-1
+    atr_sl_mult_long = 5 #2.5
+    atr_sl_mult_short = 2.5 #2.5
+    take_profit = 0.99 #止盈. 0 - n倍
+    trade_risk = 0.5     #0-1
+    max_daily_loss_pct = 0.025
 
-def main(logger:logging.Logger,args = Parameters()):
+def main(logger:logging.Logger):
     logger.info(
-        f"Backtest settings: Short={args.allow_short}, Long={args.allow_long}, Thresh={args.thresh}, commission={args.commission}"
+        f"Backtest settings: Short={Parameters.allow_short}, Long={Parameters.allow_long}, Thresh={Parameters.thresh}, commission={Parameters.commission}"
     )
 
     # 1. 数据加载
@@ -146,18 +156,18 @@ def main(logger:logging.Logger,args = Parameters()):
     cerebro = bt.Cerebro(runonce=False,cheat_on_open=True)
     cerebro.addstrategy(
         FtmoStrategy,
-        holdbar=args.holdbar,
-        allow_short=args.allow_short,
-        allow_long=args.allow_long,
-        thresh=args.thresh,
-        stop_loss=args.stop_loss,
-        stop_loss_long = args.stop_loss_long,
-        stop_loss_short = args.stop_loss_short,
-        atr_sl_mult_long = args.atr_sl_mult_long,
-        atr_sl_mult_short = args.atr_sl_mult_short,
-        take_profit = args.take_profit,
-        trade_risk = args.trade_risk,
-        max_daily_loss_pct = args.max_daily_loss_pct,
+        holdbar=Parameters.holdbar,
+        allow_short=Parameters.allow_short,
+        allow_long=Parameters.allow_long,
+        thresh=Parameters.thresh,
+        stop_loss=Parameters.stop_loss,
+        stop_loss_long = Parameters.stop_loss_long,
+        stop_loss_short = Parameters.stop_loss_short,
+        atr_sl_mult_long = Parameters.atr_sl_mult_long,
+        atr_sl_mult_short = Parameters.atr_sl_mult_short,
+        take_profit = Parameters.take_profit,
+        trade_risk = Parameters.trade_risk,
+        max_daily_loss_pct = Parameters.max_daily_loss_pct,
     )
 
     data = PandasDataWithPred(
@@ -180,9 +190,9 @@ def main(logger:logging.Logger,args = Parameters()):
     )
 
     cerebro.adddata(data)
-    cerebro.broker.setcash(args.cash)
+    cerebro.broker.setcash(Parameters.cash)
     cerebro.broker.addcommissioninfo(
-        cus_comminfo.CommInfo_Cryptocurrency(commission=args.commission, leverage =1)
+        cus_comminfo.CommInfo_Cryptocurrency(commission=Parameters.commission, leverage =1)
     )
     # cerebro.broker.set_coc(True)  #
 
@@ -200,7 +210,7 @@ def main(logger:logging.Logger,args = Parameters()):
     # 5. 结果统计
     # UI
     # 封装统计数据 (合并回测数据和模型指标)
-    statistics = generate_backtest_report(logger, strat, model_stats, args=args, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
+    statistics = generate_backtest_report(logger, strat, model_stats, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
 
     trade_logs = cerebro.trade_logs
 
@@ -237,7 +247,7 @@ def safe_get(d, keys, default=0):
     return cur if cur != {} else default
 
 
-def generate_backtest_report(logger,strat, model_stats, save_path, args:Parameters):
+def generate_backtest_report(logger,strat, model_stats, save_path):
     """
     修复版报告生成器：
     1. 修正 Profit Factor 计算公式 (Gross Won / Gross Lost)
@@ -317,8 +327,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path, args:Paramete
     daily_trades = total_trades / total_days
 
     # 计算平均值 (*100 转为百分比)
-    avg_pct_gross = avg_pnl_gross /(avg_cost/2) * args.commission
-    avg_pct_net = avg_pnl_net / (avg_cost/2) * args.commission
+    avg_pct_gross = avg_pnl_gross /(avg_cost/2) * Parameters.commission
+    avg_pct_net = avg_pnl_net / (avg_cost/2) * Parameters.commission
 
     # ============================================================
     # --- 1. 多头统计 (Long) ---
@@ -377,7 +387,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, args:Paramete
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
     logger.info(f"Para    | PREDICT_NUM: {CANDLESTICK_NUM}| PREDICT_NUM: {PREDICT_NUM} | VOL_MULTIPLIER: {VOL_MULTIPLIER} | STOP_MULTIPLIER_RATE: {STOP_MULTIPLIER_RATE}")
     logger.info(f"Para    | symbol: {symbol} | interval: {interval}| STOP_MULTIPLIER_RATE: {STOP_MULTIPLIER_RATE}")
-    log_parameters(args,logger)
+    log_parameters(Parameters,logger)
     logger.info("-" * 80)
 
     # 构造 JSON (略微精简，保持原有结构)
