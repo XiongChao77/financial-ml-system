@@ -4,7 +4,7 @@
 import os
 import sys
 import json
-import logging,shutil
+import logging
 import torch
 import torch.nn as nn
 import numpy as np
@@ -26,7 +26,7 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process import common
 from model.data_loader import TimeSeriesWindowDataset
 from model.model_factory import ModelFactory
-from model.models.fusion_wrapper import FusionWrapper
+
 # ==============================================================================
 # 1. Configuration
 # ==============================================================================
@@ -39,7 +39,7 @@ class ConvLSTMConfig:
     conv_layers: int = 3
     conv_kernel: int = 5
     conv_dropout: float = 0.2
-    # conv_dilations: Tuple[int] = (1, 2, 4)
+    conv_dilations: Tuple[int] = (1, 2, 4)
     bidirectional: bool = True
     lstm_dropout: float = 0.2
     input_norm: bool = True
@@ -70,17 +70,17 @@ class TrainConfig:
     
     epochs: int = 20
     batch_size: int = 1024
-    lr: float = 5e-3
-    gate_lr: float = 5e-3     # feature selector
+    lr: float = 1e-3
     weight_decay: float = 1e-3 #1e-3
     patience: int = 8
     seed: int = 42
-    save_dir: str = common.TRAIN_OUT_DIR
-    stride: int = 4
+    save_dir: str = common.TEMPORARY_DIR
+    stride: int = 1
     use_cache: bool = True
+    
     # Weights for binary tasks [Weight for Class 0, Weight for Class 1]
     # Class 1 is usually the "Signal" or "Action", so we weight it higher.
-    binary_pos_weight: float = 1
+    binary_pos_weight: float = 3.0 
 
 # ==============================================================================
 # 2. Dataset & Helper Classes
@@ -223,24 +223,27 @@ def prepare_data_for_subtask(X_raw, y_raw, subtask_type: str):
 # ==============================================================================
 # 4. Generic Binary Training Engine
 # ==============================================================================
-def print_feature_importance(model, feature_names, logger, subtask_name, tag=""):
+def print_feature_importance(model, feature_names, logger, subtask_name):
     """
     Extracts and prints weights from the FeatureSelector module.
     """
+    # Check if the model has the FeatureSelector parameter
     if hasattr(model, 'feature_selector') and hasattr(model.feature_selector, 'importance_logits'):
-        logger.info(f"🔍 [Feature Importance] Analysis for {subtask_name.upper()}{(' ' + tag) if tag else ''}")
-
+        logger.info(f"🔍 [Feature Importance] Analysis for {subtask_name.upper()}")
+        
         with torch.no_grad():
-            # keep consistent with FeatureSelector forward: sigmoid(logits / 0.1)
-            weights = torch.sigmoid(model.feature_selector.importance_logits / 0.1).cpu().numpy()
-
+            # Apply sigmoid just like the model does during forward pass
+            weights = torch.sigmoid(model.feature_selector.importance_logits).cpu().numpy()
+        
+        # Pair with names and sort
         importance_map = sorted(zip(feature_names, weights), key=lambda x: x[1], reverse=True)
-
+        
+        # Print Top 10 and Bottom 5 for brevity
         logger.info(f"{'Feature Name':<25} | {'Weight (Sigmoid)':<15}")
         logger.info("-" * 45)
         for name, weight in importance_map[:10]:
             logger.info(f"{name:<25} | {weight:<15.4f}")
-
+        
         if len(importance_map) > 15:
             logger.info("...")
             for name, weight in importance_map[-5:]:
@@ -249,141 +252,93 @@ def print_feature_importance(model, feature_names, logger, subtask_name, tag="")
     else:
         logger.info(f"ℹ️ Feature Selector is disabled for {subtask_name.upper()}.")
 
-
 def train_binary_model(
-    model, dl_tr, dl_va, dl_te,
-    device, train_cfg: TrainConfig, logger,
-    subtask_name: str,
+    model, dl_tr, dl_va, dl_te, 
+    device, train_cfg: TrainConfig, logger, 
+    subtask_name: str, 
+    pos_weight_multiplier: float = 3.0
 ):
     """
-    Joint Training Engine: Co-evolves Backbone and Feature Selector.
-    Monitors both Best F1 and Best Loss for early stopping.
+    Generic training loop with immediate sub-task evaluation.
     """
-    logger.info(f"🚀 [Start Joint Training] Subtask: {subtask_name.upper()}")
-
-    # 1. Setup Loss and Parameters
-    weights = torch.tensor([1.0, train_cfg.binary_pos_weight], dtype=torch.float32).to(device)
-    criterion = nn.CrossEntropyLoss(weight=weights)
-
-    use_gate = bool(train_cfg.model_cfg.use_feature_selector and hasattr(model, "feature_selector"))
-
-    if use_gate:
-        # Differential Learning Rates: Gate usually needs to be more aggressive
-        gate_params = [model.feature_selector.importance_logits]
-        base_params = [p for n, p in model.named_parameters() if "feature_selector" not in n]
-        
-        optimizer = torch.optim.AdamW([
-            {"params": base_params, "lr": train_cfg.lr, "weight_decay": train_cfg.weight_decay},
-            {"params": gate_params, "lr": train_cfg.gate_lr, "weight_decay": 0.0} # No decay for logits
-        ])
-    else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
-
-    # 2. Shared Scheduler (Reduce LR on Plateau based on Val Loss)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=train_cfg.patience // 2
-    )
-
-    # 3. State Tracking
-    best_f1 = 0.0
-    best_va_loss = float('inf')
-    best_state_f1 = None
-    best_state_loss = None
-    wait = 0
+    logger.info(f"🚀 [Start Training] Subtask: {subtask_name.upper()}")
     
-    # For final reporting
+    # Loss with Manual Class Weighting
+    weights = torch.tensor([1.0, pos_weight_multiplier], dtype=torch.float32).to(device)
+    criterion = nn.CrossEntropyLoss(weight=weights)
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
+    
+    best_f1, best_state = 0.0, None
+    wait = 0
     best_val_probs, best_val_trues, best_val_preds = None, None, None
 
-    # --- Training Loop ---
     for epoch in range(1, train_cfg.epochs + 1):
         model.train()
         tr_loss_list = []
-
         for xb, yb in tqdm(dl_tr, desc=f"Ep {epoch} {subtask_name}", leave=False, ncols=100):
             xb, yb = xb.to(device), yb.to(device)
-            optimizer.zero_grad()
-            logits = model(xb)
-            loss = criterion(logits, yb)
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            tr_loss_list.append(loss.item())
+            optimizer.zero_grad(); logits = model(xb) 
+            loss = criterion(logits, yb);
+            # 🌟 如果开启了选择器，增加 L1 惩罚项项，强迫权重向 0 靠拢
+            if train_cfg.model_cfg.use_feature_selector and hasattr(model, 'feature_selector'):
+                # 将参数分为两组
+                gate_params = [model.feature_selector.importance_logits]
+                base_params = [p for n, p in model.named_parameters() if 'feature_selector' not in n]
+                
+                optimizer = torch.optim.AdamW([
+                    {'params': base_params, 'lr': train_cfg.lr},
+                    {'params': gate_params, 'lr': train_cfg.lr * 10}  # 👈 给门控层 10 倍学习率
+                ], weight_decay=train_cfg.weight_decay)
+            else:
+                optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
 
-        # --- Validation ---
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
+            tr_loss_list.append(loss.item())
+            
         model.eval()
         val_preds, val_trues, val_probs = [], [], []
-        val_loss_sum = 0.0
-        
+        val_loss_sum = 0
         with torch.no_grad():
             for xb, yb in dl_va:
                 xb, yb = xb.to(device), yb.to(device)
-                logits = model(xb)
-                loss = criterion(logits, yb)
+                logits = model(xb); loss = criterion(logits, yb)
                 val_loss_sum += loss.item()
                 probs = torch.softmax(logits, dim=1)
                 val_probs.append(probs.cpu().numpy())
                 val_preds.append(torch.argmax(logits, dim=1).cpu().numpy())
                 val_trues.append(yb.cpu().numpy())
-
-        # Metrics Calculation
-        avg_tr_loss = float(np.mean(tr_loss_list)) if tr_loss_list else 0.0
-        avg_va_loss = val_loss_sum / max(1, len(dl_va))
-        v_preds = np.concatenate(val_preds) if val_preds else np.array([])
-        v_trues = np.concatenate(val_trues) if val_trues else np.array([])
-        v_probs = np.concatenate(val_probs) if val_probs else np.array([])
-        val_f1 = f1_score(v_trues, v_preds, average="macro") if len(v_trues) else 0.0
-
-        # Progress Reporting
-        lr_base = optimizer.param_groups[0]["lr"]
-        lr_gate = optimizer.param_groups[1]["lr"] if use_gate else 0.0
-        logger.info(
-            f"Ep {epoch:02d} | LR B/G: {lr_base:.5f}/{lr_gate:.5f} | "
-            f"tr_loss {avg_tr_loss:.4f} | va_loss {avg_va_loss:.4f} | va_macroF1 {val_f1:.4f}"
-        )
-
+                
+        # Epoch Metrics
+        avg_tr_loss = np.mean(tr_loss_list)
+        avg_va_loss = val_loss_sum / len(dl_va)
+        v_preds, v_trues, v_probs = np.concatenate(val_preds), np.concatenate(val_trues), np.concatenate(val_probs)
+        val_f1 = f1_score(v_trues, v_preds, average="macro")
+        
+        logger.info(f"Ep {epoch:02d} | tr_loss {avg_tr_loss:.4f} | va_loss {avg_va_loss:.4f} | va_macroF1 {val_f1:.4f}")
         scheduler.step(avg_va_loss)
 
-        # 🌟 Progress Logic (F1 Improvement or Loss Reduction)
-        progress_made = False
-
-        if val_f1 > best_f1 + 1e-6:
-            best_f1 = val_f1
-            best_state_f1 = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            # We track the F1-best predictions for the final sub-task report
+        if val_f1 > best_f1:
+            best_f1, best_state = val_f1, {k: v.cpu().clone() for k, v in model.state_dict().items()}
             best_val_probs, best_val_trues, best_val_preds = v_probs, v_trues, v_preds
-            progress_made = True
-            logger.debug(f"✨ New Best F1: {best_f1:.4f}")
-
-        if avg_va_loss < best_va_loss - 1e-6:
-            best_va_loss = avg_va_loss
-            best_state_loss = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            progress_made = True
-            logger.debug(f"📉 New Best Loss: {best_va_loss:.4f}")
-
-        # Early Stopping check
-        if progress_made:
             wait = 0
         else:
             wait += 1
-            if wait >= train_cfg.patience:
-                logger.warning(f"🛑 Early Stop at Epoch {epoch}")
-                break
-
-    # 4. Finalizing: Load the overall best F1 state for reporting
-    if best_state_f1 is not None:
-        model.load_state_dict(best_state_f1)
-
-    # --- Sub-task Reporting ---
-    logger.info(f"\n{'#'*10} [{subtask_name.upper()}] FINAL REPORT {'#'*10}")
-    if best_val_trues is not None:
-        counts = Counter(best_val_trues)
-        total = len(best_val_trues)
-        dist_str = ", ".join([f"Class {k}: {counts[k]/total:.2%}" for k in sorted(counts.keys())])
-        logger.info(f"📈 Sample Distribution: {dist_str}")
-        logger.info("\n" + format_report(classification_report(best_val_trues, best_val_preds, output_dict=True, zero_division=0)))
-        analyze_confidence(subtask_name, best_val_probs, best_val_trues, train_cfg.save_dir)
-
-    return best_state_f1
+            if wait >= train_cfg.patience: break
+                
+    # 🌟 SUB-TASK REPORT
+    logger.info(f"\n{'#'*10} [{subtask_name.upper()}] SUB-TASK REPORT {'#'*10}")
+    counts = Counter(best_val_trues)
+    total = len(best_val_trues)
+    dist_str = ", ".join([f"Class {k}: {counts[k]/total:.2%}" for k in sorted(counts.keys())])
+    logger.info(f"📈 Sample Distribution (Data): {dist_str}")
+    logger.info("\n" + format_report(classification_report(best_val_trues, best_val_preds, output_dict=True, zero_division=0)))
+    
+    # Visual Diagnostic
+    analyze_confidence(subtask_name, best_val_probs, best_val_trues, train_cfg.save_dir)
+    return best_state
 
 # ==============================================================================
 # 5. Pipeline Logic & Fusion
@@ -407,15 +362,15 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
         window=train_cfg.data_cfg.window, 
         stride=train_cfg.stride, 
         use_cache=train_cfg.use_cache,
-        cache_path=os.path.join(common.TRAIN_OUT_DIR,"train_cache.pt"),
+        cache_path=os.path.join(common.TEMPORARY_DIR,"train_cache.pt"),
     )
     X_raw, y_raw = full_ds.X.numpy(), full_ds.y.numpy()
     
     # Define tasks based on mode
     if train_cfg.pipeline_mode == "trigger_direction":
-        tasks = ["trigger","direction"]    #"trigger", "direction"
+        tasks = ["trigger", "direction"]
     elif train_cfg.pipeline_mode == "long_short_ovr":
-        tasks = ["long_ovr", "short_ovr"] #["long_ovr", "short_ovr"]
+        tasks = ["long_ovr","short_ovr"] #["long_ovr", "short_ovr"]
     else:
         raise ValueError("Invalid pipeline mode")
 
@@ -442,36 +397,11 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
         )
         
         # C. Train
-        # dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, shuffle=True) #sampler=get_balanced_sampler(ds_tr.y.numpy()))
-        if task_name == 'direction':
-            dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, sampler=get_balanced_sampler(ds_tr.y.numpy()))
-            train_cfg.binary_pos_weight = 1
-            train_cfg.lr = 5e-3
-            train_cfg.gate_lr = 1e-2
-            train_cfg.weight_decay = 1e-3
-            train_cfg.stride = 1
-        else :
-            train_cfg.stride = 2
-            dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, shuffle=True)
-            if task_name == 'trigger':
-                train_cfg.binary_pos_weight = 5
-                train_cfg.lr = 2e-3
-                train_cfg.gate_lr = 2e-3
-                train_cfg.weight_decay = 1e-3
-            elif task_name == 'long_ovr':
-                train_cfg.binary_pos_weight = 8
-                train_cfg.lr = 1e-3
-                train_cfg.gate_lr = 2e-3
-                train_cfg.weight_decay = 1e-3
-            elif task_name == 'short_ovr':
-                train_cfg.binary_pos_weight = 5
-                train_cfg.lr = 1e-3
-                train_cfg.gate_lr = 5e-4
-                train_cfg.weight_decay = 1e-3
+        dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, sampler=get_balanced_sampler(ds_tr.y.numpy()), num_workers=4)
         dl_va = DataLoader(ds_va, batch_size=train_cfg.batch_size, shuffle=False)
         dl_te = DataLoader(ds_te, batch_size=train_cfg.batch_size, shuffle=False)
         
-        best_state = train_binary_model(model, dl_tr, dl_va, dl_te, device, train_cfg, logger, task_name)
+        best_state = train_binary_model(model, dl_tr, dl_va, dl_te, device, train_cfg, logger, task_name, train_cfg.binary_pos_weight)
         
         # Reload best state for fusion
         model.load_state_dict(best_state)
@@ -493,16 +423,10 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
     
     logger.info(f"\n{'='*20} 🧩 FUSION EVALUATION: {train_cfg.pipeline_mode.upper()} {'='*20}")
     
-    evaluate_and_save_pipeline(
-            models_dict=models,
-            X_test_raw=X_test_raw, 
-            y_test_true=y_test_true, 
-            device=device,
-            train_cfg=train_cfg,
-            full_ds=full_ds,
-            feature_config_list=feature_config_list,
-            logger=logger
-        )
+    if train_cfg.pipeline_mode == "trigger_direction":
+        evaluate_fusion_trigger_direction(models, X_test_raw, y_test_true, logger)
+    else:
+        evaluate_fusion_ovr(models, X_test_raw, y_test_true, logger)
 
 @torch.no_grad()
 def evaluate_fusion_trigger_direction(models, X, y_true, logger):
@@ -600,94 +524,14 @@ def print_metrics(y_true, y_pred, logger, title):
     flip_rate = (cm[0, 2] + cm[2, 0]) / ((y_true == 0).sum() + (y_true == 2).sum() + 1e-6)
     logger.info(f"☠️ Fatal Flip Rate: {flip_rate:.2%}")
 
-def evaluate_and_save_pipeline(
-    models_dict, 
-    X_test_raw,    # 传入原始测试集特征
-    y_test_true,   # 传入原始测试集标签 (0,1,2)
-    device, 
-    train_cfg: TrainConfig, 
-    full_ds,
-    feature_config_list,
-    logger
-):
-    """
-    集评估、保存、索引生成于一体的管线终点函数。
-    使用 FusionWrapper 确保推理逻辑的一致性。
-    """
-    # --- 1. 实例化推理包装器 (与 model_loader 加载逻辑一致) ---
-    fusion_model = FusionWrapper(models_dict, mode=train_cfg.pipeline_mode)
-    fusion_model.to(device)
-    fusion_model.eval()
+# ==============================================================================
+# 6. Main Entry
+# ==============================================================================
 
-    # --- 2. 统一评估逻辑 ---
-    logger.info(f"\n{'='*20} 🧩 FUSION EVALUATION: {train_cfg.pipeline_mode.upper()} {'='*20}")
-    test_ds = SeqDataset(X_test_raw.cpu().numpy(), y_test_true) # 转为 CPU Numpy 构造 Dataset
-    test_dl = DataLoader(test_ds, batch_size=train_cfg.batch_size, shuffle=False)
+if __name__ == "__main__":
+    # Setup Logger
+    logger, _ = common.setup_session_logger(sub_folder='train', file_level=logging.DEBUG)
     
-    all_fused_probs = []
-    
-    with torch.no_grad():
-        for xb, _ in tqdm(test_dl, desc="Evaluating Fusion", leave=False):
-            xb = xb.to(device)
-            # 调用包装器获取 3 分类概率
-            _, fused_probs = fusion_model(xb, return_fused=True) 
-            all_fused_probs.append(fused_probs.cpu()) # 移回 CPU 释放显存
-            
-    # 拼接结果并计算预测值
-    fused_probs_all = torch.cat(all_fused_probs, dim=0).numpy()
-    final_preds = np.argmax(fused_probs_all, axis=1)
-
-    # 调用原有的指标打印函数
-    print_metrics(y_test_true, final_preds, logger, f"{train_cfg.pipeline_mode.upper()} Pipeline")
-
-    # --- 3. 独立保存子模型 ---
-    save_dir = train_cfg.save_dir
-    feature_config_info = [
-        (c.feature.__name__, c.parameters) for c in feature_config_list
-    ]
-    
-    sub_model_map = {}
-    for name, model in models_dict.items():
-        suffix = "best"
-        file_prefix = f"model_{name}_{suffix}"
-        
-        model_path = os.path.join(save_dir, f"{file_prefix}_info.pt")
-        meta_path = os.path.join(save_dir, f"{file_prefix}_meta.json")
-        
-        # 使用子模型自身的保存逻辑，包含各自的架构参数
-        model.save_checkpoint(
-            model_path=model_path,
-            meta_path=meta_path,
-            window=train_cfg.data_cfg.window,
-            feature_cols=full_ds.feature_names,
-            label_col=train_cfg.data_cfg.label_col,
-            classes=[0, 1], # 子模型固定为二分类
-            feature_config_list=feature_config_info
-        )
-        
-        sub_model_map[name] = {
-            "model": f"{file_prefix}_info.pt",
-            "meta": f"{file_prefix}_meta.json"
-        }
-    
-    # --- 4. 生成 Task Description 索引文件 ---
-    task_desc = {
-        "task_type": train_cfg.pipeline_mode,
-        "timestamp": pd.Timestamp.now().isoformat(),
-        "models": sub_model_map
-    }
-    
-    task_path = os.path.join(save_dir, "task_description.json")
-    with open(task_path, "w", encoding="utf-8") as f:
-        json.dump(task_desc, f, ensure_ascii=False, indent=2)
-        
-    logger.info(f"🎉 Task description and models saved to: {save_dir}")
-
-def main(logger:logging.Logger):
-    if os.path.exists(common.TRAIN_OUT_DIR):
-        shutil.rmtree(common.TRAIN_OUT_DIR)
-    os.makedirs(common.TRAIN_OUT_DIR, exist_ok=True)
-
     # Configure Features
     feature_config_list = [
         common.FCMA,
@@ -700,24 +544,24 @@ def main(logger:logging.Logger):
         # FCVolumeEvent, 
 
         # 2. 价格趋势与指标类    FeatureMA > FeatureRsi/FeatureKdj/FeatureMACD   what happen to FeatureMACD??
-        common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
-        common.FCMA,     # slope 值搭配使用
-        common.FCRSI,
-        common.FCKDJ,
+        # common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
+        # common.FCMA,     # slope 值搭配使用
+        # common.FCRSI,
+        # common.FCKDJ,
 
         # # 价格通道类，2选1   FeatureKeltner >> FeatureBoll/FeatureDonchian
-        common.FCDonchian, 
+        # common.FCDonchian, 
         common.FCKeltner,
-        common.FCBoll,
+        # common.FCBoll,
 
         # # 3. 量能与成交活跃度类 FeatureQavMa > FeatureMFI/FeatureWAP > FeatureCFM  > FeaturePVT >FeatureVolMa
         # # FCVolMa,
-        common.FCQavMa,
+        # common.FCQavMa,
         # common.FCOBV,    # 等于 FeaturePVT 丢掉幅度信息。不如 FeaturePVT，直接丢弃
-        common.FCPVT,    # 累积性变量，对短期预测作用小，不如动量
-        common.FCWAP,
+        # common.FCPVT,    # 累积性变量，对短期预测作用小，不如动量
+        # common.FCWAP,
         common.FCCFM,
-        common.FCMFI,
+        # common.FCMFI,
         # # FCATS,  # 负作用
 
         # # 4. K线形态类
@@ -730,15 +574,7 @@ def main(logger:logging.Logger):
     
     # 🌟 SET YOUR MODE HERE
     # Option : "trigger_direction"/long_short_ovr
-    cfg.pipeline_mode = "trigger_direction"  # Change this to switch modes
+    cfg.pipeline_mode = "long_short_ovr"  # Change this to switch modes
     
     # Run
     run_pipeline(feature_config_list, logger, cfg)
-# ==============================================================================
-# 6. Main Entry
-# ==============================================================================
-
-if __name__ == "__main__":
-    # Setup Logger
-    logger, _ = common.setup_session_logger(sub_folder='train', file_level=logging.DEBUG)
-    main(logger)

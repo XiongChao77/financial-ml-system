@@ -123,7 +123,6 @@ def analyze_label_distribution_by_params(
     predict_num_list,
     vol_multiplier_list,
     stop_multiplier_rate_list,
-    min_threshold,
 ):
     """
     扫描不同标签参数组合下的 label 分布情况
@@ -143,7 +142,6 @@ def analyze_label_distribution_by_params(
                     predict_num=predict_num,
                     vol_multiplier=vol_mul,
                     stop_multiplier_rate=stop_rate,
-                    min_threshold=min_threshold,
                 )
 
                 counts = df["label"].value_counts().to_dict()
@@ -179,48 +177,44 @@ def run_label_sensitivity_analysis(df):
     """
 
     vol_multipliers = common.float_range(0.6, 1.2 , 0.05)
-    min_thresholds = common.float_range(0.008, 0.012, 0.001)
     stop_rates = common.float_range(0.3, 0.6, 0.1)
 
     records = []
 
     for vol_mul in vol_multipliers:
-        for min_th in min_thresholds:
-            for stop_rate in stop_rates:
+        for stop_rate in stop_rates:
 
-                df_tmp = df.copy()
+            df_tmp = df.copy()
 
-                common.attach_label(
-                    df_tmp,
-                    candlestick_num=common.CANDLESTICK_NUM,
-                    predict_num=common.PREDICT_NUM,
-                    vol_multiplier=vol_mul,
-                    stop_multiplier_rate=stop_rate,
-                    min_threshold=min_th,
-                )
+            common.attach_label(
+                df_tmp,
+                candlestick_num=common.CANDLESTICK_NUM,
+                predict_num=common.PREDICT_NUM,
+                vol_multiplier=vol_mul,
+                stop_multiplier_rate=stop_rate,
+            )
 
-                counts = df_tmp["label"].value_counts().to_dict()
-                total = len(df_tmp)
+            counts = df_tmp["label"].value_counts().to_dict()
+            total = len(df_tmp)
 
-                record = {
-                    "vol_multiplier": vol_mul,
-                    "min_threshold": min_th,
-                    "stop_multiplier_rate": stop_rate,
+            record = {
+                "vol_multiplier": vol_mul,
+                "stop_multiplier_rate": stop_rate,
 
-                    "total": total,
-                    "long_cnt": counts.get(common.Signal.LONG, 0),
-                    "short_cnt": counts.get(common.Signal.SHORT, 0),
-                    "neutral_cnt": counts.get(common.Signal.NEUTRAL, 0),
-                }
+                "total": total,
+                "long_cnt": counts.get(common.Signal.LONG, 0),
+                "short_cnt": counts.get(common.Signal.SHORT, 0),
+                "neutral_cnt": counts.get(common.Signal.NEUTRAL, 0),
+            }
 
-                record["long_pct"] = record["long_cnt"] / total
-                record["short_pct"] = record["short_cnt"] / total
-                record["neutral_pct"] = record["neutral_cnt"] / total
-                record["active_pct"] = (
-                    record["long_pct"] + record["short_pct"]
-                )
+            record["long_pct"] = record["long_cnt"] / total
+            record["short_pct"] = record["short_cnt"] / total
+            record["neutral_pct"] = record["neutral_cnt"] / total
+            record["active_pct"] = (
+                record["long_pct"] + record["short_pct"]
+            )
 
-                records.append(record)
+            records.append(record)
 
     stats_df = pd.DataFrame(records)
 

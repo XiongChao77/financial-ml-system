@@ -67,7 +67,7 @@ class TurtleStrategy(BtExecutor):
         account_equity = self.broker.getvalue() # 获取当前账户总净值
         current_price = self.data.close[0]
 
-        # --- 新增：计算传递给 Brain 的持仓状态 ---
+        # --- 新增：计算传递给 BrainBase 的持仓状态 ---
         # A. 确定持仓方向 (PositionDir)
         if self.position.size > 0:
             curr_dir = PositionDir.LONG

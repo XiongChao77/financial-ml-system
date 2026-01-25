@@ -32,7 +32,7 @@ def run_test_evaluation():
     # 4. 执行推理与评估
     # is_live=False 会触发 evaluate_performance 打印详细报告
     # diff_thresh=None 表示使用模型直接预测的 argmax 结果
-    df_out, stats = handler.predict_v2(df, kline_interval_ms = common.load_interval_ms(), is_live = False, diff_thresh = None,
+    df_out, stats = handler.predict(df, kline_interval_ms = common.load_interval_ms(), is_live = False, diff_thresh = None,
                                                        cache_path=os.path.join(common.TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
 
     # 5. 输出精简结果

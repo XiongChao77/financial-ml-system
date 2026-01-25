@@ -21,7 +21,7 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         self.live_trades = []
         self.closed_pnl = []
 
-    def user_order_target_percent(self, target_pct:float, stop_loss: float = None):
+    def user_order_target_percent(self, target_pct:float, stop_loss: float = None, take_profit = None):
         """
         全能下单函数 (带订单追踪版):
         1. 自动计算股数
@@ -62,9 +62,9 @@ class BtExecutor(BaseExecutor,bt.Strategy):
             # 但为了逻辑统一，这里直接按 target_size 开仓
             action_size = abs(target_size)
             if target_size > 0: 
-                self._open_bracket(action_size, is_buy=True, stop_loss=stop_loss)
+                self._open_bracket(action_size, is_buy=True, stop_loss=stop_loss, take_profit=take_profit)
             else:
-                self._open_bracket(action_size, is_buy=False, stop_loss=stop_loss)
+                self._open_bracket(action_size, is_buy=False, stop_loss=stop_loss, take_profit=take_profit)
             return
 
         # === B: 同向加仓 (Increase) ===
@@ -83,8 +83,8 @@ class BtExecutor(BaseExecutor,bt.Strategy):
             # 调用专门的减仓处理函数
             self._reduce_position_fifo(reduce_amount, is_buy_close=(current_size > 0))
 
-    def user_order(self, size, is_buy, stop_loss=None):
-        self._open_bracket(abs(size), is_buy=is_buy, stop_loss=stop_loss)
+    def user_order(self, size, is_buy, stop_loss=None, take_profit=None):
+        self._open_bracket(abs(size), is_buy=is_buy, stop_loss=stop_loss, take_profit= take_profit)
 
     def user_close(self, size=None, **kwargs):
         self.logger.debug(f"user_close ammount :{size}")
@@ -99,14 +99,53 @@ class BtExecutor(BaseExecutor,bt.Strategy):
     # ----------------------------------------------------------------
     # 辅助逻辑封装
     # ----------------------------------------------------------------
+    def notify_order(self, order):
+        if order.status in [order.Submitted, order.Accepted]:
+            return
+
+        if order.status == order.Completed:
+            # --- 核心：判定订单的真实意图 ---
+            
+            # 1. 判定是否为“增仓”（开仓或加仓）
+            # 如果买入时原本持有多头或空仓，或者卖出时原本持有空头或空仓
+            is_entry = (order.isbuy() and self.position.size >= 0) or \
+                       (not order.isbuy() and self.position.size <= 0)
+
+            if is_entry:
+                type_str = "🚀 开仓/加仓 (ENTRY)"
+            else:
+                # 2. 如果是“减仓”，则根据类型和盈亏判定意图
+                if order.exectype == bt.Order.Stop:
+                    type_str = "🛡️ 硬核止损 (STOP LOSS)"
+                elif order.exectype == bt.Order.Limit:
+                    type_str = "🎯 自动止盈 (TAKE PROFIT)"
+                else:
+                    # 如果是市价平仓，根据盈亏判定是止损还是止盈离场
+                    # 注意：这里需要对比执行价与入场均价
+                    pnl = (order.executed.price - self.position.price) * self.position.size
+                    type_str = "🛑 信号止损 (SIGNAL SL)" if pnl < 0 else "🛑 信号止盈 (SIGNAL TP)"
+
+            direction = "🟢 买入" if order.isbuy() else "🔴 卖出"
+            self.logger.debug(
+                f"✅ 【订单成交】 {direction} | 意图: {type_str} | "
+                f"价格: {order.executed.price:.4f} | 数量: {order.executed.size:.2f}"
+            )
+
+        # 3. 订单失败判定
+        elif order.status == order.Margin:
+            self.logger.error(f"❌ 【订单失败】 保证金不足！价格: {order.created.price:.4f} | 数量: {order.created.size:.2f}")
+        elif order.status == order.Rejected:
+            self.logger.error(f"❌ 【订单失败】 订单被拒绝！")
+        elif order.status == order.Canceled:
+            self.logger.debug(f"⚠️ 【订单取消】 订单已撤单。")
 
     def notify_trade(self, trade):
         """
         交易通知：只有当一笔交易平仓（不管是止盈还是止损）时，才会触发此函数
         这里才能拿到真正的盈亏数据。
         """
-        if not trade.isclosed:
-            return
+        # if not trade.isclosed:
+        #     return
 
         # trade.pnl: 毛利 (不含手续费)
         # trade.pnlcomm: 净利 (含手续费)
@@ -114,13 +153,13 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         self.closed_pnl.append(trade.pnlcomm)
         # 打印包含手续费的净盈亏
         direction = ( "🟢 多" if trade.size > 0  else "🔴 空" )
-        self.logger.debug(f"💸 交易结算 {direction} | 毛利: {trade.pnl:.2f} | 手续费: {trade.commission:.2f} | 净利: {trade.pnlcomm:.2f}")
+        self.logger.debug(f"💸 交易结算 {direction} | price {trade.price} | 毛利: {trade.pnl:.2f} | 手续费: {trade.commission:.2f} | 净利: {trade.pnlcomm:.2f}")
 
         # 如果你想把盈亏回写到上面的 trade_logs 里，比较麻烦，
         # 因为 trade_logs 是按单(order)记的，而这里是按回合(trade)记的。
         # 通常建议单独存一个 closed_trades 列表。
 
-    def _open_bracket(self, size, is_buy, stop_loss=None):
+    def _open_bracket(self, size, is_buy, stop_loss=None, take_profit=None):
         """执行 Bracket 下单并记录返回值"""
         price = self.data.close[0]
         if stop_loss is None:
@@ -128,18 +167,24 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         else:
             actual_stop_loss = stop_loss
 
+        args = {}
         if is_buy:
             stop_price = price * (1.0 - actual_stop_loss)
-            limit_price = price * (1.0 + self.params.take_profit)
-            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, actual_stop_loss:{actual_stop_loss}")
-            
+            if take_profit == None: 
+                limit_price = None
+                args['limitexec'] = None
+            else:    limit_price = price * (1.0 + take_profit)
+            self.logger.debug(f"_open_bracket price:{price},size:{size} , stop_price{stop_price}, limit_price {limit_price}, actual_stop_loss:{actual_stop_loss}")
+            if limit_price != None:
+                self.logger.error(f"_open_bracket limit_price:{limit_price}")
             # returns: [Main, Stop, Limit]
             orders = self.buy_bracket(
                 size=size, 
                 price=price, 
                 stopprice=stop_price, 
                 limitprice=limit_price,
-                exectype=bt.Order.Market
+                exectype=bt.Order.Market,
+                **args
             )
             # 记录到队列
             self.live_trades.append({
@@ -151,14 +196,20 @@ class BtExecutor(BaseExecutor,bt.Strategy):
             
         else: # Sell
             stop_price = price * (1.0 + actual_stop_loss)
-            limit_price = price * (1.0 - self.params.take_profit)
-            self.logger.debug(f"_open_bracket price:{price}, stop_price{stop_price}, limit_price {limit_price}, actual_stop_loss:{actual_stop_loss}")
+            if take_profit == None: 
+                limit_price = None
+                args['limitexec'] = None
+            else:    limit_price = price * (1.0 - take_profit)
+            self.logger.debug(f"_open_bracket price:{price}, size:{size}, stop_price{stop_price}, limit_price {limit_price}, actual_stop_loss:{actual_stop_loss}")
+            if limit_price != None:
+                self.logger.error(f"_open_bracket limit_price:{limit_price}")
             orders = self.sell_bracket(
                 size=size, 
                 price=price, 
                 stopprice=stop_price, 
                 limitprice=limit_price,
-                exectype=bt.Order.Market
+                exectype=bt.Order.Market,
+                **args
             )
             self.live_trades.append({
                 'main': orders[0],
