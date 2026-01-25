@@ -49,7 +49,7 @@ class ConvLSTMConfig:
     readout: str = "mix"    # 'last'|'meanmax'|'attn'|'mix'
     head: str = "linear"    # 'linear'|'mlp'
     logit_clip: Optional[float] = None
-    use_feature_selector: bool = True
+    use_feature_selector: bool = False
 
 @dataclass
 class DataConfig:
@@ -407,7 +407,7 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
         window=train_cfg.data_cfg.window, 
         stride=train_cfg.stride, 
         use_cache=train_cfg.use_cache,
-        cache_path=os.path.join(common.TRAIN_OUT_DIR,"train_cache.pt"),
+        cache_path=os.path.join(common.TRAIN_OUT_DIR,"train_cache.pt"), show_feature_distribution=True
     )
     X_raw, y_raw = full_ds.X.numpy(), full_ds.y.numpy()
     
