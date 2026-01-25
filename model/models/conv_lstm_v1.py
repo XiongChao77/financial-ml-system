@@ -5,7 +5,6 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from model.models.model_base import BaseTimeSeriesModel
 
-
 class LockedDropout(nn.Module):
     """Time-consistent dropout mask over T for each sample."""
     def __init__(self, p: float):
@@ -20,7 +19,24 @@ class LockedDropout(nn.Module):
         mask = mask / keep
         return x * mask
 
+# 修改 conv_lstm_v1.py 中的 FeatureSelector 类
+class FeatureSelector(nn.Module):
+    def __init__(self, input_size: int):
+        super().__init__()
+        # Initialize to 1.0 (after sigmoid ≈ 0.73) or 0.0 (sigmoid = 0.5)
+        self.importance_logits = nn.Parameter(torch.ones(input_size) * 0.1)
 
+    def forward(self, x: torch.Tensor):
+        # Temperature T=0.1 makes the sigmoid much sharper
+        soft_weights = torch.sigmoid(self.importance_logits / 0.1) 
+        
+        # Positive propagation: Hardening
+        hard_weights = (soft_weights > 0.5).float()
+        
+        # STE Trick
+        final_weights = (hard_weights - soft_weights).detach() + soft_weights
+        return x * final_weights.view(1, 1, -1), final_weights
+    
 class AttentionPooling(nn.Module):
     """Additive attention pooling for [B,T,D] with optional mask [B,T]."""
     def __init__(self, dim: int):
@@ -117,6 +133,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
 
         # compatibility: allow pass-all params
         p_drop: float | None = None,  # alias: if provided and explicit dropouts not set
+        use_feature_selector = False,
         **kwargs,
     ):
         super().__init__()
@@ -126,15 +143,6 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
 
         assert readout in {"last", "meanmax", "attn", "mix"}
         assert head in {"linear", "mlp"}
-
-        # p_drop alias (optional)
-        if p_drop is not None:
-            # only apply when user didn't explicitly set these
-            if conv_dropout == 0.10 and head_dropout == 0.2 and lstm_dropout == 0.2:
-                conv_dropout = float(p_drop)
-                head_dropout = float(p_drop)
-                lstm_dropout = float(p_drop)
-                print("[ConvLSTM1D_V1] p_drop is deprecated; mapped to conv/lstm/head dropout.")
 
         self.input_size = int(input_size)
         self.n_classes = int(n_classes)
@@ -148,9 +156,15 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
         self.input_norm_enabled = bool(input_norm)
         self.in_locked_p = float(in_locked_p)
         self.out_locked_p = float(out_locked_p)
+        self.use_feature_selector = use_feature_selector
 
         # ---- input preprocessing ----
         self.in_norm = nn.LayerNorm(self.input_size) if self.input_norm_enabled else nn.Identity()
+        # 如果开启，则初始化 Gater；否则设为 Identity
+        if self.use_feature_selector:
+            self.feature_selector = FeatureSelector(self.input_size)
+        else:
+            self.feature_selector = nn.Identity()
         self.proj = nn.Linear(self.input_size, self.d_model)
         self.in_locked = LockedDropout(self.in_locked_p)
 
@@ -231,7 +245,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
             return torch.cat((h_n[-2], h_n[-1]), dim=1)
         return h_n[-1]
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_weights: bool = False) -> torch.Tensor:
         """
         x: [B,T,F]
         lengths: [B] optional
@@ -246,8 +260,17 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
         else:
             mask = None
 
+        # 门控逻辑分支
+        if self.use_feature_selector:
+            x, feature_weights = self.feature_selector(x)
+        else:
+            x = self.feature_selector(x) # nn.Identity
+            # 保持与 FeatureSelector 返回值形状一致 [F]
+            feature_weights = torch.ones(self.input_size).to(x.device) if return_weights else None
+            
         # input norm + projection
         x = self.in_norm(x)
+
         x = self.proj(x)
         x = self.in_locked(x)  # [B,T,D]
 
@@ -305,7 +328,9 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
         if self.logit_clip is not None:
             logits = torch.clamp(logits, -self.logit_clip, self.logit_clip)
 
-        return logits
+        if return_weights:
+            return logits, feature_weights
+        return logits # 默认只返回 Tensor，解决报错
 
     # ---------- meta ----------
     def export_meta(self, **extra) -> dict:
@@ -327,6 +352,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
             "lstm_dropout": self.lstm_dropout,
 
             "input_norm": self.input_norm_enabled,
+            "use_feature_selector": self.use_feature_selector,
             "in_locked_p": self.in_locked_p,
             "out_locked_p": self.out_locked_p,
 
@@ -357,6 +383,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
             lstm_dropout=0.0,
 
             input_norm=meta.get("input_norm", True),
+            use_feature_selector=meta.get("use_feature_selector", False),
             in_locked_p=0.0,
             out_locked_p=0.0,
 

@@ -24,15 +24,14 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-VOL_MULTIPLIER = 1.2
-# 最小硬阈值 (覆盖手续费+滑点)
-MIN_THRESHOLD = 0.005  # 0.25%
-STOP_MULTIPLIER_RATE = 0.5
+VOL_MULTIPLIER = 1.7
+
+STOP_MULTIPLIER_RATE = 0.2
 # label_decrease_weak =1 
 # label_increase_weak = 3
 model_train_rate = 0.8
-symbol = 'BTCUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
-interval = '5m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+symbol = 'DOGEUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
+interval = '15m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 log_level = logging.INFO
 
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +49,8 @@ origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{symbol}_{interval}.csv")
 train_data_path = os.path.join(TEMPORARY_DIR, "train_data.csv")
 test_data_path  = os.path.join(TEMPORARY_DIR, "test_data.csv")
 data_config_path  = os.path.join(TEMPORARY_DIR, "data_config_meta.json")
+TRAIN_OUT_DIR = os.path.join(TEMPORARY_DIR, "train")
+os.makedirs(TRAIN_OUT_DIR, exist_ok=True)
 
 CONF_DF = 'to_feather'#/'to_feather'/'to_csv'
 
@@ -92,8 +93,7 @@ def attach_label(df,
                     candlestick_num=CANDLESTICK_NUM, 
                     predict_num=PREDICT_NUM, 
                     vol_multiplier=VOL_MULTIPLIER,
-                    stop_multiplier_rate=STOP_MULTIPLIER_RATE,
-                    min_threshold=MIN_THRESHOLD):
+                    stop_multiplier_rate=STOP_MULTIPLIER_RATE):
     """
     融合版打标签逻辑：
     1. 【时空对齐】：严格校验未来第 N 根 K 线的物理时间戳，处理数据断层。
@@ -104,7 +104,7 @@ def attach_label(df,
     time_values = df[time_col].values
     
     # 1. 计算动态阈值 (生成 df['threshold'] 和 df['stop_threshold'])
-    df = calculate_thresholds(df, candlestick_num, predict_num, vol_multiplier, min_threshold, stop_multiplier_rate)
+    df = calculate_thresholds(df, candlestick_num, predict_num, vol_multiplier, stop_multiplier_rate)
 
     # 2. 物理时间锚定 (时空对齐核心)
     target_times = time_values + (predict_num * interval_ms)
@@ -207,8 +207,7 @@ def attach_triple_barrier_label(df,
                                  candlestick_num=CANDLESTICK_NUM, 
                                  predict_num=PREDICT_NUM, 
                                  vol_multiplier=VOL_MULTIPLIER,
-                                 stop_multiplier_rate=STOP_MULTIPLIER_RATE,
-                                 min_threshold=MIN_THRESHOLD):
+                                 stop_multiplier_rate=STOP_MULTIPLIER_RATE):
     """
     严苛版 Triple Barrier (混合价格触发):
     1. 止盈 (TP): 使用未来 K 线的 Close 计算，要求收盘价必须达标。
@@ -218,10 +217,10 @@ def attach_triple_barrier_label(df,
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
     
-    # 1. 计算动态阈值 (保留原逻辑)
-    df = calculate_thresholds(df, candlestick_num, predict_num, vol_multiplier, min_threshold, stop_multiplier_rate)
+    # 1. 计算动态阈值
+    df = calculate_thresholds(df, candlestick_num, predict_num, vol_multiplier, stop_multiplier_rate)
 
-    # 2. 物理时间锚定 (保留原逻辑)
+    # 2. 物理时间锚定
     target_times = time_values + (predict_num * interval_ms)
     target_indices = np.searchsorted(time_values, target_times, side='left')
     in_bounds = target_indices < len(df)
@@ -268,14 +267,10 @@ def attach_triple_barrier_label(df,
         first_s_sl = idx_short_sl[0] if len(idx_short_sl) > 0 else predict_num
 
         # 判定：TP 索引必须严格小于 SL 索引
-        # 如果 TP 和 SL 在同一根 K 线发生 (first_tp == first_sl)，
-        # 鉴于 SL 是 High/Low 触发而 TP 是 Close 触发，逻辑上 SL 必然早于或等于 TP，
-        # 因此这种“同归于尽”的样本在 strict 模式下应归为 NEUTRAL。
         if first_l_tp < first_l_sl:
             labels[i] = Signal.LONG
         elif first_s_tp < first_s_sl:
             labels[i] = Signal.SHORT
-        # 其余情况（包含 first_tp == first_sl）均为 NEUTRAL
 
     df['label'] = labels
     df.loc[~final_valid_mask, 'label'] = Signal.INVALID
@@ -290,14 +285,11 @@ def calculate_thresholds(df,
                          candlestick_num: int = CANDLESTICK_NUM, 
                          predict_num: int = PREDICT_NUM, 
                          vol_multiplier = VOL_MULTIPLIER,
-                         min_threshold = MIN_THRESHOLD,
                          stop_multiplier_rate = STOP_MULTIPLIER_RATE,
-                         **kwargs): # 🌟 接收多余参数防止报错
+                         **kwargs): 
     """
     【核心逻辑提取】计算动态止盈 (threshold) 和 止损 (stop_threshold)
-    该函数同时用于:
-    1. 训练前的数据预处理 (attach_label)
-    2. 回测/实盘中的信号生成 (simulation/production)
+    移除 min_threshold 逻辑，纯粹基于波动率。
     """
     # 基础检查
     assert 'close' in df.columns, "缺少 Close 数据"
@@ -312,28 +304,24 @@ def calculate_thresholds(df,
     
     # 3. 计算动态阈值
     # A. 目标止盈阈值 (基于波动率)
-    target_threshold = (expected_vol * vol_multiplier).clip(lower=min_threshold)
+    target_threshold = (expected_vol * vol_multiplier)
     
     # B. 目标止损阈值 (基于止盈的百分比，保持盈亏比)
     stop_threshold = target_threshold * stop_multiplier_rate
     
-    # 4. 写入 DataFrame (处理 NaN)
-    # 使用 copy 防止 SettingWithCopyWarning (视调用情况而定，这里直接赋值通常没问题)
-    df['threshold'] = target_threshold.fillna(min_threshold)
-    df['stop_threshold'] = stop_threshold.fillna(min_threshold * stop_multiplier_rate)
+    # 4. 写入 DataFrame (不设置最小保底硬阈值)
+    df['threshold'] = target_threshold
+    df['stop_threshold'] = stop_threshold
     
     return df
 
 def attach_macd_event_lifecycle_label(df, 
                                      interval_ms,
                                      vol_multiplier=VOL_MULTIPLIER,
-                                     stop_multiplier_rate=STOP_MULTIPLIER_RATE,
-                                     min_threshold=MIN_THRESHOLD):
+                                     stop_multiplier_rate=STOP_MULTIPLIER_RATE):
     """
     严格时间对齐版 MACD 生命周期标签 (自动匹配特征列名):
-    1. 自动探测列名：匹配如 MACD_12_16_DIF 和 MACD_12_16_DEA。
-    2. 物理时间校验：确保交叉点之间无数据断层。
-    3. 严苛判定：持有至下次交叉，Close 止盈达标 (X) 且过程中 High/Low 未触及止损。
+    移除 min_threshold 逻辑。
     """
     # --- 1. 自动匹配 MACD 特征列名 ---
     dif_cols = [c for c in df.columns if c.startswith('MACD_') and c.endswith('_DIF')]
@@ -342,14 +330,12 @@ def attach_macd_event_lifecycle_label(df,
     if not dif_cols or not dea_cols:
         raise ValueError("❌ 未在 DataFrame 中探测到 MACD 特征列 (需以 _DIF 和 _DEA 结尾)")
     
-    # 默认取第一组匹配的 MACD (如果有多个，通常取第一个生成的)
     dif_name = dif_cols[0]
-    # 寻找对应的 DEA 列名 (确保 fast/slow 参数一致)
     prefix = dif_name.replace('_DIF', '')
     dea_name = f"{prefix}_DEA"
     
     if dea_name not in df.columns:
-        raise ValueError(f"❌ 找不到与 {dif_name} 匹配的 {dea_name}")
+        raise ValueError(f"❌ 找不到与 {dif_name} 匹配 of {dea_name}")
 
     print(f"🔍 [MACD Match] 自动匹配到特征列: {dif_name} / {dea_name}")
 
@@ -359,16 +345,13 @@ def attach_macd_event_lifecycle_label(df,
     # 2. 识别所有交叉点
     dif = df[dif_name]
     dea = df[dea_name]
-    
-    # 交叉判断
     cross_mask = (dif > dea) != (dif.shift(1) > dea.shift(1))
     cross_mask.iloc[0] = False
     event_indices = df.index[cross_mask].tolist()
     
     # 3. 初始化与动态阈值
     df['label'] = Signal.INVALID
-    # 计算动态阈值 (用于止盈 X 和止损位)
-    df = calculate_thresholds(df, vol_multiplier=vol_multiplier, min_threshold=min_threshold, stop_multiplier_rate=stop_multiplier_rate)
+    df = calculate_thresholds(df, vol_multiplier=vol_multiplier, stop_multiplier_rate=stop_multiplier_rate)
     
     closes = df['close'].values
     highs = df['high'].values
@@ -379,7 +362,6 @@ def attach_macd_event_lifecycle_label(df,
     # 4. 遍历交叉事件
     for i in range(len(event_indices)):
         curr_idx = event_indices[i]
-        
         if i + 1 >= len(event_indices):
             df.at[curr_idx, 'label'] = Signal.INVALID
             continue
@@ -395,17 +377,14 @@ def attach_macd_event_lifecycle_label(df,
             continue
 
         # --- 业务逻辑判定 ---
-        # 根据当前交叉点判断方向
         is_long_event = dif.iloc[curr_idx] > dea.iloc[curr_idx]
         entry_price = closes[curr_idx]
         tp_target = thresholds[curr_idx]
         sl_target = sl_thresholds[curr_idx]
         
-        # A. 止盈判断：持有至下次交叉时的收盘价收益率
         pnl_at_exit = (closes[next_idx] - entry_price) / entry_price if is_long_event else \
                       (entry_price - closes[next_idx]) / entry_price
         
-        # B. 止损判断：区间内 (t+1, t_next) 的 High/Low 触碰
         window_highs = highs[curr_idx + 1 : next_idx + 1]
         window_lows = lows[curr_idx + 1 : next_idx + 1]
         
@@ -414,8 +393,6 @@ def attach_macd_event_lifecycle_label(df,
         else:
             hit_stop = np.any(window_highs >= entry_price * (1 + sl_target))
 
-        # C. 综合打标 (Strict Mode)
-        # 只有收益超过动态阈值 X 且过程中没被止损的才算 LONG/SHORT
         if pnl_at_exit >= tp_target and not hit_stop:
             df.at[curr_idx, 'label'] = Signal.LONG if is_long_event else Signal.SHORT
         else:
@@ -426,16 +403,11 @@ def attach_macd_event_lifecycle_label(df,
 def attach_boll_event_lifecycle_label(df, 
                                      interval_ms,
                                      vol_multiplier=VOL_MULTIPLIER,
-                                     stop_multiplier_rate=STOP_MULTIPLIER_RATE,
-                                     min_threshold=MIN_THRESHOLD):
+                                     stop_multiplier_rate=STOP_MULTIPLIER_RATE):
     """
     均值回归版 布林带生命周期标签：
-    1. 自动探测列名：匹配如 BOLL_UPPER_20, BOLL_LOWER_20, BOLL_MIDDLE_20。
-    2. 触发：收盘价穿越上下轨。
-    3. 退出：收盘价回归中轨。
-    4. 严苛判定：退出收益 > threshold 且过程中未触及 High/Low 止损。
+    移除 min_threshold 逻辑。
     """
-    # --- 1. 自动匹配 BOLL 特征列名 ---
     upper_cols = [c for c in df.columns if c.startswith('BOLL_UPPER_')]
     lower_cols = [c for c in df.columns if c.startswith('BOLL_LOWER_')]
     middle_cols = [c for c in df.columns if c.startswith('BOLL_MIDDLE_')]
@@ -443,25 +415,20 @@ def attach_boll_event_lifecycle_label(df,
     if not (upper_cols and lower_cols and middle_cols):
         raise ValueError("❌ 未在 DataFrame 中探测到完整的 BOLL 特征列")
     
-    # 自动提取前缀和周期
     u_name, l_name, m_name = upper_cols[0], lower_cols[0], middle_cols[0]
     print(f"🔍 [BOLL Match] 自动匹配到特征列: {u_name}, {l_name}, {m_name}")
 
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
     
-    # 2. 识别触发点 (收盘价穿越轨道)
-    # 做多触发：Close < Lower
     long_trigger = df['close'] < df[l_name]
-    # 做空触发：Close > Upper
     short_trigger = df['close'] > df[u_name]
-    
     event_mask = long_trigger | short_trigger
     event_indices = df.index[event_mask].tolist()
     
     # 3. 初始化与动态阈值
     df['label'] = Signal.INVALID
-    df = calculate_thresholds(df, vol_multiplier=vol_multiplier, min_threshold=min_threshold, stop_multiplier_rate=stop_multiplier_rate)
+    df = calculate_thresholds(df, vol_multiplier=vol_multiplier, stop_multiplier_rate=stop_multiplier_rate)
     
     closes = df['close'].values
     highs = df['high'].values
@@ -470,15 +437,13 @@ def attach_boll_event_lifecycle_label(df,
     thresholds = df['threshold'].values
     sl_thresholds = df['stop_threshold'].values
 
-    # 4. 遍历事件，寻找回归中轨的退出点
+    # 4. 遍历事件
     for curr_idx in event_indices:
         is_long_event = long_trigger.iloc[curr_idx]
         entry_price = closes[curr_idx]
         tp_target = thresholds[curr_idx]
         sl_limit = sl_thresholds[curr_idx]
         
-        # 寻找回归中轨的第一个位置 (退出点)
-        # 多头：寻找 Close >= Middle; 空头：寻找 Close <= Middle
         if is_long_event:
             exit_candidates = np.where(closes[curr_idx + 1:] >= middles[curr_idx + 1:])[0]
         else:
@@ -490,17 +455,13 @@ def attach_boll_event_lifecycle_label(df,
             
         next_idx = curr_idx + 1 + exit_candidates[0]
         
-        # --- 时间对齐校验 ---
         if (time_values[next_idx] - time_values[curr_idx]) != (next_idx - curr_idx) * interval_ms:
             df.at[curr_idx, 'label'] = Signal.INVALID
             continue
 
-        # --- 业务逻辑判定 ---
-        # A. 收益判断 (退出时的收盘价)
         pnl_at_exit = (closes[next_idx] - entry_price) / entry_price if is_long_event else \
                       (entry_price - closes[next_idx]) / entry_price
         
-        # B. 路径止损检查 (区间内 High/Low)
         window_highs = highs[curr_idx + 1 : next_idx + 1]
         window_lows = lows[curr_idx + 1 : next_idx + 1]
         
@@ -509,13 +470,11 @@ def attach_boll_event_lifecycle_label(df,
         else:
             hit_stop = np.any(window_highs >= entry_price * (1 + sl_limit))
 
-        # C. 打标
         if pnl_at_exit >= tp_target and not hit_stop:
             df.at[curr_idx, 'label'] = Signal.LONG if is_long_event else Signal.SHORT
         else:
             df.at[curr_idx, 'label'] = Signal.NEUTRAL
 
-    # 审计打印
     _boll_audit(df, event_indices)
     return df
 
@@ -531,15 +490,11 @@ def _boll_audit(df, event_indices):
 def attach_sma_7_25_crossover_label(df, 
                                    interval_ms,
                                    vol_multiplier=VOL_MULTIPLIER,
-                                   stop_multiplier_rate=STOP_MULTIPLIER_RATE,
-                                   min_threshold=MIN_THRESHOLD):
+                                   stop_multiplier_rate=STOP_MULTIPLIER_RATE):
     """
     指定 SMA 7/25 交叉生命周期标签：
-    1. 信号源：SMA_7B (快线) 与 SMA_25B (慢线)。
-    2. 触发逻辑：金叉(7>25)看多，死叉(7<25)看空。
-    3. 严苛判定：持有至下次交叉，Close 收益需 > 动态阈值，且期间 High/Low 未触及止损。
+    移除 min_threshold 逻辑。
     """
-    # --- 1. 明确指定列名 ---
     fast_ma_name = "SMA_7B"
     slow_ma_name = "SMA_25B"
     
@@ -549,18 +504,14 @@ def attach_sma_7_25_crossover_label(df,
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
     
-    # 2. 识别交叉点 (Event Detection)
     fast_ma = df[fast_ma_name]
     slow_ma = df[slow_ma_name]
     cross_mask = (fast_ma > slow_ma) != (fast_ma.shift(1) > slow_ma.shift(1))
     cross_mask.iloc[0] = False
     event_indices = df.index[cross_mask].tolist()
     
-    # 3. 初始化标签与动态阈值
-    df['label'] = Signal.INVALID # 其余非交叉点均为 INVALID
-    df = calculate_thresholds(df, vol_multiplier=vol_multiplier, 
-                              min_threshold=min_threshold, 
-                              stop_multiplier_rate=stop_multiplier_rate)
+    df['label'] = Signal.INVALID 
+    df = calculate_thresholds(df, vol_multiplier=vol_multiplier, stop_multiplier_rate=stop_multiplier_rate)
     
     closes = df['close'].values
     highs = df['high'].values
@@ -568,32 +519,25 @@ def attach_sma_7_25_crossover_label(df,
     thresholds = df['threshold'].values
     sl_thresholds = df['stop_threshold'].values
 
-    # 4. 遍历交叉事件
     for i in range(len(event_indices)):
         curr_idx = event_indices[i]
-        
         if i + 1 >= len(event_indices):
             continue
             
         next_idx = event_indices[i+1]
         
-        # --- 物理时间戳对齐检查 ---
         expected_gap = (next_idx - curr_idx) * interval_ms
         actual_gap = time_values[next_idx] - time_values[curr_idx]
         
         if actual_gap != expected_gap:
-            # 如果中间有 Gap，此交叉点保持 INVALID
             continue
 
-        # --- 判定逻辑 ---
         is_long_event = fast_ma.iloc[curr_idx] > slow_ma.iloc[curr_idx]
         entry_price = closes[curr_idx]
         
-        # A. 收益判断 (使用 Exit 点的 Close)
         pnl_rate = (closes[next_idx] - entry_price) / entry_price if is_long_event else \
                    (entry_price - closes[next_idx]) / entry_price
         
-        # B. 路径止损检查 (区间内 High/Low)
         window_highs = highs[curr_idx + 1 : next_idx + 1]
         window_lows = lows[curr_idx + 1 : next_idx + 1]
         
@@ -603,7 +547,6 @@ def attach_sma_7_25_crossover_label(df,
         else:
             hit_stop = np.any(window_highs >= entry_price * (1 + sl_limit))
 
-        # C. 打标
         if pnl_rate >= thresholds[curr_idx] and not hit_stop:
             df.at[curr_idx, 'label'] = Signal.LONG if is_long_event else Signal.SHORT
         else:
@@ -611,60 +554,30 @@ def attach_sma_7_25_crossover_label(df,
 
     return df
 
-def data_analyze(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PREDICT_NUM , vol_multiplier = VOL_MULTIPLIER,
-                 min_threshold = MIN_THRESHOLD):
-    # ============================================================
-    # === 【新增功能】 计算未来窗口内的最大上涨和最大下跌比例 ===
-    # ============================================================
-    # 逻辑说明：
-    # 1. rolling(window=N).max() 计算的是 [t-N+1, t] 的最大值
-    # 2. shift(-N) 将数据向上平移，使得索引 t 处的数据变成原索引 t+N 处的数据
-    # 3. 结合起来：在索引 t 处，我们要的是 [t+1, t+N] 的极值
-    
-    # 未来的最高价序列 (窗口: t+1 到 t+predict_num)
+def data_analyze(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PREDICT_NUM , vol_multiplier = VOL_MULTIPLIER):
     future_rolling_max = df['high'].rolling(window=predict_num).max().shift(-predict_num)
-    # 未来的最低价序列 (窗口: t+1 到 t+predict_num)
     future_rolling_min = df['low'].rolling(window=predict_num).min().shift(-predict_num)
     
-    # 计算相对于当前收盘价的涨跌幅
-    # max_up: 未来窗口内能卖到的最高收益率
     df['max_up'] = (future_rolling_max - df['close']) / df['close']
-    # max_down: 未来窗口内可能承受的最大亏损率
     df['max_down'] = (future_rolling_min - df['close']) / df['close']
 
 def clean_data_quality_auto(df: pd.DataFrame, logger) -> pd.DataFrame:
-    """
-    自动化检查所有列：
-    1. 丢弃任何含有 NaN 的行。
-    2. 探测数值列，并丢弃其中含有 0 的行（排除日期等非数值列）。
-    """
     logger.info("启动自动化数据质量扫描...")
     initial_count = len(df)
-
-    # 1. 统计并丢弃 NaN (全局检查)
     na_rows = df.isna().any(axis=1).sum()
     if na_rows > 0:
         logger.warning(f"检测到 {na_rows} 行数据包含空值 (NaN)，准备丢弃。")
 
-    # 2. 识别数值型列进行零值检查
-    # 我们只对 float 和 int 类型的列检查 0，避免对字符串时间列误判
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    # 统计数值列中的零值
     zero_mask = (df[numeric_cols] == 0).any(axis=1)
     zero_rows = zero_mask.sum()
     
     if zero_rows > 0:
-        # 找出具体是哪些列含有 0，打印详细日志
         zero_stats = (df[numeric_cols] == 0).sum()
         logger.warning(f"检测到 {zero_rows} 行数据包含零值，分布如下:\n{zero_stats[zero_stats > 0]}")
 
-    # 3. 综合清洗：剔除 NaN 或 0 的行
-    # 我们保留数值不为 0 且非空的数据
     condition = df.isna().any(axis=1) | zero_mask
     df_cleaned = df[~condition].copy()
-
-    # 4. 重置索引 (非常重要，防止后续 rolling 计算因为索引断裂出问题)
     df_cleaned.reset_index(drop=True, inplace=True)
 
     final_count = len(df_cleaned)
@@ -678,29 +591,21 @@ def clean_data_quality_auto(df: pd.DataFrame, logger) -> pd.DataFrame:
     return df_cleaned
 
 def float_range(start, end, step):
-    """
-    Like range(), but for float.
-    Inclusive of end (with tolerance).
-    """
     values = []
     v = start
     eps = step / 10
-
     while v <= end + eps:
         values.append(round(v, 10))
         v += step
-
     return values
 
-@lru_cache(maxsize=1)   #only available when tarining
+@lru_cache(maxsize=1)
 def load_interval_ms(config_path = data_config_path):
-    """从元数据文件中安全读取间隔毫秒数"""
     if not os.path.exists(config_path):
         raise RuntimeError(f"❌ 找不到配置文件: {config_path}")
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             meta = json.load(f)
-        # 提取 interval_ms
         interval_ms = meta.get("interval_ms")
         if interval_ms is None:
             raise RuntimeError(f"⚠️ 配置文件中缺失 'interval_ms' 字段！")
@@ -709,45 +614,22 @@ def load_interval_ms(config_path = data_config_path):
         raise RuntimeError(f"💥 读取 JSON 时发生意外错误: {e}")
 
 def setup_session_logger(sub_folder: str, symbol: str = symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
-    """
-    配置实盘会话日志：
-    1. 生成带时间戳的文件名 (session_SYMBOL_Time.log)
-    2. 将 FileHandler 挂载到 Root Logger (捕获所有模块日志)
-    3. 将 StreamHandler (彩色) 挂载到 Root Logger (控制台显示所有日志)
-    
-    :param log_root: 日志根目录 (例如 common.TEMPORARY_DIR)
-    :param sub_folder: 子文件夹名 (例如 'market_ftmo_sessions')
-    :param symbol: 交易品种
-    :return: (root_logger, log_file_path)
-    """
-    # 1. 准备目录
     log_dir = os.path.join(PERSISTENCE_DIR, sub_folder)
     os.makedirs(log_dir, exist_ok=True)
-
-    # 2. 生成文件名
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     sym_str = f"_{symbol}" if symbol else ""
     log_filename = f"session{sym_str}_{timestamp}.log"
     log_file_path = os.path.join(log_dir, log_filename)
-
-    # 3. 获取 Root Logger
-    # 注意：我们配置 Root，这样 self.logger = logging.getLogger("AnyName") 都会被捕获
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG) # 开启所有级别，具体过滤交给 Handler
-
-    # 清除旧的 Handlers (防止重复打印，特别是 Jupyter 或多次调用时)
+    root_logger.setLevel(logging.DEBUG) 
     if root_logger.handlers:
         root_logger.handlers = []
-
-    # 4. 配置控制台输出 (复用之前的彩色格式)
     log_format_console = "%(log_color)s%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    
     ch = logging.StreamHandler()
     ch.setLevel(console_level)
-    
     color_formatter = colorlog.ColoredFormatter(
         log_format_console,
-        datefmt="%H:%M:%S", # 控制台时间短一点，方便看
+        datefmt="%H:%M:%S",
         log_colors={
             'DEBUG':    'cyan',
             'INFO':     'green',
@@ -759,20 +641,13 @@ def setup_session_logger(sub_folder: str, symbol: str = symbol, console_level: i
     )
     ch.setFormatter(color_formatter)
     root_logger.addHandler(ch)
-
-    # 5. 配置文件输出 (全量记录)
     fh = logging.FileHandler(log_file_path, encoding='utf-8')
-    fh.setLevel(file_level) # 文件通常记录 INFO 以上
-    
-    # 文件格式包含完整日期
+    fh.setLevel(file_level) 
     file_formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     fh.setFormatter(file_formatter)
     root_logger.addHandler(fh)
-
-    # 打印一条初始化消息
     root_logger.info(f"Session Logger Initialized. Log file: {log_file_path}")
-
     return root_logger, log_file_path

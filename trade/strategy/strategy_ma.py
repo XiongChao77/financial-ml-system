@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from trade.strategy.strategy_ftmo import Brain, MarketState, TradingAction, ActionType, PositionDir
+from trade.strategy.strategy_ftmo import BrainBase, MarketState, TradingAction, ActionType, PositionDir
 
 @dataclass
 class MaMarketState(MarketState):
@@ -7,7 +7,7 @@ class MaMarketState(MarketState):
     fast_ma: float
     slow_ma: float
 
-class MaCrossoverBrain(Brain):
+class MaCrossoverBrain(BrainBase):
     def __init__(self, trade_risk: float = 0.95):
         self.trade_risk = trade_risk
 

@@ -350,7 +350,7 @@ class LiveBot:
             layers=curr_layers
         )
 
-        # 5. Brain 决策
+        # 5. BrainBase 决策
         self.brain.decide(state)
 
         # 更新时间戳，防止重复执行

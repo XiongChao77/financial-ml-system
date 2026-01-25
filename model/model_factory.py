@@ -18,6 +18,7 @@ from model.models.cnn import CNN1D_V1
 from model.models.transformer_v1 import Transformer1D_V1
 from model.models.transformer_v2 import Transformer1D_V2
 from model.models.transformer_v3 import Transformer1D_V3
+from model.models.fusion_wrapper import FusionWrapper
 # 后续新模型直接在这里加 import
 
 class ModelFactory:
@@ -39,6 +40,7 @@ class ModelFactory:
         LSTM1D_V4,  #good
         ConvLSTM1D_V1,
         ConvLSTM1D_V2,
+        # FusionWrapper,
         CNN1D_V1,
         Transformer1D_V1,
         Transformer1D_V2,

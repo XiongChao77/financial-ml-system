@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 from tqdm import tqdm
+from scipy.stats import norm
 
 # 确保 common.py 在路径中
 import common 
@@ -137,6 +138,76 @@ class LabelRegimeAnalyzer:
         print(f"📍 一阶分类变化 (1x3): {output_dir}/split_variations_1st.png")
         print(f"📍 二阶带符号变化 (1x3): {output_dir}/split_variations_signed_2nd.png")
         print(f"📍 总体一二阶对比: {output_dir}/overall_1st_vs_2nd.png")
+
+    def plot_null_hypothesis_comparison(self, output_dir="regime_discovery_detailed"):
+        """
+        新增：将实际分布与均匀分布、高斯分布零假设进行对比。
+        """
+        output_dir = os.path.join(output_dir, f"{self.symbol}_{self.interval}")
+        if not os.path.exists(output_dir): os.makedirs(output_dir)
+
+        vols = sorted(self.results_df['vol_multiplier'].unique())
+        # 我们选取 Stop Rate 的中位数进行横向对比
+        mid_stop = sorted(self.results_df['stop_rate'].unique())[len(self.results_df['stop_rate'].unique())//2]
+        
+        subset = self.results_df[self.results_df['stop_rate'] == mid_stop].sort_values('vol_multiplier')
+
+        # 1. 计算高斯零假设比例
+        # 在随机高斯世界中，阈值 k 对应的概率为：
+        # P(Long) = 1 - Phi(k), P(Short) = Phi(-k), P(Neutral) = Phi(k) - Phi(-k)
+        gaussian_nulls = []
+        for v in vols:
+            p_long = 1 - norm.cdf(v)
+            p_short = norm.cdf(-v)
+            p_neutral = 1 - (p_long + p_short)
+            gaussian_nulls.append([p_short, p_neutral, p_long])
+        gaussian_nulls = np.array(gaussian_nulls)
+
+        # 2. 绘图对比
+        fig, axes = plt.subplots(1, 3, figsize=(24, 7), sharey=True)
+        classes = ['p_short', 'p_neutral', 'p_long']
+        titles = ['Short Proportion', 'Neutral Proportion', 'Long Proportion']
+        colors = ['#ff4d4d', '#7f8c8d', '#2ecc71']
+
+        for i, (cls, title) in enumerate(zip(classes, titles)):
+            ax = axes[i]
+            # 实际分布
+            ax.plot(vols, subset[cls], 'o-', label='Actual Distribution', color=colors[i], linewidth=3)
+            # 高斯零假设
+            ax.plot(vols, gaussian_nulls[:, i], '--', label='Gaussian Null ($r \sim N(0,\sigma^2)$)', color='black', alpha=0.6)
+            # 均匀零假设
+            ax.axhline(1/3, color='blue', linestyle=':', label='Uniform Null (1/3)', alpha=0.4)
+            
+            ax.set_title(f"{title} vs Null Hypotheses\n(at Stop Rate: {mid_stop})")
+            ax.set_xlabel("Volatility Multiplier")
+            if i == 0: ax.set_ylabel("Probability")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/null_hypothesis_comparison.png")
+        plt.close()
+
+        # 3. 计算“偏离结构”：KL 散度 (Kullback-Leibler Divergence)
+        # 衡量实际分布偏离高斯随机世界的程度
+        kl_divs = []
+        for i, v in enumerate(vols):
+            actual = subset.iloc[i][classes].values.astype(float) + 1e-9
+            target = gaussian_nulls[i] + 1e-9
+            kl = np.sum(actual * np.log(actual / target))
+            kl_divs.append(kl)
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(vols, kl_divs, 's-', color='purple', linewidth=2)
+        plt.title(f"{self.symbol} - Distribution 'Information Gain' over Gaussian Null\n(Higher = More Non-random Structure)")
+        plt.xlabel("Volatility Multiplier")
+        plt.ylabel("KL Divergence")
+        plt.savefig(f"{output_dir}/information_structure_gain.png")
+        plt.close()
+
+        print(f"✅ 零假设对比完成！")
+        print(f"📍 趋势对比图: {output_dir}/null_hypothesis_comparison.png")
+        print(f"📍 结构增益图: {output_dir}/information_structure_gain.png")
 
 # --- 运行示例 ---
 if __name__ == "__main__":

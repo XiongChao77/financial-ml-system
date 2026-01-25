@@ -37,7 +37,7 @@ def verify_model_alignment_v2():
 
     # 3. 执行推理 (回测模式，必须开启 is_live=False)
     # 注意：TimeSeriesWindowDataset 内部会执行你设计的两阶段清洗
-    df_out, stats = handler.predict_v2(
+    df_out, stats = handler.predict(
         df=df_test, 
         kline_interval_ms=kline_interval, 
         is_live=False, 
@@ -96,7 +96,7 @@ def verify_model_alignment_v2():
     df_tail_bad = df_test.copy()
     df_tail_bad.iloc[-3, 0] = np.nan # 在倒数第3行制造缺失
     
-    df_out_tail, _ = handler.predict_v2(df_tail_bad, kline_interval, is_live=False)
+    df_out_tail, _ = handler.predict(df_tail_bad, kline_interval, is_live=False)
     if df_out_tail.index[-1] not in df_out_tail['pred'].dropna().index:
         logger.info("✅ 成功：尾部存在空洞时，末尾信号已按逻辑被丢弃。")
     else:

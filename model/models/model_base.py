@@ -121,7 +121,7 @@ class BaseTimeSeriesModel(torch.nn.Module, ABC):
         Prevents silent mismatch between training & inference.
         """
         keys = sorted(k for k in meta.keys() if k not in {
-            "window", "feature_cols", "label_col", "classes"
+            "window", "feature_cols", "label_col", "classes", "arch_hash"
         })
         payload = json.dumps({k: meta[k] for k in keys}, sort_keys=True)
         return hashlib.md5(payload.encode()).hexdigest()

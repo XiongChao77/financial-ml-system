@@ -157,12 +157,14 @@ class CusAnalyzer(bt.Analyzer):
         # 统计超过 -5% (FTMO 警戒线) 的天数
         violation_count_5 = sum(1 for x in self._daily_stats if x['dd_pct'] < -0.049)
         violation_count_3 = sum(1 for x in self._daily_stats if x['dd_pct'] < -0.029)
+        all_drawdowns = [x['dd_pct'] for x in self._daily_stats]
         return {
             'max_daily_dd': worst_day['dd_pct'], # 例如 -0.05
             'max_daily_dd_date': worst_day['date'],
             'daily_dd_violation_days': violation_count,
             'daily_dd_max_violation_days': violation_count_5,
-            'daily_dd_max_3_violation_days': violation_count_3
+            'daily_dd_max_3_violation_days': violation_count_3,
+            'daily_returns_list': all_drawdowns,
         }
 
     @property

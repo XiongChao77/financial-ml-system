@@ -1,10 +1,10 @@
 import pandas as pd
 import logging
 from datetime import datetime
-from trade.strategy.strategy_ftmo import Brain, TradingAction, ActionType, PositionDir
+from trade.strategy.strategy_ftmo import BrainBase, TradingAction, ActionType, PositionDir
 from trade.strategy.base_executor import BaseExecutor
 
-class TurtleBrain(Brain):
+class TurtleBrain(BrainBase):
     def __init__(
         self, 
         executor: BaseExecutor,

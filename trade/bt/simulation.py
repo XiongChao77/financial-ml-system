@@ -44,16 +44,15 @@ class Parameters:
     def __init__(self):
         self.allow_short = True
         self.allow_long = True
-        self.holdbar = 16#PREDICT_NUM
-        self.thresh: float =None#None#0.5#None#0.45
+        self.holdbar = PREDICT_NUM#PREDICT_NUM
+        self.thresh: float =None#0.5#None#0.45
         self.commission = 0.05   # 0.1 = 0.1%  .can't be 0
         self.cash = 10000
         self.stop_loss = 0.5  # 0-1
         self.take_profit = 0.99 #止盈. 0 - n倍
         self.position_ratio = 0.4     #0-1
 
-def main(logger:logging.Logger):
-    args = Parameters()
+def main(logger:logging.Logger,args = Parameters()):
     logger.info(
         f"Backtest settings: Short={args.allow_short}, Long={args.allow_long}, Thresh={args.thresh}, commission={args.commission}"
     )
@@ -61,6 +60,7 @@ def main(logger:logging.Logger):
     # 1. 数据加载
     # 直接读取 CSV，假设其中已包含所有特征列和时间列
     df = load_test_df()
+    # df = load_train_df()
     # 【关键】检查时间列是否存在
     # if "open_time_date_utc" not in df.columns:
     #     logger.error("CRITICAL: 'open_time_date_utc' column missing.")
@@ -74,10 +74,9 @@ def main(logger:logging.Logger):
     # -----------------------------------------------------------
     try:
         # 初始化处理类
-        handler = model_loader.ModelHandler(loss_fun='Best_F1') #Best_F1/Best_Loss
+        handler = model_loader.ModelHandler() #Best_F1/Best_Loss
         # 执行预测，获取结果和指标
-        # df_with_pred, model_stats = handler.predict(df, load_interval_ms())#, min_thresh= 0.3)
-        df_with_pred, model_stats = handler.predict_v2(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None,
+        df_with_pred, model_stats = handler.predict(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None,
                                                        cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()
@@ -139,6 +138,8 @@ def main(logger:logging.Logger):
         label = "label",
         openinterest=-1,
         nocase=True,
+        # fromdate=datetime(2025, 1, 1),
+        # todate=datetime(2026, 1, 1),
     )
 
     cerebro.adddata(data)
@@ -162,7 +163,7 @@ def main(logger:logging.Logger):
     # 5. 结果统计
     # UI
     # 封装统计数据 (合并回测数据和模型指标)
-    statistics = generate_backtest_report(logger, strat, model_stats, commission=args.commission, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
+    statistics = generate_backtest_report(logger, strat, model_stats, args=args, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
 
     trade_logs = cerebro.trade_logs
 
@@ -199,7 +200,7 @@ def safe_get(d, keys, default=0):
     return cur if cur != {} else default
 
 
-def generate_backtest_report(logger,strat, model_stats, save_path, commission):
+def generate_backtest_report(logger,strat, model_stats, save_path, args:Parameters):
     """
     修复版报告生成器：
     1. 修正 Profit Factor 计算公式 (Gross Won / Gross Lost)
@@ -277,8 +278,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path, commission):
     daily_trades = total_trades / total_days
 
     # 计算平均值 (*100 转为百分比)
-    avg_pct_gross = avg_pnl_gross /(avg_cost/2) * commission
-    avg_pct_net = avg_pnl_net / (avg_cost/2) * commission
+    avg_pct_gross = avg_pnl_gross /(avg_cost/2) * args.commission
+    avg_pct_net = avg_pnl_net / (avg_cost/2) * args.commission
 
     # ============================================================
     # --- 1. 多头统计 (Long) ---
@@ -307,9 +308,13 @@ def generate_backtest_report(logger,strat, model_stats, save_path, commission):
                 f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | Calmar: {calmar:.2f}")
     # 【新增】打印仓位暴露信息
     logger.info(f"EXPOSURE| Avg Pos: {avg_pos*100:.2f}% | Max Pos: {max_pos*100:.2f}% | P95 Pos: {p95_pos*100:.2f}% | Position: {Parameters().position_ratio}")
-    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% | Commission: {commission}%")
+    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% | Commission: {args.commission}%")
     logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
+    logger.info(f"Para    | thresh: {args.thresh} | position_ratio: {args.position_ratio} | PREDICT_NUM: {CANDLESTICK_NUM}| PREDICT_NUM: {PREDICT_NUM}")
+    logger.info(f"Para    | VOL_MULTIPLIER: {VOL_MULTIPLIER} | STOP_MULTIPLIER_RATE: {STOP_MULTIPLIER_RATE}")
+    logger.info(f"Para    | symbol: {symbol} | interval: {interval}| STOP_MULTIPLIER_RATE: {STOP_MULTIPLIER_RATE}")
+    logger.info(f"Time    | {bt.num2date(strat.datas[0].datetime.array[0])} --> {bt.num2date(strat.datas[0].datetime.array[-1])} | end value {end_value} ")
     logger.info("-" * 80)
 
     # 构造 JSON (略微精简，保持原有结构)

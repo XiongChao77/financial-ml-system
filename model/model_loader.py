@@ -7,64 +7,129 @@ sys.path.append(os.path.join(current_work_dir,'..'))
 # 引入自定义模块
 from data_process.common import *
 from model.model_factory import ModelFactory
-from model.data_loader import TimeSeriesWindowDataset 
+from model.data_loader import TimeSeriesWindowDataset
+from model.models.fusion_wrapper import FusionWrapper
 # -----------------------------------------------------------------------------
 # Encapsulated Model Handler
 # -----------------------------------------------------------------------------
+# model_loader.py
+
 class ModelHandler:
-    def __init__(self, device=None, loss_fun = ''):
+    def __init__(self, device=None, task_desc_path=None):
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = logging.getLogger("trade")
         
-        if loss_fun == 'Best_F1': 
-            suffix = 'Best_F1'
+        # 1. 读取 Task Index
+        if task_desc_path is None:
+            task_desc_path = os.path.join(TRAIN_OUT_DIR, "task_description.json")
+            
+        if not os.path.exists(task_desc_path):
+            raise FileNotFoundError(f"Task Description not found: {task_desc_path}")
+            
+        with open(task_desc_path, "r", encoding="utf-8") as f:
+            self.task_desc = json.load(f)
+            
+        self.task_type = self.task_desc.get("task_type", "single")
+        self.base_dir = os.path.dirname(task_desc_path)
+        
+        # 2. 根据类型初始化
+        self.logger.info(f"🚀 Loading Task: {self.task_type.upper()}")
+        
+        if self.task_type == "single":
+            self._load_single_mode()
+        elif self.task_type in ["trigger_direction", "long_short_ovr"]:
+            self._load_pipeline_mode()
         else:
-            suffix = 'Best_Loss'
-        
-        self.meta_path = os.path.join(TEMPORARY_DIR, f"model_{suffix.lower()}_meta.json")
-        self.model_path = os.path.join(TEMPORARY_DIR, f"model_{suffix.lower()}_info.pt")
-        
-        self._load_metadata()
-        self._load_model()
+            raise ValueError(f"Unknown task type: {self.task_type}")
 
-    def _load_metadata(self):
-        if not os.path.exists(self.meta_path):
-            raise FileNotFoundError(f"Meta file not found: {self.meta_path}")
-            
-        with open(self.meta_path, "r", encoding="utf-8") as f:
-            self.meta = json.load(f)
-            
-        self.feature_cols = self.meta["feature_cols"]
-        self.window = int(self.meta["window"])
-        self.classes = self.meta["classes"]
-        self.label_col = self.meta.get("label_col", "label")
-        # 仅用于日志
-        self.model_type = self.meta["model_type"]
-        self.model_version = self.meta.get("model_version", "unknown")
-        raw_config = self.meta.get("feature_config_list", [])
+    def _init_config_from_meta(self, meta):
+        """
+        从具体的 Meta 字典中提取 Dataset 配置。
+        """
+        self.feature_cols = meta["feature_cols"]
+        self.window = int(meta["window"])
+        # Pipeline 模式下，最终输出通常映射回 3 分类，这里暂时取 meta 中的定义
+        # 如果子模型是二分类，wrapper 会处理成 3 分类
+        self.classes = meta.get("classes", [0, 1]) 
+        self.label_col = meta.get("label_col", "label")
+        
+        raw_config = meta.get("feature_config_list", [])
         self.feature_config_list = []
         for class_name, params in raw_config:
-            # 由于使用了 from common import *，我们可以直接从 globals() 中找
             if class_name in globals():
                 cls = globals()[class_name] 
-                self.feature_config_list.append((cls, params))
-            else:
-                self.logger.error(f"❌ 特征类 {class_name} 在当前命名空间未定义！")
+                self.feature_config_list.append(FeatureContainer(cls, **params))
 
-    def _load_model(self):
-        self.logger.info(
-            f"Loading model: {self.model_type.upper()} "
-            f"(version={self.model_version}) on {self.device}..."
-        )
+    def _load_single_mode(self):
+        files = self.task_desc["models"]["main"]
+        meta_path = os.path.join(self.base_dir, files["meta"])
+        model_path = os.path.join(self.base_dir, files["model"])
+        
+        # 1. 读取 Meta 并初始化配置
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        self._init_config_from_meta(meta)
+        self.classes = meta["classes"] # Single 模式直接用 Meta 里的 classes
 
+        # 2. 加载模型
         self.model, _ = ModelFactory.load_from_checkpoint(
-            model_path=self.model_path,
-            meta_path=self.meta_path,
-            device=self.device,
+            model_path=model_path,
+            meta_path=meta_path,
+            device=self.device
         )
         self.model.eval()
 
-    def predict_v2(self, df, kline_interval_ms, is_live=True, batch_size=2048, diff_thresh=None, min_thresh=0.3, stride =1,
+    def _load_pipeline_mode(self):
+        sub_models_map = self.task_desc["models"]
+        loaded_sub_models = {}
+        
+        # 🌟 关键：确定谁是“主配置”提供者
+        # 通常 Trigger/Direction 模式下，Trigger 是第一步，我们用它的配置初始化 Dataset
+        if "trigger" in sub_models_map:
+            primary_key = "trigger"
+        elif "long_ovr" in sub_models_map:
+            primary_key = "long_ovr"
+        else:
+            primary_key = list(sub_models_map.keys())[0]
+
+        # 1. 先加载主配置
+        primary_files = sub_models_map[primary_key]
+        primary_meta_path = os.path.join(self.base_dir, primary_files["meta"])
+        with open(primary_meta_path, "r", encoding="utf-8") as f:
+            primary_meta = json.load(f)
+            
+        self.logger.info(f"📋 Using configuration from primary sub-model: '{primary_key}'")
+        self._init_config_from_meta(primary_meta)
+        
+        # 修正：Pipeline 模式对外永远是 3 分类 [Short, Neutral, Long]
+        # 即使子模型 Meta 里写的是 [0, 1]，Loader 对外表现必须统一
+        self.classes = [0, 1, 2]
+
+        # 2. 循环加载所有子模型
+        for name, files in sub_models_map.items():
+            model_path = os.path.join(self.base_dir, files["model"])
+            meta_path = os.path.join(self.base_dir, files["meta"])
+            
+            # 可选：检查子模型配置是否与主配置冲突
+            # if name != primary_key:
+            #     check_consistency(primary_meta, meta_path)
+
+            self.logger.info(f"   🔄 Loading sub-model '{name}'...")
+            model, _ = ModelFactory.load_from_checkpoint(
+                model_path=model_path,
+                meta_path=meta_path,
+                device=self.device
+            )
+            model.eval()
+            loaded_sub_models[name] = model
+            
+        # 3. 组装 Wrapper
+        self.model = FusionWrapper(loaded_sub_models, mode=self.task_type)
+        self.model.to(self.device)
+        self.model.eval()
+        
+
+    def predict(self, df, kline_interval_ms, is_live=True, batch_size=2048, diff_thresh=None, min_thresh=0.3, stride =1,
                    cache_path = '', use_cache= False):
         """
         执行推理，并支持基于概率差值的策略增强。

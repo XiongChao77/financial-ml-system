@@ -1,42 +1,19 @@
 from enum import Enum, IntEnum
 from dataclasses import dataclass
 from typing import Optional
-from abc import ABC, abstractmethod
 from data_process.common import Signal,PREDICT_NUM
 from trade.strategy.base_executor import BaseExecutor
+from trade.strategy.strategy_base import *
 import numpy as  np
-import logging
+import logging 
 # ============================================================
-# 枚举定义（系统协议层）
-# ============================================================
-class PositionDir(IntEnum):
-    """
-    当前/目标持仓方向
-    """
-    SHORT = -1
-    FLAT = 0
-    LONG = 1
-
-
-class ActionType(Enum):
-    """
-    Brain 输出的交易动作
-    """
-    HOLD = "hold"         # 什么都不做
-    OPEN = "open"         # 开仓
-    CLOSE = "close"       # 平仓
-    REVERSE = "reverse"   # 反手
-    PYRAMID = "pyramid"   # 加仓
-
-
-# ============================================================
-# Brain 输入 / 输出数据结构
+# BrainBase 输入 / 输出数据结构
 # ============================================================
 
 @dataclass
 class MarketState:
     """
-    Brain 的输入：当前市场 + 策略状态
+    BrainBase 的输入：当前市场 + 策略状态
     """
     price: float
     signal: Signal
@@ -48,33 +25,18 @@ class MarketState:
 @dataclass
 class TradingAction:
     """
-    Brain 的输出：要做什么
+    BrainBase 的输出：要做什么
     """
     action: ActionType
     target_dir: PositionDir = PositionDir.FLAT
     target_layers: int = 0
     target_pct: Optional[float] = None
 
-
-# ============================================================
-# Brain 抽象基类
-# ============================================================
-
-class Brain(ABC):
-
-    @abstractmethod
-    def decide(self, state: MarketState) -> TradingAction:
-        """
-        根据 MarketState 输出 TradingAction
-        """
-        pass
-
-
 # ============================================================
 # FtmoBrain：你的策略逻辑（已枚举化）
 # ============================================================
 
-class FtmoBrain(Brain):
+class FtmoBrain(BrainBase):
 
     def __init__(
         self,
@@ -135,7 +97,7 @@ class FtmoBrain(Brain):
         elif signal == Signal.SHORT and self.allow_short:
             target_dir = PositionDir.SHORT
         
-        if state.position_dir != PositionDir.FLAT and signal == Signal.NEUTRAL:
+        if state.position_dir != PositionDir.FLAT :#and signal == Signal.NEUTRAL:
             if self.bars_held < self.max_hold_num:
                 target_dir = state.position_dir
             else:
