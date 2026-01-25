@@ -150,48 +150,50 @@ class FtmoBrain(BrainBase):
         """
         回测结束时的终局审计
         """
-        if self.current_trade_bars > 0:
-            self.all_durations.append(self.current_trade_bars)
-        self.logger.info("=== 正在生成持仓时长分布报告 ===")
-        
-        if not self.all_durations:
-            self.logger.info("❌ 回测期间未产生完成的交易信号。")
-            return
-
-        durations = np.array(self.all_durations)
-        max_hold_num = self.max_hold_num # 默认 16
-        
-        # 核心统计指标
-        avg_dur = np.mean(durations)
-        median_dur = np.median(durations)
-        max_dur = np.max(durations)
-        # 续期率：持仓超过 max_hold_num 的比例
-        renewal_count = np.sum(durations > max_hold_num)
-        renewal_rate = renewal_count / len(durations)
-
-        self.logger.info(f"\n" + "="*40)
-        self.logger.info(f"📊 持仓延续性审计报告")
-        self.logger.info(f"总计完成交易: {len(durations)} 笔")
-        self.logger.info(f"平均持仓时长: {avg_dur:.2f} 根 K 线")
-        self.logger.info(f"最长持仓时长: {max_dur} 根 K 线")
-        self.logger.info(f"信号续期次数: {renewal_count} (持仓 > {max_hold_num} bars)")
-        self.logger.info(f"有效续期比例: {renewal_rate:.2%}")
-        self.logger.info(f"="*40 + "\n")
-
-        # 打印分布直方图 (ASCII 简易版)
-        self.log_histogram(durations)
-
-        if self.all_signal_streaks:
-            streaks = np.array(self.all_signal_streaks)
-            self.logger.info(f"\n🎯 信号连击深度审计 (Consecutive Trend Signals)")
-            self.logger.info(f"平均连击长度: {np.mean(streaks):.2f} 根 K 线")
-            self.logger.info(f"最大连击长度: {np.max(streaks)} 根 K 线")
-            self.logger.info(f"单点爆发比例 (Length=1): {np.sum(streaks == 1) / len(streaks):.2%}")
+        if False:
+            pass
+            if self.current_trade_bars > 0:
+                self.all_durations.append(self.current_trade_bars)
+            self.logger.info("=== 正在生成持仓时长分布报告 ===")
             
-            # 打印分布
-            counts, bins = np.histogram(streaks, bins=[1, 2, 5, 10, 20, 50, 100])
-            for i in range(len(counts)):
-                self.logger.info(f"  连击区间 [{bins[i]:>2}-{bins[i+1]:>2}]: {counts[i]} 次")
+            if not self.all_durations:
+                self.logger.info("❌ 回测期间未产生完成的交易信号。")
+                return
+
+            durations = np.array(self.all_durations)
+            max_hold_num = self.max_hold_num # 默认 16
+            
+            # 核心统计指标
+            avg_dur = np.mean(durations)
+            median_dur = np.median(durations)
+            max_dur = np.max(durations)
+            # 续期率：持仓超过 max_hold_num 的比例
+            renewal_count = np.sum(durations > max_hold_num)
+            renewal_rate = renewal_count / len(durations)
+
+            self.logger.info(f"\n" + "="*40)
+            self.logger.info(f"📊 持仓延续性审计报告")
+            self.logger.info(f"总计完成交易: {len(durations)} 笔")
+            self.logger.info(f"平均持仓时长: {avg_dur:.2f} 根 K 线")
+            self.logger.info(f"最长持仓时长: {max_dur} 根 K 线")
+            self.logger.info(f"信号续期次数: {renewal_count} (持仓 > {max_hold_num} bars)")
+            self.logger.info(f"有效续期比例: {renewal_rate:.2%}")
+            self.logger.info(f"="*40 + "\n")
+
+            # 打印分布直方图 (ASCII 简易版)
+            self.log_histogram(durations)
+
+            if self.all_signal_streaks:
+                streaks = np.array(self.all_signal_streaks)
+                self.logger.info(f"\n🎯 信号连击深度审计 (Consecutive Trend Signals)")
+                self.logger.info(f"平均连击长度: {np.mean(streaks):.2f} 根 K 线")
+                self.logger.info(f"最大连击长度: {np.max(streaks)} 根 K 线")
+                self.logger.info(f"单点爆发比例 (Length=1): {np.sum(streaks == 1) / len(streaks):.2%}")
+                
+                # 打印分布
+                counts, bins = np.histogram(streaks, bins=[1, 2, 5, 10, 20, 50, 100])
+                for i in range(len(counts)):
+                    self.logger.info(f"  连击区间 [{bins[i]:>2}-{bins[i+1]:>2}]: {counts[i]} 次")
 
     def log_histogram(self, data):
         """打印一个简单的控制台直方图，观察分布"""
