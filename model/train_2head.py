@@ -155,7 +155,7 @@ class TrainConfig:
     stride = 2
     use_cache = True
     lambda_trig: float = 0.5  # Trigger 任务权重
-    lambda_dir: float = 0.4   # Direction 任务权重 (设为 0 即可实现第一阶段只练 Trigger).lambda_dir需要补偿比例不平衡
+    lambda_dir: float = 0.7   # Direction 任务权重 (设为 0 即可实现第一阶段只练 Trigger).lambda_dir需要补偿比例不平衡
     lambda_gate: float = 1e-3
 # ==============================================================================
 # 3. 核心逻辑 (Core Logic)
@@ -442,7 +442,7 @@ class MTLManager:
         action_mask = (yb != 1)
         return target_trig, target_dir, action_mask
 
-    def compute_combined_loss(self, logits_trig, logits_dir, yb, flip_penalty=2.0, miss_penalty=1.4):
+    def compute_combined_loss(self, logits_trig, logits_dir, yb, flip_penalty=2.0, miss_penalty=1.0):
         """
         全功能量化版 Loss：整合了非对称距离惩罚、能量归一化与对称性约束。
         
@@ -683,8 +683,7 @@ def train_engine(
                     }, refresh=True)
         # 在 train_engine 的 Epoch 循环结尾
         r_final = tracker.get_ratios()
-        lr_base = optimizer.param_groups[0]["lr"]
-        logger.info(f"🏁 Epoch {epoch} | LR B/G: {lr_base:.5f} | Final Ratios: Main({r_final['main']:.1%}) Trig({r_final['trig']:.1%}) Dir({r_final['dir']:.1%})")
+        logger.info(f"🏁 Epoch {epoch} Final Ratios: Main({r_final['main']:.1%}) Trig({r_final['trig']:.1%}) Dir({r_final['dir']:.1%})")
 
         tr_loss /= max(1, tr_total)
 
@@ -1087,10 +1086,10 @@ def main(logger:logging.Logger):
         # FCVolumeEvent, 
 
         # 2. 价格趋势与指标类    FeatureMA > FeatureRsi/FeatureKdj/FeatureMACD   what happen to FeatureMACD??
-        common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
+        # common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
         # common.FCMA,     # slope 值搭配使用
         # common.FCRSI,
-        common.FCKDJ,
+        # common.FCKDJ,
 
         # # 价格通道类，2选1   FeatureKeltner >> FeatureBoll/FeatureDonchian
         # common.FCDonchian, 
@@ -1099,12 +1098,12 @@ def main(logger:logging.Logger):
 
         # # 3. 量能与成交活跃度类 FeatureQavMa > FeatureMFI/FeatureWAP > FeatureCFM  > FeaturePVT >FeatureVolMa
         # # FCVolMa,
-        common.FCQavMa,
+        # common.FCQavMa,
         # common.FCOBV,    # 等于 FeaturePVT 丢掉幅度信息。不如 FeaturePVT，直接丢弃
-        common.FCPVT,    # 累积性变量，对短期预测作用小，不如动量
+        # common.FCPVT,    # 累积性变量，对短期预测作用小，不如动量
         # common.FCWAP,
         common.FCCFM,
-        common.FCMFI,
+        # common.FCMFI,
         # # FCATS,  # 负作用
 
         # # 4. K线形态类
