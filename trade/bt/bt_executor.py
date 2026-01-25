@@ -11,7 +11,7 @@ class BtExecutor(BaseExecutor,bt.Strategy):
     params = dict(
         stop_loss = 0.05,  # 5% 止损
         take_profit = 0.50, # 10% 止盈 (可选)
-        position_ratio = 1,
+        trade_risk = 1,
     )
 
     def __init__(self):

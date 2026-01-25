@@ -14,7 +14,12 @@ class FtmoStrategy(BtExecutor):
         allow_short=True,
         allow_long=True,
         thresh=None,  # 置信度阈值
-        stop_loss = 1
+        stop_loss = 1,
+        stop_loss_long = 0.05,
+        stop_loss_short = 0.05,
+        atr_sl_mult_long = 3,
+        atr_sl_mult_short = 3,
+        max_daily_loss_pct = 0.99,
     )
 
     def __init__(self):
@@ -32,7 +37,7 @@ class FtmoStrategy(BtExecutor):
         self.audit_results['long_correct'] = 0
         self.audit_results['short_total'] = 0
         self.audit_results['short_correct'] = 0
-        self.params.trade_risk = self.params.position_ratio * self.params.trade_risk
+        self.params.trade_risk = self.params.trade_risk
         self.brain = FtmoBrain(
             self,
             trade_risk=self.params.trade_risk,
@@ -41,6 +46,11 @@ class FtmoStrategy(BtExecutor):
             allow_long=self.params.allow_long,
             allow_short=self.params.allow_short,
             thresh=self.params.thresh,
+            stop_loss_long = self.params.stop_loss_long,
+            stop_loss_short = self.params.stop_loss_short,
+            atr_sl_mult_long = self.params.atr_sl_mult_long,
+            atr_sl_mult_short = self.params.atr_sl_mult_short,
+            max_daily_loss_pct = self.params.max_daily_loss_pct,
         )
         self.logger.warning(f"stop_loss is {self.params.stop_loss}")
 
@@ -170,6 +180,11 @@ class FtmoStrategy(BtExecutor):
             pred_prob=float(current_prob),
             position_dir=self.dir,
             layers=self.layers,
+            current_time= self.data.datetime.datetime(0),
+            account_balance=self.broker.getvalue(),
+            atr=self.data.atr[0] if hasattr(self.data, 'atr') else 0.0,
+            slow_atr = self.data.slow_atr[0] if hasattr(self.data, 'slow_atr') else 0.0,
+            vol_regime = self.data.vol_regime[0] if hasattr(self.data, 'vol_regime') else None,
         )
 
         self.brain.decide(state)
