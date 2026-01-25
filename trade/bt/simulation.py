@@ -31,14 +31,38 @@ class PandasDataWithPred(bt.feeds.PandasData):
         "threshold",       # 动态止盈阈值
         "stop_threshold",  # 动态止损阈值
         'label',
+        "atr",
+        "slow_atr",
+        "vol_regime",
     )
     params = (
         ("pred", -1),
         ("pred_prob", -1),
         ("threshold", -1),      # 自动匹配列名
+        ("atr", -1),      # 自动匹配列名
+        ("slow_atr", -1),      # 自动匹配列名
+        ("vol_regime", -1),      # 自动匹配列名
         ("stop_threshold", -1), # 自动匹配列名
         ("label", -1),
     )
+
+def log_parameters(params_obj, logger):
+    """
+    按照用户指定的格式打印 Parameters 对象的所有参数
+    """
+    # 将对象转换为字典
+    params_dict = vars(params_obj)
+    items = list(params_dict.items())
+    
+    # 设定每行显示的参数数量，参考你给出的日志，通常每行 3-4 个
+    items_per_line = 4
+    
+    for i in range(0, len(items), items_per_line):
+        chunk = items[i : i + items_per_line]
+        # 格式化每一组参数为 key: value
+        para_str = " | ".join([f"{k}: {v}" for k, v in chunk])
+        # 按照你给出的格式前缀打印
+        logger.info(f"Para    | {para_str}")
 
 class Parameters:
     def __init__(self):
@@ -49,8 +73,13 @@ class Parameters:
         self.commission = 0.05   # 0.1 = 0.1%  .can't be 0
         self.cash = 10000
         self.stop_loss = 0.5  # 0-1
+        self.stop_loss_long = 0.03  # 0-1
+        self.stop_loss_short = 0.015  # 0-1
+        self.atr_sl_mult_long = 5 #2.5
+        self.atr_sl_mult_short = 2.5 #2.5
         self.take_profit = 0.99 #止盈. 0 - n倍
-        self.position_ratio = 0.4     #0-1
+        self.trade_risk = 0.5     #0-1
+        self.max_daily_loss_pct = 0.025
 
 def main(logger:logging.Logger,args = Parameters()):
     logger.info(
@@ -122,8 +151,13 @@ def main(logger:logging.Logger,args = Parameters()):
         allow_long=args.allow_long,
         thresh=args.thresh,
         stop_loss=args.stop_loss,
+        stop_loss_long = args.stop_loss_long,
+        stop_loss_short = args.stop_loss_short,
+        atr_sl_mult_long = args.atr_sl_mult_long,
+        atr_sl_mult_short = args.atr_sl_mult_short,
         take_profit = args.take_profit,
-        position_ratio = args.position_ratio,
+        trade_risk = args.trade_risk,
+        max_daily_loss_pct = args.max_daily_loss_pct,
     )
 
     data = PandasDataWithPred(
@@ -135,11 +169,14 @@ def main(logger:logging.Logger,args = Parameters()):
         close="close",
         volume="volume",
         threshold="threshold",
+        atr = "atr_14",
+        slow_atr = "atr_5000",
+        # vol_regime = "vol_regime_100",
         label = "label",
         openinterest=-1,
         nocase=True,
-        # fromdate=datetime(2025, 1, 1),
-        # todate=datetime(2026, 1, 1),
+        # fromdate=datetime(2025, 10, 1),
+        # todate=datetime(2023, 1, 1),
     )
 
     cerebro.adddata(data)
@@ -229,6 +266,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path, args:Paramete
     # --- 读取日内回撤数据 ---
     max_daily_dd = perf.get('max_daily_dd', 0.0) # 例如 -0.045
     max_daily_date = perf.get('max_daily_dd_date', 'N/A')
+    max_violation_days = perf.get('daily_dd_max_violation_days', 0)
+    max_3_violation_days = perf.get('daily_dd_max_3_violation_days', 0)
     violation_days = perf.get('daily_dd_violation_days', 0)
     # 1. 获取全局最低净值
     global_min_equity = perf.get('global_min_equity', 0.0)
@@ -302,19 +341,43 @@ def generate_backtest_report(logger,strat, model_stats, save_path, args:Paramete
     max_pos = perf.get("max_pos_ratio", 0)
     p95_pos = perf.get("p95_pos_ratio", 0)
 
+    # ============================================================
+    # === 【新增：鲁棒风险统计逻辑】仅修改此块以支持 Top-N 展示 ===
+    # ============================================================
+    daily_losses = perf.get('daily_returns_list', []) # 需要 CusAnalyzer 配合暴露此列表
+    top_10_str = "N/A"
+    robust_max_loss = 0.0
+    
+    if daily_losses:
+        # 筛选负收益并排序 (最惨的排在前面)
+        sorted_losses = sorted([l for l in daily_losses if l < 0])
+        top_5_losses = sorted_losses[:20]
+        top_10_str = " | ".join([f"{l*100:.2f}%" for l in top_5_losses])
+        
+        # 计算 Robust Max Loss: 剔除第1名离群值，取 2-5 名均值
+        if len(top_5_losses) > 1:
+            robust_max_loss = sum(top_5_losses[1:]) / len(top_5_losses[1:])
+        else:
+            robust_max_loss = top_5_losses[0] if top_5_losses else 0.0
+
+    # 【修改日志输出】增加鲁棒指标显示
+    logger.info(f"RISK(Daily)| Top 5 Losses: [{top_10_str}]")
+    logger.info(f"RISK(Daily)| Robust Max Loss (Avg 2nd-5th): {robust_max_loss*100:.2f}%")
+    logger.info(f"RISK(Daily)| Worst Day: {max_daily_dd*100:.2f}% ({max_daily_date}) | >3% Days: {max_3_violation_days} | >4% Days: {violation_days} | >5% Days: {max_violation_days}")
+
     # summary 输出
     logger.info("-" * 80)
+    logger.info(f"Time    | {bt.num2date(strat.datas[0].datetime.array[0])} --> {bt.num2date(strat.datas[0].datetime.array[-1])} | end value {end_value} ")
     logger.info(f"SUMMARY | GrossRet: {gross_return*100:.2f}% | CAGR: {cagr*100:.2f}% | "
                 f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | Calmar: {calmar:.2f}")
     # 【新增】打印仓位暴露信息
-    logger.info(f"EXPOSURE| Avg Pos: {avg_pos*100:.2f}% | Max Pos: {max_pos*100:.2f}% | P95 Pos: {p95_pos*100:.2f}% | Position: {Parameters().position_ratio}")
-    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% | Commission: {args.commission}%")
+    logger.info(f"EXPOSURE| Avg Pos: {avg_pos*100:.2f}% | Max Pos: {max_pos*100:.2f}% | P95 Pos: {p95_pos*100:.2f}% | Position: {Parameters().trade_risk}")
+    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% ")
     logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
-    logger.info(f"Para    | thresh: {args.thresh} | position_ratio: {args.position_ratio} | PREDICT_NUM: {CANDLESTICK_NUM}| PREDICT_NUM: {PREDICT_NUM}")
-    logger.info(f"Para    | VOL_MULTIPLIER: {VOL_MULTIPLIER} | STOP_MULTIPLIER_RATE: {STOP_MULTIPLIER_RATE}")
+    logger.info(f"Para    | PREDICT_NUM: {CANDLESTICK_NUM}| PREDICT_NUM: {PREDICT_NUM} | VOL_MULTIPLIER: {VOL_MULTIPLIER} | STOP_MULTIPLIER_RATE: {STOP_MULTIPLIER_RATE}")
     logger.info(f"Para    | symbol: {symbol} | interval: {interval}| STOP_MULTIPLIER_RATE: {STOP_MULTIPLIER_RATE}")
-    logger.info(f"Time    | {bt.num2date(strat.datas[0].datetime.array[0])} --> {bt.num2date(strat.datas[0].datetime.array[-1])} | end value {end_value} ")
+    log_parameters(args,logger)
     logger.info("-" * 80)
 
     # 构造 JSON (略微精简，保持原有结构)

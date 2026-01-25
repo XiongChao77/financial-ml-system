@@ -1105,6 +1105,7 @@ def main(logger:logging.Logger):
         common.FCCFM,
         # common.FCMFI,
         # # FCATS,  # 负作用
+        # common.FCATR,
 
         # # 4. K线形态类
         common.FCCandle,

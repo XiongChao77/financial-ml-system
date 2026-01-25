@@ -750,6 +750,78 @@ class FeatureContainer:
         self.feature = feature
         self.parameters = kwargs
 
+class FeatureATRRegime(FeatureBase):
+    """
+    多周期波动率环境分析器
+    用途：
+    1. atr_{w}: 输入模型或下单参考的百分比波动率 (NATR)
+    2. vol_regime: 当前短期波动相对于长期的分布位置 (用于过滤非趋势市场)
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # 🌟 现在支持通过 windows 参数配置多个周期，例如 [14, 100, 1000]
+        self.windows = kwargs.get('windows', [14, 100, 1000])
+        self.short_w = self.windows[0]  # 以第一个窗口作为“短期”基准
+        self.long_w = self.windows[-1]  # 以最后一个窗口作为“长期”背景
+        
+        self.features = []
+        # 动态注册所有 ATR 特征
+        for w in self.windows:
+            self.features.append(f'atr_{w}')
+            
+        # 保留环境参考特征
+        self.features.append(f'vol_regime_{self.long_w}')
+        self.features.append('Vol_Trend')
+
+    def generate(self, df: pd.DataFrame, kline_interval_ms: int):
+        close = df['close'].astype(float)
+        h, l = df['high'], df['low']
+        pc = close.shift(1)
+        
+        # 1. 计算 True Range (基础波幅)
+        tr = np.maximum(h - l, np.maximum((h - pc).abs(), (l - pc).abs()))
+        
+        # 2. 循环生成多个周期的 NATR (百分比化 ATR)
+        atr_series_map = {}
+        for w in self.windows:
+            atr_w = tr.rolling(w).mean()
+            atr_series_map[w] = atr_w
+            # 存储为百分比特征，方便模型理解和下单参考
+            df[f'atr_{w}'] = np.where(close > 0, atr_w / close, 0.0)
+        
+        # 3. 计算“波动率一致性环境” (Regime)
+        # 逻辑：短期(14) ATR / 长期(1000) ATR 均值
+        short_atr = atr_series_map[self.short_w]
+        long_atr_ref = short_atr.rolling(self.long_w).mean()
+        
+        # 结果 > 1 代表当前比长期更活跃，值越稳定代表波动越均匀
+        df[f'vol_regime_{self.long_w}'] = np.where(long_atr_ref > 0, short_atr / long_atr_ref, 1.0)
+        
+        # 4. 波动率趋势 (短期动量)
+        df['Vol_Trend'] = short_atr.diff(5) / (short_atr.shift(5) + EPS)
+
+    def normalize(self, X: np.ndarray, feature_cols: list[str], factory):
+        # 1. 批量处理所有 ATR 特征
+        # 采用独立 Z-Score + Tanh 压制，确保不同尺度的波动率在模型输入层量纲一致
+        for w in self.windows:
+            col = f'atr_{w}'
+            if col in feature_cols:
+                self._normalize_z_score(X, feature_cols, [col], col, factory, method='tanh')
+
+        # 2. 处理环境参考特征 (Regime)
+        regime_col = f'vol_regime_{self.long_w}'
+        if regime_col in feature_cols:
+            self._normalize_z_score(X, feature_cols, [regime_col], regime_col, factory, method='log')
+
+        # 3. 处理 Vol_Trend (变化率)
+        if 'Vol_Trend' in feature_cols:
+            idx = feature_cols.index('Vol_Trend')
+            X[:, :, idx] = self._apply_squashing(X[:, :, idx], scale=1.0, method='tanh')
+
+    def _min_history_request(self, kline_interval_ms: int = None) -> int:
+        # 必须满足最大窗口的需求
+        return int(max(self.windows) * 1.2)
+    
 class FeatureVolMa(FeatureBase):
     def __init__(self,**kwargs):
         super().__init__(**kwargs)
@@ -1621,6 +1693,7 @@ FCWAP         = FeatureContainer(FeatureWAP, **{"vwap_windows": [7], "add_bias":
 FCCFM         = FeatureContainer(FeatureCFM, **{"cmf_windows": [25]})
 FCMFI         = FeatureContainer(FeatureMFI, **{"mfi_windows": [25]})
 FCATS         = FeatureContainer(FeatureATS, **{})
+FCATR         = FeatureContainer(FeatureATRRegime, windows = [14, 16, 1000 , 2000, 5000])
 
 # --- 4. K线形态与原始数据 ---
 FCCandle      = FeatureContainer(FeatureCandle, **{})
@@ -1654,6 +1727,7 @@ FEATURE_CONFIG_LIST = [
     FCCFM,
     FCMFI,
     FCATS,  # 负作用
+    FCATR,
 
     # 4. K线形态类
     FCCandle,
