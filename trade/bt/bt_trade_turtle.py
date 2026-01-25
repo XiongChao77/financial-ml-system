@@ -3,7 +3,7 @@ import pandas as pd
 import logging
 from trade.bt.bt_executor import BtExecutor
 from trade.strategy.strategy_turtle import TurtleBrain
-from trade.strategy.strategy_ftmo import PositionDir
+from trade.strategy.strategy_ml import PositionDir
 
 class TurtleStrategy(BtExecutor):
     params = dict(

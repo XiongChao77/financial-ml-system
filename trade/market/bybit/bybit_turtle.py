@@ -13,7 +13,7 @@ sys.path.append(os.path.join(current_work_dir, "..", '..', '..'))
 
 from bybit_engine import BybitEngine
 from data_process.common import setup_session_logger
-from trade.strategy.strategy_ftmo import PositionDir, ActionType
+from trade.strategy.strategy_ml import PositionDir, ActionType
 # 假设 TurtleBrain 在此路径，请确保该文件存在
 from trade.strategy.strategy_turtle import TurtleBrain 
 

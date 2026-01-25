@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from trade.strategy.strategy_ftmo import BrainBase, MarketState, TradingAction, ActionType, PositionDir
+from trade.strategy.strategy_ml import BrainBase, MarketState, TradingAction, ActionType, PositionDir
 
 @dataclass
 class MaMarketState(MarketState):
