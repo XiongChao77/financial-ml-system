@@ -62,7 +62,7 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
-    # 🌟 PIPELINE MODE: "trigger_direction" OR "long_short_ovr"
+    #  PIPELINE MODE: "trigger_direction" OR "long_short_ovr"
     pipeline_mode: str = "trigger_direction" 
     
     model_cfg = ConvLSTMConfig()
@@ -281,7 +281,7 @@ def train_binary_model(
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad(); logits = model(xb) 
             loss = criterion(logits, yb);
-            # 🌟 如果开启了选择器，增加 L1 惩罚项项，强迫权重向 0 靠拢
+            #  如果开启了选择器，增加 L1 惩罚项项，强迫权重向 0 靠拢
             if train_cfg.model_cfg.use_feature_selector and hasattr(model, 'feature_selector'):
                 # 将参数分为两组
                 gate_params = [model.feature_selector.importance_logits]
@@ -328,7 +328,7 @@ def train_binary_model(
             wait += 1
             if wait >= train_cfg.patience: break
                 
-    # 🌟 SUB-TASK REPORT
+    #  SUB-TASK REPORT
     logger.info(f"\n{'#'*10} [{subtask_name.upper()}] SUB-TASK REPORT {'#'*10}")
     counts = Counter(best_val_trues)
     total = len(best_val_trues)
@@ -510,7 +510,7 @@ def print_metrics(y_true, y_pred, logger, title):
     report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
     logger.info("\n" + format_report(report))
     
-    # 🌟 CORE F1 METRICS
+    #  CORE F1 METRICS
     f1_short = report.get('0', {}).get('f1-score', 0)
     f1_long = report.get('2', {}).get('f1-score', 0)
     macro_f1 = report.get('macro avg', {}).get('f1-score', 0)
@@ -572,7 +572,7 @@ if __name__ == "__main__":
     # Configure Training
     cfg = TrainConfig()
     
-    # 🌟 SET YOUR MODE HERE
+    #  SET YOUR MODE HERE
     # Option : "trigger_direction"/long_short_ovr
     cfg.pipeline_mode = "long_short_ovr"  # Change this to switch modes
     

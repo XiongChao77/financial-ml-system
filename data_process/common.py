@@ -130,7 +130,7 @@ def attach_label(df,
     max_drawdown = (future_low_min - df['close']) / df['close']
     max_runup = (future_high_max - df['close']) / df['close']
 
-    # 4. 🌟 应用非对称逻辑
+    # 4.  应用非对称逻辑
     # 做多：用 Long 专属阈值
     cond_long = final_valid_mask & \
                 (pct_final > df['threshold_long']) & \
@@ -183,7 +183,7 @@ def attach_triple_barrier_label(df,
     closes = df['close'].values
     labels = np.full(len(df), Signal.NEUTRAL, dtype=int)
 
-    # 4. 🌟 循环遍历 (分别使用对应的 Long/Short 阈值列)
+    # 4.  循环遍历 (分别使用对应的 Long/Short 阈值列)
     for i in range(len(df) - predict_num):
         if not final_valid_mask[i]:
             labels[i] = Signal.INVALID
@@ -216,10 +216,10 @@ def attach_triple_barrier_label(df,
 def calculate_thresholds(df, 
                          candlestick_num: int = CANDLESTICK_NUM, 
                          predict_num: int = PREDICT_NUM, 
-                         vol_mult_long = VOL_MULTIPLIER_LONG,    # 🌟 拆分
-                         vol_mult_short = VOL_MULTIPLIER_SHORT,   # 🌟 拆分
-                         stop_rate_long = STOP_MULTIPLIER_RATE_LONG,  # 🌟 拆分
-                         stop_rate_short = STOP_MULTIPLIER_RATE_SHORT, # 🌟 拆分
+                         vol_mult_long = VOL_MULTIPLIER_LONG,    #  拆分
+                         vol_mult_short = VOL_MULTIPLIER_SHORT,   #  拆分
+                         stop_rate_long = STOP_MULTIPLIER_RATE_LONG,  #  拆分
+                         stop_rate_short = STOP_MULTIPLIER_RATE_SHORT, #  拆分
                          **kwargs): 
     """
     计算非对称动态止盈和止损阈值
@@ -234,7 +234,7 @@ def calculate_thresholds(df,
     # 2. 时间扩充波动率 (sigma * sqrt(T))
     expected_vol = rolling_std * np.sqrt(predict_num)
     
-    # 3. 🌟 生成非对称阈值
+    # 3.  生成非对称阈值
     # 多头 (Long) 阈值
     df['threshold_long'] = (expected_vol * vol_mult_long)
     df['stop_threshold_long'] = df['threshold_long'] * stop_rate_long

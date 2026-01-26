@@ -227,7 +227,7 @@ class LSTM1D_V4(BaseTimeSeriesModel):
 
     def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused=False) -> torch.Tensor:
         """
-        🌟 增加 return_fused 参数，支持直接输出三分类指令
+         增加 return_fused 参数，支持直接输出三分类指令
         """
         B, T, F = x.shape
         assert F == self.input_size
@@ -275,7 +275,7 @@ class LSTM1D_V4(BaseTimeSeriesModel):
 
         feat = self.norm(feat)
 
-        # 🌟 修改点 2：计算分层 Logits
+        #  修改点 2：计算分层 Logits
         logits_trig = self.head_trigger(feat)    # [B, 2]
         logits_dir = self.head_direction(feat)  # [B, 2]
 
@@ -283,7 +283,7 @@ class LSTM1D_V4(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        # 🌟 修改点 3：固化的融合逻辑 (支持 predict)
+        #  修改点 3：固化的融合逻辑 (支持 predict)
         if return_fused:
             p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
             p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]

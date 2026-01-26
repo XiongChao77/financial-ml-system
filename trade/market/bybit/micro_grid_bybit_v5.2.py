@@ -62,7 +62,7 @@ class SequentialGridBot_V5_3:
         
         self.logger.info("🚀 V5.3 终极网格启动 | ID标记恢复 | 趋势熔断 | 利润保底")
         
-        # 🌟 初始化三部曲
+        #  初始化三部曲
         self.get_wallet_balance() 
         self.start_balance = self.current_balance
         self.update_instrument_info()     # 1. 获取精度
@@ -450,9 +450,9 @@ class SequentialGridBot_V5_3:
             time.sleep(0.5) # 主循环暂停
 
     def report_status(self, now):
-        # 🌟 改进后的简报
+        #  改进后的简报
         # os.system('clear' if os.name == 'posix' else 'cls') # 可选：清屏让输出更整洁
-        # 🌟 关键：打印前强制更新一次余额
+        #  关键：打印前强制更新一次余额
         self.get_wallet_balance() 
         
         total_seconds = int(now - self.start_time)
@@ -479,7 +479,7 @@ if __name__ == "__main__":
     BASE = os.path.dirname(os.path.abspath(__file__))
     API_K, PRI_K = os.path.join(BASE, "keys", "api_key"), os.path.join(BASE, "keys", "bybit_rsa.pem")
     
-    # 🌟 终极配置：Offset 必须给足，防止精度亏损
+    #  终极配置：Offset 必须给足，防止精度亏损
     CONFIGS = {
         "DOGEUSDT": {"budget_pct": 0.2, "max_layers": 5, "base_offset": 0.00035, "qty_step": 0},
         "ARCUSDT":  {"budget_pct": 0.1, "max_layers": 5, "base_offset": 0.001, "qty_step": 0}, 

@@ -83,7 +83,7 @@ class ModelHandler:
         sub_models_map = self.task_desc["models"]
         loaded_sub_models = {}
         
-        # 🌟 关键：确定谁是“主配置”提供者
+        #  关键：确定谁是“主配置”提供者
         # 通常 Trigger/Direction 模式下，Trigger 是第一步，我们用它的配置初始化 Dataset
         if "trigger" in sub_models_map:
             primary_key = "trigger"
@@ -174,9 +174,8 @@ class ModelHandler:
         # 2. 推理循环 (获取原始 Logits -> Probabilities)
         probs_list = []
         with torch.no_grad():
-            for xb, _ in dl:
+            for xb, _, _ in dl:
                 xb = xb.to(self.device)
-                # 🌟 调用升级后的模型，直接获取标签和合成概率
                 _, fused_probs = self.model(xb, return_fused=True) 
                 
                 # 转换回 numpy 以便后续处理
@@ -278,7 +277,7 @@ class ModelHandler:
         with torch.no_grad():
             for xb, _ in dl:
                 xb = xb.to(self.device)
-                # 🌟 统一调用融合接口，获取 [B, 3] 的概率分布
+                #  统一调用融合接口，获取 [B, 3] 的概率分布
                 _, fused_probs = self.model(xb, return_fused=True) 
                 probs_list.append(fused_probs.cpu().numpy())
         

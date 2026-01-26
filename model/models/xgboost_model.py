@@ -61,7 +61,7 @@ class XGBoostAdapter(BaseTimeSeriesModel):
             'eval_metric': 'logloss',
             'n_jobs': -1
         }
-        # 🌟 兼容性处理：适配新旧版本
+        #  兼容性处理：适配新旧版本
         if self.device_type == "cuda":
             # 尝试新版 2.0+ 的 device 参数写法
             self.params['tree_method'] = 'hist'

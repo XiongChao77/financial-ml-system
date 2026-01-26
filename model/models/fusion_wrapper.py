@@ -91,7 +91,7 @@ class FusionWrapper(nn.Module):
         # 有效多头：Long 是 1，Short 必须是 0
         mask_exclusive_long  = is_sig_l & (~is_sig_s)
 
-        # 5. 🌟 构造 3 分类 Logit 竞争空间 [Short, Neutral, Long]
+        # 5.  构造 3 分类 Logit 竞争空间 [Short, Neutral, Long]
         # 初始化分数：不满足互斥条件的信号类分数设为极低 (-100.0) 以实现硬过滤
         score_short = torch.full_like(logits_s[:, 0], -100.0) 
         score_long  = torch.full_like(logits_l[:, 0], -100.0)

@@ -343,7 +343,7 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        # 🌟 Fusion Logic
+        #  Fusion Logic
         if return_fused:
             # 1. 计算各头概率 (Softmax)
             p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
@@ -364,7 +364,7 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
             # 3. 生成预测标签 (基于合成概率的 argmax 确保与概率对齐)
             fused_preds = torch.argmax(fused_probs, dim=1)
             
-            return fused_preds, fused_probs # 🌟 返回元组
+            return fused_preds, fused_probs #  返回元组
         
         return logits_trig, logits_dir
 

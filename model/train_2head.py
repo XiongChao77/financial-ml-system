@@ -144,7 +144,7 @@ class CNNConfig:
 class TrainConfig:
     model_cfg = ConvLSTMConfig()
     data_cfg = DataConfig()
-    epochs: int = 20
+    epochs: int = 30
     batch_size: int = 512    #越小模型越敏感，小batch_size自带正则化
     lr: float = 3e-4    #3e-4
     gate_lr: float = 1e-2    #3e-4
@@ -157,6 +157,10 @@ class TrainConfig:
     lambda_trig: float = 0.5  # Trigger 任务权重
     lambda_dir: float = 0.7   # Direction 任务权重 (设为 0 即可实现第一阶段只练 Trigger).lambda_dir需要补偿比例不平衡
     lambda_gate: float = 1e-3
+    mag_alpha: float = 0   # 幅度敏感度：1% 的波动增加 10% 权重
+    mag_limit: float = 3.0    # 权重截断：单个样本最大权重不超过 4 倍，防止插针干扰
+    flip_penalty: float = 2.0 # 致命错误惩罚 (0 <-> 2)
+    miss_penalty: float = 1.20 # 保守错误惩罚 (0/2 -> 1)
 # ==============================================================================
 # 3. 核心逻辑 (Core Logic)
 # ==============================================================================
@@ -226,14 +230,14 @@ def run_training(feature_config_list:list[common.FeatureContainer], logger:loggi
     # 2. 切分数据
     tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
     
-    ds_tr = SeqDataset(full_ds.X[tr_rng[0]:tr_rng[1]].numpy(), full_ds.y[tr_rng[0]:tr_rng[1]].numpy())
-    ds_va = SeqDataset(full_ds.X[va_rng[0]:va_rng[1]].numpy(), full_ds.y[va_rng[0]:va_rng[1]].numpy())
-    ds_te = SeqDataset(full_ds.X[te_rng[0]:te_rng[1]].numpy(), full_ds.y[te_rng[0]:te_rng[1]].numpy())
+    ds_tr = SeqDataset(full_ds.X[tr_rng[0]:tr_rng[1]].numpy(), full_ds.y[tr_rng[0]:tr_rng[1]].numpy(),full_ds.returns[tr_rng[0]:tr_rng[1]].numpy())
+    ds_va = SeqDataset(full_ds.X[va_rng[0]:va_rng[1]].numpy(), full_ds.y[va_rng[0]:va_rng[1]].numpy(),full_ds.returns[va_rng[0]:va_rng[1]].numpy())
+    ds_te = SeqDataset(full_ds.X[te_rng[0]:te_rng[1]].numpy(), full_ds.y[te_rng[0]:te_rng[1]].numpy(),full_ds.returns[te_rng[0]:te_rng[1]].numpy())
 
     # 3. 计算权重
     y_tr_np = full_ds.y[tr_rng[0]:tr_rng[1]].numpy()
     classes = np.unique(y_tr_np)
-    # 🌟 注入平衡采样逻辑
+    #  注入平衡采样逻辑
     # 使用你代码中定义的 get_balanced_sampler (Neutral 50%, Short 25%, Long 25%)
     sampler_tr = get_balanced_sampler(ds_tr) 
     
@@ -242,7 +246,7 @@ def run_training(feature_config_list:list[common.FeatureContainer], logger:loggi
     logger.info(f"Class weights: {dict(zip(classes, cw_balanced))}")
 
     # 4. DataLoader
-    # 🌟 针对 5090 优化：增加 num_workers，开启 pin_memory
+    #  针对 5090 优化：增加 num_workers，开启 pin_memory
     dl_tr = DataLoader(
         ds_tr, 
         batch_size=train_cfg.batch_size, 
@@ -280,7 +284,7 @@ def run_training(feature_config_list:list[common.FeatureContainer], logger:loggi
             input_size=full_ds.feature_count, n_classes=len(classes),
             **params
         )
-        # 🌟 针对 Mamba 的优化器特殊设置
+        #  针对 Mamba 的优化器特殊设置
         if m_type == "mamba":
             # 将参数分类：dt_proj 需要更高的学习率，A_log 需要较低的学习率
             dt_params = []
@@ -373,17 +377,17 @@ def chrono_split_by_window_ends(M, tr_r, va_r):
     return (0, n_tr), (n_tr, n_tr + n_va), (n_tr + n_va, M)
 
 class SeqDataset(Dataset):
-    def __init__(self, X, y): 
-        self.X = torch.from_numpy(X)
-        self.y = torch.from_numpy(y)
-        # 🌟 关键：增加 labels 属性供 Sampler 使用，确保为整数
+    def __init__(self, X, y, returns): #  增加 returns 参数
+        self.X = torch.from_numpy(X).float()
+        self.y = torch.from_numpy(y).long()
+        self.r = torch.from_numpy(returns).float() #  存储回报率
         self.labels = self.y.long().numpy() 
 
     def __len__(self): 
         return self.X.shape[0]
 
     def __getitem__(self, i): 
-        return self.X[i], self.y[i]
+        return self.X[i], self.y[i], self.r[i] #  返回三元组
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
@@ -401,13 +405,12 @@ class FocalLoss(nn.Module):
         else: return focal_loss
 
 class MTLManager:
-    def __init__(self, device, train_cfg):
+    def __init__(self, device, train_cfg:TrainConfig):
         self.device = device
         self.cfg = train_cfg
         self.weights = {}
         self.criteria = {}
-        # 🌟 新增：对称性惩罚权重，初始建议设为 0.5 ~ 1.0
-        self.bias_lambda = getattr(train_cfg, 'bias_lambda', 0.5)
+        #  新增：对称性惩罚权重，初始建议设为 0.5 ~ 1.0
 
     def prepare_all(self, y_raw):
         """一次性初始化所有权重和 Loss 函数"""
@@ -441,83 +444,251 @@ class MTLManager:
         target_dir = torch.where(yb == 2, 1, 0).long()
         action_mask = (yb != 1)
         return target_trig, target_dir, action_mask
+    def compute_combined_loss(
+        self,
+        logits_trig,
+        logits_dir,
+        yb,
+        rb,
+    ):
+        """
+        Differentiable Magnitude & Direction Aware MTL Loss (Stable Version)
 
-    def compute_combined_loss(self, logits_trig, logits_dir, yb, flip_penalty=2.0, miss_penalty=1.0):
+        yb: [B]  0=Short, 1=Neutral, 2=Long
+        rb: [B]  future return (signed)
         """
-        全功能量化版 Loss：整合了非对称距离惩罚、能量归一化与对称性约束。
-        
-        flip_penalty: 致命错误惩罚 (0 <-> 2)
-        miss_penalty: 保守错误惩罚 (0/2 -> 1)
-        """
-        t_trig, t_dir, act_mask = self.get_targets(yb)
-        
-        # 1. 基础子任务 Loss
-        loss_trig = self.criteria['trig'](logits_trig, t_trig)
-        loss_dir = torch.tensor(0.0, device=self.device)
+        device = logits_trig.device
+        eps = 1e-8
+
+        # ===============================
+        # 0. targets & masks
+        # ===============================
+        # Trigger head: 0=Neutral, 1=Action
+        target_trig = (yb != 1).long()  # [B]
+
+        # Direction head: 0=Short, 1=Long (only valid for Action samples)
+        target_dir = torch.zeros_like(yb)
+        target_dir[yb == 2] = 1
+        act_mask = (yb != 1)  # [B] action samples
+
+        # ===============================
+        # 1. magnitude weight (ONE layer only)
+        # ===============================
+        mag_alpha = float(getattr(self.cfg, "mag_alpha", 10.0))
+        max_weight = float(getattr(self.cfg, "max_weight", 5.0))
+        mag = rb.abs()
+        mag_weights = (1.0 + mag_alpha * mag).clamp(max=max_weight)  # [B]
+
+        # ===============================
+        # 2. Trigger loss (weighted by magnitude, normalized)
+        # ===============================
+        w_trig = self.weights.get("trig", None) if hasattr(self, "weights") else None
+        loss_trig_raw = F.cross_entropy(
+            logits_trig,
+            target_trig,
+            weight=w_trig,
+            reduction="none"
+        )
+        loss_trig = (loss_trig_raw * (mag_weights / (mag_weights.mean() + eps))).mean()
+
+        # ===============================
+        # 3. Direction loss (only Action samples)
+        # ===============================
+        w_dir = self.weights.get("dir", None) if hasattr(self, "weights") else None
         if act_mask.any():
-            loss_dir = self.criteria['dir'](logits_dir[act_mask], t_dir[act_mask])
-        
-        # 2. 融合 3-Class 概率分布 [Short(0), Neutral(1), Long(2)]
-        p_trig = torch.softmax(logits_trig, dim=1)
-        p_dir = torch.softmax(logits_dir, dim=1)
-        fused_probs = torch.stack([
-            p_trig[:, 1] * p_dir[:, 0], # Short
-            p_trig[:, 0],               # Neutral
-            p_trig[:, 1] * p_dir[:, 1]  # Long
-        ], dim=1)
-        
-        # 3. 计算逐样本基础 Main Loss (NLL)
-        # 使用 1e-10 防止 log(0) 崩溃
-        sample_main_loss = F.nll_loss(torch.log(fused_probs + 1e-10), yb, weight=self.weights['main'], reduction='none')
-
-        # --- 🌟 逻辑 A: 三级非对称距离惩罚 ---
-        penalty = torch.ones_like(sample_main_loss)
-        preds = torch.argmax(fused_probs, dim=1)
-        trend_mask = (yb != 1) # 真实标签为趋势的样本
-
-        if trend_mask.any():
-            # 1. 致命错误：多空做反 (例如 y=2, pred=0)
-            fatal_mask = trend_mask & (preds != yb) & (preds != 1)
-            penalty[fatal_mask] = flip_penalty
-            
-            # 2. 保守错误：趋势预测成了震荡 (例如 y=2, pred=1)
-            # 增加此惩罚，防止模型逃向震荡类，迫使其在趋势中寻找微弱信号
-            miss_mask = trend_mask & (preds == 1)
-            penalty[miss_mask] = miss_penalty
-            
-            # --- 🌟 逻辑 B: 惩罚能量归一化 ---
-            # 核心：确保 penalty 均值为 1.0。
-            # 这样放大错误权重的同事，会相对缩小正确预测的权重，
-            # 且保证 Main Loss 总量稳定，不会淹没 lambda_trig/dir 的梯度。
-            penalty = penalty / (penalty.mean() + 1e-8)
-
-        # 应用归一化惩罚
-        loss_main = (sample_main_loss * penalty).mean()
-
-        # --- 🌟 逻辑 C: 方向对称性约束 (Bias Constraint) ---
-        # 计算当前 Batch 预测多头和空头的平均概率差
-        # 用于强制拉平模型在不同训练轮次中产生的随机“多/空偏心”
-        avg_p_short = fused_probs[:, 0].mean()
-        avg_p_long = fused_probs[:, 2].mean()
-        bias_loss = torch.zeros((), device=logits_dir.device)
-
-        act = (p_trig[:, 1] > 0.5)   # 或 act = (yb != 1)
-        if act.any():
-            bias_loss = torch.abs(
-                p_dir[act, 0].mean() - p_dir[act, 1].mean()
+            loss_dir_raw = F.cross_entropy(
+                logits_dir[act_mask],
+                target_dir[act_mask],
+                weight=w_dir,
+                reduction="none"
             )
+            mw = mag_weights[act_mask]
+            loss_dir = (loss_dir_raw * (mw / (mw.mean() + eps))).mean()
+        else:
+            loss_dir = torch.zeros((), device=device)
 
-        
-        # 获取 bias_lambda 配置，默认设为 0.5
-        bias_lambda = getattr(self.cfg, 'bias_lambda', 0.5)
+        # ===============================
+        # 4. Fused 3-class log-prob (numerically stable)
+        #    trig logits: [:,0]=Neutral, [:,1]=Action
+        #    dir  logits: [:,0]=Short,   [:,1]=Long
+        # ===============================
+        log_p_trig = F.log_softmax(logits_trig, dim=1)  # [B,2]
+        log_p_dir  = F.log_softmax(logits_dir,  dim=1)  # [B,2]
 
-        # 4. 最终多任务组合
-        total_loss = loss_main + \
-                    (self.cfg.lambda_trig * loss_trig) + \
-                    (self.cfg.lambda_dir * loss_dir) + \
-                    (bias_lambda * bias_loss)
-        
+        log_p_short = log_p_trig[:, 1] + log_p_dir[:, 0]  # Action * Short
+        log_p_neu   = log_p_trig[:, 0]                    # Neutral
+        log_p_long  = log_p_trig[:, 1] + log_p_dir[:, 1]  # Action * Long
+
+        log_fused = torch.stack([log_p_short, log_p_neu, log_p_long], dim=1)  # [B,3]
+        fused_probs = log_fused.exp()  # [B,3], for expected penalties
+
+        # ===============================
+        # 5. Main loss (NLL on fused)
+        # ===============================
+        w_main = self.weights.get("main", None) if hasattr(self, "weights") else None
+        sample_main_loss = F.nll_loss(
+            log_fused,
+            yb,
+            weight=w_main,
+            reduction="none"
+        )  # [B]
+
+        # ===============================
+        # 6. Differentiable expected penalties (NO argmax / NO hard mask)
+        # ===============================
+        p_short = fused_probs[:, 0]
+        p_neu   = fused_probs[:, 1]
+        p_long  = fused_probs[:, 2]
+        p_action = p_short + p_long
+
+        y_short = (yb == 0).float()
+        y_neu   = (yb == 1).float()
+        y_long  = (yb == 2).float()
+        y_action = 1.0 - y_neu
+
+        # fatal: true trend/action but predicted neutral (expected)
+        fatal_expect = y_action * p_neu
+
+        # miss: true neutral but predicted action (expected)
+        miss_expect = y_neu * p_action
+
+        # flip: true short predicted long OR true long predicted short (expected)
+        flip_expect = y_short * p_long + y_long * p_short
+
+        # penalties (>=1)
+        flip_penalty = float(getattr(self.cfg, "flip_penalty", 2.5))
+        miss_penalty = float(getattr(self.cfg, "miss_penalty", 1.0))
+        # 如果你没有单独的 fatal_penalty，就沿用 flip_penalty（保持你旧逻辑）
+        fatal_penalty = float(getattr(self.cfg, "fatal_penalty", flip_penalty))
+
+        # optional magnitude coupling (set to 0 by default)
+        flip_mag_beta  = float(getattr(self.cfg, "flip_mag_beta", 0.0))
+        fatal_mag_beta = float(getattr(self.cfg, "fatal_mag_beta", 0.0))
+
+        # 让惩罚是“额外倍数”的期望形式：1 + (k-1)*E[event]
+        eff_fatal = (fatal_penalty - 1.0) * (1.0 + fatal_mag_beta * mag)
+        eff_miss  = (miss_penalty  - 1.0)
+        eff_flip  = (flip_penalty  - 1.0) * (1.0 + flip_mag_beta  * mag)
+
+        penalty = 1.0 + eff_fatal * fatal_expect + eff_miss * miss_expect + eff_flip * flip_expect  # [B]
+
+        # ===============================
+        # 7. final composite weight (smooth & stable)
+        # ===============================
+        combined_weights = (mag_weights * penalty).clamp(min=0.0)
+        combined_weights = combined_weights / (combined_weights.mean() + eps)
+
+        loss_main = (sample_main_loss * combined_weights).mean()
+
+        # ===============================
+        # 8. Soft direction bias regularization (optional, differentiable)
+        # ===============================
+        bias_lambda = float(getattr(self.cfg, "bias_lambda", 0.0))
+        bias_loss = torch.zeros((), device=device)
+        if bias_lambda > 0:
+            p_trig = torch.softmax(logits_trig, dim=1)  # [B,2]
+            p_dir  = torch.softmax(logits_dir,  dim=1)  # [B,2]
+
+            act_prob = p_trig[:, 1]  # P(action)
+            exp_short = (act_prob * p_dir[:, 0]).sum()
+            exp_long  = (act_prob * p_dir[:, 1]).sum()
+            norm = act_prob.sum() + eps
+
+            bias_loss = torch.abs(exp_short / norm - exp_long / norm)
+
+        # ===============================
+        # 9. total loss
+        # ===============================
+        total_loss = (
+            loss_main +
+            self.cfg.lambda_trig * loss_trig +
+            self.cfg.lambda_dir  * loss_dir +
+            bias_lambda * bias_loss
+        )
+
         return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
+
+    # def compute_combined_loss(self, logits_trig, logits_dir, yb, rb):
+    #     """
+    #     平滑优化版：Soft Magnitude-Aware MTL Loss
+    #     解决硬阶跃、权重爆炸和梯度饥饿问题。
+    #     """
+    #     # --- 0. 准备基础目标 ---
+    #     t_trig, t_dir, act_mask = self.get_targets(yb)
+        
+    #     # --- 1. 幅度权重平滑化 (Log Compression) ---
+    #     # 使用 log(1+x) 压缩大波动的权重，防止 alpha^2 级别的爆炸
+    #     mag_weights = 1.0 + torch.log1p(self.cfg.mag_alpha * torch.abs(rb))
+    #     mag_weights = torch.clamp(mag_weights, max=self.cfg.mag_limit)
+
+    #     # --- 2. 软化子任务 Loss (Sub-task Soft Loss) ---
+    #     # 使用归一化的幅度权重计算基础子任务
+    #     loss_trig_raw = F.cross_entropy(logits_trig, t_trig, weight=self.weights['trig'], reduction='none')
+    #     loss_trig = (loss_trig_raw * (mag_weights / mag_weights.mean())).mean()
+
+    #     loss_dir = torch.tensor(0.0, device=self.device)
+    #     if act_mask.any():
+    #         loss_dir_raw = F.cross_entropy(logits_dir[act_mask], t_dir[act_mask], weight=self.weights['dir'], reduction='none')
+    #         mw_act = mag_weights[act_mask]
+    #         loss_dir = (loss_dir_raw * (mw_act / mw_act.mean())).mean()
+
+    #     # --- 3. 融合 3-Class 概率 ---
+    #     p_trig = torch.softmax(logits_trig, dim=1)
+    #     p_dir = torch.softmax(logits_dir, dim=1)
+    #     # [B, 3] 顺序: 0:Short, 1:Neutral, 2:Long
+    #     fused_probs = torch.stack([
+    #         p_trig[:, 1] * p_dir[:, 0], 
+    #         p_trig[:, 0],               
+    #         p_trig[:, 1] * p_dir[:, 1]  
+    #     ], dim=1)
+
+    #     # --- 4. 核心：软化非对称惩罚 (Soft Penalty) ---
+    #     # 不再使用 argmax，而是根据“分错方向的概率”来计算惩罚
+    #     p_short, p_neutral, p_long = fused_probs[:, 0], fused_probs[:, 1], fused_probs[:, 2]
+        
+    #     # 定义惩罚项 penalty = 1.0 + 额外开销
+    #     soft_penalty = torch.ones_like(p_neutral)
+        
+    #     # 真实标签为趋势 (Long/Short) 时的惩罚逻辑
+    #     is_long = (yb == 2)
+    #     is_short = (yb == 0)
+        
+    #     if is_long.any():
+    #         # Long 样本的风险：预测为 Short 的概率 (Fatal) + 预测为 Neutral 的概率 (Miss)
+    #         soft_penalty[is_long] += (p_short[is_long] * self.cfg.flip_penalty + 
+    #                                   p_neutral[is_long] * self.cfg.miss_penalty)
+            
+    #     if is_short.any():
+    #         # Short 样本的风险：预测为 Long 的概率 (Fatal) + 预测为 Neutral 的概率 (Miss)
+    #         soft_penalty[is_short] += (p_long[is_short] * self.cfg.flip_penalty + 
+    #                                    p_neutral[is_short] * self.cfg.miss_penalty)
+
+    #     # --- 5. 🚀 改进的耦合惩罚 (Additive Coupling) ---
+    #     # 只有在“真正的方向错误概率”较大时才施加额外回报加权，且改乘法为加法
+    #     soft_flip_prob = torch.where(is_long, p_short, torch.where(is_short, p_long, 0.0))
+    #     coupling_weight = soft_flip_prob * torch.abs(rb) * self.cfg.mag_alpha
+
+    #     # --- 6. 最终复合权重归一化 ---
+    #     # 复合权重 = 幅度加权 + 错误倾向惩罚 + 回报耦合
+    #     combined_weights = mag_weights + soft_penalty + coupling_weight # 改为加法结构更稳定
+    #     combined_weights = combined_weights / (combined_weights.mean() + 1e-8) # 维持梯度预算
+
+    #     sample_main_loss = F.nll_loss(torch.log(fused_probs + 1e-10), yb, weight=self.weights['main'], reduction='none')
+    #     loss_main = (sample_main_loss * combined_weights).mean()
+
+    #     # --- 7. 对称性正则 (保持不变) ---
+    #     bias_loss = torch.zeros((), device=logits_trig.device)
+    #     act_p = (p_trig[:, 1] > 0.5)
+    #     if act_p.any():
+    #         bias_loss = torch.abs(p_dir[act_p, 0].mean() - p_dir[act_p, 1].mean())
+
+    #     total_loss = loss_main + \
+    #                 (self.cfg.lambda_trig * loss_trig) + \
+    #                 (self.cfg.lambda_dir * loss_dir) + \
+    #                 (getattr(self.cfg, 'bias_lambda', 0.5) * bias_loss)
+        
+    #     return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
+
     
 class MTLLossTracker:
     def __init__(self, alpha=0.9):
@@ -574,7 +745,7 @@ def train_xgboost_engine(model, dl_tr, dl_va, logger, mtl_manager):
     x_train, y_train = dl_tr.dataset.X, dl_tr.dataset.y
     x_val, y_val = dl_va.dataset.X, dl_va.dataset.y
     
-    # 🌟 关键修正：确保 mtl_manager 已经针对当前数据初始化了 criteria
+    #  关键修正：确保 mtl_manager 已经针对当前数据初始化了 criteria
     # prepare_all 内部会设置 self.criteria['trig'] 等
     y_raw_train = y_train.cpu().numpy() if torch.is_tensor(y_train) else y_train
     mtl_manager.prepare_all(y_raw_train) 
@@ -585,7 +756,7 @@ def train_xgboost_engine(model, dl_tr, dl_va, logger, mtl_manager):
     # 3. 验证阶段
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # 此时 eval_epoch 内部调用 compute_combined_loss 就不会报 KeyError 了
-    va_loss, yv_true, yv_pred = eval_epoch(model, dl_va, device, mtl_manager)
+    va_loss, yv_true, yv_pred, yt_ret = eval_epoch(model, dl_va, device, mtl_manager)
     va_f1 = f1_score(yv_true, yv_pred, average="macro")
     
     logger.info(f"✅ XGBoost Train Done. Val F1: {va_f1:.4f}")
@@ -630,10 +801,10 @@ def train_engine(
         tr_loss, tr_total = 0.0, 0
         
         
-        # 🌟 1. 使用 with 语句接管 pbar，这样可以更精准地控制后缀
+        #  1. 使用 with 语句接管 pbar，这样可以更精准地控制后缀
         with tqdm(dl_tr, desc=f"Epoch {epoch}/{train_cfg.epochs}", ncols=120, leave=False) as pbar:
-            for i, (xb, yb) in enumerate(pbar):
-                xb, yb = xb.to(device), yb.to(device)
+            for i, (xb, yb, rb) in enumerate(pbar):
+                xb, yb, rb = xb.to(device), yb.to(device), rb.to(device)
                 # yb: [B]
                 cnt_total = yb.numel()
                 cnt_action = (yb != 1).sum().item()
@@ -656,8 +827,8 @@ def train_engine(
                 # 获取两个头的原始 Logits
                 logits_trig, logits_dir = model(xb, return_fused=False)
 
-                # 🌟 调用统一的 Loss 计算
-                loss, l_m, l_t, l_d, lam_d = mtl_manager.compute_combined_loss(logits_trig, logits_dir, yb)
+                #  调用统一的 Loss 计算
+                loss, l_m, l_t, l_d, lam_d = mtl_manager.compute_combined_loss(logits_trig, logits_dir, yb, rb)
 
                 # 6. 反向传播
                 optimizer.zero_grad(set_to_none=True)
@@ -668,10 +839,10 @@ def train_engine(
                 tr_loss += loss.item() * xb.size(0)
                 tr_total += xb.size(0)
 
-                # 🌟 2. 更新监测器
+                #  2. 更新监测器
                 tracker.update(l_m, l_t, l_d, train_cfg.lambda_trig, lam_d)
 
-                # 🌟 3. 每 N 步更新进度条后缀，而不是打印新行
+                #  3. 每 N 步更新进度条后缀，而不是打印新行
                 if i % 10 == 0:
                     r = tracker.get_ratios()
                     # 这里的字段会显示在进度条右侧
@@ -688,7 +859,7 @@ def train_engine(
         tr_loss /= max(1, tr_total)
 
         # --- 验证 ---
-        va_loss, yv_true, yv_pred = eval_epoch(model, dl_va, device, mtl_manager)
+        va_loss, yv_true, yv_pred, yt_ret = eval_epoch(model, dl_va, device, mtl_manager)
         va_f1 = f1_score(yv_true, yv_pred, average="macro") if len(yv_true) else 0.0
         scheduler.step(va_loss)
 
@@ -699,7 +870,7 @@ def train_engine(
         if va_f1 > best_val_f1 + 1e-6:
             best_val_f1 = va_f1
             best_state_f1 = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            logger.info(f"🌟 [New Best F1] {va_f1:.4f}")
+            logger.info(f" [New Best F1] {va_f1:.4f}")
             progress_made = True # 标记有进展
 
         if va_loss < best_val_loss - 1e-6:
@@ -752,7 +923,15 @@ def evaluate_and_save_results(
         model.load_state_dict(state)
         if train_cfg.model_cfg.use_feature_selector:
             print_feature_importance(model, full_ds.feature_names, logger, suffix)
-        test_loss, yt_true, yt_pred = eval_epoch(model, dl_te, device, mtl_manager)
+        test_loss, yt_true, yt_pred, yt_ret = eval_epoch(model, dl_te, device, mtl_manager)
+
+        # 2. 调用存粹版评估
+        avg_ret, trade_count, win_rate= calculate_pure_trading_metrics(yt_true, yt_pred, yt_ret, logger)
+
+        # 3. 将结果存入 final_metrics，方便以后对比不同模型
+        final_metrics["pure_avg_ret"] = avg_ret
+        final_metrics["trade_count"] = trade_count
+        final_metrics["win_rate"] = win_rate
 
         # --- 以下逻辑 100% 保留，因为它们基于已经“还原”的三分类标签 ---
         report_dict = classification_report(yt_true, yt_pred, output_dict=True, zero_division=0)
@@ -764,8 +943,10 @@ def evaluate_and_save_results(
         logger.info(format_custom_report(report_dict))
         # --- 新增指标计算 ---
         t_f1, d_prec, f_rate = calculate_quant_metrics(yt_true, yt_pred, report_dict)
-        logger.info(f"🎯 [Quant Metrics] Trend-F1: {t_f1:.4f} | Dir-Precision: {d_prec:.4f} | Flip-Rate: {f_rate:.2%}")
+        logger.info(f"🎯 [Quant Metrics] Trend-F1: {t_f1:.4f} | Dir-Precision: {d_prec:.4f} | Flip-Rate: {f_rate:.2%} ")
+        logger.info(f"| avg_ret: {avg_ret} | trade_count: {trade_count}| win_rate: {win_rate}")
         logger.info(f"Test macro-F1: {test_f1:.4f}")
+
 
         # 统计标签比例 (保留)
         counts = Counter(yt_true)
@@ -786,7 +967,7 @@ def evaluate_and_save_results(
         pt_path = os.path.join(train_cfg.save_dir, f"model_{suffix.lower()}_info.pt")
         torch.save({
             "state_dict": state,
-            "feature_config_list": feature_config_info, # 🌟 保存配置
+            "feature_config_list": feature_config_info, #  保存配置
             "classes": classes.tolist(),
             "channel": full_ds.feature_count,
             "window": data_cfg.window,
@@ -809,7 +990,7 @@ def evaluate_and_save_results(
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
         if suffix == "Best_F1":
-            final_metrics = {
+            final_metrics.update({
                 "test_f1": test_f1,
                 "val_f1": val_score,
                 "test_loss": test_loss,
@@ -818,9 +999,9 @@ def evaluate_and_save_results(
                 "precision_long": report_dict.get('2', {}).get('precision', 0),
                 "recall_long": report_dict.get('2', {}).get('recall', 0),
                 "overfit_gap": abs(val_score - test_f1)
-            }
+            })
             
-    # 🌟 生成 Task Description (Single Mode)
+    #  生成 Task Description (Single Mode)
     primary_suffix = "Best_F1" if results.get("best_f1_state") is not None else "Best_Loss"
     
     task_desc = {
@@ -841,6 +1022,40 @@ def evaluate_and_save_results(
         
     logger.info(f"🎉 Task description saved to: {task_path}")
     return final_metrics
+
+def calculate_pure_trading_metrics(y_true, y_pred, returns, logger):
+    """
+    更存粹的评估方法：
+    1. 只要预测为 Long 或 Short 就视为入场。
+    2. PnL = 信号方向 * 实际收益率 (即：Long正确得正，Long错误得负)。
+    """
+    # 信号映射: 0(Short)->-1, 1(Neutral)->0, 2(Long)->1
+    signals = np.zeros_like(y_pred)
+    signals[y_pred == 2] = 1
+    signals[y_pred == 0] = -1
+    
+    # 核心计算：信号方向 * 实际回报
+    # 如果预测 Long(1) 且回报为 0.02 -> +0.02 (正确)
+    # 如果预测 Long(1) 且回报为 -0.02 -> -0.02 (错误)
+    # 如果预测 Short(-1) 且回报为 -0.02 -> +0.02 (正确)
+    pnl_per_sample = signals * returns
+    
+    # 筛选出所有发生了交易的样本
+    trade_mask = (signals != 0)
+    trades_pnl = pnl_per_sample[trade_mask]
+    num_trades = len(trades_pnl)
+    
+    if num_trades == 0:
+        logger.warning("⚠️ 本轮评估未产生任何交易信号 (Long/Short)")
+        return 0.0, 0
+    
+    # 计算核心指标
+    total_return = np.sum(trades_pnl)
+    avg_return_per_trade = np.mean(trades_pnl)
+    
+    # 辅助：胜率 (仅统计 PnL > 0 的交易)
+    win_rate = (trades_pnl > 0).sum() / num_trades
+    return avg_return_per_trade, num_trades, win_rate
 
 def print_feature_importance(model, feature_names, logger, subtask_name, tag=""):
     """
@@ -952,9 +1167,8 @@ def diagnose_confidence(results, model, dl_te, device, logger, save_dir):
         all_trues = []
 
         with torch.no_grad():
-            for xb, yb in dl_te:
+            for xb, yb, _ in dl_te:
                 xb = xb.to(device)
-                # 🌟 适配 V2：直接获取融合后的概率 [B, 3]
                 fused_preds, fused_probs = model(xb, return_fused=True) 
                 
                 all_probs.append(fused_probs.cpu().numpy())
@@ -1005,7 +1219,7 @@ def find_best_threshold(results, model, dl_te, device, logger):
     with torch.no_grad():
         for xb, yb in dl_te:
             xb = xb.to(device)
-            # 🌟 核心：使用融合后的 3 类概率 [Short(0), Neutral(1), Long(2)]
+            #  核心：使用融合后的 3 类概率 [Short(0), Neutral(1), Long(2)]
             _, fused_probs = model(xb, return_fused=True) 
             all_probs.append(fused_probs.cpu().numpy())
             all_trues.append(yb.numpy())
@@ -1061,21 +1275,24 @@ def find_best_threshold(results, model, dl_te, device, logger):
 @torch.no_grad()
 def eval_epoch(model, loader, device, mtl_manager):
     model.eval()
-    tl, yt, yp = 0.0, [], []
+    tl, yt, yp, yr = 0.0, [], [], [] # 🌟 增加 yr 用于存储 return_rate
 
-    for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)
+    for xb, yb, rb in loader:
+        xb, yb, rb = xb.to(device), yb.to(device), rb.to(device)
         logits_trig, logits_dir = model(xb, return_fused=False)
         
-        # 🌟 使用同一套计算逻辑，彻底避免“度量衡”不一致
-        loss, _, _, _, _ = mtl_manager.compute_combined_loss(logits_trig, logits_dir, yb)
+        # 使用 MTLManager 计算损失
+        loss, _, _, _, _ = mtl_manager.compute_combined_loss(logits_trig, logits_dir, yb, rb)
         tl += loss.item() * xb.size(0)
 
+        # 获取预测标签
         yp_batch, _ = model(xb, return_fused=True)
         yp.append(yp_batch.cpu().numpy())
         yt.append(yb.cpu().numpy())
+        yr.append(rb.cpu().numpy()) # 🌟 收集收益率
 
-    return tl/len(loader.dataset), np.concatenate(yt), np.concatenate(yp)
+    # 返回增加了一个返回值：拼接后的收益率数组
+    return tl/len(loader.dataset), np.concatenate(yt), np.concatenate(yp), np.concatenate(yr)
 
 def main(logger:logging.Logger):
     if os.path.exists(common.TRAIN_OUT_DIR):

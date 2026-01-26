@@ -89,7 +89,7 @@ class MarketScanner:
         # 一致性误差：每天表现的波动程度
         cons_err = math.sqrt(sum((s - avg_stability)**2 for s in segment_stabilities) / 3)
 
-        # 🌟 统一键名：确保这里定义的键，后面打印时能找得到
+        #  统一键名：确保这里定义的键，后面打印时能找得到
         return {
             "Symbol": symbol,
             "Vol_50": round(sorted(diffs)[int(len(diffs)*0.5)], 3), # 日常波动中位数
@@ -139,7 +139,7 @@ class MarketScanner:
         return {
             "Symbol": symbol,
             "Vol_Avg(%)": round(vol_avg, 3),
-            "Vol_50(%)": round(vol_50, 3),  # 🌟 我们最看重的：日常活跃度
+            "Vol_50(%)": round(vol_50, 3),  #  我们最看重的：日常活跃度
             "Vol_95(%)": round(vol_95, 3),  # ⚠️ 风险预警：极端插针强度
             "Stability": round(stability, 2), # 💎 稳定性：越高越适合网格
             "Z-Score": round(z_score, 2),
@@ -239,7 +239,7 @@ class MarketScanner:
         
         df = pd.DataFrame(results)
         
-        # 🌟 修复：使用上面定义的新键名进行排序和筛选
+        #  修复：使用上面定义的新键名进行排序和筛选
         # 我们优先按 Min_Stab (保底稳定性) 排序，选出每天都稳的币
         df_sorted = df.sort_values(by="Min_Stab", ascending=False)
         
@@ -247,7 +247,7 @@ class MarketScanner:
         print("📊 市场多维扫描报告 (分段一致性版)")
         print("="*100)
         
-        # 🌟 确保这里的列名与 analyze_coin 返回的 Key 完全一致
+        #  确保这里的列名与 analyze_coin 返回的 Key 完全一致
         display_cols = ["Symbol", "Turnover(M)", "Vol_50", "Min_Stab", "Avg_Stab", "Cons_Err", "Z-Score"]
         print(df_sorted[display_cols].to_string(index=False))
         print("="*100)

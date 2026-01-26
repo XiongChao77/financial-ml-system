@@ -38,7 +38,7 @@ class SymbolConfig:
     qty_step: float          # 数量精度 (交易所限制)
     tick_size: float         # 价格精度 (交易所限制)
     min_qty: float           # 最小下单量
-    # 🌟 费率参数 (由 API 填充)
+    #  费率参数 (由 API 填充)
     maker_fee: float = 0.0002   # 默认 0.02%
     taker_fee: float = 0.00055  # 默认 0.055%
     # 核心矩阵：存储每一层的系数
@@ -58,7 +58,7 @@ class SymbolConfig:
         cum_notional_factor = 0.0
         cum_gap = 0.0
         
-        # 🌟 计算双边手续费成本因子
+        #  计算双边手续费成本因子
         # 成本 = 开仓费率 + 平仓费率
         fee_cost_pct = self.maker_fee + self.maker_fee
         
@@ -73,7 +73,7 @@ class SymbolConfig:
             cum_notional_factor += (q_factor * p_factor)
             avg_p_factor = cum_notional_factor / cum_q_factor
             
-            # 🌟 计算该层“理论净利润率因子” (Net Profit Factor)
+            #  计算该层“理论净利润率因子” (Net Profit Factor)
             # 逻辑：(均价 * (1 + 利润目标)) - (均价 * (1 + 手续费成本))
             net_profit_factor = self.profit_target - fee_cost_pct
             
@@ -94,7 +94,7 @@ class SymbolState:
         self.last_order_ts = int(time.time() * 1000)
         # print(f"{sys._getframe().f_lineno} {time.time()} last_order_ts {self.last_order_ts}")
 
-        # 🌟 核心：有符号仓位 (正数=多头, 负数=空头, 0=无仓位)
+        #  核心：有符号仓位 (正数=多头, 负数=空头, 0=无仓位)
         self.signed_pos_qty = 0.0  
         self.avg_entry_price = 0.0
         self.base_price = 0
@@ -118,8 +118,8 @@ class SymbolState:
         # 统计
         self.total_profit = 0.0
         self.total_fees = 0.0
-        self.tp_count = 0           # 🌟 累计止盈次数
-        self.sl_count = 0           # 🌟 累计止损次数
+        self.tp_count = 0           #  累计止盈次数
+        self.sl_count = 0           #  累计止损次数
         self.tp_layer_dist = {}     # 例如: {1: 15, 2: 5, 3: 1}
 
 class MartingaleBot:
@@ -150,7 +150,7 @@ class MartingaleBot:
             info = self.engine.get_symbol_info(cfg.symbol) # 假设你在engine增加了此函数
             if info:
                 cfg.tick_size, cfg.qty_step, cfg.min_qty = info['tick_size'], info['qty_step'], info['min_qty']
-            # 2. 🌟 同步真实费率
+            # 2.  同步真实费率
             maker, taker = self.engine.get_real_fee_rate(cfg.symbol)
             cfg.maker_fee = maker
             cfg.taker_fee = taker
@@ -224,7 +224,7 @@ class MartingaleBot:
                     q_total = m.base_qty * row['cum_q_factor']
                     total_notional = q_total * avg_p
                     
-                    # 🌟 计算该层离场时的“净利润”
+                    #  计算该层离场时的“净利润”
                     # 公式：总名义价值 * 净利润率因子
                     net_profit_u = total_notional * row['net_profit_factor']
                     
@@ -355,7 +355,7 @@ class MartingaleBot:
         # 5. 计算冗余平仓数量 (1.001倍 + reduceOnly 确保全平)
         full_qty = m.base_qty * final_layer['cum_q_factor'] * 1.001
         sl_qty = round(full_qty / m.conf.qty_step) * m.conf.qty_step
-        # 🌟 增加打印信息：监控 SL 核心参数
+        #  增加打印信息：监控 SL 核心参数
         # print(f"[{sys._getframe().f_lineno}] 🛡️ {m.symbol} SL Calc | Side: {side} | TheoAvgP: {theo_avg_p:.6f} | Dist: {dist:.6f} | SL_Price: {sl_price} | SL_Qty: {sl_qty} | TS: {m.last_order_ts}")
         return {
             "symbol": m.symbol,
@@ -364,7 +364,7 @@ class MartingaleBot:
             "qty": str(sl_qty),
             "price": str(sl_price),
             "orderLinkId": self.generate_order_link_id(m.last_order_ts, m.conf.max_layers, OrderLabel.SL),
-            "reduceOnly": True  # 🌟 必须开启，确保只减仓
+            "reduceOnly": True  #  必须开启，确保只减仓
         }
 
     #对称止损
@@ -381,16 +381,16 @@ class MartingaleBot:
         #     link_id=params['orderLinkId'],
         #     is_reduce=True # 内部对应 reduceOnly=True
         # )
-        # 🌟 注意：市价条件单在触发前不需要传 price，只需 triggerPrice
+        #  注意：市价条件单在触发前不需要传 price，只需 triggerPrice
         self.engine.place_order(
             symbol=params['symbol'],
             side=params['side'],
             qty=float(params['qty']),
-            price=None,                     # 🌟 市价单不设限价
-            triggerPrice=params['price'], # 🌟 传入触发价
+            price=None,                     #  市价单不设限价
+            triggerPrice=params['price'], #  传入触发价
             link_id=params['orderLinkId'],
             is_reduce=True,
-            order_type="Market",             # 🌟 显式指定 Market
+            order_type="Market",             #  显式指定 Market
             triggerDirection = 2 if self.is_long_account else 1
         )
         self.logger.info(f"🛡️ [{m.symbol}] 镜像止损单已就位 | 价格: {params['price']} | 数量: {params['qty']}")
@@ -433,14 +433,14 @@ class MartingaleBot:
             else: 
                 m.signed_pos_qty += signed_delta
                 if label == OrderLabel.TP:
-                    m.tp_count += 1  # 🌟 记录止盈
+                    m.tp_count += 1  #  记录止盈
                     m.tp_layer_dist[layer_count] = m.tp_layer_dist.get(layer_count, 0) + 1
                     m.last_result = OrderLabel.TP
                     m.last_result_updte = time.time()
                     m.loss_count = 0
                     self.logger.info(" 止盈触发 ")
                 elif label == OrderLabel.SL:
-                    m.sl_count += 1  # 🌟 记录止损
+                    m.sl_count += 1  #  记录止损
                     if m.last_result == OrderLabel.SL:
                         m.loss_count += 1
                     else:
@@ -572,7 +572,7 @@ class MartingaleBot:
                 self.logger.info(f"trade forbiden symbol {symbol} market_state {m.market_state.value}")
                 return
             m.order_submit_sl = False
-            # 🌟 核心：在此锁定基准锚点
+            #  核心：在此锁定基准锚点
             res = self.engine.http.get_tickers(category=self.engine.category, symbol=symbol)
             
             if res.get('retCode') == 0:
@@ -604,7 +604,7 @@ class MartingaleBot:
         """
         🚀 一次性获取当前账户下所有币种的活动挂单
         """
-        # 🌟 关键点：不传 symbol 参数，Bybit 会返回该 category 下的所有挂单
+        #  关键点：不传 symbol 参数，Bybit 会返回该 category 下的所有挂单
         res = self.engine.http.get_open_orders(category="linear", settleCoin="USDT")
         
         if res.get('retCode') == 0:
@@ -735,7 +735,7 @@ class MartingaleBot:
                     self.logger.debug(f" symbol {symbol} avg_entry_price {m.avg_entry_price} avgPrice {p['avgPrice']}")
                     m.signed_pos_qty = qty * (1 if p['side'] == 'Buy' else -1)
                     m.avg_entry_price = float(p['avgPrice'])
-                    # 🌟 传入同步回来的均价进行推算
+                    #  传入同步回来的均价进行推算
                     valid, ts, last_layer_count, total_position = self.recover_layer_from_history(symbol)
                     sync_result = False
                     if valid == False:
@@ -855,7 +855,7 @@ class MartingaleBot:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Gemini Martingale Bot V1")
     group = parser.add_mutually_exclusive_group(required=True)
-    # 🌟 简化为 -l 和 -s
+    #  简化为 -l 和 -s
     group.add_argument("-l", "--long", action="store_true", help="Run Long Account")
     group.add_argument("-s", "--short", action="store_true", help="Run Short Account")
     
