@@ -34,7 +34,7 @@ class BinanceDataFeed:
         if not data: return None
         
         cols = [
-            "open_time_ms", "open", "high", "low", "close", "volume", 
+            "open_time_ms_utc", "open", "high", "low", "close", "volume", 
             "close_time_ms", "quote_asset_volume", "number_of_trades", 
             "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
         ]
@@ -46,7 +46,7 @@ class BinanceDataFeed:
         df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
         
         # 生成时间字符串 (仅用于日志或调试，计算尽量用 ms)
-        df["open_time_date_utc"] = pd.to_datetime(df["open_time_ms"], unit="ms", utc=True)\
+        df["open_time_date_utc"] = pd.to_datetime(df["open_time_ms_utc"], unit="ms", utc=True)\
                                     .dt.strftime("%Y-%m-%d %H:%M:%S")
         return df
 
@@ -109,8 +109,8 @@ class BinanceDataFeed:
         
         if df is not None and not df.empty:
             # 3. 去重并存入缓存
-            df.drop_duplicates("open_time_ms", inplace=True)
-            df.sort_values("open_time_ms", inplace=True)
+            df.drop_duplicates("open_time_ms_utc", inplace=True)
+            df.sort_values("open_time_ms_utc", inplace=True)
             df.reset_index(drop=True, inplace=True)
             
             self.local_cache = df
@@ -143,7 +143,7 @@ class BinanceDataFeed:
             self.local_cache = pd.concat([self.local_cache, new_df], ignore_index=True)
             
             # 4. 安全清洗 (去重 + 排序)
-            self.local_cache.drop_duplicates("open_time_ms", inplace=True)
+            self.local_cache.drop_duplicates("open_time_ms_utc", inplace=True)
             
             # 5. 内存管理 (剪枝)
             # 如果缓存超过最大长度，切掉头部的旧数据

@@ -1,21 +1,23 @@
 import MetaTrader5 as mt5
 import logging
+from datetime import datetime
 from trade.strategy.base_executor import BaseExecutor
 from trade.strategy.strategy_ml import PositionDir
 
 class MT5Executor(BaseExecutor):
-    def __init__(self, symbol, magic):
+    def __init__(self, path, symbol, magic, logger):
         self.symbol = symbol
         self.magic = magic
         self.stop_threshold_pct = 0.01 # 默认 1% 止损阈值
-        self.logger = logging.getLogger("MT5Executor")
+        self.logger = logger
         
-        if not mt5.initialize():
+        if not mt5.initialize(path=path):
             self.logger.error(f"❌ 初始化失败! 错误码: {mt5.last_error()}")
             raise RuntimeError("MT5 初始化失败")
         
         # 确保品种已在市场报价中
-        mt5.symbol_select(self.symbol, True)
+        if not mt5.symbol_select(self.symbol, True):
+            raise RuntimeError(f"{symbol} not support")
 
     def update_context(self, stop_threshold_pct):
         """同步来自 BrainBase 的实时止损设置"""
@@ -40,6 +42,11 @@ class MT5Executor(BaseExecutor):
         # 修正：返回 pos.price_open (开仓均价) 而不是 pos.volume
         # 这样 ftmo_turtle.py 里的 last_price 才能拿到正确的值
         return direction, 1, pos.price_open
+
+    def get_server_time(self):
+        tick = mt5.symbol_info_tick(self.symbol)
+        server_time = datetime.fromtimestamp(tick.time)
+        return server_time
 
     def user_order(self, size, is_buy, stop_loss=None):
         symbol_info = mt5.symbol_info(self.symbol)
