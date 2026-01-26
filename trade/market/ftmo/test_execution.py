@@ -8,7 +8,7 @@ import MetaTrader5 as mt5
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", '..', '..'))
 
-from trade.market.ftmo.ftmo_executor import MT5Executor
+from trade.market.ftmo.mt5_executor import MT5Executor
 from Quant.trade.market.ftmo.market_ml import LiveConfig
 from trade.strategy.strategy_ml import PositionDir
 

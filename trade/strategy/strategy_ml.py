@@ -185,7 +185,6 @@ class FtmoBrain(BrainBase):
             if target_dir == PositionDir.FLAT or sl_pct <= 0:
                 final_order_qty = 0.0
             else:
-                # --- 关卡 A: ATR 基础仓位 ---
                 base_pct = self.trade_risk 
                 
                 intended_qty = (base_pct * state.account_balance) / state.price

@@ -27,24 +27,24 @@ pd.set_option("display.max_colwidth", None)  # 单元格内容不截断
 # ============================================================
 class LiveConfig:
     # 交易品种映射
-    SYMBOL_BINANCE = "DOGEUSDT"  # 数据源品种
-    SYMBOL_FTMO = "DOGEUSD"      # 交易执行品种 (FTMO通常是 BTCUSD)
+    SYMBOL_BINANCE = "ETHUSDT"  # 数据源品种
+    SYMBOL_FTMO = "ETHUSD"      # 交易执行品种 (FTMO通常是 BTCUSD)
     
     # 时间周期 (分钟)
     TIMEFRAME = common.interval
     allow_short = True
     allow_long = True
     holdbar = common.PREDICT_NUM#PREDICT_NUM
-    thresh: float =None#0.5#None#0.45
+    thresh: float =0.4#0.5#None#0.45
     commission = 0.05   # 0.1 = 0.1%  .can't be 0
     cash = 10000
     stop_loss_long = 0.03  # 0-1
     stop_loss_short = 0.015  # 0-1
-    atr_sl_mult_long = 5 #2.5
-    atr_sl_mult_short = 2.5 #2.5
+    atr_sl_mult_long = 8 # 5
+    atr_sl_mult_short = 5 #2.5
     take_profit = 0.99 #止盈. 0 - n倍
     trade_risk = 0.5     #0-1
-    max_daily_loss_pct = 0.025
+    max_daily_loss_pct = 0.03
 
     mt5_path = r"C:\Program Files\Five Percent Online MetaTrader 5\terminal64.exe"
     max_layers = 1
@@ -88,7 +88,7 @@ class LiveBot:
         )
         #strategy
         self.brain = FtmoBrain(
-            self,
+            self.executor,
             trade_risk=LiveConfig.trade_risk,
             max_layers=LiveConfig.max_layers,
             holdbar=LiveConfig.holdbar,
@@ -146,7 +146,7 @@ class LiveBot:
         
         if self.last_candle_time == current_candle_time:
             # 时间没变，说明没有新 K 线收盘 -> 跳过
-            pass#return 
+            return 
             
         self.logger.info(f"✨ New Candle Closed: {current_candle_time} | Buffer Size: {len(df)}")
         

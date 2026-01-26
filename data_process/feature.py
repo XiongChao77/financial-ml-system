@@ -1693,7 +1693,7 @@ FCWAP         = FeatureContainer(FeatureWAP, **{"vwap_windows": [7], "add_bias":
 FCCFM         = FeatureContainer(FeatureCFM, **{"cmf_windows": [25]})
 FCMFI         = FeatureContainer(FeatureMFI, **{"mfi_windows": [25]})
 FCATS         = FeatureContainer(FeatureATS, **{})
-FCATR         = FeatureContainer(FeatureATRRegime, windows = [14, 16, 1000 , 2000, 5000])
+FCATR         = FeatureContainer(FeatureATRRegime, windows = [14])   #14, 16, 1000 , 2000, 5000
 
 # --- 4. K线形态与原始数据 ---
 FCCandle      = FeatureContainer(FeatureCandle, **{})

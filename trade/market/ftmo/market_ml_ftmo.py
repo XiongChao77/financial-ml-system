@@ -44,9 +44,9 @@ class LiveConfig:
     atr_sl_mult_short = 2.5 #2.5
     take_profit = 0.99 #止盈. 0 - n倍
     trade_risk = 0.5     #0-1
-    max_daily_loss_pct = 0.025
+    max_daily_loss_pct = 0.04
 
-    mt5_path = r"C:\Program Files\Five Percent Online MetaTrader 5\terminal64.exe"
+    mt5_path = r"C:\Program Files\FTMO Global Markets MT5 Terminal\terminal64.exe"
     max_layers = 1
     # MT5 魔法数字
     MAGIC_NUMBER = 888888
@@ -88,7 +88,7 @@ class LiveBot:
         )
         #strategy
         self.brain = FtmoBrain(
-            self,
+            self.executor,
             trade_risk=LiveConfig.trade_risk,
             max_layers=LiveConfig.max_layers,
             holdbar=LiveConfig.holdbar,
@@ -146,7 +146,7 @@ class LiveBot:
         
         if self.last_candle_time == current_candle_time:
             # 时间没变，说明没有新 K 线收盘 -> 跳过
-            pass#return 
+            return 
             
         self.logger.info(f"✨ New Candle Closed: {current_candle_time} | Buffer Size: {len(df)}")
         

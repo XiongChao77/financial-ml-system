@@ -10,8 +10,8 @@ from data_process.regime_discovery import LabelRegimeAnalyzer
 def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST):
     file = common.origin_data_path
     # 1. 获取周期字符串并转为毫秒
-    interval_str = get_interval_from_filename(file)
-    interval_ms = get_interval_ms(interval_str)
+    interval_str = common.get_interval_from_filename(file)
+    interval_ms = common.get_interval_ms(interval_str)
     
     # 2. 存入元数据，方便 attach_label_v2 和后续模型使用
     metadata = {
@@ -90,40 +90,6 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     logger.info(f"📍 周期识别: {interval_str}")
     logger.info(f"📍 配置已写入: {meta_path}")
 
-
-def get_interval_from_filename(path: str) -> str:
-    """
-    从路径中提取时间周期 (如 ETHUSDT_3m.csv -> 3m)
-    """
-    filename = os.path.basename(path)
-    # 匹配 1s, 15s, 1m, 3m... 1M 等格式
-    match = re.search(r'_(\d+[smhdwM])\.csv', filename)
-    if match:
-        return match.group(1)
-    return "unknown"
-
-def get_interval_ms(interval_str: str) -> int:
-    """
-    将周期字符串转换为毫秒数
-    支持: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
-    """
-    # 定义基础单位（毫秒）
-    units = {
-        's': 1000,
-        'm': 60 * 1000,
-        'h': 60 * 60 * 1000,
-        'd': 24 * 60 * 60 * 1000,
-        'w': 7 * 24 * 60 * 60 * 1000,
-        'M': 30 * 24 * 60 * 60 * 1000  # 按照标准 30 天计算
-    }
-    
-    # 使用正则表达式拆分数字和单位
-    match = re.match(r'(\d+)([smhdwM])', interval_str)
-    if not match:
-        return 0
-    
-    value, unit = match.groups()
-    return int(value) * units[unit]
 
 if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
