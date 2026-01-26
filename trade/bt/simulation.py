@@ -28,8 +28,6 @@ class PandasDataWithPred(bt.feeds.PandasData):
     lines = (
         "pred",
         "pred_prob",
-        "threshold",       # 动态止盈阈值
-        "stop_threshold",  # 动态止损阈值
         'label',
         "atr",
         "slow_atr",
@@ -38,11 +36,9 @@ class PandasDataWithPred(bt.feeds.PandasData):
     params = (
         ("pred", -1),
         ("pred_prob", -1),
-        ("threshold", -1),      # 自动匹配列名
         ("atr", -1),      # 自动匹配列名
         ("slow_atr", -1),      # 自动匹配列名
         ("vol_regime", -1),      # 自动匹配列名
-        ("stop_threshold", -1), # 自动匹配列名
         ("label", -1),
     )
 
@@ -79,17 +75,17 @@ class Parameters:
     allow_short = True
     allow_long = True
     holdbar = PREDICT_NUM#PREDICT_NUM
-    thresh: float =None#0.5#None#0.45
+    thresh: float =0.4#0.5#None#0.45
     commission = 0.05   # 0.1 = 0.1%  .can't be 0
     cash = 10000
     stop_loss = 0.5  # 0-1
     stop_loss_long = 0.03  # 0-1
     stop_loss_short = 0.015  # 0-1
-    atr_sl_mult_long = 5 #2.5
-    atr_sl_mult_short = 2.5 #2.5
+    atr_sl_mult_long = 8 # 5
+    atr_sl_mult_short = 5 #2.5
     take_profit = 0.99 #止盈. 0 - n倍
-    trade_risk = 0.5     #0-1
-    max_daily_loss_pct = 0.025
+    trade_risk = 0.99     #0-1
+    max_daily_loss_pct = 0.03
 
 def main(logger:logging.Logger):
     logger.info(
@@ -133,14 +129,6 @@ def main(logger:logging.Logger):
             logger.error("No valid predictions found in the entire dataset!")
             sys.exit(1)
 
-        # B. 【关键修改】调用封装函数计算动态阈值
-        # 这会自动在 df_with_pred 中生成 'threshold' 和 'stop_threshold' 两列
-        # 且使用的参数 (VOL_MULTIPLIER 等) 默认与 common.py 中定义的训练参数完全一致
-        df_with_pred = calculate_thresholds(df_with_pred)
-
-        # 不过滤，保持与实盘一致
-        # df_with_pred = df_with_pred.dropna(subset=["pred", "threshold", "stop_threshold"]).copy()
-
         logger.info(
             f"Backtest range: {df_with_pred['open_time_date_utc'].min()} to {df_with_pred['open_time_date_utc'].max()}"
         )
@@ -178,14 +166,13 @@ def main(logger:logging.Logger):
         low="low",
         close="close",
         volume="volume",
-        threshold="threshold",
         atr = "atr_14",
         slow_atr = "atr_5000",
         # vol_regime = "vol_regime_100",
         label = "label",
         openinterest=-1,
         nocase=True,
-        # fromdate=datetime(2025, 10, 1),
+        # fromdate=datetime(2022, 10, 1),
         # todate=datetime(2023, 1, 1),
     )
 
@@ -385,8 +372,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path):
     logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% ")
     logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
-    logger.info(f"Para    | PREDICT_NUM: {CANDLESTICK_NUM}| PREDICT_NUM: {PREDICT_NUM} | VOL_MULTIPLIER: {VOL_MULTIPLIER} | STOP_MULTIPLIER_RATE: {STOP_MULTIPLIER_RATE}")
-    logger.info(f"Para    | symbol: {symbol} | interval: {interval}| STOP_MULTIPLIER_RATE: {STOP_MULTIPLIER_RATE}")
+    logger.info(f"Para    | symbol: {symbol} | interval: {interval}| PREDICT_NUM: {CANDLESTICK_NUM}| PREDICT_NUM: {PREDICT_NUM} ")
+    logger.info(f"Para    | VOL_MULTIPLIER_LONG: {VOL_MULTIPLIER_LONG} | STOP_MULTIPLIER_RATE_LONG: {STOP_MULTIPLIER_RATE_LONG}| VOL_MULTIPLIER_SHORT: {VOL_MULTIPLIER_SHORT}| STOP_MULTIPLIER_RATE_SHORT: {STOP_MULTIPLIER_RATE_SHORT}")
     log_parameters(Parameters,logger)
     logger.info("-" * 80)
 

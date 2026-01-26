@@ -29,14 +29,10 @@ class PandasDataWithPred(bt.feeds.PandasData):
     lines = (
         "pred",
         "pred_prob",
-        "threshold",       # 动态止盈阈值
-        "stop_threshold",  # 动态止损阈值
     )
     params = (
         ("pred", -1),
         ("pred_prob", -1),
-        ("threshold", -1),      # 自动匹配列名
-        ("stop_threshold", -1), # 自动匹配列名
     )
 
 class Parameters:

@@ -8,7 +8,6 @@ class MT5Executor(BaseExecutor):
     def __init__(self, path, symbol, magic, logger):
         self.symbol = symbol
         self.magic = magic
-        self.stop_threshold_pct = 0.01 # 默认 1% 止损阈值
         self.logger = logger
         
         if not mt5.initialize(path=path):
@@ -18,10 +17,6 @@ class MT5Executor(BaseExecutor):
         # 确保品种已在市场报价中
         if not mt5.symbol_select(self.symbol, True):
             raise RuntimeError(f"{symbol} not support")
-
-    def update_context(self, stop_threshold_pct):
-        """同步来自 BrainBase 的实时止损设置"""
-        self.stop_threshold_pct = stop_threshold_pct
 
     def get_account_equity(self):
         """用于每日风控审计"""
@@ -114,7 +109,7 @@ class MT5Executor(BaseExecutor):
         target_value = abs(target_pct) * equity
         size = target_value / tick.bid # 将金额转换为币数
         
-        return self.user_order(size, target_is_buy, stop_loss=self.stop_threshold_pct)
+        return self.user_order(size, target_is_buy)
 
     def user_close(self, **kwargs):
         """全平当前 Magic 订单"""
