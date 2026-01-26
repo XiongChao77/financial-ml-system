@@ -47,6 +47,7 @@ class LiveConfig:
     max_daily_loss_pct = 0.04
 
     mt5_path = r"C:\Program Files\FTMO Global Markets MT5 Terminal\terminal64.exe"
+    tarin_out_path = os.path.join(common.PROJECT_DIR, r"output\FTMO")
     max_layers = 1
     # MT5 魔法数字
     MAGIC_NUMBER = 888888
@@ -69,7 +70,7 @@ class LiveBot:
 
         self._log_startup_info(log_path)
         self.executor = mt5_executor.MT5Executor(LiveConfig.mt5_path,LiveConfig.SYMBOL_FTMO, LiveConfig.MAGIC_NUMBER,logger= self.logger)
-        self.model_handler = model_loader.ModelHandler() # 自动加载训练好的模型
+        self.model_handler = model_loader.ModelHandler(tarin_out_path = LiveConfig.tarin_out_path) # 自动加载训练好的模型
 
         # 1. 设置参数
         self.interval_ms = common.get_interval_ms(LiveConfig.TIMEFRAME) 
