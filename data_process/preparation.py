@@ -19,8 +19,10 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
         "interval_ms": interval_ms, # <--- 新增
         "candlestick_num": common.CANDLESTICK_NUM,
         "predict_num": common.PREDICT_NUM,
-        "vol_multiplier": common.VOL_MULTIPLIER,
-        "stop_multiplier_rate": common.STOP_MULTIPLIER_RATE,
+        "vol_multiplier_long": common.VOL_MULTIPLIER_LONG,
+        "stop_multiplier_rate_long": common.STOP_MULTIPLIER_RATE_LONG,
+        "vol_multiplier_short": common.VOL_MULTIPLIER_SHORT,
+        "stop_multiplier_rate_short": common.STOP_MULTIPLIER_RATE_SHORT,
     }
 
     df = pd.read_csv(file)
@@ -42,9 +44,9 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
         analyzer = LabelRegimeAnalyzer(df, interval_ms, common.symbol,common.interval)
         
         # 定义更精细的步长以捕捉梯度变化
-        vol_range = np.linspace(0.2, 2.0, 19)
+        vol_range = np.linspace(1.5, 3, 15)
         # vol_range = np.linspace(1.25, 1.45, 5) 
-        stop_range = np.linspace(0.3, 1.0, 8)
+        stop_range = np.linspace(0.1, 0.4, 15)
         
         analyzer.run_parameter_sweep(vol_range, stop_range)
         analyzer.analyze_and_plot(output_dir= common.PERSISTENCE_DIR)
@@ -56,7 +58,8 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     
     logger.info("\n=== 动态标签分布统计 ===")
     logger.info(f"阈值已保存至列: 'threshold'")
-    logger.info(f"阈值范围: Min={df['threshold'].min():.4f}, Max={df['threshold'].max():.4f}, Mean={df['threshold'].mean():.4f}")
+    logger.info(f"阈值范围: Min={df['threshold_long'].min():.4f}, Max={df['threshold_long'].max():.4f}, Mean={df['threshold_long'].mean():.4f}")
+    logger.info(f"阈值范围: Min={df['threshold_short'].min():.4f}, Max={df['threshold_short'].max():.4f}, Mean={df['threshold_short'].mean():.4f}")
     
     for label_val, cnt in counts.items():
         label_name = "下跌" if label_val == 0 else ("上涨" if label_val == 2 else ("震荡" if label_val == 1 else "INVALID" ))

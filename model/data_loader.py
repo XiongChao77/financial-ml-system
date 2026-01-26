@@ -7,7 +7,7 @@ from data_process import common
 
 #number_of_trades 和vloume高度重合，统计相关性低,quote_asset_volume和vloume高度重合.
 #taker_buy_quote_volume--taker_buy_base_volume,
-DROP_FEATURES =['threshold', 'stop_threshold', 'label', 'return_rate', 'open_time_ms_utc', 'open_time_date_utc',
+DROP_FEATURES =['threshold_long', 'stop_threshold_long','threshold_short', 'stop_threshold_short', 'label', 'return_rate', 'open_time_ms_utc', 'open_time_date_utc',
                  'close_time_ms_utc', 'ignore' ]
 LOW_CORRELATION_FEATURES = ['number_of_trades','quote_asset_volume', 'taker_buy_quote_volume']
 
