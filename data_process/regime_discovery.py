@@ -176,7 +176,7 @@ class LabelRegimeAnalyzer:
             # 实际分布
             ax.plot(vols, subset[cls], 'o-', label='Actual Distribution', color=colors[i], linewidth=3)
             # 高斯零假设
-            ax.plot(vols, gaussian_nulls[:, i], '--', label='Gaussian Null ($r \sim N(0,\sigma^2)$)', color='black', alpha=0.6)
+            ax.plot(vols, gaussian_nulls[:, i], '--', label='Gaussian Null ($r \ sim N(0,\sigma^2)$)', color='black', alpha=0.6)
             # 均匀零假设
             ax.axhline(1/3, color='blue', linestyle=':', label='Uniform Null (1/3)', alpha=0.4)
             
