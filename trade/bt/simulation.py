@@ -109,7 +109,7 @@ def main(logger:logging.Logger):
     # -----------------------------------------------------------
     try:
         # 初始化处理类
-        handler = model_loader.ModelHandler() #Best_F1/Best_Loss
+        handler = model_loader.ModelHandler(tarin_out_path=r"C:\Users\xc176\Desktop\Project\Quant\output\the5ers") #Best_F1/Best_Loss
         # 执行预测，获取结果和指标
         df_with_pred, model_stats = handler.predict(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None,
                                                        cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
@@ -167,7 +167,7 @@ def main(logger:logging.Logger):
         close="close",
         volume="volume",
         atr = "atr_14",
-        slow_atr = "atr_5000",
+        # slow_atr = "atr_5000",
         # vol_regime = "vol_regime_100",
         label = "label",
         openinterest=-1,
