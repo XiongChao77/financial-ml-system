@@ -377,7 +377,7 @@ class UnifiedGridBot:
             data = res.get('result', {})
             all_orders.extend(data.get('list', []))
             
-            # 🌟 检查是否还有下一页
+            #  检查是否还有下一页
             cursor = data.get('nextPageCursor')
             if not cursor: # 如果没有 cursor 了，说明抓完了
                 break
@@ -394,7 +394,7 @@ class UnifiedGridBot:
         if res_open.get('retCode') != 0: return
         on_chain_ids = {o['orderLinkId'] for o in res_open['result']['list']}
         
-        # 2. 🌟 批量获取历史成交订单 (Order History)
+        # 2.  批量获取历史成交订单 (Order History)
         # 一次拿 50 条，覆盖过去几分钟的成交绰绰有余
         res_hist = self.engine.http.get_order_history(category=self.engine.category, symbol=symbol, limit=50)
         history_map = {}
@@ -409,7 +409,7 @@ class UnifiedGridBot:
                 # 状态 A: 内存说在等买，但链上挂单里没了
                 if node.status == NodeStatus.WAITING_ENTRY and node.entry_id not in on_chain_ids:
                     
-                    # 🌟 核心检查：去批量抓取的历史映射表中查找
+                    #  核心检查：去批量抓取的历史映射表中查找
                     hist_order = history_map.get(node.entry_id)
                     
                     if hist_order:
@@ -420,7 +420,7 @@ class UnifiedGridBot:
                         # 手动补偿执行成交逻辑
                         self.handle_filled_order(symbol, node.entry_id, fill_price, node.qty)
                     else:
-                        # 🌟 备选逻辑：如果历史里也没有，说明订单被“手动撤销”或“系统废弃”了
+                        #  备选逻辑：如果历史里也没有，说明订单被“手动撤销”或“系统废弃”了
                         self.logger.error(f"🚨 [{symbol}] 订单 #{node.id} 彻底失踪（非成交，非挂单），需清理内存")
                         # 这种情况通常需要从内存删除该节点，否则网格会卡死在这层
                         # m.grid_nodes.pop(nid, None)
@@ -486,7 +486,7 @@ class UnifiedGridBot:
                 side=side,
                 orderType="Market",
                 qty=str(abs(size)),
-                reduceOnly=True # 🌟 核心：确保只减仓不反向开仓
+                reduceOnly=True #  核心：确保只减仓不反向开仓
             )
             
             if res.get('retCode') == 0:
@@ -526,7 +526,7 @@ class UnifiedGridBot:
                 p_idx = int(pos['positionIdx'])
                 size = pos['size']
                 
-                # 🌟 核心逻辑：市价单不需要价格，限价单使用标记价
+                #  核心逻辑：市价单不需要价格，限价单使用标记价
                 price = "" if use_market else pos['markPrice']
                 order_type = "Market" if use_market else "Limit"
                 
@@ -563,7 +563,7 @@ class UnifiedGridBot:
                 if s in info_map:
                     # 获取价格精度
                     self.markets[s].tick_size = float(info_map[s]['priceFilter']['tickSize'])
-                    # 🌟 获取数量步长 和 最小下单量
+                    #  获取数量步长 和 最小下单量
                     self.markets[s].config.qty_step = float(info_map[s]['lotSizeFilter']['qtyStep'])
                     self.markets[s].min_qty = float(info_map[s]['lotSizeFilter']['minOrderQty'])
                     self.check_profit_viability(s)
@@ -598,7 +598,7 @@ class UnifiedGridBot:
         ts = timestamp if timestamp else int(time.time())
         st = status.short
         sd = side.short
-        # 🌟 极致精简：[版本]:[币种]:[ID]:[时间戳]
+        #  极致精简：[版本]:[币种]:[ID]:[时间戳]
         return f"{self.version}:{short_sym}:{node_id}:{sd}:{st}:{ts}"
 
     def parse_order_link_id(self, order_link_id):

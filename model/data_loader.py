@@ -41,7 +41,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self.factory = common.FeatureFactory(feature_config_list, self.kline_interval_ms)
 
 
-        # 🌟 核心修改：增加特征过滤逻辑
+        #  核心修改：增加特征过滤逻辑
         if feature_cols is not None:
             # 由于 self.factory.all_feature_list 已是一维列表，直接转 set 进行高效匹配
             available_features = set(self.factory.all_feature_list)
@@ -171,6 +171,11 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         clean_features = [c for c in feature_cols if c not in DROP_FEATURES]
         cols = clean_features + ([label_col] if label_col and label_col in df.columns else []) + [self.time_col]
         
+        #  核心改动：把 return_rate 强制塞进 DataFrame 提取列表，但它不属于 clean_features
+        if 'return_rate' in df.columns:
+            if 'return_rate' not in cols:
+                cols.append('return_rate')
+
         df_work = df[cols].copy()
         if not self.is_live:
             df_work['orig_index'] = df.index
@@ -282,7 +287,17 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         if fail_label > 0:
             self.logger.warning(f"   - ❌ 丢弃 (标签无效/INVALID): {fail_label}")
         self.logger.info(f"   - ✅ 最终保留数量: {final_count} ({final_count/original_count:.2%})")
-        
+    
+        if 'return_rate' in df_work.columns:
+            # 使用与标签一致的切片逻辑：从 window-1 开始按 stride 采样
+            aligned_returns = df_work['return_rate'].values[self.window - 1 :: self.stride]
+            df_work.drop(columns=['return_rate'], inplace=True)
+            # 截取到与窗口数量一致
+            self.returns = aligned_returns[:original_count][final_mask]
+        else:
+            self.logger.warning("⚠️ df_work 中缺失 return_rate，回报率已设为 0")
+            self.returns = np.zeros(final_count)
+
         return X3d[final_mask], labels_all[final_mask], final_indices
 
     def _finalize_dataset(self, X_filtered, y_filtered, final_indices):
@@ -291,6 +306,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
 
         self.X = torch.from_numpy(X_filtered)
         self.y = torch.from_numpy(y_filtered).long()
+        self.returns = torch.from_numpy(self.returns).float()
         self.indices = final_indices
         # --- 自动打印统计信息供 Review ---
         if self.show_feature_distribution:
@@ -307,6 +323,16 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         if self.X is None or self.X.shape[0] == 0:
             self.logger.warning("⚠️ 没有数据可以进行统计复核。")
             return
+
+        num_features_in_data = self.X.shape[2]
+        num_feature_names = len(self.feature_names)
+
+        if num_features_in_data != num_feature_names:
+            msg = (f"❌ 维度不匹配！数据特征列数 ({num_features_in_data}) "
+                   f"与特征名称数量 ({num_feature_names}) 不一致。")
+            self.logger.critical(msg)
+            # 如果不一致，说明有特征（如 return_rate）误入，必须停止程序
+            raise RuntimeError(msg)
 
         # 提取最后一帧数据 [Batch, Feature]
         # X 的形状是 [N, Window, Feature]
@@ -338,7 +364,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         return self.X.shape[0]
 
     def __getitem__(self, i):
-        return self.X[i], self.y[i]
+        return self.X[i], self.y[i], self.returns[i]
 def should_regenerate_cache(cache_path, data_path, feature_file, data_cfg):
     """
     通过校验文件修改时间和配置哈希，决定是否需要重新生成缓存。

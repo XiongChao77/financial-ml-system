@@ -60,7 +60,7 @@ def plot_doge_vol_variance():
     # 短期平均波动 (震感强度)
     short_natr = natr_raw.rolling(short_w).mean()
     
-    # 3. 🌟 计算“波动的方差” (CV - 变异系数)
+    # 3.  计算“波动的方差” (CV - 变异系数)
     # 逻辑：长期波动的标准差 / 长期波动的均值
     long_natr_mean = natr_raw.rolling(long_w).mean()
     long_natr_std = natr_raw.rolling(long_w).std()

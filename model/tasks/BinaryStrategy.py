@@ -30,11 +30,11 @@ class BinaryStrategy(BaseTaskStrategy):
             return np.where(y == 2, 1, 0)
             
         elif self.task_type == "long-others":
-            # 🌟 看多 vs 其他：2(Long)->1, [0,1](Short/Neutral)->0
+            #  看多 vs 其他：2(Long)->1, [0,1](Short/Neutral)->0
             return (y == 2).astype(int)
             
         elif self.task_type == "short-others":
-            # 🌟 看空 vs 其他：0(Short)->1, [1,2](Neutral/Long)->0
+            #  看空 vs 其他：0(Short)->1, [1,2](Neutral/Long)->0
             return (y == 0).astype(int)
         
         else:
@@ -49,7 +49,7 @@ class BinaryStrategy(BaseTaskStrategy):
             mask = (y != 1)
             return X[mask], y[mask]
         
-        # 🌟 Trigger, long-others, short-others 均需要全量数据进行训练
+        #  Trigger, long-others, short-others 均需要全量数据进行训练
         return X, y
 
     # def prepare_resources(self, y_train_raw: np.ndarray):
@@ -67,7 +67,7 @@ class BinaryStrategy(BaseTaskStrategy):
         # 统计样本分布，仅用于日志
         counts = np.bincount(y_train_raw)
         
-        # 🌟 核心逻辑：手动设置权重向量
+        #  核心逻辑：手动设置权重向量
         # 假设 0 是多数类 (Others/Neutral)，1 是少数类 (Signal/Action)
         # 我们给 0 类基础权重 1.0，给 1 类显式的倍数惩罚
         if self.task_type == "direction":

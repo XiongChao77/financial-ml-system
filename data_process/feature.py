@@ -25,7 +25,7 @@ class FeatureBase(ABC):
             if method is None:
                 # 如果不压制，且 scale 为 1.0，直接返回以节省 CPU
                 return vals #if (scale == 1.0 or scale == None) else (vals / scale)
-            # 1. 🌟 动态确定信任半径 S
+            # 1.  动态确定信任半径 S
             if scale is None:
                 # 取当前窗口绝对值的分位数作为 S，代表“90% 的数据分布范围”
                 scale = np.nanpercentile(np.abs(vals), 95, keepdims=True)
@@ -81,7 +81,7 @@ class FeatureBase(ABC):
         # 2. 提取目标组数据，形状为 (Samples, Time, Group_Features)
         vals = X[:, :, target_indices]
         
-        # 3. 🌟 核心计算：跨时间轴 (axis=1) 和 特征轴 (axis=2) 进行池化统计
+        # 3.  核心计算：跨时间轴 (axis=1) 和 特征轴 (axis=2) 进行池化统计
         # 这样每一个 Batch 样本都会得到唯一的 [1, 1, 1] 形状的统计量
         group_mu = np.nanmean(vals, axis=(1, 2), keepdims=True)
         group_sigma = np.nanstd(vals, axis=(1, 2), keepdims=True)
@@ -135,7 +135,7 @@ class FeatureBase(ABC):
             return
         vals = X[:, :, target_indices]
         
-        # 1. 🌟 预处理：在算统计量前，先把原始值限制在 1% ~ 99% 分位数之间
+        # 1.  预处理：在算统计量前，先把原始值限制在 1% ~ 99% 分位数之间
         # 这样可以防止极端插针拉大标准差
         p_low = np.nanpercentile(vals, 1, axis=1, keepdims=True)
         p_high = np.nanpercentile(vals, 99, axis=1, keepdims=True)
@@ -154,7 +154,7 @@ class FeatureBase(ABC):
         target_indices = [factory._feature_index[f] for f in target_feature_cols]
         vals = X[:, :, target_indices]
         
-        # 1. 🌟 预处理：在算统计量前，先把原始值限制在 1% ~ 99% 分位数之间
+        # 1.  预处理：在算统计量前，先把原始值限制在 1% ~ 99% 分位数之间
         # 这样可以防止极端插针拉大标准差
         p_low = np.nanpercentile(vals, 1, axis=1, keepdims=True)
         p_high = np.nanpercentile(vals, 99, axis=1, keepdims=True)
@@ -569,7 +569,7 @@ class FeatureMA(FeatureBase):
         # 斜率：每个斜率的波动率差异极大，强制使用自缩放 + 长尾压制
         if self.ratio_features:
             for f in self.ratio_features:
-                # 🌟 这里使用带 suppress=True 的自缩放版本，防止分母塌陷和极端值
+                #  这里使用带 suppress=True 的自缩放版本，防止分母塌陷和极端值
                 self._normalize_z_score_rel(X, feature_cols, [f], f, factory=factory, method='log')
     def _min_history_request(self, kline_interval_ms: int) -> int:
         """
@@ -620,7 +620,7 @@ class FeatureRsi(FeatureBase):
         avg_loss = loss.ewm(alpha=1/float(self.period), adjust=False,
                             min_periods=self.period if self.strict else 1).mean()
 
-        # 2. 🌟 健壮性计算：直接处理 rs，不要 replace(0, np.nan)
+        # 2.  健壮性计算：直接处理 rs，不要 replace(0, np.nan)
         # 加上 EPS 仅仅是为了防止分母为 0 时的 RuntimeWarning 刷屏，逻辑判断会覆盖它
         rs = avg_gain / (avg_loss + EPS)
         rsi_values = np.where(avg_loss == 0, 100.0, 100.0 - (100.0 / (1.0 + rs)))
@@ -628,7 +628,7 @@ class FeatureRsi(FeatureBase):
         # 3. 处理死水行情 (涨跌均为 0)
         rsi_values = np.where((avg_gain == 0) & (avg_loss == 0), 50.0, rsi_values)
 
-        # 4. 🌟 赋值与 Strict 模式裁剪
+        # 4.  赋值与 Strict 模式裁剪
         col = f"{self.prefix}_{self.period}"
         
         # 只有当数据根数足够时才保留结果，否则置为 NaN
@@ -698,7 +698,7 @@ class FeatureKdj(FeatureBase):
         llv = low.rolling(window=self.n, min_periods=self.n if self.strict else 1).min()
         hhv = high.rolling(window=self.n, min_periods=self.n if self.strict else 1).max()
 
-        # --- 🌟 核心改进：处理 RSV 的除零风险 ---
+        # ---  核心改进：处理 RSV 的除零风险 ---
         diff = hhv - llv
         # 如果周期内最高等于最低，说明没有波动，RSV 设为 50
         rsv = np.where(diff == 0, 50.0, (close - llv) / (diff + EPS) * 100.0)
@@ -759,7 +759,7 @@ class FeatureATRRegime(FeatureBase):
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # 🌟 现在支持通过 windows 参数配置多个周期，例如 [14, 100, 1000]
+        #  现在支持通过 windows 参数配置多个周期，例如 [14, 100, 1000]
         self.windows = kwargs.get('windows', [14, 100, 1000])
         self.short_w = self.windows[0]  # 以第一个窗口作为“短期”基准
         self.long_w = self.windows[-1]  # 以最后一个窗口作为“长期”背景
@@ -926,7 +926,7 @@ class FeatureQavMa(FeatureBase):
         y_mean = sum_y / n
         slope = (sum_xy - n * x_mean * y_mean) / var_x
         
-        # 🌟 关键：因为没有用 log，为了保持不同价格/成交量下的可比性
+        #  关键：因为没有用 log，为了保持不同价格/成交量下的可比性
         # 我们将斜率“标准化”：即 这里的 slope 代表的是 相对于均值的变动比例
         # 这样 100 变成 110 和 10 变成 11 的斜率在量纲上才一致
         return slope / (y_mean + EPS)
@@ -946,7 +946,7 @@ class FeatureQavMa(FeatureBase):
             
             # --- 趋势斜率 (Slope): 取对数后再算斜率，解决 QAV 长尾问题 ---
             if self.add_slope:
-                # 🌟 这里不再是简单的 (ma - ma.shift)
+                #  这里不再是简单的 (ma - ma.shift)
                 # 而是使用回归函数，拟合过去 slope_step 长度内 ma_qav 的走向
                 # 这样即使最后一根 K 线是插针，由于前面几根线的支撑，斜率也不会乱跳
                 df[f'QAV_SLOPE_{w}'] = self._slope_reg_vectorized(ma_qav, self.slope_step)
@@ -1092,13 +1092,13 @@ class FeatureWAP(FeatureBase):
             rolling_qav = qav.rolling(w).sum()
             rolling_vol = vol.rolling(w).sum()
             
-            # 🌟 计算原始 VWAP：成交额 / 成交量
+            #  计算原始 VWAP：成交额 / 成交量
             # 安全防护：如果窗口内无成交量，VWAP 暂设为当前 close (或者 NaN)
             vwap_series = np.where(rolling_vol > EPS, rolling_qav / rolling_vol, close)
             vwap_col = f'VWAP_{w}'
             df[vwap_col] = vwap_series
             
-            # 🌟 计算 VWAP Bias：(当前价 / 平均成本) - 1
+            #  计算 VWAP Bias：(当前价 / 平均成本) - 1
             if self.add_bias:
                 bias_col = f'VWAP_Bias_{w}'
                 # 只有在 vwap 有效且大于 0 时计算偏离

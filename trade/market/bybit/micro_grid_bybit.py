@@ -313,7 +313,7 @@ class UnifiedGridBot:
         self.is_stopped = True
         self.stop_signal = True
         
-        # 🌟 改进点：不再循环 self.markets，而是执行地毯式平仓
+        #  改进点：不再循环 self.markets，而是执行地毯式平仓
         # 这样即使是历史遗留仓位也能一扫而光
         self.emergency_wipe_all_account_positions(use_market=True)
             
@@ -398,7 +398,7 @@ class UnifiedGridBot:
                 p_idx = int(pos['positionIdx'])
                 size = pos['size']
                 
-                # 🌟 核心逻辑：市价单不需要价格，限价单使用标记价
+                #  核心逻辑：市价单不需要价格，限价单使用标记价
                 price = "" if use_market else pos['markPrice']
                 order_type = "Market" if use_market else "Limit"
                 
@@ -414,7 +414,7 @@ class UnifiedGridBot:
                     side=side, 
                     qty=size, 
                     price=price,
-                    order_type=order_type, # 🌟 这里的参数名必须与引擎类定义一致
+                    order_type=order_type, #  这里的参数名必须与引擎类定义一致
                     link_id=f"CLOSE_{p_idx}_{int(time.time())}",
                     is_reduce=True, 
                     pos_idx=p_idx,
@@ -458,7 +458,7 @@ class UnifiedGridBot:
                 self.handle_filled_order(
                     order['symbol'], 
                     order['orderLinkId'], 
-                    float(order.get('avgPrice', order['price'])), # 🌟 优先使用成交均价 avgPrice
+                    float(order.get('avgPrice', order['price'])), #  优先使用成交均价 avgPrice
                     float(order['qty']),
                 )
 
@@ -475,7 +475,7 @@ class UnifiedGridBot:
 
         self.logger.info(f"⚡ [{symbol}] 索引 {index} ({side.value}) 成交 -> 触发平移")
 
-        # 2. 🌟 核心：更新网格中心 (Center Follows Price)
+        # 2.  核心：更新网格中心 (Center Follows Price)
         # 无论买单还是卖单成交，中心都移动到该成交位置
         # 例如：-1 买单成交，中心变为 -1。此时 -1 变成新的中轴，原本的 0 变成上方的卖单。
         with m.lock:
@@ -505,7 +505,7 @@ class UnifiedGridBot:
                 
                 # 更新持仓数量 (不影响成本均价)
                 m.current_pos_size = max(0, m.current_pos_size - qty)
-                # 🌟 核心修复：如果仓位清零，重置均价
+                #  核心修复：如果仓位清零，重置均价
                 if m.current_pos_size <= 0:
                     m.avg_entry_price = 0.0
                     self.logger.info(f"✨ [{symbol}] 仓位已结清，成本均价重置")
@@ -681,12 +681,12 @@ class UnifiedGridBot:
         price = self.get_price_by_index(symbol, index)
         if price <= 0: return
 
-        # 🌟 修复 A: 强制最小下单价值 (Notional Value)
+        #  修复 A: 强制最小下单价值 (Notional Value)
         # Bybit 线性合约通常要求单笔 > 5 USDT，我们设 5.5 以防万一
         safe_budget = max(budget, 5.5) 
         
         # 确定方向
-        # --- 🌟 趋势驱动的下单方向判定 ---
+        # ---  趋势驱动的下单方向判定 ---
         if index < center_index:
             side = OrderSide.BUY
         elif index > center_index:
