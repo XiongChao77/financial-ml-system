@@ -15,13 +15,13 @@ from model.models.fusion_wrapper import FusionWrapper
 # model_loader.py
 
 class ModelHandler:
-    def __init__(self, device=None, task_desc_path=None):
+    def __init__(self,tarin_out_path = TRAIN_OUT_DIR , device=None, task_desc_path=None):
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = logging.getLogger("trade")
         
         # 1. 读取 Task Index
         if task_desc_path is None:
-            task_desc_path = os.path.join(TRAIN_OUT_DIR, "task_description.json")
+            task_desc_path = os.path.join(tarin_out_path, "task_description.json")
             
         if not os.path.exists(task_desc_path):
             raise FileNotFoundError(f"Task Description not found: {task_desc_path}")

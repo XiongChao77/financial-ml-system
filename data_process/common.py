@@ -14,8 +14,8 @@ class Signal(IntEnum):
     LONG = 2
 
 #define model
-CANDLESTICK_NUM = 200   #160 best for LSTM
-PREDICT_NUM = 16
+CANDLESTICK_NUM = 128   #160 best for LSTM
+PREDICT_NUM = 12
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
 乘数 (Multiplier),阈值位置,含义
@@ -24,14 +24,16 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-VOL_MULTIPLIER = 1.7
-
-STOP_MULTIPLIER_RATE = 0.2
+# 建议在 common.py 中增加以下定义
+VOL_MULTIPLIER_LONG = 1.9
+STOP_MULTIPLIER_RATE_LONG = 0.2
+VOL_MULTIPLIER_SHORT = 1.9
+STOP_MULTIPLIER_RATE_SHORT = 0.2
 # label_decrease_weak =1 
 # label_increase_weak = 3
 model_train_rate = 0.8
-symbol = 'DOGEUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
-interval = '15m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+symbol = 'ETHUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
+interval = '30m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 log_level = logging.INFO
 
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -89,116 +91,61 @@ def attach_attr(df, feature_config_list, kline_interval_ms):
     FeatureFactory(feature_config_list, kline_interval_ms).generate(df)
 
 def attach_label(df, 
-                    interval_ms,
-                    candlestick_num=CANDLESTICK_NUM, 
-                    predict_num=PREDICT_NUM, 
-                    vol_multiplier=VOL_MULTIPLIER,
-                    stop_multiplier_rate=STOP_MULTIPLIER_RATE):
+                interval_ms,
+                candlestick_num=CANDLESTICK_NUM, 
+                predict_num=PREDICT_NUM, 
+                vol_mult_long=VOL_MULTIPLIER_LONG, 
+                vol_mult_short=VOL_MULTIPLIER_SHORT,
+                stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
+                stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
     """
-    融合版打标签逻辑：
-    1. 【时空对齐】：严格校验未来第 N 根 K 线的物理时间戳，处理数据断层。
-    2. 【路径依赖】：使用 High/Low 检查期间是否触发止损（来自 copy 版本）。
-    3. 【动态阈值】：基于波动率生成的 TP/SL 阈值。
+    基于路径依赖的非对称打标签逻辑
     """
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
     
-    # 1. 计算动态阈值 (生成 df['threshold'] 和 df['stop_threshold'])
-    df = calculate_thresholds(df, candlestick_num, predict_num, vol_multiplier, stop_multiplier_rate)
+    # 1. 计算非对称动态阈值
+    df = calculate_thresholds(df, candlestick_num, predict_num, 
+                               vol_mult_long, vol_mult_short, 
+                               stop_rate_long, stop_rate_short)
 
-    # 2. 物理时间锚定 (时空对齐核心)
+    # 2. 物理时间锚定 (保持不变)
     target_times = time_values + (predict_num * interval_ms)
     target_indices = np.searchsorted(time_values, target_times, side='left')
-    
-    # 构建有效性掩码：索引不越界且时间戳精确匹配
     in_bounds = target_indices < len(df)
     safe_idx = np.where(in_bounds, target_indices, 0)
-    actual_times = time_values[safe_idx]
-    final_valid_mask = in_bounds & (actual_times == target_times)
-    # # 直接覆盖原来的逻辑
-    # final_valid_mask = np.ones(len(df), dtype=bool)
+    final_valid_mask = in_bounds & (time_values[safe_idx] == target_times)
 
-    # 3. 计算未来收益率 (基于锚定点收盘价)
-    # pct_final 是从当前 close 到未来 T+predict_num 的 close 的变动
+    # 3. 计算未来收益与极致波动 (保持不变)
     future_close = np.where(final_valid_mask, df['close'].values[safe_idx], np.nan)
     pct_final = (future_close - df['close']) / df['close']
 
-    # 4. 计算期间极致波动 (用于路径依赖校验)
-    # 我们需要检查在 (t, t+predict_num] 期间，价格是否先触碰了止损
-    steps = (target_indices - np.arange(len(df))).clip(1, predict_num)
-    
-    # 提取未来窗口内的 High 和 Low (包含当前行之后的 predict_num 根)
     high_mtx = np.column_stack([df['high'].shift(-i).values for i in range(1, predict_num + 1)])
     low_mtx = np.column_stack([df['low'].shift(-i).values for i in range(1, predict_num + 1)])
     
-    # 计算累计极值
+    steps = (target_indices - np.arange(len(df))).clip(1, predict_num)
     future_high_max = np.maximum.accumulate(high_mtx, axis=1)[np.arange(len(df)), steps - 1]
     future_low_min = np.minimum.accumulate(low_mtx, axis=1)[np.arange(len(df)), steps - 1]
 
-    # 计算期间最大反向波动
-    max_drawdown = (future_low_min - df['close']) / df['close'] # 多单要看回撤
-    max_runup = (future_high_max - df['close']) / df['close']    # 空单要看反弹
+    max_drawdown = (future_low_min - df['close']) / df['close']
+    max_runup = (future_high_max - df['close']) / df['close']
 
-    # 5. 核心打标签逻辑 (融合 copy 中的路径检查)
-    # 做多条件：
-    # A. 时间对齐有效 
-    # B. 最终收益 > 止盈阈值 
-    # C. 期间最低价未跌破动态止损线 (max_drawdown > -stop_threshold)
+    # 4. 🌟 应用非对称逻辑
+    # 做多：用 Long 专属阈值
     cond_long = final_valid_mask & \
-                (pct_final > df['threshold']) & \
-                (max_drawdown > -df['stop_threshold'])
+                (pct_final > df['threshold_long']) & \
+                (max_drawdown > -df['stop_threshold_long'])
                 
-    # 做空条件：
-    # A. 时间对齐有效
-    # B. 最终收益 < -止盈阈值
-    # C. 期间最高价未突破动态止盈线 (max_runup < df['stop_threshold'])
+    # 做空：用 Short 专属阈值
     cond_short = final_valid_mask & \
-                 (pct_final < -df['threshold']) & \
-                 (max_runup < df['stop_threshold'])
+                 (pct_final < -df['threshold_short']) & \
+                 (max_runup < df['stop_threshold_short'])
 
-    # 6. 应用标签
+    # 5. 生成结果
     conditions = [~final_valid_mask, cond_short, cond_long]
     choices = [Signal.INVALID, Signal.SHORT, Signal.LONG]
-    
     df['label'] = np.select(conditions, choices, default=Signal.NEUTRAL).astype(int)
     
-    # ==============================================================================
-    # 🔍 【深度审计】打印原始 ms 与 物理跨度检查
-    # ==============================================================================
-    invalid_rows = df[df['label'] == Signal.INVALID]
-    num_invalid = len(invalid_rows)
-
-    print(f"\n📊 [Label Audit] 发现 {num_invalid} 个无效标签 (Signal.INVALID):")
-    
-    if num_invalid > 0:
-        sample_size = min(10, num_invalid)
-        print(f"📍 前 {sample_size} 个无效行明细 (含原始 ms):")
-        # 增加一列：物理差值 (Gap_ms)，用来定位到底跳了多少时间
-        print(f"{'Index':>8} | {'Raw MS':>15} | {'Target MS':>15} | {'Gap_ms':>10} | {'Reason'}")
-        print("-" * 85)
-        
-        # 预先获取整个时间序列的 numpy 数组用于快速计算
-        time_values = df['open_time_ms_utc'].values
-        
-        for idx, row in invalid_rows.head(sample_size).iterrows():
-            curr_ms = int(row['open_time_ms_utc'])
-            # 理想中，这根 K 线对应的预测终点时间
-            ideal_target_ms = curr_ms + (predict_num * interval_ms)
-            
-            # 使用 searchsorted 找出的实际索引
-            target_idx = np.searchsorted(time_values, ideal_target_ms, side='left')
-            
-            if target_idx < len(df):
-                actual_target_ms = time_values[target_idx]
-                gap_ms = actual_target_ms - ideal_target_ms
-                # 如果 gap_ms > 0，说明理想的时间点在数据里是空的
-                reason = f"Gap: {gap_ms}ms" if gap_ms > 0 else "Continuous"
-            else:
-                reason = "Out-of-Bounds"
-                gap_ms = "N/A"
-
-            print(f"{idx:8d} | {curr_ms:15d} | {ideal_target_ms:15d} | {str(gap_ms):>10} | {reason}")
-
     df['return_rate'] = pct_final 
     return df
 
@@ -206,19 +153,20 @@ def attach_triple_barrier_label(df,
                                  interval_ms,
                                  candlestick_num=CANDLESTICK_NUM, 
                                  predict_num=PREDICT_NUM, 
-                                 vol_multiplier=VOL_MULTIPLIER,
-                                 stop_multiplier_rate=STOP_MULTIPLIER_RATE):
+                                 vol_mult_long=VOL_MULTIPLIER_LONG, 
+                                 vol_mult_short=VOL_MULTIPLIER_SHORT,
+                                 stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
+                                 stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
     """
-    严苛版 Triple Barrier (混合价格触发):
-    1. 止盈 (TP): 使用未来 K 线的 Close 计算，要求收盘价必须达标。
-    2. 止损 (SL): 使用未来 K 线的 High/Low 计算，只要触碰即视为失败。
-    3. 判定顺序: 只有当【首次收盘达标止盈】的索引 早于 【首次触碰止损】的索引时，才标注信号。
+    严苛版非对称 Triple Barrier 标签
     """
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
     
-    # 1. 计算动态阈值
-    df = calculate_thresholds(df, candlestick_num, predict_num, vol_multiplier, stop_multiplier_rate)
+    # 1. 计算非对称动态阈值
+    df = calculate_thresholds(df, candlestick_num, predict_num, 
+                               vol_mult_long, vol_mult_short, 
+                               stop_rate_long, stop_rate_short)
 
     # 2. 物理时间锚定
     target_times = time_values + (predict_num * interval_ms)
@@ -227,20 +175,15 @@ def attach_triple_barrier_label(df,
     safe_idx = np.where(in_bounds, target_indices, 0)
     final_valid_mask = in_bounds & (time_values[safe_idx] == target_times)
 
-    # 3. 向量化矩阵准备
-    # 止盈用 closes，止损用 highs/lows
+    # 3. 准备数据矩阵
     future_closes = np.column_stack([df['close'].shift(-i).values for i in range(1, predict_num + 1)])
     future_highs = np.column_stack([df['high'].shift(-i).values for i in range(1, predict_num + 1)])
     future_lows = np.column_stack([df['low'].shift(-i).values for i in range(1, predict_num + 1)])
     
     closes = df['close'].values
-    tp_dist = df['threshold'].values
-    sl_dist = df['stop_threshold'].values
-    
-    # 初始化：全部设为 NEUTRAL (1)
     labels = np.full(len(df), Signal.NEUTRAL, dtype=int)
 
-    # 4. 严苛匹配逻辑 (基于 Close 止盈 vs High/Low 止损)
+    # 4. 🌟 循环遍历 (分别使用对应的 Long/Short 阈值列)
     for i in range(len(df) - predict_num):
         if not final_valid_mask[i]:
             labels[i] = Signal.INVALID
@@ -248,25 +191,19 @@ def attach_triple_barrier_label(df,
             
         curr_price = closes[i]
         
-        # --- 多头检测 (Long) ---
-        # 止盈：Close >= 目标价
-        idx_long_tp = np.where(future_closes[i] >= curr_price * (1 + tp_dist[i]))[0]
-        # 止损：Low <= 止损价
-        idx_long_sl = np.where(future_lows[i] <= curr_price * (1 - sl_dist[i]))[0]
-        
+        # --- 多头检测 (使用 _long 结尾的阈值) ---
+        idx_long_tp = np.where(future_closes[i] >= curr_price * (1 + df['threshold_long'].iloc[i]))[0]
+        idx_long_sl = np.where(future_lows[i] <= curr_price * (1 - df['stop_threshold_long'].iloc[i]))[0]
         first_l_tp = idx_long_tp[0] if len(idx_long_tp) > 0 else predict_num
         first_l_sl = idx_long_sl[0] if len(idx_long_sl) > 0 else predict_num
 
-        # --- 空头检测 (Short) ---
-        # 止盈：Close <= 目标价 (价格下跌)
-        idx_short_tp = np.where(future_closes[i] <= curr_price * (1 - tp_dist[i]))[0]
-        # 止损：High >= 止损价 (价格反弹)
-        idx_short_sl = np.where(future_highs[i] >= curr_price * (1 + sl_dist[i]))[0]
-        
+        # --- 空头检测 (使用 _short 结尾的阈值) ---
+        idx_short_tp = np.where(future_closes[i] <= curr_price * (1 - df['threshold_short'].iloc[i]))[0]
+        idx_short_sl = np.where(future_highs[i] >= curr_price * (1 + df['stop_threshold_short'].iloc[i]))[0]
         first_s_tp = idx_short_tp[0] if len(idx_short_tp) > 0 else predict_num
         first_s_sl = idx_short_sl[0] if len(idx_short_sl) > 0 else predict_num
 
-        # 判定：TP 索引必须严格小于 SL 索引
+        # 判定
         if first_l_tp < first_l_sl:
             labels[i] = Signal.LONG
         elif first_s_tp < first_s_sl:
@@ -274,24 +211,19 @@ def attach_triple_barrier_label(df,
 
     df['label'] = labels
     df.loc[~final_valid_mask, 'label'] = Signal.INVALID
-    
-    # 保留 return_rate 计算
-    future_close = np.where(final_valid_mask, df['close'].values[safe_idx], np.nan)
-    df['return_rate'] = (future_close - df['close']) / df['close']
-    
     return df
 
 def calculate_thresholds(df, 
                          candlestick_num: int = CANDLESTICK_NUM, 
                          predict_num: int = PREDICT_NUM, 
-                         vol_multiplier = VOL_MULTIPLIER,
-                         stop_multiplier_rate = STOP_MULTIPLIER_RATE,
+                         vol_mult_long = VOL_MULTIPLIER_LONG,    # 🌟 拆分
+                         vol_mult_short = VOL_MULTIPLIER_SHORT,   # 🌟 拆分
+                         stop_rate_long = STOP_MULTIPLIER_RATE_LONG,  # 🌟 拆分
+                         stop_rate_short = STOP_MULTIPLIER_RATE_SHORT, # 🌟 拆分
                          **kwargs): 
     """
-    【核心逻辑提取】计算动态止盈 (threshold) 和 止损 (stop_threshold)
-    移除 min_threshold 逻辑，纯粹基于波动率。
+    计算非对称动态止盈和止损阈值
     """
-    # 基础检查
     assert 'close' in df.columns, "缺少 Close 数据"
     
     # 1. 计算波动率基准 (Rolling Standard Deviation)
@@ -299,26 +231,28 @@ def calculate_thresholds(df,
     returns = df['close'].pct_change()
     rolling_std = returns.rolling(window=vol_window).std()
     
-    # 2. 时间扩充波动率 (Time Scaling: sigma * sqrt(T))
+    # 2. 时间扩充波动率 (sigma * sqrt(T))
     expected_vol = rolling_std * np.sqrt(predict_num)
     
-    # 3. 计算动态阈值
-    # A. 目标止盈阈值 (基于波动率)
-    target_threshold = (expected_vol * vol_multiplier)
+    # 3. 🌟 生成非对称阈值
+    # 多头 (Long) 阈值
+    df['threshold_long'] = (expected_vol * vol_mult_long)
+    df['stop_threshold_long'] = df['threshold_long'] * stop_rate_long
     
-    # B. 目标止损阈值 (基于止盈的百分比，保持盈亏比)
-    stop_threshold = target_threshold * stop_multiplier_rate
-    
-    # 4. 写入 DataFrame (不设置最小保底硬阈值)
-    df['threshold'] = target_threshold
-    df['stop_threshold'] = stop_threshold
+    # 空头 (Short) 阈值
+    df['threshold_short'] = (expected_vol * vol_mult_short)
+    df['stop_threshold_short'] = df['threshold_short'] * stop_rate_short
     
     return df
 
 def attach_macd_event_lifecycle_label(df, 
-                                     interval_ms,
-                                     vol_multiplier=VOL_MULTIPLIER,
-                                     stop_multiplier_rate=STOP_MULTIPLIER_RATE):
+                                interval_ms,
+                                candlestick_num=CANDLESTICK_NUM, 
+                                predict_num=PREDICT_NUM, 
+                                vol_mult_long=VOL_MULTIPLIER_LONG, 
+                                vol_mult_short=VOL_MULTIPLIER_SHORT,
+                                stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
+                                stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
     """
     严格时间对齐版 MACD 生命周期标签 (自动匹配特征列名):
     移除 min_threshold 逻辑。
@@ -351,7 +285,9 @@ def attach_macd_event_lifecycle_label(df,
     
     # 3. 初始化与动态阈值
     df['label'] = Signal.INVALID
-    df = calculate_thresholds(df, vol_multiplier=vol_multiplier, stop_multiplier_rate=stop_multiplier_rate)
+    df = calculate_thresholds(df, candlestick_num, predict_num, 
+                               vol_mult_long, vol_mult_short, 
+                               stop_rate_long, stop_rate_short)
     
     closes = df['close'].values
     highs = df['high'].values
@@ -401,9 +337,13 @@ def attach_macd_event_lifecycle_label(df,
     return df
 
 def attach_boll_event_lifecycle_label(df, 
-                                     interval_ms,
-                                     vol_multiplier=VOL_MULTIPLIER,
-                                     stop_multiplier_rate=STOP_MULTIPLIER_RATE):
+                                interval_ms,
+                                candlestick_num=CANDLESTICK_NUM, 
+                                predict_num=PREDICT_NUM, 
+                                vol_mult_long=VOL_MULTIPLIER_LONG, 
+                                vol_mult_short=VOL_MULTIPLIER_SHORT,
+                                stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
+                                stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
     """
     均值回归版 布林带生命周期标签：
     移除 min_threshold 逻辑。
@@ -428,7 +368,9 @@ def attach_boll_event_lifecycle_label(df,
     
     # 3. 初始化与动态阈值
     df['label'] = Signal.INVALID
-    df = calculate_thresholds(df, vol_multiplier=vol_multiplier, stop_multiplier_rate=stop_multiplier_rate)
+    df = calculate_thresholds(df, candlestick_num, predict_num, 
+                               vol_mult_long, vol_mult_short, 
+                               stop_rate_long, stop_rate_short)
     
     closes = df['close'].values
     highs = df['high'].values
@@ -488,9 +430,13 @@ def _boll_audit(df, event_indices):
     print(f"  - NEUTRAL (1) 噪音: {stats.get(Signal.NEUTRAL, 0)}")
 
 def attach_sma_7_25_crossover_label(df, 
-                                   interval_ms,
-                                   vol_multiplier=VOL_MULTIPLIER,
-                                   stop_multiplier_rate=STOP_MULTIPLIER_RATE):
+                                interval_ms,
+                                candlestick_num=CANDLESTICK_NUM, 
+                                predict_num=PREDICT_NUM, 
+                                vol_mult_long=VOL_MULTIPLIER_LONG, 
+                                vol_mult_short=VOL_MULTIPLIER_SHORT,
+                                stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
+                                stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
     """
     指定 SMA 7/25 交叉生命周期标签：
     移除 min_threshold 逻辑。
@@ -511,7 +457,9 @@ def attach_sma_7_25_crossover_label(df,
     event_indices = df.index[cross_mask].tolist()
     
     df['label'] = Signal.INVALID 
-    df = calculate_thresholds(df, vol_multiplier=vol_multiplier, stop_multiplier_rate=stop_multiplier_rate)
+    df = calculate_thresholds(df, candlestick_num, predict_num, 
+                               vol_mult_long, vol_mult_short, 
+                               stop_rate_long, stop_rate_short)
     
     closes = df['close'].values
     highs = df['high'].values
@@ -554,12 +502,6 @@ def attach_sma_7_25_crossover_label(df,
 
     return df
 
-def data_analyze(df, candlestick_num:int = CANDLESTICK_NUM, predict_num:int= PREDICT_NUM , vol_multiplier = VOL_MULTIPLIER):
-    future_rolling_max = df['high'].rolling(window=predict_num).max().shift(-predict_num)
-    future_rolling_min = df['low'].rolling(window=predict_num).min().shift(-predict_num)
-    
-    df['max_up'] = (future_rolling_max - df['close']) / df['close']
-    df['max_down'] = (future_rolling_min - df['close']) / df['close']
 
 def clean_data_quality_auto(df: pd.DataFrame, logger) -> pd.DataFrame:
     logger.info("启动自动化数据质量扫描...")

@@ -31,8 +31,10 @@ class LabelRegimeAnalyzer:
                 temp_df = common.attach_triple_barrier_label(
                     temp_df, 
                     interval_ms=self.interval_ms,
-                    vol_multiplier=vol,
-                    stop_multiplier_rate=stop
+                    vol_mult_long=vol,
+                    stop_rate_long=stop,
+                    vol_mult_short=vol,
+                    stop_rate_short=stop,
                 )
                 
                 counts = temp_df['label'].value_counts(normalize=True).to_dict()
