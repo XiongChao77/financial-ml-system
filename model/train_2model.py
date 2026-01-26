@@ -62,7 +62,7 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
-    # 🌟 PIPELINE MODE: "trigger_direction" OR "long_short_ovr"
+    #  PIPELINE MODE: "trigger_direction" OR "long_short_ovr"
     pipeline_mode: str = "trigger_direction" 
     
     model_cfg = ConvLSTMConfig()
@@ -343,7 +343,7 @@ def train_binary_model(
 
         scheduler.step(avg_va_loss)
 
-        # 🌟 Progress Logic (F1 Improvement or Loss Reduction)
+        #  Progress Logic (F1 Improvement or Loss Reduction)
         progress_made = False
 
         if val_f1 > best_f1 + 1e-6:
@@ -586,7 +586,7 @@ def print_metrics(y_true, y_pred, logger, title):
     report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
     logger.info("\n" + format_report(report))
     
-    # 🌟 CORE F1 METRICS
+    #  CORE F1 METRICS
     f1_short = report.get('0', {}).get('f1-score', 0)
     f1_long = report.get('2', {}).get('f1-score', 0)
     macro_f1 = report.get('macro avg', {}).get('f1-score', 0)
@@ -728,7 +728,7 @@ def main(logger:logging.Logger):
     # Configure Training
     cfg = TrainConfig()
     
-    # 🌟 SET YOUR MODE HERE
+    #  SET YOUR MODE HERE
     # Option : "trigger_direction"/long_short_ovr
     cfg.pipeline_mode = "trigger_direction"  # Change this to switch modes
     

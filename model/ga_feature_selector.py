@@ -171,7 +171,7 @@ class GroupGAOptimizer:
             if r_long < 0.005 and r_short < 0.005:
                 return 0.001 # 极低分，淘汰
 
-            # 5. 🌟 适应度公式 (Score Calculation)
+            # 5.  适应度公式 (Score Calculation)
             score = val_f1
             
             # 奖励高精度

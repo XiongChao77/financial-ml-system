@@ -20,14 +20,14 @@ class MarketState:
     price: float
     signal: Signal
     pred_prob: float
-    atr: float              # 🌟 由 DataProvider 提供的当前 ATR
+    atr: float              #  由 DataProvider 提供的当前 ATR
     slow_atr : float
     vol_regime: float
 
     position_dir: PositionDir   #仓位方向
     layers: int
     
-    # 🌟 用于风控审计的元数据
+    #  用于风控审计的元数据
     current_time: datetime
     account_balance: float
 
@@ -39,7 +39,7 @@ class TradingAction:
     action: ActionType
     target_dir: PositionDir = PositionDir.FLAT
     target_layers: int = 0
-    # 🌟 新增字段以支持 user_order 接口
+    #  新增字段以支持 user_order 接口
     order_qty: float = 0.0
     stop_loss: float = 0.0
 
@@ -58,7 +58,7 @@ class FtmoBrain(BrainBase):
         allow_long: bool = True,
         allow_short: bool = True,
         thresh: Optional[float] = None,
-        # 🌟 仿照 RulesBrain 新增的参数
+        #  仿照 RulesBrain 新增的参数
         max_daily_loss_pct: float = 0.5, # 日内熔断阈值 (3.5%)
         unit_pct_scale: float = 1.9,      # 仓位利用率缩放系数
         stop_loss_long: float = 0.05,      # 做多止损百分比
@@ -79,7 +79,7 @@ class FtmoBrain(BrainBase):
         self.atr_sl_mult_long = atr_sl_mult_long
         self.atr_sl_mult_short = atr_sl_mult_short
         
-        # --- 🌟 风控状态管理 ---
+        # ---  风控状态管理 ---
         self.max_daily_loss_pct = max_daily_loss_pct
         self.unit_pct_scale = unit_pct_scale
         

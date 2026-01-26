@@ -178,7 +178,7 @@ class LSTM1D_V3(BaseTimeSeriesModel):
 
         feat = self.norm(feat)
 
-        # 🌟 修改点 2：分别计算双头 Logits
+        #  修改点 2：分别计算双头 Logits
         logits_trig = self.head_trigger(feat)    # [B, 2]
         logits_dir = self.head_direction(feat)  # [B, 2]
 
@@ -186,7 +186,7 @@ class LSTM1D_V3(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        # 🌟 修改点 3：增加概率融合逻辑 (Hierarchical Fusion)
+        #  修改点 3：增加概率融合逻辑 (Hierarchical Fusion)
         if return_fused:
             # 计算各头概率 (Softmax)
             p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]

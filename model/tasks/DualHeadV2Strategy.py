@@ -43,7 +43,7 @@ class DualHeadV2Strategy(BaseTaskStrategy):
             'dir': nn.CrossEntropyLoss(weight=self.weights['dir'])
         }
 
-        # 🌟 增加详细的权重打印逻辑
+        #  增加详细的权重打印逻辑
         self.logger.info(f"⚖️ [MTL Weights Prepared] Main (Short/Neu/Long): {cw_main} | Trig (Neu/Act): {cw_trig} | Dir (Short/Long): {cw_dir}")
 
     def compute_loss(self, model_output, targets):
@@ -78,7 +78,7 @@ class DualHeadV2Strategy(BaseTaskStrategy):
                      (self.cfg.lambda_dir * loss_dir) + \
                      (getattr(self.cfg, 'bias_lambda', 0.5) * bias_loss)
         
-        # 🌟 核心修改：返回总 Loss 和包含子项的字典
+        #  核心修改：返回总 Loss 和包含子项的字典
         loss_dict = {
             "main": loss_main,
             "trig": loss_trig,
@@ -86,7 +86,7 @@ class DualHeadV2Strategy(BaseTaskStrategy):
             "bias": bias_loss
         }
         
-        return total_loss, loss_dict # 🌟 现在返回 2 个值了
+        return total_loss, loss_dict #  现在返回 2 个值了
 
     def get_predictions(self, model, xb):
         # 统一返回预测标签和概率分布

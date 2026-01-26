@@ -29,7 +29,7 @@ class FtmoStrategy(BtExecutor):
         self.dir = 0  # 当前持仓方向: 1(多), -1(空), 0(无)
         self.layers = 0  # 当前加仓层数
         self.trade_logs = []
-        # 🌟 新增：用于校验的数据容器
+        #  新增：用于校验的数据容器
         self.all_preds = []
         self.all_labels = []
         self.audit_results = {}
@@ -131,7 +131,7 @@ class FtmoStrategy(BtExecutor):
         self.brain.stop()
         value = self.broker.getvalue()
         self.logger.info(f"Start Value: {self.broker.startingcash:2f} | End Value: {value:.2f}")
-        # 🌟 新增：在回测结束时打印输入准确性校验报告
+        #  新增：在回测结束时打印输入准确性校验报告
         if self.all_preds:
             from sklearn.metrics import classification_report, f1_score
             y_true = np.array(self.all_labels)
@@ -154,7 +154,7 @@ class FtmoStrategy(BtExecutor):
         label = self.data.label[0]
 
         self._audit_label_integrity(lookback=common.PREDICT_NUM)
-        # 🌟 新增：收集非空数据用于校验
+        #  新增：收集非空数据用于校验
         if not np.isnan(pred) and not np.isnan(label):
             self.all_preds.append(int(pred))
             self.all_labels.append(int(label))

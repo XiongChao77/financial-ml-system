@@ -11,7 +11,7 @@ class MambaBlock(nn.Module):
     """
     def __init__(self, d_model, d_state=16, d_conv=4, expand=2):
         super().__init__()
-        # 🌟 直接实例化官方 Mamba 层，它内部已经包含了：
+        #  直接实例化官方 Mamba 层，它内部已经包含了：
         # In_proj -> Conv1d -> S6 (Selective Scan) -> Out_proj
     #     self.mamba = Mamba(
     #         d_model=d_model,    # 输入维度
@@ -22,7 +22,7 @@ class MambaBlock(nn.Module):
 
     # def forward(self, x):
     #     # x: [B, L, D]
-    #     # 🌟 这一行现在会直接调用 5090 的高性能 CUDA 内核
+    #     #  这一行现在会直接调用 5090 的高性能 CUDA 内核
     #     return self.mamba(x)
 
 class Mamba1D_V1(BaseTimeSeriesModel):
@@ -85,7 +85,7 @@ class Mamba1D_V1(BaseTimeSeriesModel):
 
         # 经过 Mamba 层（残差连接）
         for layer in self.layers:
-            # 🌟 这里的计算现在是全并行的
+            #  这里的计算现在是全并行的
             x = x + layer["mamba"](layer["norm"](x))
 
         # Readout (保持你原有的逻辑)

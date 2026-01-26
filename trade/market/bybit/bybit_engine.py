@@ -134,7 +134,7 @@ class BybitEngine:
             order_params["timeInForce"] = "GTC"
 
         try:
-            # 🌟 关键修复：将 callback 作为第一个位置参数传入
+            #  关键修复：将 callback 作为第一个位置参数传入
             self.ws_trade.place_order(callback, **order_params)
             
         except Exception as e:
@@ -148,7 +148,7 @@ class BybitEngine:
         通过 HTTP 撤销所有挂单：增强健壮性版
         """
         try:
-            # 🌟 修复点：明确 category 并增加 settleCoin 辅助判定
+            #  修复点：明确 category 并增加 settleCoin 辅助判定
             # 对于 USDT 永续合约，settleCoin 必须是 "USDT"
             return self.http.cancel_all_orders(
                 category=self.category, # 确保是 "linear"

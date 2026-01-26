@@ -75,7 +75,7 @@ class Parameters:
     allow_short = True
     allow_long = True
     holdbar = PREDICT_NUM#PREDICT_NUM
-    thresh: float =0.4#0.5#None#0.45
+    thresh: float =None#0.5#None#0.45
     commission = 0.05   # 0.1 = 0.1%  .can't be 0
     cash = 10000
     stop_loss = 0.5  # 0-1
@@ -84,7 +84,7 @@ class Parameters:
     atr_sl_mult_long = 8 # 5
     atr_sl_mult_short = 5 #2.5
     take_profit = 0.99 #止盈. 0 - n倍
-    trade_risk = 0.99     #0-1
+    trade_risk = 0.4     #0-1
     max_daily_loss_pct = 0.03
 
 def main(logger:logging.Logger):
@@ -109,7 +109,7 @@ def main(logger:logging.Logger):
     # -----------------------------------------------------------
     try:
         # 初始化处理类
-        handler = model_loader.ModelHandler(tarin_out_path=r"C:\Users\xc176\Desktop\Project\Quant\output\the5ers") #Best_F1/Best_Loss
+        handler = model_loader.ModelHandler() #Best_F1/Best_Loss
         # 执行预测，获取结果和指标
         df_with_pred, model_stats = handler.predict(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None,
                                                        cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )

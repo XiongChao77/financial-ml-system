@@ -94,10 +94,10 @@ class BybitMarketScanner:
             # 2. 计算赫斯特指数 (长期基因)
             h_val = self.calculate_hurst(closes_1m)
 
-            # 3. 🌟 计算过程波动率 (跳动剧烈度)
+            # 3.  计算过程波动率 (跳动剧烈度)
             path_vol = self.calculate_path_volatility(closes_1m)
 
-            # 4. 🌟 计算效率比 (越低代表噪音越大)
+            # 4.  计算效率比 (越低代表噪音越大)
             er_val = self.calculate_efficiency_ratio(closes_1m)
 
             results.append({
