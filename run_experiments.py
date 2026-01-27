@@ -50,8 +50,8 @@ def main():
         start = time.time()
         simulation.Parameters.thresh = None
         simulation.main(logger)
-        simulation.Parameters.thresh = 0.4
-        simulation.main(logger)
+        # simulation.Parameters.thresh = 0.4
+        # simulation.main(logger)
         stats["simulation"] = time.time() - start
 
     end_time = time.time()
