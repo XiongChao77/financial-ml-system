@@ -35,7 +35,7 @@ class DataConfig:
     csv_path: str = common.train_data_path
     feature_cols: list = field(default_factory=list)
     label_col: str = "label"
-    window: int = common.CANDLESTICK_NUM
+    window: int = common.CommonDefine.CANDLESTICK_NUM
     train_ratio: float = 0.7
     val_ratio: float = 0.15
 
@@ -130,7 +130,7 @@ class XGBoostConfig:
     xgb_estimators: int = 100
     learning_rate: float = 3e-4
     # 新增：用于 Flatten 维度计算
-    window_size: int = common.CANDLESTICK_NUM
+    window_size: int = common.CommonDefine.CANDLESTICK_NUM
 
 @dataclass
 class CNNConfig:
@@ -157,10 +157,10 @@ class TrainConfig:
     lambda_trig: float = 0.5  # Trigger 任务权重
     lambda_dir: float = 0.7   # Direction 任务权重 (设为 0 即可实现第一阶段只练 Trigger).lambda_dir需要补偿比例不平衡
     lambda_gate: float = 1e-3
-    mag_alpha: float = 0   # 幅度敏感度：1% 的波动增加 10% 权重
-    mag_limit: float = 3.0    # 权重截断：单个样本最大权重不超过 4 倍，防止插针干扰
-    flip_penalty: float = 2.0 # 致命错误惩罚 (0 <-> 2)
-    miss_penalty: float = 1.20 # 保守错误惩罚 (0/2 -> 1)
+    mag_alpha: float =  0  # 幅度敏感度：1% 的波动增加 10% 权重
+    mag_limit: float = 4.0    # 权重截断：单个样本最大权重不超过 4 倍，防止插针干扰
+    flip_penalty: float = 2 # 致命错误惩罚 (0 <-> 2)
+    miss_penalty: float = 1 # 保守错误惩罚 (0/2 -> 1)
 # ==============================================================================
 # 3. 核心逻辑 (Core Logic)
 # ==============================================================================
@@ -444,250 +444,87 @@ class MTLManager:
         target_dir = torch.where(yb == 2, 1, 0).long()
         action_mask = (yb != 1)
         return target_trig, target_dir, action_mask
-    def compute_combined_loss(
-        self,
-        logits_trig,
-        logits_dir,
-        yb,
-        rb,
-    ):
+
+    def compute_combined_loss(self, logits_trig, logits_dir, yb, rb):
         """
-        Differentiable Magnitude & Direction Aware MTL Loss (Stable Version)
-
-        yb: [B]  0=Short, 1=Neutral, 2=Long
-        rb: [B]  future return (signed)
+        平滑优化版：Soft Magnitude-Aware MTL Loss
+        解决硬阶跃、权重爆炸和梯度饥饿问题。
         """
-        device = logits_trig.device
-        eps = 1e-8
+        # --- 0. 准备基础目标 ---
+        t_trig, t_dir, act_mask = self.get_targets(yb)
+        
+        # --- 1. 幅度权重平滑化 (Log Compression) ---
+        # 使用 log(1+x) 压缩大波动的权重，防止 alpha^2 级别的爆炸
+        mag_weights = 1.0 + torch.log1p(self.cfg.mag_alpha * torch.abs(rb))
+        mag_weights = torch.clamp(mag_weights, max=self.cfg.mag_limit)
 
-        # ===============================
-        # 0. targets & masks
-        # ===============================
-        # Trigger head: 0=Neutral, 1=Action
-        target_trig = (yb != 1).long()  # [B]
+        # --- 2. 软化子任务 Loss (Sub-task Soft Loss) ---
+        # 使用归一化的幅度权重计算基础子任务
+        loss_trig_raw = F.cross_entropy(logits_trig, t_trig, weight=self.weights['trig'], reduction='none')
+        loss_trig = (loss_trig_raw * (mag_weights / mag_weights.mean())).mean()
 
-        # Direction head: 0=Short, 1=Long (only valid for Action samples)
-        target_dir = torch.zeros_like(yb)
-        target_dir[yb == 2] = 1
-        act_mask = (yb != 1)  # [B] action samples
-
-        # ===============================
-        # 1. magnitude weight (ONE layer only)
-        # ===============================
-        mag_alpha = float(getattr(self.cfg, "mag_alpha", 10.0))
-        max_weight = float(getattr(self.cfg, "max_weight", 5.0))
-        mag = rb.abs()
-        mag_weights = (1.0 + mag_alpha * mag).clamp(max=max_weight)  # [B]
-
-        # ===============================
-        # 2. Trigger loss (weighted by magnitude, normalized)
-        # ===============================
-        w_trig = self.weights.get("trig", None) if hasattr(self, "weights") else None
-        loss_trig_raw = F.cross_entropy(
-            logits_trig,
-            target_trig,
-            weight=w_trig,
-            reduction="none"
-        )
-        loss_trig = (loss_trig_raw * (mag_weights / (mag_weights.mean() + eps))).mean()
-
-        # ===============================
-        # 3. Direction loss (only Action samples)
-        # ===============================
-        w_dir = self.weights.get("dir", None) if hasattr(self, "weights") else None
+        loss_dir = torch.tensor(0.0, device=self.device)
         if act_mask.any():
-            loss_dir_raw = F.cross_entropy(
-                logits_dir[act_mask],
-                target_dir[act_mask],
-                weight=w_dir,
-                reduction="none"
-            )
-            mw = mag_weights[act_mask]
-            loss_dir = (loss_dir_raw * (mw / (mw.mean() + eps))).mean()
-        else:
-            loss_dir = torch.zeros((), device=device)
+            loss_dir_raw = F.cross_entropy(logits_dir[act_mask], t_dir[act_mask], weight=self.weights['dir'], reduction='none')
+            mw_act = mag_weights[act_mask]
+            loss_dir = (loss_dir_raw * (mw_act / mw_act.mean())).mean()
 
-        # ===============================
-        # 4. Fused 3-class log-prob (numerically stable)
-        #    trig logits: [:,0]=Neutral, [:,1]=Action
-        #    dir  logits: [:,0]=Short,   [:,1]=Long
-        # ===============================
-        log_p_trig = F.log_softmax(logits_trig, dim=1)  # [B,2]
-        log_p_dir  = F.log_softmax(logits_dir,  dim=1)  # [B,2]
+        # --- 3. 融合 3-Class 概率 ---
+        p_trig = torch.softmax(logits_trig, dim=1)
+        p_dir = torch.softmax(logits_dir, dim=1)
+        # [B, 3] 顺序: 0:Short, 1:Neutral, 2:Long
+        fused_probs = torch.stack([
+            p_trig[:, 1] * p_dir[:, 0], 
+            p_trig[:, 0],               
+            p_trig[:, 1] * p_dir[:, 1]  
+        ], dim=1)
 
-        log_p_short = log_p_trig[:, 1] + log_p_dir[:, 0]  # Action * Short
-        log_p_neu   = log_p_trig[:, 0]                    # Neutral
-        log_p_long  = log_p_trig[:, 1] + log_p_dir[:, 1]  # Action * Long
+        # --- 4. 核心：软化非对称惩罚 (Soft Penalty) ---
+        # 不再使用 argmax，而是根据“分错方向的概率”来计算惩罚
+        p_short, p_neutral, p_long = fused_probs[:, 0], fused_probs[:, 1], fused_probs[:, 2]
+        
+        # 定义惩罚项 penalty = 1.0 + 额外开销
+        soft_penalty = torch.ones_like(p_neutral)
+        
+        # 真实标签为趋势 (Long/Short) 时的惩罚逻辑
+        is_long = (yb == 2)
+        is_short = (yb == 0)
+        
+        if is_long.any():
+            # Long 样本的风险：预测为 Short 的概率 (Fatal) + 预测为 Neutral 的概率 (Miss)
+            soft_penalty[is_long] += (p_short[is_long] * self.cfg.flip_penalty + 
+                                      p_neutral[is_long] * self.cfg.miss_penalty)
+            
+        if is_short.any():
+            # Short 样本的风险：预测为 Long 的概率 (Fatal) + 预测为 Neutral 的概率 (Miss)
+            soft_penalty[is_short] += (p_long[is_short] * self.cfg.flip_penalty + 
+                                       p_neutral[is_short] * self.cfg.miss_penalty)
 
-        log_fused = torch.stack([log_p_short, log_p_neu, log_p_long], dim=1)  # [B,3]
-        fused_probs = log_fused.exp()  # [B,3], for expected penalties
+        # --- 5. 🚀 改进的耦合惩罚 (Additive Coupling) ---
+        # 只有在“真正的方向错误概率”较大时才施加额外回报加权，且改乘法为加法
+        soft_flip_prob = torch.where(is_long, p_short, torch.where(is_short, p_long, 0.0))
+        coupling_weight = soft_flip_prob * torch.abs(rb) * self.cfg.mag_alpha
 
-        # ===============================
-        # 5. Main loss (NLL on fused)
-        # ===============================
-        w_main = self.weights.get("main", None) if hasattr(self, "weights") else None
-        sample_main_loss = F.nll_loss(
-            log_fused,
-            yb,
-            weight=w_main,
-            reduction="none"
-        )  # [B]
+        # --- 6. 最终复合权重归一化 ---
+        # 复合权重 = 幅度加权 + 错误倾向惩罚 + 回报耦合
+        combined_weights = mag_weights + soft_penalty + coupling_weight # 改为加法结构更稳定
+        combined_weights = combined_weights / (combined_weights.mean() + 1e-8) # 维持梯度预算
 
-        # ===============================
-        # 6. Differentiable expected penalties (NO argmax / NO hard mask)
-        # ===============================
-        p_short = fused_probs[:, 0]
-        p_neu   = fused_probs[:, 1]
-        p_long  = fused_probs[:, 2]
-        p_action = p_short + p_long
-
-        y_short = (yb == 0).float()
-        y_neu   = (yb == 1).float()
-        y_long  = (yb == 2).float()
-        y_action = 1.0 - y_neu
-
-        # fatal: true trend/action but predicted neutral (expected)
-        fatal_expect = y_action * p_neu
-
-        # miss: true neutral but predicted action (expected)
-        miss_expect = y_neu * p_action
-
-        # flip: true short predicted long OR true long predicted short (expected)
-        flip_expect = y_short * p_long + y_long * p_short
-
-        # penalties (>=1)
-        flip_penalty = float(getattr(self.cfg, "flip_penalty", 2.5))
-        miss_penalty = float(getattr(self.cfg, "miss_penalty", 1.0))
-        # 如果你没有单独的 fatal_penalty，就沿用 flip_penalty（保持你旧逻辑）
-        fatal_penalty = float(getattr(self.cfg, "fatal_penalty", flip_penalty))
-
-        # optional magnitude coupling (set to 0 by default)
-        flip_mag_beta  = float(getattr(self.cfg, "flip_mag_beta", 0.0))
-        fatal_mag_beta = float(getattr(self.cfg, "fatal_mag_beta", 0.0))
-
-        # 让惩罚是“额外倍数”的期望形式：1 + (k-1)*E[event]
-        eff_fatal = (fatal_penalty - 1.0) * (1.0 + fatal_mag_beta * mag)
-        eff_miss  = (miss_penalty  - 1.0)
-        eff_flip  = (flip_penalty  - 1.0) * (1.0 + flip_mag_beta  * mag)
-
-        penalty = 1.0 + eff_fatal * fatal_expect + eff_miss * miss_expect + eff_flip * flip_expect  # [B]
-
-        # ===============================
-        # 7. final composite weight (smooth & stable)
-        # ===============================
-        combined_weights = (mag_weights * penalty).clamp(min=0.0)
-        combined_weights = combined_weights / (combined_weights.mean() + eps)
-
+        sample_main_loss = F.nll_loss(torch.log(fused_probs + 1e-10), yb, weight=self.weights['main'], reduction='none')
         loss_main = (sample_main_loss * combined_weights).mean()
 
-        # ===============================
-        # 8. Soft direction bias regularization (optional, differentiable)
-        # ===============================
-        bias_lambda = float(getattr(self.cfg, "bias_lambda", 0.0))
-        bias_loss = torch.zeros((), device=device)
-        if bias_lambda > 0:
-            p_trig = torch.softmax(logits_trig, dim=1)  # [B,2]
-            p_dir  = torch.softmax(logits_dir,  dim=1)  # [B,2]
+        # --- 7. 对称性正则 (保持不变) ---
+        bias_loss = torch.zeros((), device=logits_trig.device)
+        act_p = (p_trig[:, 1] > 0.5)
+        if act_p.any():
+            bias_loss = torch.abs(p_dir[act_p, 0].mean() - p_dir[act_p, 1].mean())
 
-            act_prob = p_trig[:, 1]  # P(action)
-            exp_short = (act_prob * p_dir[:, 0]).sum()
-            exp_long  = (act_prob * p_dir[:, 1]).sum()
-            norm = act_prob.sum() + eps
-
-            bias_loss = torch.abs(exp_short / norm - exp_long / norm)
-
-        # ===============================
-        # 9. total loss
-        # ===============================
-        total_loss = (
-            loss_main +
-            self.cfg.lambda_trig * loss_trig +
-            self.cfg.lambda_dir  * loss_dir +
-            bias_lambda * bias_loss
-        )
-
+        total_loss = loss_main + \
+                    (self.cfg.lambda_trig * loss_trig) + \
+                    (self.cfg.lambda_dir * loss_dir) + \
+                    (getattr(self.cfg, 'bias_lambda', 0.5) * bias_loss)
+        
         return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
-
-    # def compute_combined_loss(self, logits_trig, logits_dir, yb, rb):
-    #     """
-    #     平滑优化版：Soft Magnitude-Aware MTL Loss
-    #     解决硬阶跃、权重爆炸和梯度饥饿问题。
-    #     """
-    #     # --- 0. 准备基础目标 ---
-    #     t_trig, t_dir, act_mask = self.get_targets(yb)
-        
-    #     # --- 1. 幅度权重平滑化 (Log Compression) ---
-    #     # 使用 log(1+x) 压缩大波动的权重，防止 alpha^2 级别的爆炸
-    #     mag_weights = 1.0 + torch.log1p(self.cfg.mag_alpha * torch.abs(rb))
-    #     mag_weights = torch.clamp(mag_weights, max=self.cfg.mag_limit)
-
-    #     # --- 2. 软化子任务 Loss (Sub-task Soft Loss) ---
-    #     # 使用归一化的幅度权重计算基础子任务
-    #     loss_trig_raw = F.cross_entropy(logits_trig, t_trig, weight=self.weights['trig'], reduction='none')
-    #     loss_trig = (loss_trig_raw * (mag_weights / mag_weights.mean())).mean()
-
-    #     loss_dir = torch.tensor(0.0, device=self.device)
-    #     if act_mask.any():
-    #         loss_dir_raw = F.cross_entropy(logits_dir[act_mask], t_dir[act_mask], weight=self.weights['dir'], reduction='none')
-    #         mw_act = mag_weights[act_mask]
-    #         loss_dir = (loss_dir_raw * (mw_act / mw_act.mean())).mean()
-
-    #     # --- 3. 融合 3-Class 概率 ---
-    #     p_trig = torch.softmax(logits_trig, dim=1)
-    #     p_dir = torch.softmax(logits_dir, dim=1)
-    #     # [B, 3] 顺序: 0:Short, 1:Neutral, 2:Long
-    #     fused_probs = torch.stack([
-    #         p_trig[:, 1] * p_dir[:, 0], 
-    #         p_trig[:, 0],               
-    #         p_trig[:, 1] * p_dir[:, 1]  
-    #     ], dim=1)
-
-    #     # --- 4. 核心：软化非对称惩罚 (Soft Penalty) ---
-    #     # 不再使用 argmax，而是根据“分错方向的概率”来计算惩罚
-    #     p_short, p_neutral, p_long = fused_probs[:, 0], fused_probs[:, 1], fused_probs[:, 2]
-        
-    #     # 定义惩罚项 penalty = 1.0 + 额外开销
-    #     soft_penalty = torch.ones_like(p_neutral)
-        
-    #     # 真实标签为趋势 (Long/Short) 时的惩罚逻辑
-    #     is_long = (yb == 2)
-    #     is_short = (yb == 0)
-        
-    #     if is_long.any():
-    #         # Long 样本的风险：预测为 Short 的概率 (Fatal) + 预测为 Neutral 的概率 (Miss)
-    #         soft_penalty[is_long] += (p_short[is_long] * self.cfg.flip_penalty + 
-    #                                   p_neutral[is_long] * self.cfg.miss_penalty)
-            
-    #     if is_short.any():
-    #         # Short 样本的风险：预测为 Long 的概率 (Fatal) + 预测为 Neutral 的概率 (Miss)
-    #         soft_penalty[is_short] += (p_long[is_short] * self.cfg.flip_penalty + 
-    #                                    p_neutral[is_short] * self.cfg.miss_penalty)
-
-    #     # --- 5. 🚀 改进的耦合惩罚 (Additive Coupling) ---
-    #     # 只有在“真正的方向错误概率”较大时才施加额外回报加权，且改乘法为加法
-    #     soft_flip_prob = torch.where(is_long, p_short, torch.where(is_short, p_long, 0.0))
-    #     coupling_weight = soft_flip_prob * torch.abs(rb) * self.cfg.mag_alpha
-
-    #     # --- 6. 最终复合权重归一化 ---
-    #     # 复合权重 = 幅度加权 + 错误倾向惩罚 + 回报耦合
-    #     combined_weights = mag_weights + soft_penalty + coupling_weight # 改为加法结构更稳定
-    #     combined_weights = combined_weights / (combined_weights.mean() + 1e-8) # 维持梯度预算
-
-    #     sample_main_loss = F.nll_loss(torch.log(fused_probs + 1e-10), yb, weight=self.weights['main'], reduction='none')
-    #     loss_main = (sample_main_loss * combined_weights).mean()
-
-    #     # --- 7. 对称性正则 (保持不变) ---
-    #     bias_loss = torch.zeros((), device=logits_trig.device)
-    #     act_p = (p_trig[:, 1] > 0.5)
-    #     if act_p.any():
-    #         bias_loss = torch.abs(p_dir[act_p, 0].mean() - p_dir[act_p, 1].mean())
-
-    #     total_loss = loss_main + \
-    #                 (self.cfg.lambda_trig * loss_trig) + \
-    #                 (self.cfg.lambda_dir * loss_dir) + \
-    #                 (getattr(self.cfg, 'bias_lambda', 0.5) * bias_loss)
-        
-    #     return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
 
     
 class MTLLossTracker:

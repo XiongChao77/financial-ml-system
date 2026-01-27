@@ -11,7 +11,7 @@ def run_test_evaluation():
     
     # 2. 严格复刻训练集切分逻辑
     df = common.load_test_df()
-    # window = common.CANDLESTICK_NUM  # 120
+    # window = common.CommonDefine.CANDLESTICK_NUM  # 120
     # stride = 4                       # 必须与 train.py 的全量数据集 stride 一致
     # train_ratio = 0.7
     # val_ratio = 0.15
