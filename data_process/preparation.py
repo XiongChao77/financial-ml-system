@@ -17,12 +17,12 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     metadata = {
         "symbol_interval": interval_str,
         "interval_ms": interval_ms, # <--- 新增
-        "candlestick_num": common.CANDLESTICK_NUM,
-        "predict_num": common.PREDICT_NUM,
-        "vol_multiplier_long": common.VOL_MULTIPLIER_LONG,
-        "stop_multiplier_rate_long": common.STOP_MULTIPLIER_RATE_LONG,
-        "vol_multiplier_short": common.VOL_MULTIPLIER_SHORT,
-        "stop_multiplier_rate_short": common.STOP_MULTIPLIER_RATE_SHORT,
+        "candlestick_num": common.CommonDefine.CANDLESTICK_NUM,
+        "predict_num": common.CommonDefine.PREDICT_NUM,
+        "vol_multiplier_long": common.CommonDefine.VOL_MULTIPLIER_LONG,
+        "stop_multiplier_rate_long": common.CommonDefine.STOP_MULTIPLIER_RATE_LONG,
+        "vol_multiplier_short": common.CommonDefine.VOL_MULTIPLIER_SHORT,
+        "stop_multiplier_rate_short": common.CommonDefine.STOP_MULTIPLIER_RATE_SHORT,
     }
 
     df = pd.read_csv(file)
@@ -41,7 +41,7 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     # # common.attach_sma_7_25_crossover_label(df, interval_ms=interval_ms)
     else:
         # 4. 执行分析
-        analyzer = LabelRegimeAnalyzer(df, interval_ms, common.symbol,common.interval)
+        analyzer = LabelRegimeAnalyzer(df, interval_ms, common.CommonDefine.symbol,common.interval)
         
         # 定义更精细的步长以捕捉梯度变化
         vol_range = np.linspace(1.5, 3, 15)

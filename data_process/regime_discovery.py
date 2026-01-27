@@ -225,7 +225,7 @@ if __name__ == "__main__":
     except:
         interval_ms = 300000 # 兜底 5m
     
-    analyzer = LabelRegimeAnalyzer(df_clean, interval_ms, symbol=common.symbol, interval=common.interval)
+    analyzer = LabelRegimeAnalyzer(df_clean, interval_ms, symbol=common.CommonDefine.symbol, interval=common.interval)
     
     # 定义研究步长
     vols = np.array([0.5, 0.8, 1.0, 1.2, 1.5, 2.0])

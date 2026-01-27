@@ -22,7 +22,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             kline_interval_ms: int = None,
             feature_cols: List[str] = None,
             label_col: str = None,
-            window: int = common.CANDLESTICK_NUM,
+            window: int = common.CommonDefine.CANDLESTICK_NUM,
             stride: int = 1,
             is_live: bool = False,
             cache_path: Optional[str] = None,
@@ -103,8 +103,8 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             "kline_interval_ms": self.kline_interval_ms,
             "label_col": self.label_col,
             "feature_cols_requested": self.feature_cols_requested,
-            "symbol": common.symbol,
-            "interval": common.interval,
+            "symbol": common.CommonDefine.symbol,
+            "interval": common.CommonDefine.interval,
         }
         torch.save(data_to_save, path)
         self.logger.info(f"💾 数据处理完成，缓存已更新至: {path}")
@@ -129,11 +129,11 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             if self.label_col != checkpoint.get("label_col"):
                 mismatch_reasons.append(f"label_col ({checkpoint.get('label_col')} -> {self.label_col})")
 
-            if common.symbol != checkpoint.get("symbol"):
-                mismatch_reasons.append(f"symbol ({checkpoint.get('symbol')} -> {common.symbol})")
+            if common.CommonDefine.symbol != checkpoint.get("symbol"):
+                mismatch_reasons.append(f"symbol ({checkpoint.get('symbol')} -> {common.CommonDefine.symbol})")
 
             if common.interval != checkpoint.get("interval"):
-                mismatch_reasons.append(f"interval ({checkpoint.get('interval')} -> {common.interval})")
+                mismatch_reasons.append(f"interval ({checkpoint.get('interval')} -> {common.CommonDefine.interval})")
 
             # 2. 特征列表校验 (内容与顺序)
             cached_features = checkpoint.get("feature_cols_requested", [])

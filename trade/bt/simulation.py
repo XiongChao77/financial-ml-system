@@ -15,7 +15,7 @@ sys.path.append(os.path.join(current_work_dir, "..",'..'))
 from data_process.common import *
 from model import model_loader
 from trade.bt import cus_analyzer, cus_comminfo, result_analyze
-
+from model import train_2head 
 from trade.bt.bt_trade_ml import FtmoStrategy
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
 
@@ -69,12 +69,12 @@ def log_parameters(params_obj, logger):
         para_str = " | ".join(para_parts)
         
         # 4. 打印，确保 "Para" 后面的空格与你的 SUMMARY/EXPOSURE 对齐
-        logger.info(f"Para    | {para_str}")
+        logger(f"Para    | {para_str}")
 
 class Parameters:
     allow_short = True
     allow_long = True
-    holdbar = PREDICT_NUM#PREDICT_NUM
+    holdbar = CommonDefine.PREDICT_NUM#CommonDefine.PREDICT_NUM
     thresh: float =None#0.5#None#0.45
     commission = 0.05   # 0.1 = 0.1%  .can't be 0
     cash = 10000
@@ -172,8 +172,8 @@ def main(logger:logging.Logger):
         label = "label",
         openinterest=-1,
         nocase=True,
-        # fromdate=datetime(2022, 10, 1),
-        # todate=datetime(2023, 1, 1),
+        # fromdate=datetime(2024, 10, 1),
+        # todate=datetime(2025, 1, 1),
     )
 
     cerebro.adddata(data)
@@ -372,9 +372,9 @@ def generate_backtest_report(logger,strat, model_stats, save_path):
     logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% ")
     logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
-    logger.info(f"Para    | symbol: {symbol} | interval: {interval}| PREDICT_NUM: {CANDLESTICK_NUM}| PREDICT_NUM: {PREDICT_NUM} ")
-    logger.info(f"Para    | VOL_MULTIPLIER_LONG: {VOL_MULTIPLIER_LONG} | STOP_MULTIPLIER_RATE_LONG: {STOP_MULTIPLIER_RATE_LONG}| VOL_MULTIPLIER_SHORT: {VOL_MULTIPLIER_SHORT}| STOP_MULTIPLIER_RATE_SHORT: {STOP_MULTIPLIER_RATE_SHORT}")
-    log_parameters(Parameters,logger)
+    log_parameters(Parameters,logger.info)
+    log_parameters(train_2head.TrainConfig,logger.debug)
+    log_parameters(CommonDefine,logger.debug)
     logger.info("-" * 80)
 
     # 构造 JSON (略微精简，保持原有结构)

@@ -13,9 +13,6 @@ class Signal(IntEnum):
     NEUTRAL = 1
     LONG = 2
 
-#define model
-CANDLESTICK_NUM = 128   #160 best for LSTM
-PREDICT_NUM = 12
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
 乘数 (Multiplier),阈值位置,含义
@@ -25,15 +22,19 @@ VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
 # 建议在 common.py 中增加以下定义
-VOL_MULTIPLIER_LONG = 1.9
-STOP_MULTIPLIER_RATE_LONG = 0.2
-VOL_MULTIPLIER_SHORT = 1.9
-STOP_MULTIPLIER_RATE_SHORT = 0.2
-# label_decrease_weak =1 
-# label_increase_weak = 3
-model_train_rate = 0.8
-symbol = 'ETHUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
-interval = '30m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+class CommonDefine:
+    #define model
+    CANDLESTICK_NUM = 128   #160 best for LSTM
+    PREDICT_NUM = 12
+    VOL_MULTIPLIER_LONG = 1.9
+    STOP_MULTIPLIER_RATE_LONG = 0.2
+    VOL_MULTIPLIER_SHORT = 1.9
+    STOP_MULTIPLIER_RATE_SHORT = 0.2
+    # label_decrease_weak =1 
+    # label_increase_weak = 3
+    model_train_rate = 0.8
+    symbol = 'ETHUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
+    interval = '30m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
 log_level = logging.INFO
 
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,7 +48,7 @@ PERSISTENCE_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'quant_output')
 os.makedirs(PERSISTENCE_DIR, exist_ok=True)
 
 PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency')
-origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{symbol}_{interval}.csv")
+origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{CommonDefine.symbol}_{CommonDefine.interval}.csv")
 train_data_path = os.path.join(TEMPORARY_DIR, "train_data.csv")
 test_data_path  = os.path.join(TEMPORARY_DIR, "test_data.csv")
 data_config_path  = os.path.join(TEMPORARY_DIR, "data_config_meta.json")
@@ -92,12 +93,12 @@ def attach_attr(df, feature_config_list, kline_interval_ms):
 
 def attach_label(df, 
                 interval_ms,
-                candlestick_num=CANDLESTICK_NUM, 
-                predict_num=PREDICT_NUM, 
-                vol_mult_long=VOL_MULTIPLIER_LONG, 
-                vol_mult_short=VOL_MULTIPLIER_SHORT,
-                stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
-                stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
+                candlestick_num=CommonDefine.CANDLESTICK_NUM, 
+                predict_num=CommonDefine.PREDICT_NUM, 
+                vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
+                vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
+                stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
+                stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
     """
     基于路径依赖的非对称打标签逻辑
     """
@@ -151,12 +152,12 @@ def attach_label(df,
 
 def attach_triple_barrier_label(df, 
                                  interval_ms,
-                                 candlestick_num=CANDLESTICK_NUM, 
-                                 predict_num=PREDICT_NUM, 
-                                 vol_mult_long=VOL_MULTIPLIER_LONG, 
-                                 vol_mult_short=VOL_MULTIPLIER_SHORT,
-                                 stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
-                                 stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
+                                 candlestick_num=CommonDefine.CANDLESTICK_NUM, 
+                                 predict_num=CommonDefine.PREDICT_NUM, 
+                                 vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
+                                 vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
+                                 stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
+                                 stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
     """
     严苛版非对称 Triple Barrier 标签
     """
@@ -214,12 +215,12 @@ def attach_triple_barrier_label(df,
     return df
 
 def calculate_thresholds(df, 
-                         candlestick_num: int = CANDLESTICK_NUM, 
-                         predict_num: int = PREDICT_NUM, 
-                         vol_mult_long = VOL_MULTIPLIER_LONG,    #  拆分
-                         vol_mult_short = VOL_MULTIPLIER_SHORT,   #  拆分
-                         stop_rate_long = STOP_MULTIPLIER_RATE_LONG,  #  拆分
-                         stop_rate_short = STOP_MULTIPLIER_RATE_SHORT, #  拆分
+                         candlestick_num: int = CommonDefine.CANDLESTICK_NUM, 
+                         predict_num: int = CommonDefine.PREDICT_NUM, 
+                         vol_mult_long = CommonDefine.VOL_MULTIPLIER_LONG,    #  拆分
+                         vol_mult_short = CommonDefine.VOL_MULTIPLIER_SHORT,   #  拆分
+                         stop_rate_long = CommonDefine.STOP_MULTIPLIER_RATE_LONG,  #  拆分
+                         stop_rate_short = CommonDefine.STOP_MULTIPLIER_RATE_SHORT, #  拆分
                          **kwargs): 
     """
     计算非对称动态止盈和止损阈值
@@ -247,12 +248,12 @@ def calculate_thresholds(df,
 
 def attach_macd_event_lifecycle_label(df, 
                                 interval_ms,
-                                candlestick_num=CANDLESTICK_NUM, 
-                                predict_num=PREDICT_NUM, 
-                                vol_mult_long=VOL_MULTIPLIER_LONG, 
-                                vol_mult_short=VOL_MULTIPLIER_SHORT,
-                                stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
-                                stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
+                                candlestick_num=CommonDefine.CANDLESTICK_NUM, 
+                                predict_num=CommonDefine.PREDICT_NUM, 
+                                vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
+                                vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
+                                stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
+                                stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
     """
     严格时间对齐版 MACD 生命周期标签 (自动匹配特征列名):
     移除 min_threshold 逻辑。
@@ -338,12 +339,12 @@ def attach_macd_event_lifecycle_label(df,
 
 def attach_boll_event_lifecycle_label(df, 
                                 interval_ms,
-                                candlestick_num=CANDLESTICK_NUM, 
-                                predict_num=PREDICT_NUM, 
-                                vol_mult_long=VOL_MULTIPLIER_LONG, 
-                                vol_mult_short=VOL_MULTIPLIER_SHORT,
-                                stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
-                                stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
+                                candlestick_num=CommonDefine.CANDLESTICK_NUM, 
+                                predict_num=CommonDefine.PREDICT_NUM, 
+                                vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
+                                vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
+                                stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
+                                stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
     """
     均值回归版 布林带生命周期标签：
     移除 min_threshold 逻辑。
@@ -431,12 +432,12 @@ def _boll_audit(df, event_indices):
 
 def attach_sma_7_25_crossover_label(df, 
                                 interval_ms,
-                                candlestick_num=CANDLESTICK_NUM, 
-                                predict_num=PREDICT_NUM, 
-                                vol_mult_long=VOL_MULTIPLIER_LONG, 
-                                vol_mult_short=VOL_MULTIPLIER_SHORT,
-                                stop_rate_long=STOP_MULTIPLIER_RATE_LONG,
-                                stop_rate_short=STOP_MULTIPLIER_RATE_SHORT):
+                                candlestick_num=CommonDefine.CANDLESTICK_NUM, 
+                                predict_num=CommonDefine.PREDICT_NUM, 
+                                vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
+                                vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
+                                stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
+                                stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
     """
     指定 SMA 7/25 交叉生命周期标签：
     移除 min_threshold 逻辑。
@@ -555,7 +556,7 @@ def load_interval_ms(config_path = data_config_path):
     except Exception as e:
         raise RuntimeError(f"💥 读取 JSON 时发生意外错误: {e}")
 
-def setup_session_logger(sub_folder: str, symbol: str = symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
+def setup_session_logger(sub_folder: str, symbol: str = CommonDefine.symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
     log_dir = os.path.join(PERSISTENCE_DIR, sub_folder)
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -627,3 +628,4 @@ def get_interval_ms(interval_str: str) -> int:
     
     value, unit = match.groups()
     return int(value) * units[unit]
+

@@ -153,7 +153,7 @@ class FtmoStrategy(BtExecutor):
         pred_prob = self.data.pred_prob[0]
         label = self.data.label[0]
 
-        self._audit_label_integrity(lookback=common.PREDICT_NUM)
+        self._audit_label_integrity(lookback=common.CommonDefine.PREDICT_NUM)
         #  新增：收集非空数据用于校验
         if not np.isnan(pred) and not np.isnan(label):
             self.all_preds.append(int(pred))
@@ -193,7 +193,7 @@ class FtmoStrategy(BtExecutor):
         # if len(self.data) - 1 == len(self) - 1 and self.position:
         #     self.close()
 
-    def _audit_label_integrity(self, lookback=common.CANDLESTICK_NUM):
+    def _audit_label_integrity(self, lookback=common.CommonDefine.CANDLESTICK_NUM):
         """
         封装的校验函数：对比 [当前价格] 与 [lookback 根 K 线前的价格及标签]
         """

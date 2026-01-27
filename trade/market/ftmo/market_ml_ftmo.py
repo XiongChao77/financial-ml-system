@@ -34,7 +34,7 @@ class LiveConfig:
     TIMEFRAME = common.interval
     allow_short = True
     allow_long = True
-    holdbar = common.PREDICT_NUM#PREDICT_NUM
+    holdbar = common.CommonDefine.PREDICT_NUM#CommonDefine.PREDICT_NUM
     thresh: float =None#0.5#None#0.45
     commission = 0.05   # 0.1 = 0.1%  .can't be 0
     cash = 10000
@@ -77,7 +77,7 @@ class LiveBot:
         self.factory = FeatureFactory(LiveConfig.feature_config_list, self.interval_ms)
         
         # 2. 计算历史需求 (数量)
-        self.min_bars_needed = self.factory.get_global_min_history() + common.CANDLESTICK_NUM
+        self.min_bars_needed = self.factory.get_global_min_history() + common.CommonDefine.CANDLESTICK_NUM
         self.logger.info(f"History Required: {self.min_bars_needed} bars")
         
         # 3. 初始化数据源 (带缓存)
