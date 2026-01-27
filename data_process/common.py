@@ -567,7 +567,7 @@ def setup_session_logger(sub_folder: str, symbol: str = CommonDefine.symbol, con
     root_logger.setLevel(logging.DEBUG) 
     if root_logger.handlers:
         root_logger.handlers = []
-    log_format_console = "%(log_color)s%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    log_format_console = "%(log_color)s%(asctime)s-%(name)s-%(levelname)s- %(message)s"
     ch = logging.StreamHandler()
     ch.setLevel(console_level)
     color_formatter = colorlog.ColoredFormatter(

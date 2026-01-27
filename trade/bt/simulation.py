@@ -82,7 +82,7 @@ class Parameters:
     stop_loss_long = 0.03  # 0-1
     stop_loss_short = 0.015  # 0-1
     atr_sl_mult_long = 8 # 5
-    atr_sl_mult_short = 5 #2.5
+    atr_sl_mult_short = 4.5 #2.5
     take_profit = 0.99 #止盈. 0 - n倍
     trade_risk = 0.8    #0-leverage
     max_daily_loss_pct = 0.03
@@ -188,6 +188,7 @@ def main(logger:logging.Logger):
     cerebro.addanalyzer(btanalyzers.DrawDown, _name="dd")
     cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(cus_analyzer.CusAnalyzer, _name="customize")
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="my_trades")
 
     logger.info("Starting Backtest...")
     results = cerebro.run()
@@ -246,6 +247,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path):
     dd = strat.analyzers.dd.get_analysis()
     trades = strat.analyzers.trades.get_analysis()
     sharpe = strat.analyzers.sharpe.get_analysis()
+    trade_analysis = strat.analyzers.my_trades.get_analysis()
 
     # ----- 基础数值 -----
     start_value = strat.broker.startingcash  # 初始资金
@@ -260,6 +262,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path):
     maxdd_amt = dd.get("max", {}).get("moneydown", 0.0)
     maxdd_len = dd.get("max", {}).get("len", 0)
     calmar = (cagr*100 / abs(maxdd_pct)) if maxdd_pct > 0 else 0.0
+    lost_longest = trade_analysis.streak.lost.longest
+    won_longest = trade_analysis.streak.won.longest
     # --- 读取日内回撤数据 ---
     max_daily_dd = perf.get('max_daily_dd', 0.0) # 例如 -0.045
     max_daily_date = perf.get('max_daily_dd_date', 'N/A')
@@ -368,8 +372,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path):
     logger.info(f"SUMMARY | GrossRet: {gross_return*100:.2f}% | CAGR: {cagr*100:.2f}% | "
                 f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | Calmar: {calmar:.2f}")
     # 【新增】打印仓位暴露信息
-    logger.info(f"EXPOSURE| Avg Pos: {avg_pos*100:.2f}% | Max Pos: {max_pos*100:.2f}% | P95 Pos: {p95_pos*100:.2f}% | Position: {Parameters().trade_risk}")
-    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% ")
+    logger.info(f"EXPOSURE| Avg Pos: {avg_pos*100:.2f}% | Max Pos: {max_pos*100:.2f}% | P95 Pos: {p95_pos*100:.2f}% | trade_risk: {Parameters().trade_risk}")
+    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% | lost_longest: {lost_longest} | won_longest: {won_longest} ")
     logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
     logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
     log_parameters(Parameters,logger.info)
