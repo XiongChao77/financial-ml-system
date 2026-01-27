@@ -84,7 +84,7 @@ class Parameters:
     atr_sl_mult_long = 8 # 5
     atr_sl_mult_short = 5 #2.5
     take_profit = 0.99 #止盈. 0 - n倍
-    trade_risk = 0.4     #0-1
+    trade_risk = 0.8    #0-leverage
     max_daily_loss_pct = 0.03
 
 def main(logger:logging.Logger):
@@ -179,7 +179,7 @@ def main(logger:logging.Logger):
     cerebro.adddata(data)
     cerebro.broker.setcash(Parameters.cash)
     cerebro.broker.addcommissioninfo(
-        cus_comminfo.CommInfo_Cryptocurrency(commission=Parameters.commission, leverage =1)
+        cus_comminfo.CommInfo_Cryptocurrency(commission=Parameters.commission, leverage =10)
     )
     # cerebro.broker.set_coc(True)  #
 

@@ -52,6 +52,8 @@ class FtmoStrategy(BtExecutor):
             atr_sl_mult_short = self.params.atr_sl_mult_short,
             max_daily_loss_pct = self.params.max_daily_loss_pct,
         )
+
+        self.max_margin_level = 0.0
         self.logger.warning(f"stop_loss is {self.params.stop_loss}")
 
     def notify_order(self, order):
@@ -144,10 +146,12 @@ class FtmoStrategy(BtExecutor):
             self.logger.info(f"📊 Final Input Macro-F1: {input_f1:.4f}")
             self.logger.info("="*75 + "\n")
         self._print_audit_report()
+        self.logger.info(f"🚩 回测结束 | 最大保证金占用: {self.max_margin_level:.2%}")
         # UI
         self.cerebro.trade_logs = self.trade_logs
 
     def next(self):
+        self._audit_margin()
         # 获取预测结果
         pred = self.data.pred[0]
         pred_prob = self.data.pred_prob[0]
@@ -235,4 +239,16 @@ class FtmoStrategy(BtExecutor):
             self.logger.error("🚨 警告：标签一致性低于 99%！数据处理阶段可能存在 index shift。")
         else:
             self.logger.info("✅ 标签对齐校验通过。")
-        self.logger.info("=" * 55 + "\n")           
+        self.logger.info("=" * 55 + "\n")  
+
+
+    def _audit_margin(self):
+        equity = self.broker.getvalue()
+        pos_value = abs(self.position.size * self.data.close[0])
+        leverage = self.broker.getcommissioninfo(self.data).p.leverage
+        
+        if equity > 0:
+            margin_level = (pos_value / leverage) / equity
+            self.max_margin_level = max(self.max_margin_level, margin_level)
+            if margin_level > 0.8:
+                self.logger.warning(f"⚠️ 风险：保证金占用率 {margin_level:.2%}")         
