@@ -152,8 +152,8 @@ def analyze_label_distribution_by_params(
                     "vol_multiplier": vol_mul,
                     "stop_multiplier_rate": stop_rate,
                     "total": total,
-                    "long_cnt": counts.get(common.Signal.LONG, 0),
-                    "short_cnt": counts.get(common.Signal.SHORT, 0),
+                    "long_cnt": counts.get(common.Signal.POSITIVE , 0),
+                    "short_cnt": counts.get(common.Signal.NEGATIVE, 0),
                     "neutral_cnt": counts.get(common.Signal.NEUTRAL, 0),
                 }
 
@@ -202,8 +202,8 @@ def run_label_sensitivity_analysis(df):
                 "stop_multiplier_rate": stop_rate,
 
                 "total": total,
-                "long_cnt": counts.get(common.Signal.LONG, 0),
-                "short_cnt": counts.get(common.Signal.SHORT, 0),
+                "long_cnt": counts.get(common.Signal.POSITIVE , 0),
+                "short_cnt": counts.get(common.Signal.NEGATIVE, 0),
                 "neutral_cnt": counts.get(common.Signal.NEUTRAL, 0),
             }
 

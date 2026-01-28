@@ -145,10 +145,10 @@ class FtmoBrain(BrainBase):
 
         # 4. 信号映射与出场逻辑
         target_dir = PositionDir.FLAT
-        if signal == Signal.LONG and self.allow_long:
-            target_dir = PositionDir.LONG
-        elif signal == Signal.SHORT and self.allow_short:
-            target_dir = PositionDir.SHORT
+        if signal == Signal.POSITIVE  and self.allow_long:
+            target_dir = PositionDir.POSITIVE 
+        elif signal == Signal.NEGATIVE and self.allow_short:
+            target_dir = PositionDir.NEGATIVE
         
         if state.position_dir != PositionDir.FLAT:
             if self.bars_held < self.max_hold_num:
@@ -175,12 +175,12 @@ class FtmoBrain(BrainBase):
             # 3. 计算下单参数
             # 使用 trade_risk 作为固定百分比，或切换回 _calculate_dynamic_unit_pct
             sl_pct = 0.05
-            if self.atr_sl_mult_long!=None and target_dir == PositionDir.LONG and state.atr > 0:
+            if self.atr_sl_mult_long!=None and target_dir == PositionDir.POSITIVE  and state.atr > 0:
                 sl_pct = state.atr * self.atr_sl_mult_long
-            elif self.atr_sl_mult_short!=None and target_dir == PositionDir.SHORT and state.atr > 0:
+            elif self.atr_sl_mult_short!=None and target_dir == PositionDir.NEGATIVE and state.atr > 0:
                 sl_pct = state.atr * self.atr_sl_mult_short
             elif self.atr_sl_mult_long==None and  self.atr_sl_mult_short==None:
-                sl_pct = self.stop_loss_long if target_dir == PositionDir.LONG else self.stop_loss_short
+                sl_pct = self.stop_loss_long if target_dir == PositionDir.POSITIVE  else self.stop_loss_short
             
             if target_dir == PositionDir.FLAT or sl_pct <= 0:
                 final_order_qty = 0.0
@@ -248,7 +248,7 @@ class FtmoBrain(BrainBase):
             self.layers = 0
             return
 
-        is_buy = (action.target_dir == PositionDir.LONG)
+        is_buy = (action.target_dir == PositionDir.POSITIVE )
         
         # 处理订单执行
         if action.action == ActionType.REVERSE:

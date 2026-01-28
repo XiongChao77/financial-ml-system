@@ -131,8 +131,8 @@ class RulesBrain(BrainBase):
         final_sl_pct = min(turtle_sl_ratio, max_sl_ratio)
 
         # 4. 出场判断
-        if (curr_dir == PositionDir.LONG and current_price < curr_row['exit_low']) or \
-           (curr_dir == PositionDir.SHORT and current_price > curr_row['exit_high']):
+        if (curr_dir == PositionDir.POSITIVE  and current_price < curr_row['exit_low']) or \
+           (curr_dir == PositionDir.NEGATIVE and current_price > curr_row['exit_high']):
             self.executor.user_close()
             return TradingAction(ActionType.CLOSE)
 
@@ -150,14 +150,14 @@ class RulesBrain(BrainBase):
 
         elif self.curr_layers < self.max_layers:
             threshold = self.pyramid_gap_atr * atr
-            if (curr_dir == PositionDir.LONG and current_price > self.last_order_price + threshold) or \
-               (curr_dir == PositionDir.SHORT and current_price < self.last_order_price - threshold):
+            if (curr_dir == PositionDir.POSITIVE  and current_price > self.last_order_price + threshold) or \
+               (curr_dir == PositionDir.NEGATIVE and current_price < self.last_order_price - threshold):
                 
                 self.layer_sizes.append(final_unit_shares)
                 self.last_order_price, self.curr_layers = current_price, len(self.layer_sizes)
-                direction = 'long' if  curr_dir == PositionDir.LONG else 'short'
+                direction = 'long' if  curr_dir == PositionDir.POSITIVE  else 'short'
                 self.logger.info(f"➕ [PYRAMID] Layer: {self.curr_layers} | SL_Pct: {final_sl_pct:.2%} | {direction} ")
-                self.executor.user_order(final_unit_shares, is_buy=(curr_dir == PositionDir.LONG), stop_loss=final_sl_pct)
+                self.executor.user_order(final_unit_shares, is_buy=(curr_dir == PositionDir.POSITIVE ), stop_loss=final_sl_pct)
                 return TradingAction(ActionType.PYRAMID)
 
         return TradingAction(ActionType.HOLD)

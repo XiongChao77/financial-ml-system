@@ -195,12 +195,12 @@ class ModelHandler:
             
             # 做多逻辑
             mask_long = (net_score > diff_thresh) & (p_long > min_thresh)
-            final_pred[mask_long] = int(Signal.LONG)
+            final_pred[mask_long] = int(Signal.POSITIVE )
             final_conf[mask_long] = net_score[mask_long]
             
             # 做空逻辑
             mask_short = (net_score < -diff_thresh) & (p_short > min_thresh)
-            final_pred[mask_short] = int(Signal.SHORT)
+            final_pred[mask_short] = int(Signal.NEGATIVE)
             final_conf[mask_short] = -net_score[mask_short]
         else:
             final_pred = probs_all.argmax(axis=1)
@@ -318,16 +318,16 @@ class ModelHandler:
             preds = np.full(len(y_true), int(Signal.NEUTRAL))
             
             # 应用阈值逻辑
-            preds[net_score > th] = int(Signal.LONG)
-            preds[net_score < -th] = int(Signal.SHORT)
+            preds[net_score > th] = int(Signal.POSITIVE )
+            preds[net_score < -th] = int(Signal.NEGATIVE)
             
             # 计算指标
             # output_dict=True 返回字典方便提取
             report = classification_report(y_true, preds, output_dict=True, zero_division=0)
             
             # 统计开单数量 (非震荡的单子)
-            n_short = np.sum(preds == int(Signal.SHORT))
-            n_long = np.sum(preds == int(Signal.LONG))
+            n_short = np.sum(preds == int(Signal.NEGATIVE))
+            n_long = np.sum(preds == int(Signal.POSITIVE ))
             total_signals = n_short + n_long
             coverage = total_signals / len(y_true)
             
@@ -338,12 +338,12 @@ class ModelHandler:
                 "Coverage": coverage,       # 覆盖率 (开单频率)
                 
                 # 精确率 (Precision): 做的单子里有多少是对的？
-                "Prec_Short": report[str(int(Signal.SHORT))]['precision'],
-                "Prec_Long": report[str(int(Signal.LONG))]['precision'],
+                "Prec_Short": report[str(int(Signal.NEGATIVE))]['precision'],
+                "Prec_Long": report[str(int(Signal.POSITIVE ))]['precision'],
                 
                 # 召回率 (Recall): 所有的机会抓住了多少？
-                "Rec_Short": report[str(int(Signal.SHORT))]['recall'],
-                "Rec_Long": report[str(int(Signal.LONG))]['recall'],
+                "Rec_Short": report[str(int(Signal.NEGATIVE))]['recall'],
+                "Rec_Long": report[str(int(Signal.POSITIVE ))]['recall'],
                 
                 # 综合 F1 (宏平均)
                 "Macro_F1": report['macro avg']['f1-score']
