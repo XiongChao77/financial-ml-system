@@ -9,9 +9,9 @@ from data_process.feature import *
 
 class Signal(IntEnum):
     INVALID = -1
-    SHORT = 0
+    NEGATIVE = 0
     NEUTRAL = 1
-    LONG = 2
+    POSITIVE  = 2
 
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
@@ -144,7 +144,7 @@ def attach_label(df,
 
     # 5. 生成结果
     conditions = [~final_valid_mask, cond_short, cond_long]
-    choices = [Signal.INVALID, Signal.SHORT, Signal.LONG]
+    choices = [Signal.INVALID, Signal.NEGATIVE, Signal.POSITIVE ]
     df['label'] = np.select(conditions, choices, default=Signal.NEUTRAL).astype(int)
     
     df['return_rate'] = pct_final 
@@ -206,9 +206,9 @@ def attach_triple_barrier_label(df,
 
         # 判定
         if first_l_tp < first_l_sl:
-            labels[i] = Signal.LONG
+            labels[i] = Signal.POSITIVE 
         elif first_s_tp < first_s_sl:
-            labels[i] = Signal.SHORT
+            labels[i] = Signal.NEGATIVE
 
     df['label'] = labels
     df.loc[~final_valid_mask, 'label'] = Signal.INVALID
@@ -331,7 +331,7 @@ def attach_macd_event_lifecycle_label(df,
             hit_stop = np.any(window_highs >= entry_price * (1 + sl_target))
 
         if pnl_at_exit >= tp_target and not hit_stop:
-            df.at[curr_idx, 'label'] = Signal.LONG if is_long_event else Signal.SHORT
+            df.at[curr_idx, 'label'] = Signal.POSITIVE  if is_long_event else Signal.NEGATIVE
         else:
             df.at[curr_idx, 'label'] = Signal.NEUTRAL
 
@@ -414,7 +414,7 @@ def attach_boll_event_lifecycle_label(df,
             hit_stop = np.any(window_highs >= entry_price * (1 + sl_limit))
 
         if pnl_at_exit >= tp_target and not hit_stop:
-            df.at[curr_idx, 'label'] = Signal.LONG if is_long_event else Signal.SHORT
+            df.at[curr_idx, 'label'] = Signal.POSITIVE  if is_long_event else Signal.NEGATIVE
         else:
             df.at[curr_idx, 'label'] = Signal.NEUTRAL
 
@@ -426,8 +426,8 @@ def _boll_audit(df, event_indices):
     stats = df.loc[event_indices, 'label'].value_counts()
     print(f"\n📊 [BOLL Lifecycle Audit]")
     print(f"  - 触发点总数: {total}")
-    print(f"  - LONG (2) 有效: {stats.get(Signal.LONG, 0)} ({(stats.get(Signal.LONG, 0)/total)*100:.2f}%)")
-    print(f"  - SHORT (0) 有效: {stats.get(Signal.SHORT, 0)} ({(stats.get(Signal.SHORT, 0)/total)*100:.2f}%)")
+    print(f"  - POSITIVE  (2) 有效: {stats.get(Signal.POSITIVE , 0)} ({(stats.get(Signal.POSITIVE , 0)/total)*100:.2f}%)")
+    print(f"  - NEGATIVE (0) 有效: {stats.get(Signal.NEGATIVE, 0)} ({(stats.get(Signal.NEGATIVE, 0)/total)*100:.2f}%)")
     print(f"  - NEUTRAL (1) 噪音: {stats.get(Signal.NEUTRAL, 0)}")
 
 def attach_sma_7_25_crossover_label(df, 
@@ -497,7 +497,7 @@ def attach_sma_7_25_crossover_label(df,
             hit_stop = np.any(window_highs >= entry_price * (1 + sl_limit))
 
         if pnl_rate >= thresholds[curr_idx] and not hit_stop:
-            df.at[curr_idx, 'label'] = Signal.LONG if is_long_event else Signal.SHORT
+            df.at[curr_idx, 'label'] = Signal.POSITIVE  if is_long_event else Signal.NEGATIVE
         else:
             df.at[curr_idx, 'label'] = Signal.NEUTRAL
 

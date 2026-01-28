@@ -38,6 +38,7 @@ pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook j
     采样
     特征
 时间尺度越大，盈利预期越好，首先要打败手续费，时间尺度至少需要在15-30m级别
+设计自动化流程来调参，不要人工调参-筛选。人只集中精力在思考
 ***********************坑*************************
 指标计算：
 FeatureCandle/FeatureKdj/FeatureCFM/MFI在极端行情为0或nan，需要处理成有意义的值

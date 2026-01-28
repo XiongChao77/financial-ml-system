@@ -15,10 +15,10 @@ class MaCrossoverBrain(BrainBase):
         # 1. 判断交叉方向
         # 金叉：快线 > 慢线
         if state.fast_ma > state.slow_ma:
-            target_dir = PositionDir.LONG
+            target_dir = PositionDir.POSITIVE 
         # 死叉：快线 < 慢线
         else:
-            target_dir = PositionDir.SHORT
+            target_dir = PositionDir.NEGATIVE
 
         # 2. 状态机逻辑
         action = TradingAction(ActionType.HOLD)

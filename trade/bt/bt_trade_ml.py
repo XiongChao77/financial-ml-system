@@ -172,10 +172,10 @@ class FtmoStrategy(BtExecutor):
             self.dir = PositionDir.FLAT
             self.layers = 0
         elif self.position.size > 0:
-            self.dir = PositionDir.LONG
+            self.dir = PositionDir.POSITIVE 
             self.layers = 1
         elif self.position.size < 0:
-            self.dir = PositionDir.SHORT
+            self.dir = PositionDir.NEGATIVE
             self.layers = 1
 
         state = MarketState(
@@ -209,13 +209,13 @@ class FtmoStrategy(BtExecutor):
         current_price = self.data.close[0]
 
         # 校验做多标签 (Label 2)
-        if past_label == common.Signal.LONG:
+        if past_label == common.Signal.POSITIVE :
             self.audit_results['long_total'] += 1
             if current_price > past_price:
                 self.audit_results['long_correct'] += 1
         
         # 校验做空标签 (Label 0)
-        elif past_label == common.Signal.SHORT:
+        elif past_label == common.Signal.NEGATIVE:
             self.audit_results['short_total'] += 1
             if current_price < past_price:
                 self.audit_results['short_correct'] += 1

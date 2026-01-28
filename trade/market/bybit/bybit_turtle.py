@@ -141,7 +141,7 @@ class BybitTurtleExecutor:
             
             # 简单的层数估算（海龟逻辑通常需要自己记录，这里简化为 1 层代表有持仓）
             # 如果需要严格的层数逻辑，需要在外部记录或通过 size/unit_size 推算
-            direction = PositionDir.LONG if side == 'Buy' else PositionDir.SHORT
+            direction = PositionDir.POSITIVE  if side == 'Buy' else PositionDir.NEGATIVE
             return direction, 1, avg_price
 
         except Exception as e:

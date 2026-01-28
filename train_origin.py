@@ -503,8 +503,8 @@ def print_metrics(y_true, y_pred, logger, title):
     # Sample and Prediction Distribution
     total = len(y_true)
     c_true, c_pred = Counter(y_true), Counter(y_pred)
-    logger.info(f"📈 Sample Distribution (Data): SHORT(0): {c_true.get(0,0)/total:.2%}, NEUTRAL(1): {c_true.get(1,0)/total:.2%}, LONG(2): {c_true.get(2,0)/total:.2%}")
-    logger.info(f"🔮 Prediction Distribution (Model): SHORT(0): {c_pred.get(0,0)/total:.2%}, NEUTRAL(1): {c_pred.get(1,0)/total:.2%}, LONG(2): {c_pred.get(2,0)/total:.2%}")
+    logger.info(f"📈 Sample Distribution (Data): NEGATIVE(0): {c_true.get(0,0)/total:.2%}, NEUTRAL(1): {c_true.get(1,0)/total:.2%}, POSITIVE (2): {c_true.get(2,0)/total:.2%}")
+    logger.info(f"🔮 Prediction Distribution (Model): NEGATIVE(0): {c_pred.get(0,0)/total:.2%}, NEUTRAL(1): {c_pred.get(1,0)/total:.2%}, POSITIVE (2): {c_pred.get(2,0)/total:.2%}")
     
     # Classification Report
     report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)

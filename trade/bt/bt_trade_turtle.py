@@ -70,9 +70,9 @@ class TurtleStrategy(BtExecutor):
         # --- 新增：计算传递给 BrainBase 的持仓状态 ---
         # A. 确定持仓方向 (PositionDir)
         if self.position.size > 0:
-            curr_dir = PositionDir.LONG
+            curr_dir = PositionDir.POSITIVE 
         elif self.position.size < 0:
-            curr_dir = PositionDir.SHORT
+            curr_dir = PositionDir.NEGATIVE
         else:
             curr_dir = PositionDir.FLAT
 

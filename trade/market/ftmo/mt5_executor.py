@@ -32,7 +32,7 @@ class MT5Executor(BaseExecutor):
             return PositionDir.FLAT, 0, 0.0
 
         pos = positions[0] 
-        direction = PositionDir.LONG if pos.type == 0 else PositionDir.SHORT
+        direction = PositionDir.POSITIVE  if pos.type == 0 else PositionDir.NEGATIVE
         
         # 修正：返回 pos.price_open (开仓均价) 而不是 pos.volume
         # 这样 ftmo_turtle.py 里的 last_price 才能拿到正确的值
@@ -101,8 +101,8 @@ class MT5Executor(BaseExecutor):
         # 若方向反转，先平后开 (满足单层仓位逻辑)
         target_is_buy = target_pct > 0
         if current_dir != PositionDir.FLAT:
-            if (target_is_buy and current_dir == PositionDir.SHORT) or \
-               (not target_is_buy and current_dir == PositionDir.LONG):
+            if (target_is_buy and current_dir == PositionDir.NEGATIVE) or \
+               (not target_is_buy and current_dir == PositionDir.POSITIVE ):
                 self.user_close()
 
         tick = mt5.symbol_info_tick(self.symbol)

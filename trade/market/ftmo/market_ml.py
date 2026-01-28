@@ -31,7 +31,7 @@ class LiveConfig:
     SYMBOL_FTMO = "DOGEUSD"      # 交易执行品种 (FTMO通常是 BTCUSD)
     
     # 时间周期 (分钟)
-    TIMEFRAME = common.interval
+    TIMEFRAME = common.CommonDefine.interval
     allow_short = True
     allow_long = True
     holdbar = common.CommonDefine.PREDICT_NUM#CommonDefine.PREDICT_NUM

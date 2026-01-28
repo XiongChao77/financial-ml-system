@@ -407,7 +407,7 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
         window=train_cfg.data_cfg.window, 
         stride=train_cfg.stride, 
         use_cache=train_cfg.use_cache,
-        cache_path=os.path.join(common.TRAIN_OUT_DIR,"train_cache.pt"), show_feature_distribution=True
+        cache_path=os.path.join(common.TEMPORARY_DIR,"train_cache.pt"), show_feature_distribution=True
     )
     X_raw, y_raw = full_ds.X.numpy(), full_ds.y.numpy()
     
@@ -579,8 +579,8 @@ def print_metrics(y_true, y_pred, logger, title):
     # Sample and Prediction Distribution
     total = len(y_true)
     c_true, c_pred = Counter(y_true), Counter(y_pred)
-    logger.info(f"📈 Sample Distribution (Data): SHORT(0): {c_true.get(0,0)/total:.2%}, NEUTRAL(1): {c_true.get(1,0)/total:.2%}, LONG(2): {c_true.get(2,0)/total:.2%}")
-    logger.info(f"🔮 Prediction Distribution (Model): SHORT(0): {c_pred.get(0,0)/total:.2%}, NEUTRAL(1): {c_pred.get(1,0)/total:.2%}, LONG(2): {c_pred.get(2,0)/total:.2%}")
+    logger.info(f"📈 Sample Distribution (Data): NEGATIVE(0): {c_true.get(0,0)/total:.2%}, NEUTRAL(1): {c_true.get(1,0)/total:.2%}, POSITIVE (2): {c_true.get(2,0)/total:.2%}")
+    logger.info(f"🔮 Prediction Distribution (Model): NEGATIVE(0): {c_pred.get(0,0)/total:.2%}, NEUTRAL(1): {c_pred.get(1,0)/total:.2%}, POSITIVE (2): {c_pred.get(2,0)/total:.2%}")
     
     # Classification Report
     report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
