@@ -11,9 +11,9 @@ class PositionDir(IntEnum):
     """
     当前/目标持仓方向
     """
-    SHORT = -1
+    NEGATIVE = -1
     FLAT = 0
-    LONG = 1
+    POSITIVE  = 1
 
 
 class ActionType(Enum):

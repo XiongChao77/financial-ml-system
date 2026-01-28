@@ -31,19 +31,18 @@ class LiveConfig:
     SYMBOL_FTMO = "ETHUSD"      # 交易执行品种 (FTMO通常是 BTCUSD)
     
     # 时间周期 (分钟)
-    TIMEFRAME = common.interval
+    TIMEFRAME = common.CommonDefine.interval
     allow_short = True
     allow_long = True
     holdbar = common.CommonDefine.PREDICT_NUM#CommonDefine.PREDICT_NUM
-    thresh: float =0.4#0.5#None#0.45
-    commission = 0.05   # 0.1 = 0.1%  .can't be 0
-    cash = 10000
+
+    thresh: float =None#0.5#None#0.45
     stop_loss_long = 0.03  # 0-1
     stop_loss_short = 0.015  # 0-1
     atr_sl_mult_long = 8 # 5
-    atr_sl_mult_short = 5 #2.5
+    atr_sl_mult_short = 4.5 #2.5
     take_profit = 0.99 #止盈. 0 - n倍
-    trade_risk = 0.99     #0-1
+    trade_risk = 0.8    #0-leverage
     max_daily_loss_pct = 0.03
 
     mt5_path = r"C:\Program Files\Five Percent Online MetaTrader 5\terminal64.exe"

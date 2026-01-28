@@ -61,9 +61,9 @@ class RulesStrategy(BtExecutor):
 
         # 3. 获取实时持仓状态
         if self.position.size > 0:
-            curr_dir = PositionDir.LONG
+            curr_dir = PositionDir.POSITIVE 
         elif self.position.size < 0:
-            curr_dir = PositionDir.SHORT
+            curr_dir = PositionDir.NEGATIVE
         else:
             curr_dir = PositionDir.FLAT
 

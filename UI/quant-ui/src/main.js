@@ -415,8 +415,8 @@ function updateChart(candles, markers) {
 
     //label {
     const colors = {
-        LONG: '#26a69a',    // 绿色 (2)
-        SHORT: '#ef5350',   // 红色 (0)
+        POSITIVE : '#26a69a',    // 绿色 (2)
+        NEGATIVE: '#ef5350',   // 红色 (0)
         NEUTRAL: '#b2b2b2', // 灰色 (1)
         WARNING: '#ffff00'  // 【强调】黄色：预测与实际冲突
     };
@@ -432,8 +432,8 @@ function updateChart(candles, markers) {
 
         // 颜色映射函数
         const getSignalColor = (val) => {
-            if (val === 2) return colors.LONG;
-            if (val === 0) return colors.SHORT;
+            if (val === 2) return colors.POSITIVE ;
+            if (val === 0) return colors.NEGATIVE;
             return colors.NEUTRAL;
         };
 

@@ -213,7 +213,7 @@ def run_training(feature_config_list:list[common.FeatureContainer], logger:loggi
 
     full_ds = TimeSeriesWindowDataset(feature_config_list = feature_config_list,
         df=df, kline_interval_ms= common.load_interval_ms() , feature_cols=feature_cols, label_col=data_cfg.label_col, window=data_cfg.window,
-        cache_path=os.path.join(common.TRAIN_OUT_DIR,"train_cache.pt"), stride =train_cfg.stride, use_cache = train_cfg.use_cache, show_feature_distribution=True
+        cache_path=os.path.join(common.TEMPORARY_DIR,"train_cache.pt"), stride =train_cfg.stride, use_cache = train_cfg.use_cache, show_feature_distribution=True
     )
     logger.info(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):")
     logger.warning(f"{full_ds.feature_names}")

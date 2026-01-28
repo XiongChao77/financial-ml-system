@@ -28,9 +28,9 @@ class MaCrossoverStrategy(BtExecutor):
         # 同步当前持仓状态
         current_dir = PositionDir.FLAT
         if self.position.size > 0:
-            current_dir = PositionDir.LONG
+            current_dir = PositionDir.POSITIVE 
         elif self.position.size < 0:
-            current_dir = PositionDir.SHORT
+            current_dir = PositionDir.NEGATIVE
 
         # 构造状态并交给大脑决策
         state = MaMarketState(

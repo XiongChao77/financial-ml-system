@@ -143,19 +143,19 @@ class TurtleBrain(BrainBase):
         # self.logger.info(f"entry_high {last_row['entry_high']}, entry_low: {last_row['entry_low']}, exit_low: {last_row['exit_low']}, exit_high: {last_row['exit_high']}")
         if curr_dir == PositionDir.FLAT:
             if current_price > last_row['entry_high']:
-                action = TradingAction(ActionType.OPEN, PositionDir.LONG, 1, unit_pct)
+                action = TradingAction(ActionType.OPEN, PositionDir.POSITIVE , 1, unit_pct)
             elif current_price < last_row['entry_low']:
-                action = TradingAction(ActionType.OPEN, PositionDir.SHORT, 1, unit_pct)
+                action = TradingAction(ActionType.OPEN, PositionDir.NEGATIVE, 1, unit_pct)
         elif self.curr_layers < self.max_layers:
             threshold = 0.5 * atr
-            if curr_dir == PositionDir.LONG and current_price > last_entry_price + threshold:
-                action = TradingAction(ActionType.PYRAMID, PositionDir.LONG, target_layers, unit_pct)
-            elif curr_dir == PositionDir.SHORT and current_price < last_entry_price - threshold:
-                action = TradingAction(ActionType.PYRAMID, PositionDir.SHORT, target_layers, unit_pct)
+            if curr_dir == PositionDir.POSITIVE  and current_price > last_entry_price + threshold:
+                action = TradingAction(ActionType.PYRAMID, PositionDir.POSITIVE , target_layers, unit_pct)
+            elif curr_dir == PositionDir.NEGATIVE and current_price < last_entry_price - threshold:
+                action = TradingAction(ActionType.PYRAMID, PositionDir.NEGATIVE, target_layers, unit_pct)
 
         # 出场
-        if (curr_dir == PositionDir.LONG and current_price < last_row['exit_low']) or \
-           (curr_dir == PositionDir.SHORT and current_price > last_row['exit_high']):
+        if (curr_dir == PositionDir.POSITIVE  and current_price < last_row['exit_low']) or \
+           (curr_dir == PositionDir.NEGATIVE and current_price > last_row['exit_high']):
             action = TradingAction(ActionType.CLOSE)
 
         # 5. 执行：由 executor.user_order 处理
@@ -165,7 +165,7 @@ class TurtleBrain(BrainBase):
                 self.executor.user_close()
             else:
                 self.curr_layers = action.target_layers
-                is_buy = action.target_dir == PositionDir.LONG
+                is_buy = action.target_dir == PositionDir.POSITIVE 
                 self.logger.info(f"🐢 Order: {action.action} | is_buy: {is_buy} | Layer: {self.curr_layers} | Size_Pct: {unit_pct:.2%} | SL: {final_sl_ratio:.2%}")
                 # 改造点：使用 user_order 替代 target_percent
                 self.executor.user_order(unit_size, is_buy, stop_loss=final_sl_ratio)
