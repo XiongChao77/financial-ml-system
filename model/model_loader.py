@@ -1,7 +1,7 @@
 import os, sys, time, json
 import torch
 from torch.utils.data import DataLoader
-from sklearn.metrics import classification_report, f1_score, accuracy_score, precision_score, recall_score
+from sklearn.metrics import classification_report, f1_score, accuracy_score, precision_score, recall_score,confusion_matrix
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 # 引入自定义模块
@@ -371,35 +371,74 @@ class ModelHandler:
         
         return df_res
 
-    def evaluate_performance(self, y_true, y_pred, labels=None):
+    def evaluate_performance(self, y_true, y_pred):
         """
-        生成符合要求的 Test Report 格式日志
+        返回的 stats 保证 json.dumps 可直接序列化
         """
-        self.logger.info("=== Test Report ===")
-        
-        # 1. 生成主要分类报告 (Precision, Recall, F1)
-        # digits=4 确保保留4位小数 (例如 0.0956)
-        report = classification_report(y_true, y_pred, digits=4, zero_division=0)
-        # logger 默认会处理换行，直接打印即可
-        self.logger.info("\n" + report)
+        # 确保是 numpy array（方便统一处理）
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
 
-        # 2. 宏平均 F1 (单独打印)
-        macro_f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
-        self.logger.info(f"Test macro-F1:{macro_f1}")
-        
-        # 3. 真实标签分布
-        self.logger.info("\n=== True label proportion (Test set) ===")
-        unique_labels, counts = np.unique(y_true, return_counts=True)
-        total_samples = len(y_true)
-        
-        for label, count in zip(unique_labels, counts):
-            proportion = count / total_samples
-            self.logger.info(f"label {label}: {count} samples, {proportion:.4f} of total")
+        stats = {}
 
-        # 返回 UI 需要的简单指标字典
-        return {
-            "accuracy": f"{accuracy_score(y_true, y_pred):.2%}",
-            "precision": f"{precision_score(y_true, y_pred, average='weighted', zero_division=0):.2%}",
-            "recall": f"{recall_score(y_true, y_pred, average='weighted', zero_division=0):.2%}",
-            "f1_score": f"{f1_score(y_true, y_pred, average='weighted', zero_division=0):.2%}"
+        # ===== 基础指标 =====
+        stats["accuracy"] = float(accuracy_score(y_true, y_pred))
+        stats["f1_macro"] = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+        stats["f1_weighted"] = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+        stats["precision_weighted"] = float(precision_score(y_true, y_pred, average="weighted", zero_division=0))
+        stats["recall_weighted"] = float(recall_score(y_true, y_pred, average="weighted", zero_division=0))
+
+        # ===== 分类报告（dict）=====
+        stats["classification_report"] = classification_report(
+            y_true, y_pred, output_dict=True, zero_division=0
+        )
+        # sklearn 这里通常是 str key（'0','1','2' / 'accuracy' / 'macro avg'），但我们最后统一 json_safe
+
+        # ===== 混淆矩阵 =====
+        labels = sorted(np.unique(np.concatenate([y_true, y_pred])).tolist())
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
+        stats["confusion_matrix"] = {
+            "labels": [int(x) for x in labels],     # 强制 Python int
+            "matrix": cm.tolist(),                  # list[list[int]]
         }
+
+        # ===== 分布信息（注意：key 转 str/int）=====
+        unique_t, cnt_t = np.unique(y_true, return_counts=True)
+        unique_p, cnt_p = np.unique(y_pred, return_counts=True)
+
+        stats["label_distribution_true"] = {int(k): int(v) for k, v in zip(unique_t, cnt_t)}
+        stats["label_distribution_pred"] = {int(k): int(v) for k, v in zip(unique_p, cnt_p)}
+
+        # ===== 信号指标（按你项目的 Signal 定义改 NEUTRAL/NEG/POS）=====
+        NEUTRAL = int(Signal.NEUTRAL)
+        NEG = int(Signal.NEGATIVE)
+        POS = int(Signal.POSITIVE)
+
+        mask_signal = (y_pred != NEUTRAL)
+        n_total = int(len(y_pred))
+        n_signal = int(mask_signal.sum())
+
+        signal = {
+            "total_samples": n_total,
+            "signal_count": n_signal,
+            "coverage": float(n_signal / n_total) if n_total > 0 else 0.0,
+        }
+
+        if n_signal > 0:
+            y_true_sig = y_true[mask_signal]
+            y_pred_sig = y_pred[mask_signal]
+            signal["directional_accuracy"] = float(np.mean(y_true_sig == y_pred_sig))
+
+            # long / short 单独统计（基于预测触发）
+            for name, cls in [("short", NEG), ("long", POS)]:
+                m = (y_pred == cls)
+                cnt = int(m.sum())
+                signal[f"{name}_count"] = cnt
+                signal[f"{name}_win_rate"] = float(np.mean(y_true[m] == cls)) if cnt > 0 else None
+
+        stats["signal"] = signal
+
+        # ===== 最后一刀：强制 JSON-safe（保证不会再炸）=====
+        stats = json_safe(stats)
+
+        return stats

@@ -1,0 +1,47 @@
+import json
+import hashlib
+from dataclasses import asdict
+import numpy as np
+
+def safe_get(d, keys, default=0):
+    """从多层 dict 中取值，避免 KeyError"""
+    cur = d
+    for k in keys:
+        cur = cur.get(k, {})
+    return cur if cur != {} else default
+
+def json_safe(x):
+    """递归把对象转换为可 JSON 序列化的结构"""
+    # numpy scalar -> python scalar
+    if isinstance(x, np.generic):
+        return x.item()
+
+    # numpy array -> list
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+
+    # dict: key 必须是 str/int/float/bool/None，最稳是 str
+    if isinstance(x, dict):
+        return {str(k): json_safe(v) for k, v in x.items()}
+
+    # list/tuple
+    if isinstance(x, (list, tuple)):
+        return [json_safe(v) for v in x]
+
+    return x
+
+def calc_params_hash(*, strategy, common, train, algo="sha1", length=8):
+    """
+    对参数快照计算稳定 hash
+    """
+    payload = {
+        "strategy": asdict(strategy),
+        "common": asdict(common),
+        "train": asdict(train),
+    }
+
+    # canonical JSON：key 排序 + 无空格
+    s = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    h = hashlib.new(algo, s.encode("utf-8")).hexdigest()
+
+    return h[:length] if length else h

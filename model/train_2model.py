@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
+import os,copy
 import sys
 import json
 import logging,shutil
@@ -56,7 +56,7 @@ class DataConfig:
     csv_path: str = common.train_data_path
     feature_cols: list = field(default_factory=list)
     label_col: str = "label"
-    window: int = common.CommonDefine.CANDLESTICK_NUM
+    window: int = common.CommonDefine.predict_num
     train_ratio: float = 0.7
     val_ratio: float = 0.15
 
@@ -76,22 +76,26 @@ class TrainConfig:
     patience: int = 8
     seed: int = 42
     save_dir: str = common.TRAIN_OUT_DIR
-    stride: int = 4
+    stride: int = 2
     use_cache: bool = True
     # Weights for binary tasks [Weight for Class 0, Weight for Class 1]
     # Class 1 is usually the "Signal" or "Action", so we weight it higher.
-    binary_pos_weight: float = 1
+    mag_alpha: float = 0
+    mag_limit: float = 4.0
+    miss_penalty: float = 5  # 踏空惩罚
+    flip_penalty: float = 4.0  # 做反惩罚 (针对 OvR 任务中的 Opposite Trend)
 
 # ==============================================================================
 # 2. Dataset & Helper Classes
 # ==============================================================================
 
 class SeqDataset(Dataset):
-    def __init__(self, X, y): 
+    def __init__(self, X, y, returns): 
         self.X = torch.from_numpy(X).float()
         self.y = torch.from_numpy(y).long()
+        self.r = torch.from_numpy(returns).float() # 存储收益率
     def __len__(self): return self.X.shape[0]
-    def __getitem__(self, i): return self.X[i], self.y[i]
+    def __getitem__(self, i): return self.X[i], self.y[i], self.r[i]
 
 def set_seed(seed):
     import random
@@ -179,43 +183,30 @@ def analyze_confidence(subtask_name, probs, trues, save_dir, bins=20):
 # 3. Label Processing Logic (The Core Difference)
 # ==============================================================================
 
-def prepare_data_for_subtask(X_raw, y_raw, subtask_type: str):
+def prepare_data_for_subtask(X_raw, y_raw, rb_raw, subtask_type: str):
     """
-    Transforms raw multi-class labels (0:Short, 1:Neutral, 2:Long)
-    into binary labels and filters data for specific sub-tasks.
-    
-    Returns: X_filtered, y_transformed
+    同步过滤特征、标签和收益率，确保索引对齐。
     """
     if subtask_type == "trigger":
-        # Task: Detect Action (0,2) vs Neutral (1)
-        # 0 (Neutral) -> 0
-        # 1 (Short/Long) -> 1
         y_new = (y_raw != 1).astype(int)
-        return X_raw, y_new
+        return X_raw, y_new, rb_raw # Trigger 不删样本，直接返回
         
     elif subtask_type == "direction":
-        # Task: Long (2) vs Short (0)
-        # Filter: Remove Neutral (1)
-        mask = (y_raw != 1)
+        mask = (y_raw != 1) # 仅保留 Long(2) 和 Short(0)
         X_filt = X_raw[mask]
         y_filt = y_raw[mask]
+        rb_filt = rb_raw[mask] # <--- 核心修复：同步过滤收益率
         # Map: 0(Short) -> 0, 2(Long) -> 1
         y_new = np.where(y_filt == 2, 1, 0)
-        return X_filt, y_new
+        return X_filt, y_new, rb_filt
 
     elif subtask_type == "long_ovr":
-        # Task: Long (2) vs Others (0, 1)
-        # 0 (Others) -> 0
-        # 1 (Long) -> 1
         y_new = (y_raw == 2).astype(int)
-        return X_raw, y_new
+        return X_raw, y_new, rb_raw
         
     elif subtask_type == "short_ovr":
-        # Task: Short (0) vs Others (1, 2)
-        # 0 (Others) -> 0
-        # 1 (Short) -> 1
         y_new = (y_raw == 0).astype(int)
-        return X_raw, y_new
+        return X_raw, y_new, rb_raw
     
     else:
         raise ValueError(f"Unknown subtask: {subtask_type}")
@@ -249,49 +240,86 @@ def print_feature_importance(model, feature_names, logger, subtask_name, tag="")
     else:
         logger.info(f"ℹ️ Feature Selector is disabled for {subtask_name.upper()}.")
 
+def get_trigger_sampler(y, pos_ratio=0.3):
+    """
+    y: 0/1 trigger label
+    pos_ratio: 采样后 POS 在 batch 中的大致比例
+    """
+    y = np.asarray(y)
+    cnt_pos = (y == 1).sum()
+    cnt_neg = (y == 0).sum()
+
+    # 目标：pos_ratio : (1 - pos_ratio)
+    w_pos = pos_ratio / max(cnt_pos, 1)
+    w_neg = (1 - pos_ratio) / max(cnt_neg, 1)
+
+    weights = np.where(y == 1, w_pos, w_neg)
+    return WeightedRandomSampler(weights, len(weights), replacement=True)
+
+
+def compute_soft_binary_loss(logits, y_sub, rb, subtask_type, train_cfg:TrainConfig, device):
+    probs = torch.softmax(logits, dim=1)
+    p_neg, p_pos = probs[:, 0], probs[:, 1]
+    
+    # 1. 基础幅度权重 (行情越大，权重越高)
+    mag_weights = 1.0 + torch.log1p(train_cfg.mag_alpha * torch.abs(rb))
+    mag_weights = torch.clamp(mag_weights, max=train_cfg.mag_limit)
+
+    # 2. 任务特定的软化惩罚
+    penalty = torch.zeros_like(p_neg)
+    is_pos = (y_sub == 1)
+    is_neg = (y_sub == 0)
+
+    if subtask_type == "trigger":
+        # 错过行情惩罚：真实是有信号(1)，但预测为无信号(0)的概率高
+        penalty[is_pos] += p_neg[is_pos] * train_cfg.miss_penalty
+    elif subtask_type in ["long_ovr", "short_ovr"]:
+        # 错过行情惩罚：真实是有信号(1)，但预测为无信号(0)的概率高
+        penalty[is_pos] += p_neg[is_pos] * train_cfg.flip_penalty
+
+    # 3. 最终权重融合
+    final_weights = mag_weights * (1.0 + penalty)
+    final_weights = final_weights / (final_weights.mean() + 1e-8)
+
+    # 4. 计算带权重的 NLL Loss
+    log_probs = torch.log_softmax(logits, dim=1)
+    # 直接提取 NLL Loss
+    loss_samples = -log_probs.gather(1, y_sub.unsqueeze(1)).squeeze()
+
+    return (loss_samples * final_weights).mean()
 
 def train_binary_model(
     model, dl_tr, dl_va, dl_te,
     device, train_cfg: TrainConfig, logger,
     subtask_name: str,
 ):
-    """
-    Joint Training Engine: Co-evolves Backbone and Feature Selector.
-    Monitors both Best F1 and Best Loss for early stopping.
-    """
     logger.info(f"🚀 [Start Joint Training] Subtask: {subtask_name.upper()}")
 
-    # 1. Setup Loss and Parameters
-    weights = torch.tensor([1.0, train_cfg.binary_pos_weight], dtype=torch.float32).to(device)
-    criterion = nn.CrossEntropyLoss(weight=weights)
-
+    # 1. Setup StrategyPara
     use_gate = bool(train_cfg.model_cfg.use_feature_selector and hasattr(model, "feature_selector"))
 
     if use_gate:
-        # Differential Learning Rates: Gate usually needs to be more aggressive
         gate_params = [model.feature_selector.importance_logits]
         base_params = [p for n, p in model.named_parameters() if "feature_selector" not in n]
         
         optimizer = torch.optim.AdamW([
             {"params": base_params, "lr": train_cfg.lr, "weight_decay": train_cfg.weight_decay},
-            {"params": gate_params, "lr": train_cfg.gate_lr, "weight_decay": 0.0} # No decay for logits
+            {"params": gate_params, "lr": train_cfg.gate_lr, "weight_decay": 0.0}
         ])
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
 
-    # 2. Shared Scheduler (Reduce LR on Plateau based on Val Loss)
+    # 2. Shared Scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=train_cfg.patience // 2
     )
 
-    # 3. State Tracking
     best_f1 = 0.0
     best_va_loss = float('inf')
     best_state_f1 = None
     best_state_loss = None
     wait = 0
     
-    # For final reporting
     best_val_probs, best_val_trues, best_val_preds = None, None, None
 
     # --- Training Loop ---
@@ -299,13 +327,20 @@ def train_binary_model(
         model.train()
         tr_loss_list = []
 
-        for xb, yb in tqdm(dl_tr, desc=f"Ep {epoch} {subtask_name}", leave=False, ncols=100):
-            xb, yb = xb.to(device), yb.to(device)
+        # 注意：这里解包 3 个值 (xb, y_sub, rb)，对应 SeqDataset 的返回
+        for xb, y_sub, rb in tqdm(dl_tr, desc=f"Ep {epoch}", leave=False):
+            xb, y_sub, rb = xb.to(device), y_sub.to(device), rb.to(device)
+            
             optimizer.zero_grad()
             logits = model(xb)
-            loss = criterion(logits, yb)
+            
+            # 训练损失
+            loss = compute_soft_binary_loss(
+                logits, y_sub, rb, 
+                subtask_name, train_cfg, device
+            )
+            
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             tr_loss_list.append(loss.item())
 
@@ -315,52 +350,51 @@ def train_binary_model(
         val_loss_sum = 0.0
         
         with torch.no_grad():
-            for xb, yb in dl_va:
-                xb, yb = xb.to(device), yb.to(device)
+            # 统一解包逻辑：xb (特征), yb (子任务标签), rb (收益率)
+            for xb, yb, rb in dl_va:
+                xb, yb, rb = xb.to(device), yb.to(device), rb.to(device)
                 logits = model(xb)
-                loss = criterion(logits, yb)
+                
+                # ✅ 关键修改：验证集同样使用自定义损失函数
+                loss = compute_soft_binary_loss(
+                    logits, yb, rb, 
+                    subtask_name, train_cfg, device
+                )
+                
                 val_loss_sum += loss.item()
                 probs = torch.softmax(logits, dim=1)
                 val_probs.append(probs.cpu().numpy())
                 val_preds.append(torch.argmax(logits, dim=1).cpu().numpy())
                 val_trues.append(yb.cpu().numpy())
 
-        # Metrics Calculation
+        # 指标计算
         avg_tr_loss = float(np.mean(tr_loss_list)) if tr_loss_list else 0.0
         avg_va_loss = val_loss_sum / max(1, len(dl_va))
+        
         v_preds = np.concatenate(val_preds) if val_preds else np.array([])
         v_trues = np.concatenate(val_trues) if val_trues else np.array([])
         v_probs = np.concatenate(val_probs) if val_probs else np.array([])
         val_f1 = f1_score(v_trues, v_preds, average="macro") if len(v_trues) else 0.0
 
-        # Progress Reporting
-        lr_base = optimizer.param_groups[0]["lr"]
-        lr_gate = optimizer.param_groups[1]["lr"] if use_gate else 0.0
         logger.info(
-            f"Ep {epoch:02d} | LR B/G: {lr_base:.5f}/{lr_gate:.5f} | "
-            f"tr_loss {avg_tr_loss:.4f} | va_loss {avg_va_loss:.4f} | va_macroF1 {val_f1:.4f}"
+            f"Ep {epoch:02d} | tr_loss {avg_tr_loss:.4f} | va_loss {avg_va_loss:.4f} | va_macroF1 {val_f1:.4f}"
         )
 
         scheduler.step(avg_va_loss)
 
-        #  Progress Logic (F1 Improvement or Loss Reduction)
+        # 保存逻辑与 Early Stopping
         progress_made = False
-
         if val_f1 > best_f1 + 1e-6:
             best_f1 = val_f1
             best_state_f1 = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            # We track the F1-best predictions for the final sub-task report
             best_val_probs, best_val_trues, best_val_preds = v_probs, v_trues, v_preds
             progress_made = True
-            logger.debug(f"✨ New Best F1: {best_f1:.4f}")
 
         if avg_va_loss < best_va_loss - 1e-6:
             best_va_loss = avg_va_loss
             best_state_loss = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             progress_made = True
-            logger.debug(f"📉 New Best Loss: {best_va_loss:.4f}")
 
-        # Early Stopping check
         if progress_made:
             wait = 0
         else:
@@ -369,17 +403,12 @@ def train_binary_model(
                 logger.warning(f"🛑 Early Stop at Epoch {epoch}")
                 break
 
-    # 4. Finalizing: Load the overall best F1 state for reporting
     if best_state_f1 is not None:
         model.load_state_dict(best_state_f1)
 
-    # --- Sub-task Reporting ---
+    # 报告与诊断
     logger.info(f"\n{'#'*10} [{subtask_name.upper()}] FINAL REPORT {'#'*10}")
     if best_val_trues is not None:
-        counts = Counter(best_val_trues)
-        total = len(best_val_trues)
-        dist_str = ", ".join([f"Class {k}: {counts[k]/total:.2%}" for k in sorted(counts.keys())])
-        logger.info(f"📈 Sample Distribution: {dist_str}")
         logger.info("\n" + format_report(classification_report(best_val_trues, best_val_preds, output_dict=True, zero_division=0)))
         analyze_confidence(subtask_name, best_val_probs, best_val_trues, train_cfg.save_dir)
 
@@ -410,7 +439,8 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
         cache_path=os.path.join(common.TEMPORARY_DIR,"train_cache.pt"), show_feature_distribution=True
     )
     X_raw, y_raw = full_ds.X.numpy(), full_ds.y.numpy()
-    
+    returns_raw = full_ds.returns.numpy()
+
     # Define tasks based on mode
     if train_cfg.pipeline_mode == "trigger_direction":
         tasks = ["trigger","direction"]    #"trigger", "direction"
@@ -424,14 +454,14 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
     # 2. Train Loop for each Subtask
     for task_name in tasks:
         # A. Preprocess Data for this specific task
-        X_t, y_t = prepare_data_for_subtask(X_raw, y_raw, task_name)
+        X_t, y_t, rb = prepare_data_for_subtask(X_raw, y_raw,full_ds.returns, task_name)
         
         # Split (Ensure Chronological consistency)
         tr_rng, va_rng, te_rng = chrono_split(len(y_t), train_cfg.data_cfg.train_ratio, train_cfg.data_cfg.val_ratio)
         
-        ds_tr = SeqDataset(X_t[tr_rng[0]:tr_rng[1]], y_t[tr_rng[0]:tr_rng[1]])
-        ds_va = SeqDataset(X_t[va_rng[0]:va_rng[1]], y_t[va_rng[0]:va_rng[1]])
-        ds_te = SeqDataset(X_t[te_rng[0]:te_rng[1]], y_t[te_rng[0]:te_rng[1]])
+        ds_tr = SeqDataset(X_t[tr_rng[0]:tr_rng[1]], y_t[tr_rng[0]:tr_rng[1]],rb[tr_rng[0]:tr_rng[1]].numpy())
+        ds_va = SeqDataset(X_t[va_rng[0]:va_rng[1]], y_t[va_rng[0]:va_rng[1]],rb[va_rng[0]:va_rng[1]].numpy())
+        ds_te = SeqDataset(X_t[te_rng[0]:te_rng[1]], y_t[te_rng[0]:te_rng[1]],rb[te_rng[0]:te_rng[1]].numpy())
         
         # B. Build Model
         model = ModelFactory.build_for_training(
@@ -443,29 +473,30 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
         
         # C. Train
         # dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, shuffle=True) #sampler=get_balanced_sampler(ds_tr.y.numpy()))
+        cfg_task = copy.deepcopy(train_cfg)
         if task_name == 'direction':
-            dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, sampler=get_balanced_sampler(ds_tr.y.numpy()))
-            train_cfg.binary_pos_weight = 1
+            dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, shuffle=True)
             train_cfg.lr = 5e-3
             train_cfg.gate_lr = 1e-2
             train_cfg.weight_decay = 1e-3
-            train_cfg.stride = 1
         else :
-            train_cfg.stride = 2
             dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, shuffle=True)
             if task_name == 'trigger':
-                train_cfg.binary_pos_weight = 5
+                sampler = get_trigger_sampler(ds_tr.y.numpy(), pos_ratio=0.25)
+                dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, sampler=sampler)
                 train_cfg.lr = 2e-3
                 train_cfg.gate_lr = 2e-3
                 train_cfg.weight_decay = 1e-3
             elif task_name == 'long_ovr':
-                train_cfg.binary_pos_weight = 8
-                train_cfg.lr = 1e-3
+                sampler = get_trigger_sampler(ds_tr.y.numpy(), pos_ratio=0.1)
+                dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, sampler=sampler)
+                train_cfg.lr = 2e-3
                 train_cfg.gate_lr = 2e-3
                 train_cfg.weight_decay = 1e-3
             elif task_name == 'short_ovr':
-                train_cfg.binary_pos_weight = 5
-                train_cfg.lr = 1e-3
+                sampler = get_trigger_sampler(ds_tr.y.numpy(), pos_ratio=0.1)
+                dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, num_workers=4, sampler=sampler)
+                train_cfg.lr = 2e-3
                 train_cfg.gate_lr = 5e-4
                 train_cfg.weight_decay = 1e-3
         dl_va = DataLoader(ds_va, batch_size=train_cfg.batch_size, shuffle=False)
@@ -490,7 +521,7 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
     
     X_test_raw = torch.from_numpy(X_raw[te_rng_raw[0]:te_rng_raw[1]]).float().to(device)
     y_test_true = y_raw[te_rng_raw[0]:te_rng_raw[1]] # 0, 1, 2
-    
+
     logger.info(f"\n{'='*20} 🧩 FUSION EVALUATION: {train_cfg.pipeline_mode.upper()} {'='*20}")
     
     evaluate_and_save_pipeline(
@@ -621,13 +652,14 @@ def evaluate_and_save_pipeline(
 
     # --- 2. 统一评估逻辑 ---
     logger.info(f"\n{'='*20} 🧩 FUSION EVALUATION: {train_cfg.pipeline_mode.upper()} {'='*20}")
-    test_ds = SeqDataset(X_test_raw.cpu().numpy(), y_test_true) # 转为 CPU Numpy 构造 Dataset
+    placeholder_returns = np.zeros(len(y_test_true))
+    test_ds = SeqDataset(X_test_raw.cpu().numpy(), y_test_true,placeholder_returns) # 转为 CPU Numpy 构造 Dataset
     test_dl = DataLoader(test_ds, batch_size=train_cfg.batch_size, shuffle=False)
     
     all_fused_probs = []
     
     with torch.no_grad():
-        for xb, _ in tqdm(test_dl, desc="Evaluating Fusion", leave=False):
+        for xb, _, _ in tqdm(test_dl, desc="Evaluating Fusion", leave=False):
             xb = xb.to(device)
             # 调用包装器获取 3 分类概率
             _, fused_probs = fusion_model(xb, return_fused=True) 
@@ -700,24 +732,24 @@ def main(logger:logging.Logger):
         # FCVolumeEvent, 
 
         # 2. 价格趋势与指标类    FeatureMA > FeatureRsi/FeatureKdj/FeatureMACD   what happen to FeatureMACD??
-        common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
+        # common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
         common.FCMA,     # slope 值搭配使用
-        common.FCRSI,
+        # common.FCRSI,
         common.FCKDJ,
 
         # # 价格通道类，2选1   FeatureKeltner >> FeatureBoll/FeatureDonchian
-        common.FCDonchian, 
+        # common.FCDonchian, 
         common.FCKeltner,
-        common.FCBoll,
+        # common.FCBoll,
 
         # # 3. 量能与成交活跃度类 FeatureQavMa > FeatureMFI/FeatureWAP > FeatureCFM  > FeaturePVT >FeatureVolMa
         # # FCVolMa,
         common.FCQavMa,
         # common.FCOBV,    # 等于 FeaturePVT 丢掉幅度信息。不如 FeaturePVT，直接丢弃
         common.FCPVT,    # 累积性变量，对短期预测作用小，不如动量
-        common.FCWAP,
+        # common.FCWAP,
         common.FCCFM,
-        common.FCMFI,
+        # common.FCMFI,
         # # FCATS,  # 负作用
 
         # # 4. K线形态类
@@ -729,8 +761,8 @@ def main(logger:logging.Logger):
     cfg = TrainConfig()
     
     #  SET YOUR MODE HERE
-    # Option : "trigger_direction"/long_short_ovr
-    cfg.pipeline_mode = "trigger_direction"  # Change this to switch modes
+    # Option : "long_short_ovr"/long_short_ovr
+    cfg.pipeline_mode = "long_short_ovr"  # Change this to switch modes
     
     # Run
     run_pipeline(feature_config_list, logger, cfg)

@@ -188,8 +188,8 @@ def run_label_sensitivity_analysis(df):
 
             common.attach_label(
                 df_tmp,
-                candlestick_num=common.CommonDefine.CANDLESTICK_NUM,
-                predict_num=common.CommonDefine.PREDICT_NUM,
+                candlestick_num=common.CommonDefine.predict_num,
+                predict_num=common.CommonDefine.predict_num,
                 vol_multiplier=vol_mul,
                 stop_multiplier_rate=stop_rate,
             )

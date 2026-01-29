@@ -7,12 +7,15 @@ import backtrader as bt
 import backtrader.analyzers as btanalyzers
 import pandas as pd
 import logging
+from dataclasses import asdict, is_dataclass,dataclass
+from typing import Optional
 
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..",'..'))
 
 # 引入自定义模块
 from data_process.common import *
+from data_process import common 
 from model import model_loader
 from trade.bt import cus_analyzer, cus_comminfo, result_analyze
 from model import train_2head 
@@ -71,26 +74,41 @@ def log_parameters(params_obj, logger):
         # 4. 打印，确保 "Para" 后面的空格与你的 SUMMARY/EXPOSURE 对齐
         logger(f"Para    | {para_str}")
 
-class Parameters:
-    allow_short = True
-    allow_long = True
-    holdbar = CommonDefine.PREDICT_NUM#CommonDefine.PREDICT_NUM
-    commission = 0.05   # 0.1 = 0.1%  .can't be 0
-    cash = 10000
-    thresh: float =None#0.5#None#0.45
-    stop_loss_long = 0.03  # 0-1
-    stop_loss_short = 0.015  # 0-1
-    atr_sl_mult_long = 8 # 5
-    atr_sl_mult_short = 4.5 #2.5
-    take_profit = 0.99 #止盈. 0 - n倍
-    trade_risk = 0.8    #0-leverage
-    max_daily_loss_pct = 0.03
+def dump_params_json(obj, logger):
+    if is_dataclass(obj):
+        data = asdict(obj)
+    elif isinstance(obj, dict):
+        data = obj
+    else:
+        raise TypeError(f"Unsupported config type: {type(obj)}")
 
-def main(logger:logging.Logger):
+    logger.info("Params | " + json.dumps(data, indent=2, ensure_ascii=False))
+
+@dataclass
+class StrategyPara:
+    # switches
+    allow_short: bool = True
+    allow_long: bool = True
+    # execution
+    holdbar: int = -1          # 默认值，初始化时可覆盖
+    commission: float = 0.05   # 0.1 = 0.1%, can't be 0
+    cash: float = 10000.0
+    # signal
+    thresh: Optional[float] = None
+    # stop / take
+    stop_loss_long: float = 0.03
+    stop_loss_short: float = 0.015
+    atr_sl_mult_long: float = 8.0
+    atr_sl_mult_short: float = 5.0
+    take_profit: float = 0.99
+    # risk
+    trade_risk: float = 0.4
+    max_daily_loss_pct: float = 0.035
+
+def main(logger:logging.Logger, para = StrategyPara(holdbar=CommonDefine.predict_num), pre_para = CommonDefine(),train_cfg= train_2head.TrainConfig()):
     logger.info(
-        f"Backtest settings: Short={Parameters.allow_short}, Long={Parameters.allow_long}, Thresh={Parameters.thresh}, commission={Parameters.commission}"
+        f"Backtest settings: Short={para.allow_short}, Long={para.allow_long}, Thresh={para.thresh}, commission={para.commission}"
     )
-
     # 1. 数据加载
     # 直接读取 CSV，假设其中已包含所有特征列和时间列
     df = load_test_df()
@@ -108,7 +126,8 @@ def main(logger:logging.Logger):
     # -----------------------------------------------------------
     try:
         # 初始化处理类
-        tarin_out_path = r"output\the5ers"
+        # tarin_out_path = r"output/the5ers"
+        tarin_out_path = r"output/train"
         tarin_out_path = os.path.join(PROJECT_DIR,tarin_out_path)
         handler = model_loader.ModelHandler(tarin_out_path=tarin_out_path) #Best_F1/Best_Loss
         # 执行预测，获取结果和指标
@@ -145,17 +164,17 @@ def main(logger:logging.Logger):
     cerebro = bt.Cerebro(runonce=False,cheat_on_open=True)
     cerebro.addstrategy(
         FtmoStrategy,
-        holdbar=Parameters.holdbar,
-        allow_short=Parameters.allow_short,
-        allow_long=Parameters.allow_long,
-        thresh=Parameters.thresh,
-        stop_loss_long = Parameters.stop_loss_long,
-        stop_loss_short = Parameters.stop_loss_short,
-        atr_sl_mult_long = Parameters.atr_sl_mult_long,
-        atr_sl_mult_short = Parameters.atr_sl_mult_short,
-        take_profit = Parameters.take_profit,
-        trade_risk = Parameters.trade_risk,
-        max_daily_loss_pct = Parameters.max_daily_loss_pct,
+        holdbar=para.holdbar,
+        allow_short=para.allow_short,
+        allow_long=para.allow_long,
+        thresh=para.thresh,
+        stop_loss_long = para.stop_loss_long,
+        stop_loss_short = para.stop_loss_short,
+        atr_sl_mult_long = para.atr_sl_mult_long,
+        atr_sl_mult_short = para.atr_sl_mult_short,
+        take_profit = para.take_profit,
+        trade_risk = para.trade_risk,
+        max_daily_loss_pct = para.max_daily_loss_pct,
     )
 
     data = PandasDataWithPred(
@@ -172,14 +191,14 @@ def main(logger:logging.Logger):
         label = "label",
         openinterest=-1,
         nocase=True,
-        # fromdate=datetime(2024, 10, 1),
-        # todate=datetime(2025, 1, 1),
+        # fromdate=datetime(2023, 10, 1),
+        # todate=datetime(2024, 1, 1),
     )
 
     cerebro.adddata(data)
-    cerebro.broker.setcash(Parameters.cash)
+    cerebro.broker.setcash(para.cash)
     cerebro.broker.addcommissioninfo(
-        cus_comminfo.CommInfo_Cryptocurrency(commission=Parameters.commission, leverage =10)
+        cus_comminfo.CommInfo_Cryptocurrency(commission=para.commission, leverage =10)
     )
     # cerebro.broker.set_coc(True)  #
 
@@ -198,7 +217,7 @@ def main(logger:logging.Logger):
     # 5. 结果统计
     # UI
     # 封装统计数据 (合并回测数据和模型指标)
-    statistics = generate_backtest_report(logger, strat, model_stats, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'))
+    statistics = generate_backtest_report(logger, strat, model_stats, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'), para=para,pre_para=pre_para,train_cfg=train_cfg)
 
     trade_logs = cerebro.trade_logs
 
@@ -226,16 +245,7 @@ def main(logger:logging.Logger):
 
     return {"candles": candles_json, "markers": markers, "statistics": statistics}
 
-
-def safe_get(d, keys, default=0):
-    """从多层 dict 中取值，避免 KeyError"""
-    cur = d
-    for k in keys:
-        cur = cur.get(k, {})
-    return cur if cur != {} else default
-
-
-def generate_backtest_report(logger,strat, model_stats, save_path):
+def generate_backtest_report(logger,strat, model_stats, save_path, para:StrategyPara,pre_para:CommonDefine,train_cfg:train_2head.TrainConfig):
     """
     修复版报告生成器：
     1. 修正 Profit Factor 计算公式 (Gross Won / Gross Lost)
@@ -248,12 +258,12 @@ def generate_backtest_report(logger,strat, model_stats, save_path):
     trades = strat.analyzers.trades.get_analysis()
     sharpe = strat.analyzers.sharpe.get_analysis()
     trade_analysis = strat.analyzers.my_trades.get_analysis()
+    ret_analyzer = strat.analyzers.returns.get_analysis()
 
     # ----- 基础数值 -----
     start_value = strat.broker.startingcash  # 初始资金
     end_value = strat.broker.getvalue()      # 最终资金
     gross_return = (end_value - start_value) / start_value
-    ret_analyzer = strat.analyzers.returns.get_analysis()
     cagr = ret_analyzer.get('rnorm', 0.0)
     sr = sharpe.get("sharperatio", 0.0) or 0.0
 
@@ -318,8 +328,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path):
     daily_trades = total_trades / total_days
 
     # 计算平均值 (*100 转为百分比)
-    avg_pct_gross = avg_pnl_gross /(avg_cost/2) * Parameters.commission
-    avg_pct_net = avg_pnl_net / (avg_cost/2) * Parameters.commission
+    avg_pct_gross = avg_pnl_gross /(avg_cost/2) * para.commission
+    avg_pct_net = avg_pnl_net / (avg_cost/2) * para.commission
 
     # ============================================================
     # --- 1. 多头统计 (Long) ---
@@ -361,84 +371,164 @@ def generate_backtest_report(logger,strat, model_stats, save_path):
         else:
             robust_max_loss = top_5_losses[0] if top_5_losses else 0.0
 
-    # 【修改日志输出】增加鲁棒指标显示
-    logger.info(f"RISK(Daily)| Top 5 Losses: [{top_10_str}]")
-    logger.info(f"RISK(Daily)| Robust Max Loss (Avg 2nd-5th): {robust_max_loss*100:.2f}%")
-    logger.info(f"RISK(Daily)| Worst Day: {max_daily_dd*100:.2f}% ({max_daily_date}) | >3% Days: {max_3_violation_days} | >4% Days: {violation_days} | >5% Days: {max_violation_days}")
+    params_hash = calc_params_hash(
+        strategy=para,
+        common=pre_para,
+        train=train_cfg,
+    )
+    report = {
+        "params": {
+            "strategy": asdict(para),
+            "common": asdict(pre_para),
+            "train": asdict(train_cfg),
+            "hash": params_hash,
+        },
+        "time": {
+            "start": bt.num2date(strat.datas[0].datetime.array[0]),
+            "end": bt.num2date(strat.datas[0].datetime.array[-1]),
+        },
 
-    # summary 输出
-    logger.info("-" * 80)
-    logger.info(f"Time    | {bt.num2date(strat.datas[0].datetime.array[0])} --> {bt.num2date(strat.datas[0].datetime.array[-1])} | end value {end_value} ")
-    logger.info(f"SUMMARY | GrossRet: {gross_return*100:.2f}% | CAGR: {cagr*100:.2f}% | "
-                f"Sharpe: {sr:.3f} | MaxDD: {maxdd_pct:.2f}% ({maxdd_amt:.0f}) | Calmar: {calmar:.2f}")
-    # 【新增】打印仓位暴露信息
-    logger.info(f"EXPOSURE| Avg Pos: {avg_pos*100:.2f}% | Max Pos: {max_pos*100:.2f}% | P95 Pos: {p95_pos*100:.2f}% | trade_risk: {Parameters().trade_risk}")
-    logger.info(f"TRADES  | Total: {total_trades} | Freq: {daily_trades:.2f} trades/day | WinRate: {win_rate:.2f}% | lost_longest: {lost_longest} | won_longest: {won_longest} ")
-    logger.info(f"PNL($)  | Avg Gross: {avg_pnl_gross:.2f}({avg_pct_gross:.3f}%) | Avg Net: {avg_pnl_net:.2f}({avg_pct_net:.3f}%) (Cost: {avg_cost:.2f}/trade)")
-    logger.info(f"DETAILS | Long: {long_pnl_total} Winrate: {long_win_rate:.1f}% | Short: {short_pnl_total} Winrate: {short_win_rate:.1f}%")
-    log_parameters(Parameters,logger.info)
-    log_parameters(train_2head.TrainConfig,logger.debug)
-    log_parameters(CommonDefine,logger.debug)
-    logger.info("-" * 80)
+        "performance": {
+            "gross_return": gross_return,
+            "cagr": cagr,
+            "calmar": calmar,
+            "sharpe": sr,
+            "start_value": start_value,
+            "end_value": end_value,
+        },
 
-    # 构造 JSON (略微精简，保持原有结构)
-    full_report = {
-        "gross_return": gross_return,
-        "profit_factor": profit_factor,
-        "avg_pct_gross": avg_pct_gross,
-        "avg_pct_net": avg_pct_net,
-        # 各 Analyzer 原始数据
-        "trade_analyzer_raw": trades,
-        # 基础资金曲线
-        "start_value": start_value,
-        "end_value": end_value,
-        "cagr": cagr,
-        "sharpe": sr,
-        # 回撤
-        "max_drawdown_pct": maxdd_pct,
-        "max_drawdown_amount": maxdd_amt,
-        "max_drawdown_duration": maxdd_len,
-        # 交易统计
-        "total_trades": total_trades,
-        "total_won": total_won,
-        "win_rate": win_rate,
-        # 暴露信息来自 CusAnalyzer
-        "avg_pos_ratio": perf.get("avg_pos_ratio", 0),
-        "std_pos_ratio": perf.get("std_pos_ratio", 0),
-        "p95_pos_ratio": perf.get("p95_pos_ratio", 0),
-        "max_pos_ratio": perf.get("max_pos_ratio", 0),
-        "drawdown_raw": dd,
-        # 模型预测指标（从外部传入）
+        "drawdown": {
+            "max_dd_pct": maxdd_pct,
+            "max_dd_amt": maxdd_amt,
+            "max_daily_dd": max_daily_dd,
+            "max_daily_date": max_daily_date,
+            # "daily_loss_list": daily_losses,          # 原始 list（负数）
+            "robust_max_daily_loss": robust_max_loss,
+            "dd_3_pct_days": max_3_violation_days,
+            "dd_4_pct_days": violation_days,
+            "dd_5_pct_days": max_violation_days,
+        },
+
+        "exposure": {
+            "avg_pos": avg_pos,
+            "max_pos": max_pos,
+            "p95_pos": p95_pos,
+            "trade_risk": para.trade_risk,
+        },
+
+        "trades": {
+            "total": total_trades,
+            "daily_freq": daily_trades,
+            "win_rate": win_rate,
+            "lost_longest": lost_longest,
+            "won_longest": won_longest,
+            "avg_pnl_gross": avg_pnl_gross,
+            "avg_pct_gross": avg_pct_gross,
+            "avg_pnl_net": avg_pnl_net,
+            "avg_pct_net": avg_pct_net,
+            "avg_cost": avg_cost,
+            "long_pnl": long_pnl_total,
+            "long_win_rate": long_win_rate,
+            "short_pnl": short_pnl_total,
+            "short_win_rate": short_win_rate,
+        },
+
         "model_metrics": model_stats or {},
     }
-    
-    # 写入文件
-    with open(save_path, "w", encoding="utf-8") as f:
-        json.dump(full_report, f, indent=4, default=str)
 
-    # 返回 UI 数据
-    ui_stats = {
-        "gross_return": f"{gross_return*100:.2f}%",
-        "profit_factor": f"{profit_factor:.2f}",
-        "avg_trade_gross": f"{avg_pct_gross:.3f}%",
-        "avg_trade_net": f"{avg_pct_net:.3f}%",
-        "daily_frequency": f"{daily_trades:.2f} 次/天",
-        "avg_pnl_net": f"${avg_pnl_net:.2f}",
-        "cagr": f"{cagr*100:.2f}%",
-        "sharpe": f"{sr:.3f}",
-        "max_drawdown": f"{maxdd_pct:.2f}%",
-        "total_trades": total_trades,
-        "win_rate": f"{win_rate:.2f}%",
-        "start_value": f"{start_value:.2f}",
-        "end_value": f"{end_value:.2f}",
-        **(model_stats or {}),
-    }
-    return ui_stats
+    r = report
+
+    dump_params_json(train_cfg,logger)
+    dump_params_json(para,logger)
+    dump_params_json(pre_para,logger)
+
+    # 筛选负收益并排序 (最惨的排在前面)
+    sorted_losses = sorted([l for l in daily_losses if l < 0])
+    top_5_losses = sorted_losses[:10]
+    top_10_str = " | ".join([f"{l*100:.2f}%" for l in top_5_losses])
+    
+    # 计算 Robust Max Loss: 剔除第1名离群值，取 2-5 名均值
+    if len(top_5_losses) > 1:
+        robust_max_loss = sum(top_5_losses[1:]) / len(top_5_losses[1:])
+    else:
+        robust_max_loss = top_5_losses[0] if top_5_losses else 0.0
+        
+    # summary 输出
+    logger.info("-" * 29 + f"PARAMS_HASH | {params_hash}"+"-" * 29)
+
+    logger.info(f"RISK(Daily)| Top 10 Losses: [{top_10_str}]")
+    logger.info(
+        f"RISK(Daily)| Robust Max Loss (Avg 2nd-5th): "
+        f"{report['drawdown']['robust_max_daily_loss']*100:.2f}%"
+    )
+    logger.info(
+        f"RISK(Daily)| Worst Day: "
+        f"{report['drawdown']['max_daily_dd']*100:.2f}% "
+        f"({report['drawdown']['max_daily_date']}) | "
+        f">3% Days: {report['drawdown']['dd_3_pct_days']} | "
+        f">4% Days: {report['drawdown']['dd_4_pct_days']} | "
+        f">5% Days: {report['drawdown']['dd_5_pct_days']}"
+    )
+
+    logger.info(
+        f"Time    | {report['time']['start']} --> {report['time']['end']} "
+        f"| CAGR: {report['performance']['cagr']*100:.2f}% "
+        f"| Calmar: {report['performance']['calmar']:.2f}"
+    )
+
+    logger.info(
+        f"SUMMARY | GrossRet: {report['performance']['gross_return']*100:.2f}% "
+        f"| Sharpe: {report['performance']['sharpe']:.3f} "
+        f"| MaxDD: {report['drawdown']['max_dd_pct']:.2f}% "
+        f"({report['drawdown']['max_dd_amt']:.0f}) "
+        f"| end value {report['performance']['end_value']}"
+    )
+
+    logger.info(
+        f"EXPOSURE| Avg Pos: {report['exposure']['avg_pos']*100:.2f}% "
+        f"| Max Pos: {report['exposure']['max_pos']*100:.2f}% "
+        f"| P95 Pos: {report['exposure']['p95_pos']*100:.2f}% "
+        f"| trade_risk: {report['exposure']['trade_risk']}"
+    )
+
+    logger.info(
+        f"TRADES  | Total: {report['trades']['total']} "
+        f"| Freq: {report['trades']['daily_freq']:.2f} trades/day "
+        f"| WinRate: {report['trades']['win_rate']:.2f}% "
+        f"| lost_longest: {report['trades']['lost_longest']} "
+        f"| won_longest: {report['trades']['won_longest']}"
+    )
+
+    logger.info(
+        f"PNL($)  | Avg Gross: {report['trades']['avg_pnl_gross']:.2f}"
+        f"({report['trades']['avg_pct_gross']:.3f}%) "
+        f"| Avg Net: {report['trades']['avg_pnl_net']:.2f}"
+        f"({report['trades']['avg_pct_net']:.3f}%) "
+        f"(Cost: {report['trades']['avg_cost']:.2f}/trade)"
+    )
+
+    logger.info(
+        f"DETAILS | Long: {report['trades']['long_pnl']} "
+        f"Winrate: {report['trades']['long_win_rate']:.1f}% | "
+        f"Short: {report['trades']['short_pnl']} "
+        f"Winrate: {report['trades']['short_win_rate']:.1f}%"
+    )
+
+    logger.info("-" * 80)
+
+    return report
 
 if __name__ == "__main__":
-    logger, _= setup_session_logger(sub_folder='simulation',console_level= logging.INFO, file_level = logging.DEBUG)
+    exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'batch_experiments'),common.CommonDefine.symbol, common.CommonDefine.interval)
+    logger: logging.Logger
+    logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
+    common.get_git_info(logger)
     start_time = time.time()
-    main(logger)
+    report = main(logger)
+    append_jsonl(
+        os.path.join(exp_dir, "reports.jsonl"),
+        report["statistics"]
+    )
     end_time = time.time()
     run_time = end_time - start_time
     logger.info(f": run_time: {run_time:.4f} s")

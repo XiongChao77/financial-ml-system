@@ -28,7 +28,7 @@ class LabelRegimeAnalyzer:
             for stop in stop_range:
                 temp_df = self.df.copy()
                 # 调用 common.py 中的三重屏障逻辑
-                temp_df = common.attach_attr(
+                temp_df = common.attach_label(
                     temp_df, 
                     interval_ms=self.interval_ms,
                     vol_mult_long=vol,
