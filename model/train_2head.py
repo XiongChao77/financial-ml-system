@@ -35,7 +35,7 @@ class DataConfig:
     csv_path: str = common.train_data_path
     feature_cols: list = field(default_factory=list)
     label_col: str = "label"
-    window: int = common.CommonDefine.CANDLESTICK_NUM
+    window: int = common.CommonDefine.predict_num
     train_ratio: float = 0.7
     val_ratio: float = 0.15
 
@@ -130,7 +130,7 @@ class XGBoostConfig:
     xgb_estimators: int = 100
     learning_rate: float = 3e-4
     # 新增：用于 Flatten 维度计算
-    window_size: int = common.CommonDefine.CANDLESTICK_NUM
+    window_size: int = common.CommonDefine.predict_num
 
 @dataclass
 class CNNConfig:
@@ -142,25 +142,25 @@ class CNNConfig:
 
 @dataclass
 class TrainConfig:
-    model_cfg = ConvLSTMConfig()
-    data_cfg = DataConfig()
+    model_cfg: ConvLSTMConfig = field(default_factory=ConvLSTMConfig)
+    data_cfg: DataConfig = field(default_factory=DataConfig)
     epochs: int = 30
-    batch_size: int = 512    #越小模型越敏感，小batch_size自带正则化
-    lr: float = 3e-4    #3e-4
-    gate_lr: float = 1e-2    #3e-4
-    weight_decay: float = 5e-4  # $$L_{total} = L_{original} + \frac{\lambda}{2} \sum \|w\|^2$$  防止过拟合
+    batch_size: int = 512
+    lr: float = 3e-4
+    gate_lr: float = 1e-2
+    weight_decay: float = 5e-4
     patience: int = 8
-    seed: int = 42  #设计和验证阶段固定 seed，模型确定之后用多个 seed。
+    seed: int = 42
     save_dir: str = common.TRAIN_OUT_DIR
-    stride = 2
-    use_cache = True
-    lambda_trig: float = 0.5  # Trigger 任务权重
-    lambda_dir: float = 0.7   # Direction 任务权重 (设为 0 即可实现第一阶段只练 Trigger).lambda_dir需要补偿比例不平衡
+    stride: int = 2
+    use_cache: bool = True
+    lambda_trig: float = 0.5
+    lambda_dir: float = 0.7
     lambda_gate: float = 1e-3
-    mag_alpha: float =  0  # 幅度敏感度：1% 的波动增加 10% 权重
-    mag_limit: float = 4.0    # 权重截断：单个样本最大权重不超过 4 倍，防止插针干扰
-    flip_penalty: float = 2 # 致命错误惩罚 (0 <-> 2)
-    miss_penalty: float = 1.5 # 保守错误惩罚 (0/2 -> 1) 1.518
+    mag_alpha: float = 0
+    mag_limit: float = 4.0
+    flip_penalty: float = 2
+    miss_penalty: float = 1.4
 # ==============================================================================
 # 3. 核心逻辑 (Core Logic)
 # ==============================================================================
@@ -592,7 +592,6 @@ def train_xgboost_engine(model, dl_tr, dl_va, logger, mtl_manager):
     
     # 3. 验证阶段
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # 此时 eval_epoch 内部调用 compute_combined_loss 就不会报 KeyError 了
     va_loss, yv_true, yv_pred, yt_ret = eval_epoch(model, dl_va, device, mtl_manager)
     va_f1 = f1_score(yv_true, yv_pred, average="macro")
     
@@ -1110,7 +1109,7 @@ def find_best_threshold(results, model, dl_te, device, logger):
     return None
 
 @torch.no_grad()
-def eval_epoch(model, loader, device, mtl_manager):
+def eval_epoch(model, loader, device, mtl_manager:MTLManager):
     model.eval()
     tl, yt, yp, yr = 0.0, [], [], [] # 🌟 增加 yr 用于存储 return_rate
 
@@ -1131,40 +1130,41 @@ def eval_epoch(model, loader, device, mtl_manager):
     # 返回增加了一个返回值：拼接后的收益率数组
     return tl/len(loader.dataset), np.concatenate(yt), np.concatenate(yp), np.concatenate(yr)
 
-def main(logger:logging.Logger):
+feature_config_list = [
+    # 1. 自定义的成交量爆发特征 (窗口 512，对比前 2 强)
+    # FCVolumeEvent, 
+
+    # 2. 价格趋势与指标类    FeatureMA > FeatureRsi/FeatureKdj/FeatureMACD   what happen to FeatureMACD??
+    common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
+    # common.FCMA,     # slope 值搭配使用
+    # common.FCRSI,
+    common.FCKDJ,
+
+    # # 价格通道类，2选1   FeatureKeltner >> FeatureBoll/FeatureDonchian
+    # common.FCDonchian, 
+    common.FCKeltner,
+    # common.FCBoll,
+
+    # # 3. 量能与成交活跃度类 FeatureQavMa > FeatureMFI/FeatureWAP > FeatureCFM  > FeaturePVT >FeatureVolMa
+    # # FCVolMa,
+    common.FCQavMa,
+    # common.FCOBV,    # 等于 FeaturePVT 丢掉幅度信息。不如 FeaturePVT，直接丢弃
+    common.FCPVT,    # 累积性变量，对短期预测作用小，不如动量
+    # common.FCWAP,
+    common.FCCFM,
+    # common.FCMFI,
+    # # FCATS,  # 负作用
+    # common.FCATR,
+
+    # # 4. K线形态类
+    common.FCCandle,
+    common.FCOrigin,
+]
+
+def main(logger:logging.Logger,feature_config_list = feature_config_list, train_cfg = TrainConfig()):
     if os.path.exists(common.TRAIN_OUT_DIR):
         shutil.rmtree(common.TRAIN_OUT_DIR)
     os.makedirs(common.TRAIN_OUT_DIR, exist_ok=True)
-    feature_config_list = [
-        # 1. 自定义的成交量爆发特征 (窗口 512，对比前 2 强)
-        # FCVolumeEvent, 
-
-        # 2. 价格趋势与指标类    FeatureMA > FeatureRsi/FeatureKdj/FeatureMACD   what happen to FeatureMACD??
-        # common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
-        # common.FCMA,     # slope 值搭配使用
-        # common.FCRSI,
-        # common.FCKDJ,
-
-        # # 价格通道类，2选1   FeatureKeltner >> FeatureBoll/FeatureDonchian
-        # common.FCDonchian, 
-        common.FCKeltner,
-        # common.FCBoll,
-
-        # # 3. 量能与成交活跃度类 FeatureQavMa > FeatureMFI/FeatureWAP > FeatureCFM  > FeaturePVT >FeatureVolMa
-        # # FCVolMa,
-        # common.FCQavMa,
-        # common.FCOBV,    # 等于 FeaturePVT 丢掉幅度信息。不如 FeaturePVT，直接丢弃
-        # common.FCPVT,    # 累积性变量，对短期预测作用小，不如动量
-        # common.FCWAP,
-        common.FCCFM,
-        # common.FCMFI,
-        # # FCATS,  # 负作用
-        # common.FCATR,
-
-        # # 4. K线形态类
-        common.FCCandle,
-        common.FCOrigin,
-    ]
     
     # 4. 打印结果
     logger.info("🏆 === 最终选中的特征组合 (Final Selection) ===")
@@ -1177,14 +1177,12 @@ def main(logger:logging.Logger):
     # 1. 数据配置
     d_cfg = DataConfig()
     
-    # 2. 训练配置
-    t_cfg = TrainConfig()
             # 0             1                   2                   3           4               5               6
     m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig(), TCNConfig(), MambaConfig()][2]
     # m_cfg.model_version = 1
 
     logger.info(f"Training {m_cfg.model_type}...")
-    return run_training(feature_config_list, logger,d_cfg, t_cfg, m_cfg)
+    return run_training(feature_config_list, logger,d_cfg, train_cfg, m_cfg)
 # ==============================================================================
 # 5. 调用入口 (Main Entry)
 # ==============================================================================

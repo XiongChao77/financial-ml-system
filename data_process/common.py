@@ -1,10 +1,13 @@
 from enum import IntEnum
 from functools import lru_cache
-import logging,math,re
+from dataclasses import dataclass
+import logging,math,re,git
 import pandas as pd
 import numpy as np
 import os, colorlog , logging, json,platform
+from dataclasses import asdict, is_dataclass,fields
 from datetime import datetime
+from data_process.utils import *
 from data_process.feature import *
 
 class Signal(IntEnum):
@@ -21,20 +24,22 @@ VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
 VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
 ''' 
-# 建议在 common.py 中增加以下定义
+@dataclass
 class CommonDefine:
-    #define model
-    CANDLESTICK_NUM = 128   #160 best for LSTM
-    PREDICT_NUM = 12
-    VOL_MULTIPLIER_LONG = 1.9
-    STOP_MULTIPLIER_RATE_LONG = 0.2
-    VOL_MULTIPLIER_SHORT = 1.9
-    STOP_MULTIPLIER_RATE_SHORT = 0.2
-    # label_decrease_weak =1 
-    # label_increase_weak = 3
-    model_train_rate = 0.8
-    symbol = 'ETHUSDT' # option: 'BTCUSDT' 'ETHUSDT' 'BNBUSDT' 'DOGEUSDT'
-    interval = '30m' # option: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+    # model / data
+    candlestick_num: int = 128     # 160 best for LSTM
+    predict_num: int = 12
+    # risk / vol
+    vol_multiplier_long: float = 1.9
+    stop_multiplier_rate_long: float = 0.2
+    vol_multiplier_short: float = 1.9
+    stop_multiplier_rate_short: float = 0.2
+    # training
+    model_train_rate: float = 0.8
+    # market
+    symbol: str = "DOGEUSDT"
+    interval: str = "5m"
+
 log_level = logging.INFO
 
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,26 +49,35 @@ TEMPORARY_DIR = os.path.join(PROJECT_DIR, 'output')
 if platform.system().lower() != 'windows':
     os.makedirs('/dev/shm/quant', exist_ok=True)
     if not os.path.islink(TEMPORARY_DIR):   os.symlink('/dev/shm/quant', TEMPORARY_DIR)  # Linux/Ubuntu 环境：直接映射到共享内存
+else:
+    os.makedirs(TEMPORARY_DIR, exist_ok=True)
 PERSISTENCE_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'quant_output')
 os.makedirs(PERSISTENCE_DIR, exist_ok=True)
-
+DATA_OUT_DIR = os.path.join(TEMPORARY_DIR, "data")
+os.makedirs(DATA_OUT_DIR, exist_ok=True)
 PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency')
 origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{CommonDefine.symbol}_{CommonDefine.interval}.csv")
-train_data_path = os.path.join(TEMPORARY_DIR, "train_data.csv")
-test_data_path  = os.path.join(TEMPORARY_DIR, "test_data.csv")
-data_config_path  = os.path.join(TEMPORARY_DIR, "data_config_meta.json")
+train_data_path = os.path.join(DATA_OUT_DIR, "train_data.csv")
+test_data_path  = os.path.join(DATA_OUT_DIR, "test_data.csv")
+data_config_path  = os.path.join(DATA_OUT_DIR, "data_config_meta.json")
 TRAIN_OUT_DIR = os.path.join(TEMPORARY_DIR, "train")
 os.makedirs(TRAIN_OUT_DIR, exist_ok=True)
+EXPERIMENT_DIR = os.path.join(PROJECT_DATA_DIR, "experiment")
+os.makedirs(EXPERIMENT_DIR, exist_ok=True)
 
 CONF_DF = 'to_feather'#/'to_feather'/'to_csv'
 
+import os
+
 def save_train_df(df):
+    if os.path.exists(train_data_path):
+        os.remove(train_data_path)
     if CONF_DF == 'to_csv':
         df.to_csv(train_data_path, index=False, encoding="utf-8")
     else:
-        # Feather 格式需确保列名为字符串，否则会报错
         df.columns = df.columns.astype(str)
         df.to_feather(train_data_path)
+
 
 def load_train_df():
     if CONF_DF == 'to_csv':
@@ -72,6 +86,8 @@ def load_train_df():
         return pd.read_feather(train_data_path)
 
 def save_test_df(df):
+    if os.path.exists(test_data_path):
+        os.remove(test_data_path)
     if CONF_DF == 'to_csv':
         df.to_csv(test_data_path, index=False, encoding="utf-8")
     else:
@@ -93,12 +109,7 @@ def attach_attr(df, feature_config_list, kline_interval_ms):
 
 def attach_label(df, 
                 interval_ms,
-                candlestick_num=CommonDefine.CANDLESTICK_NUM, 
-                predict_num=CommonDefine.PREDICT_NUM, 
-                vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
-                vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
-                stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
-                stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
+                para = CommonDefine):
     """
     基于路径依赖的非对称打标签逻辑
     """
@@ -106,12 +117,10 @@ def attach_label(df,
     time_values = df[time_col].values
     
     # 1. 计算非对称动态阈值
-    df = calculate_thresholds(df, candlestick_num, predict_num, 
-                               vol_mult_long, vol_mult_short, 
-                               stop_rate_long, stop_rate_short)
+    df = calculate_thresholds(df, para)
 
     # 2. 物理时间锚定 (保持不变)
-    target_times = time_values + (predict_num * interval_ms)
+    target_times = time_values + (para.predict_num * interval_ms)
     target_indices = np.searchsorted(time_values, target_times, side='left')
     in_bounds = target_indices < len(df)
     safe_idx = np.where(in_bounds, target_indices, 0)
@@ -121,10 +130,10 @@ def attach_label(df,
     future_close = np.where(final_valid_mask, df['close'].values[safe_idx], np.nan)
     pct_final = (future_close - df['close']) / df['close']
 
-    high_mtx = np.column_stack([df['high'].shift(-i).values for i in range(1, predict_num + 1)])
-    low_mtx = np.column_stack([df['low'].shift(-i).values for i in range(1, predict_num + 1)])
+    high_mtx = np.column_stack([df['high'].shift(-i).values for i in range(1, para.predict_num + 1)])
+    low_mtx = np.column_stack([df['low'].shift(-i).values for i in range(1, para.predict_num + 1)])
     
-    steps = (target_indices - np.arange(len(df))).clip(1, predict_num)
+    steps = (target_indices - np.arange(len(df))).clip(1, para.predict_num)
     future_high_max = np.maximum.accumulate(high_mtx, axis=1)[np.arange(len(df)), steps - 1]
     future_low_min = np.minimum.accumulate(low_mtx, axis=1)[np.arange(len(df)), steps - 1]
 
@@ -152,12 +161,7 @@ def attach_label(df,
 
 def attach_triple_barrier_label(df, 
                                  interval_ms,
-                                 candlestick_num=CommonDefine.CANDLESTICK_NUM, 
-                                 predict_num=CommonDefine.PREDICT_NUM, 
-                                 vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
-                                 vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
-                                 stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
-                                 stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
+                                 para = CommonDefine,):
     """
     严苛版非对称 Triple Barrier 标签
     """
@@ -165,27 +169,25 @@ def attach_triple_barrier_label(df,
     time_values = df[time_col].values
     
     # 1. 计算非对称动态阈值
-    df = calculate_thresholds(df, candlestick_num, predict_num, 
-                               vol_mult_long, vol_mult_short, 
-                               stop_rate_long, stop_rate_short)
+    df = calculate_thresholds(df, para)
 
     # 2. 物理时间锚定
-    target_times = time_values + (predict_num * interval_ms)
+    target_times = time_values + (para.predict_num * interval_ms)
     target_indices = np.searchsorted(time_values, target_times, side='left')
     in_bounds = target_indices < len(df)
     safe_idx = np.where(in_bounds, target_indices, 0)
     final_valid_mask = in_bounds & (time_values[safe_idx] == target_times)
 
     # 3. 准备数据矩阵
-    future_closes = np.column_stack([df['close'].shift(-i).values for i in range(1, predict_num + 1)])
-    future_highs = np.column_stack([df['high'].shift(-i).values for i in range(1, predict_num + 1)])
-    future_lows = np.column_stack([df['low'].shift(-i).values for i in range(1, predict_num + 1)])
+    future_closes = np.column_stack([df['close'].shift(-i).values for i in range(1, para.predict_num + 1)])
+    future_highs = np.column_stack([df['high'].shift(-i).values for i in range(1, para.predict_num + 1)])
+    future_lows = np.column_stack([df['low'].shift(-i).values for i in range(1, para.predict_num + 1)])
     
     closes = df['close'].values
     labels = np.full(len(df), Signal.NEUTRAL, dtype=int)
 
     # 4.  循环遍历 (分别使用对应的 Long/Short 阈值列)
-    for i in range(len(df) - predict_num):
+    for i in range(len(df) - para.predict_num):
         if not final_valid_mask[i]:
             labels[i] = Signal.INVALID
             continue
@@ -195,14 +197,14 @@ def attach_triple_barrier_label(df,
         # --- 多头检测 (使用 _long 结尾的阈值) ---
         idx_long_tp = np.where(future_closes[i] >= curr_price * (1 + df['threshold_long'].iloc[i]))[0]
         idx_long_sl = np.where(future_lows[i] <= curr_price * (1 - df['stop_threshold_long'].iloc[i]))[0]
-        first_l_tp = idx_long_tp[0] if len(idx_long_tp) > 0 else predict_num
-        first_l_sl = idx_long_sl[0] if len(idx_long_sl) > 0 else predict_num
+        first_l_tp = idx_long_tp[0] if len(idx_long_tp) > 0 else para.predict_num
+        first_l_sl = idx_long_sl[0] if len(idx_long_sl) > 0 else para.predict_num
 
         # --- 空头检测 (使用 _short 结尾的阈值) ---
         idx_short_tp = np.where(future_closes[i] <= curr_price * (1 - df['threshold_short'].iloc[i]))[0]
         idx_short_sl = np.where(future_highs[i] >= curr_price * (1 + df['stop_threshold_short'].iloc[i]))[0]
-        first_s_tp = idx_short_tp[0] if len(idx_short_tp) > 0 else predict_num
-        first_s_sl = idx_short_sl[0] if len(idx_short_sl) > 0 else predict_num
+        first_s_tp = idx_short_tp[0] if len(idx_short_tp) > 0 else para.predict_num
+        first_s_sl = idx_short_sl[0] if len(idx_short_sl) > 0 else para.predict_num
 
         # 判定
         if first_l_tp < first_l_sl:
@@ -215,12 +217,7 @@ def attach_triple_barrier_label(df,
     return df
 
 def calculate_thresholds(df, 
-                         candlestick_num: int = CommonDefine.CANDLESTICK_NUM, 
-                         predict_num: int = CommonDefine.PREDICT_NUM, 
-                         vol_mult_long = CommonDefine.VOL_MULTIPLIER_LONG,    #  拆分
-                         vol_mult_short = CommonDefine.VOL_MULTIPLIER_SHORT,   #  拆分
-                         stop_rate_long = CommonDefine.STOP_MULTIPLIER_RATE_LONG,  #  拆分
-                         stop_rate_short = CommonDefine.STOP_MULTIPLIER_RATE_SHORT, #  拆分
+                         para = CommonDefine,
                          **kwargs): 
     """
     计算非对称动态止盈和止损阈值
@@ -228,32 +225,27 @@ def calculate_thresholds(df,
     assert 'close' in df.columns, "缺少 Close 数据"
     
     # 1. 计算波动率基准 (Rolling Standard Deviation)
-    vol_window = candlestick_num
+    vol_window = para.candlestick_num
     returns = df['close'].pct_change()
     rolling_std = returns.rolling(window=vol_window).std()
     
     # 2. 时间扩充波动率 (sigma * sqrt(T))
-    expected_vol = rolling_std * np.sqrt(predict_num)
+    expected_vol = rolling_std * np.sqrt(para.predict_num)
     
     # 3.  生成非对称阈值
     # 多头 (Long) 阈值
-    df['threshold_long'] = (expected_vol * vol_mult_long)
-    df['stop_threshold_long'] = df['threshold_long'] * stop_rate_long
+    df['threshold_long'] = (expected_vol * para.vol_multiplier_long)
+    df['stop_threshold_long'] = df['threshold_long'] * para.stop_multiplier_rate_long
     
     # 空头 (Short) 阈值
-    df['threshold_short'] = (expected_vol * vol_mult_short)
-    df['stop_threshold_short'] = df['threshold_short'] * stop_rate_short
+    df['threshold_short'] = (expected_vol * para.vol_multiplier_short)
+    df['stop_threshold_short'] = df['threshold_short'] * para.stop_multiplier_rate_short
     
     return df
 
 def attach_macd_event_lifecycle_label(df, 
                                 interval_ms,
-                                candlestick_num=CommonDefine.CANDLESTICK_NUM, 
-                                predict_num=CommonDefine.PREDICT_NUM, 
-                                vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
-                                vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
-                                stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
-                                stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
+                                para = CommonDefine,):
     """
     严格时间对齐版 MACD 生命周期标签 (自动匹配特征列名):
     移除 min_threshold 逻辑。
@@ -286,9 +278,7 @@ def attach_macd_event_lifecycle_label(df,
     
     # 3. 初始化与动态阈值
     df['label'] = Signal.INVALID
-    df = calculate_thresholds(df, candlestick_num, predict_num, 
-                               vol_mult_long, vol_mult_short, 
-                               stop_rate_long, stop_rate_short)
+    df = calculate_thresholds(df, para)
     
     closes = df['close'].values
     highs = df['high'].values
@@ -339,12 +329,7 @@ def attach_macd_event_lifecycle_label(df,
 
 def attach_boll_event_lifecycle_label(df, 
                                 interval_ms,
-                                candlestick_num=CommonDefine.CANDLESTICK_NUM, 
-                                predict_num=CommonDefine.PREDICT_NUM, 
-                                vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
-                                vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
-                                stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
-                                stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
+                                para = CommonDefine,):
     """
     均值回归版 布林带生命周期标签：
     移除 min_threshold 逻辑。
@@ -369,9 +354,7 @@ def attach_boll_event_lifecycle_label(df,
     
     # 3. 初始化与动态阈值
     df['label'] = Signal.INVALID
-    df = calculate_thresholds(df, candlestick_num, predict_num, 
-                               vol_mult_long, vol_mult_short, 
-                               stop_rate_long, stop_rate_short)
+    df = calculate_thresholds(df, para)
     
     closes = df['close'].values
     highs = df['high'].values
@@ -431,13 +414,7 @@ def _boll_audit(df, event_indices):
     print(f"  - NEUTRAL (1) 噪音: {stats.get(Signal.NEUTRAL, 0)}")
 
 def attach_sma_7_25_crossover_label(df, 
-                                interval_ms,
-                                candlestick_num=CommonDefine.CANDLESTICK_NUM, 
-                                predict_num=CommonDefine.PREDICT_NUM, 
-                                vol_mult_long=CommonDefine.VOL_MULTIPLIER_LONG, 
-                                vol_mult_short=CommonDefine.VOL_MULTIPLIER_SHORT,
-                                stop_rate_long=CommonDefine.STOP_MULTIPLIER_RATE_LONG,
-                                stop_rate_short=CommonDefine.STOP_MULTIPLIER_RATE_SHORT):
+                                interval_ms,para = CommonDefine,):
     """
     指定 SMA 7/25 交叉生命周期标签：
     移除 min_threshold 逻辑。
@@ -458,9 +435,7 @@ def attach_sma_7_25_crossover_label(df,
     event_indices = df.index[cross_mask].tolist()
     
     df['label'] = Signal.INVALID 
-    df = calculate_thresholds(df, candlestick_num, predict_num, 
-                               vol_mult_long, vol_mult_short, 
-                               stop_rate_long, stop_rate_short)
+    df = calculate_thresholds(df, para)
     
     closes = df['close'].values
     highs = df['high'].values
@@ -556,13 +531,15 @@ def load_interval_ms(config_path = data_config_path):
     except Exception as e:
         raise RuntimeError(f"💥 读取 JSON 时发生意外错误: {e}")
 
-def setup_session_logger(sub_folder: str, symbol: str = CommonDefine.symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
-    log_dir = os.path.join(PERSISTENCE_DIR, sub_folder)
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    sym_str = f"_{symbol}" if symbol else ""
-    log_filename = f"session{sym_str}_{timestamp}.log"
-    log_file_path = os.path.join(log_dir, log_filename)
+def setup_session_logger(sub_folder: str = None, log_file_path=None, symbol: str = CommonDefine.symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
+    if log_file_path ==None:
+        assert sub_folder!=None
+        log_dir = os.path.join(PERSISTENCE_DIR, sub_folder)
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        sym_str = f"_{symbol}" if symbol else ""
+        log_filename = f"session{sym_str}_{timestamp}.log"
+        log_file_path = os.path.join(log_dir, log_filename)
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG) 
     if root_logger.handlers:
@@ -629,3 +606,84 @@ def get_interval_ms(interval_str: str) -> int:
     value, unit = match.groups()
     return int(value) * units[unit]
 
+def get_git_info(logger):
+    repo = git.Repo(PROJECT_DIR)
+    sha = repo.head.object.hexsha
+    short_sha = repo.git.rev_parse(sha, short=7)
+    
+    logger.info(f"Full SHA: {sha}")
+    logger.info(f"Short SHA: {short_sha}")
+    logger.info(f"Commit Message: {repo.head.object.message.strip()}")
+
+def save_params(path, *, strategy, common, train):
+    data = {
+        "strategy": asdict(strategy),
+        "common": asdict(common),
+        "train": asdict(train),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def build_dataclass(cls, data: dict):
+    """
+    从 dict 构造 dataclass（支持嵌套 dataclass）
+    """
+    if not is_dataclass(cls):
+        raise TypeError(f"{cls} is not a dataclass")
+
+    kwargs = {}
+    for f in fields(cls):
+        if f.name not in data:
+            continue
+
+        val = data[f.name]
+
+        # 嵌套 dataclass
+        if is_dataclass(f.type) and isinstance(val, dict):
+            kwargs[f.name] = build_dataclass(f.type, val)
+        else:
+            kwargs[f.name] = val
+
+    return cls(**kwargs)
+
+def load_parameters(path, cls):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return build_dataclass(cls, data["strategy"])
+
+def load_common_define(path, cls):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return build_dataclass(cls, data["common"])
+
+def load_train_config(path, cls):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return build_dataclass(cls, data["train"])
+
+def create_experiment_dir(base_dir, symbol, interval, now=None):
+    """
+    创建目录：
+    base_dir / YYYY-MM-DD / SYMBOL_INTERVAL / HH_MM_SS
+
+    返回最终实验目录路径
+    """
+    now = now or datetime.now()
+
+    date_dir = now.strftime("%Y-%m-%d")
+    time_dir = now.strftime("%H_%M_%S")
+    sym_interval_dir = f"{symbol}_{interval}"
+
+    exp_dir = os.path.join(base_dir, date_dir, sym_interval_dir, time_dir)
+    os.makedirs(exp_dir, exist_ok=True)
+
+    return exp_dir
+
+def append_jsonl(path, obj):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+        f.flush()
+        os.fsync(f.fileno())   # 可选，但推荐
