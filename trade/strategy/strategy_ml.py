@@ -163,12 +163,12 @@ class FtmoBrain(BrainBase):
         #     if valid_number(state.atr) and valid_number(state.slow_atr):
         #         # if state.atr/state.slow_atr < 0.7: 
         #         #     target_dir = PositionDir.FLAT
-        #         if target_dir != PositionDir.FLAT and  state.slow_atr * math.sqrt(CommonDefine.PREDICT_NUM) < 0.02:
+        #         if target_dir != PositionDir.FLAT and  state.slow_atr * math.sqrt(CommonDefine.predict_num) < 0.02:
         #             target_dir = PositionDir.FLAT
         #             self.logger.debug(f"filter signal {target_dir} by slow_atr:{state.slow_atr}")
             # if target_dir != PositionDir.FLAT and state.vol_regime < 1 :
             #     target_dir = PositionDir.FLAT
-            # if target_dir != PositionDir.FLAT and  state.atr * math.sqrt(CommonDefine.PREDICT_NUM) < 0.02:
+            # if target_dir != PositionDir.FLAT and  state.atr * math.sqrt(CommonDefine.predict_num) < 0.02:
             #     target_dir = PositionDir.FLAT
 
         if target_dir != PositionDir.FLAT:

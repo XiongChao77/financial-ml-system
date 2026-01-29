@@ -22,7 +22,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             kline_interval_ms: int = None,
             feature_cols: List[str] = None,
             label_col: str = None,
-            window: int = common.CommonDefine.CANDLESTICK_NUM,
+            window: int = common.CommonDefine.predict_num,
             stride: int = 1,
             is_live: bool = False,
             cache_path: Optional[str] = None,
@@ -94,6 +94,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         data_to_save = {
             "X": self.X,
             "y": self.y,
+            "returns": self.returns,
             "indices": self.indices,
             "feature_names": self.feature_names,
             "feature_count": self.feature_count,
@@ -117,6 +118,13 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             # --- 严格参数比对逻辑 ---
             # 1. 基础标量参数校验
             mismatch_reasons = []
+            self.returns = checkpoint.get("returns") 
+            
+            # 容错处理：如果加载的是旧版没有 returns 的缓存
+            if self.returns is None:
+                self.logger.error("🚨 缓存中缺少 'returns' 数据！请删除缓存文件并重新生成。")
+                return False
+
             if self.stride != checkpoint.get("stride"):
                 mismatch_reasons.append(f"stride ({checkpoint.get('stride')} -> {self.stride})")
             
@@ -132,7 +140,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             if common.CommonDefine.symbol != checkpoint.get("symbol"):
                 mismatch_reasons.append(f"symbol ({checkpoint.get('symbol')} -> {common.CommonDefine.symbol})")
 
-            if common.interval != checkpoint.get("interval"):
+            if common.CommonDefine.interval != checkpoint.get("interval"):
                 mismatch_reasons.append(f"interval ({checkpoint.get('interval')} -> {common.CommonDefine.interval})")
 
             # 2. 特征列表校验 (内容与顺序)

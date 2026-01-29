@@ -1,13 +1,13 @@
 import pandas as pd 
 import numpy as np
 import matplotlib.pyplot as plt
-import datetime,os,sys, re, math, json, logging
+import datetime,os,sys, re, math, json, logging,shutil
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 from data_process.regime_discovery import LabelRegimeAnalyzer
 
-def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST):
+def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST,para = common.CommonDefine):
     file = common.origin_data_path
     # 1. 获取周期字符串并转为毫秒
     interval_str = common.get_interval_from_filename(file)
@@ -17,12 +17,12 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     metadata = {
         "symbol_interval": interval_str,
         "interval_ms": interval_ms, # <--- 新增
-        "candlestick_num": common.CommonDefine.CANDLESTICK_NUM,
-        "predict_num": common.CommonDefine.PREDICT_NUM,
-        "vol_multiplier_long": common.CommonDefine.VOL_MULTIPLIER_LONG,
-        "stop_multiplier_rate_long": common.CommonDefine.STOP_MULTIPLIER_RATE_LONG,
-        "vol_multiplier_short": common.CommonDefine.VOL_MULTIPLIER_SHORT,
-        "stop_multiplier_rate_short": common.CommonDefine.STOP_MULTIPLIER_RATE_SHORT,
+        "candlestick_num": para.predict_num,
+        "predict_num": para.predict_num,
+        "vol_multiplier_long": para.vol_multiplier_long,
+        "stop_multiplier_rate_long": para.stop_multiplier_rate_long,
+        "vol_multiplier_short": para.vol_multiplier_short,
+        "stop_multiplier_rate_short": para.stop_multiplier_rate_short,
     }
 
     df = pd.read_csv(file)
@@ -33,8 +33,8 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
     common.attach_attr(df, feature_config_list , interval_ms)
-    if False:
-        common.attach_label(df, interval_ms=interval_ms)
+    if True:
+        common.attach_label(df, interval_ms=interval_ms,para=para)
         # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
@@ -76,9 +76,10 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     test_df  = df.iloc[split_idx:]
 
     # 创建临时目录
-    os.makedirs(common.TEMPORARY_DIR, exist_ok=True)
-    os.makedirs(common.TEMPORARY_DIR, exist_ok=True)
-
+    shutil.rmtree(common.DATA_OUT_DIR, ignore_errors=True)
+    shutil.rmtree(common.TRAIN_OUT_DIR, ignore_errors=True)
+    os.makedirs(common.DATA_OUT_DIR, exist_ok=True)
+    
     # A. 保存 CSV 数据
     common.save_train_df(train_df)
     common.save_test_df(test_df)
