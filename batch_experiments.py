@@ -66,6 +66,37 @@ def finish_time_evaluate(stats):
     
     return f" [ETA: {str(eta_delta)} | Finish: {finish_time.strftime('%H:%M:%S')}]"
 
+def build_paras_from_record(record):
+    """
+    从 selected_configs.jsonl 的一条记录中
+    构造：
+      - CommonDefine
+      - TrainConfig
+      - StrategyPara
+    """
+    params = record.get("params", {})
+
+    if not params:
+        raise ValueError("record missing 'params'")
+
+    pre_para = common.build_dataclass(
+        common.CommonDefine,
+        params.get("common", {})
+    )
+
+    train_para = common.build_dataclass(
+        train.TrainConfig,
+        params.get("train", {})
+    )
+
+    sim_para = common.build_dataclass(
+        simulation.StrategyPara,
+        params.get("strategy", {})
+    )
+
+    return pre_para, train_para, sim_para
+
+
 def main():
     # 1. 配置参数解析器
     parser = argparse.ArgumentParser(description="Quant Trading Pipeline Control")
@@ -73,6 +104,7 @@ def main():
     parser.add_argument('-t', '--train', action='store_true', help='Execute model training stage')
     parser.add_argument('-s', '--sim', action='store_true', help='Execute backtest simulation stage')
     parser.add_argument('-a', '--all', action='store_true', help='Execute all stages')
+    parser.add_argument('-l', '--load', action='store_true', help='Execute all stages')
     parser.add_argument('-r', '--resume', type=str, help='Resume experiment from specified directory') # 新增
     
     args = parser.parse_args()
@@ -112,17 +144,48 @@ def main():
     # ==========================
     #  任务列表生成 (保持原样)
     # ==========================
-    
+
+    if args.load:
+        selected_path = os.path.join(common.PERSISTENCE_DIR,'batch_experiments',"selected_configs.jsonl")
+
+        selected_records = common.load_selected_configs(selected_path)
+        logger.info(f"📥 Loaded {len(selected_records)} selected configs")
+
+        # 直接生成任务列表（而不是 grid search）
+        preparation_task = []
+        training_task = []
+        simulation_task = []
+
+        for rec in selected_records:
+            pre_para, train_para, sim_para = build_paras_from_record(rec)
+
+            preparation_task.append(pre_para)
+            training_task.append(train_para)
+            simulation_task.append(sim_para)
+
+        # 更新统计信息
+        stats['preparation']['max_count'] = len(preparation_task)
+        stats['train']['max_count'] = len(training_task)
+        stats['simulation']['max_count'] = len(simulation_task)
+
+        stats['preparation']['left_count'] = stats['preparation']['max_count']
+        stats['train']['left_count'] = stats['train']['max_count']
+        stats['simulation']['left_count'] = stats['simulation']['max_count']
+
+
     # --- 阶段 1: Preparation ---
     preparation_task = []
  
     if args.prep or run_all:
         for cn in [96]:    #[96, 128]
-            for pn in [16]:     #[12, 16]
-                item = common.CommonDefine() 
-                item.candlestick_num = cn
-                item.predict_num = pn
-                preparation_task.append(item)
+            for pn in [12,16,20]:     #[12, 16]
+                for vol_multiplier in [1.9]:
+                    item = common.CommonDefine() 
+                    item.candlestick_num = cn
+                    item.predict_num = pn
+                    item.vol_multiplier_long = vol_multiplier
+                    item.vol_multiplier_short = vol_multiplier
+                    preparation_task.append(item)
     else:
         preparation_task.append(common.CommonDefine() )
     stats['preparation']['max_count'] = len(preparation_task)
@@ -131,8 +194,8 @@ def main():
     # --- 阶段 2: Train ---
     training_task = []
     if args.train or run_all:
-        for flip_penalty in np.linspace(0.5, 2.5, num=20): # 示例减少数量方便测试
-            for miss_penalty in np.linspace(flip_penalty*0.2, flip_penalty*1.5, num=10):
+        for flip_penalty in np.linspace(0.5, 2, num=10): # 示例减少数量方便测试
+            for miss_penalty in np.linspace(flip_penalty*0.2, flip_penalty*1.5, num=5):
                 t_cfg = train.TrainConfig()
                 t_cfg.use_cache = True # 批量实验通常关闭 Train 内部缓存以响应参数变化
                 t_cfg.flip_penalty = float(flip_penalty)
@@ -146,7 +209,7 @@ def main():
     # --- 阶段 3: Simulation ---
     simulation_task = []
     if args.sim or run_all:
-        for hb in [16, 20]:#[16, 20, 24, 28, 32]
+        for hb in [12,16,20]:#[16, 20, 24, 28, 32]
             s_cfg = simulation.StrategyPara() # 假设这是你的策略配置类
             s_cfg.holdbar = hb
             simulation_task.append(s_cfg)
@@ -188,7 +251,8 @@ def main():
             
             # 2. 执行 Training 
             # (即使 j == start_t，也需要重新训练模型，因为 simulation 依赖内存中的模型或临时文件)
-            logger.info(f">>> [Group P-{i}/{stats['preparation']['max_count']},T-{j}/{stats['train']['max_count']}]...")
+            logger.info(f">>> [Group P-{stats['preparation']['count']}/{stats['preparation']['left_count']},T-{stats['train']['count']}/{stats['train']['left_count']},S-{stats['simulation']['count']}/{stats['simulation']['left_count']}]"
+                        f" Preparation {finish_time_evaluate(stats)}...")
             start = time.time()
             # 确保传递给 train 的配置是独立的
             train.main(logger, train_cfg=t_task) 
@@ -205,9 +269,9 @@ def main():
                 if i == start_p and j == start_t and k <= start_s:
                     continue
 
-                logger.info(f">>> [{global_idx}/{total_task_num}] Simulation ...")
+                logger.info(f">>> [Group P-{stats['preparation']['count']}/{stats['preparation']['left_count']},T-{stats['train']['count']}/{stats['train']['left_count']},S-{stats['simulation']['count']}/{stats['simulation']['left_count']}]"
+                            f" Preparation {finish_time_evaluate(stats)}...")
                 start = time.time()
-                
                 # 执行回测
                 report = simulation.main(logger, para=s_task, pre_para=p_task, train_cfg=t_task)
                 

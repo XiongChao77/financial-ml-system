@@ -53,9 +53,9 @@ class ModelHandler:
         self.classes = meta.get("classes", [0, 1]) 
         self.label_col = meta.get("label_col", "label")
         
-        raw_config = meta.get("feature_config_list", [])
+        self.raw_config = meta.get("feature_config_list", [])
         self.feature_config_list = []
-        for class_name, params in raw_config:
+        for class_name, params in self.raw_config:
             if class_name in globals():
                 cls = globals()[class_name] 
                 self.feature_config_list.append(FeatureContainer(cls, **params))
@@ -243,7 +243,7 @@ class ModelHandler:
                 y_true = df_valid[self.label_col].values.astype(int)
                 y_pred = df_valid['pred'].values.astype(int)
                 stats = self.evaluate_performance(y_true, y_pred)
-        
+        stats['feature_config'] = self.raw_config
         self.logger.info(f"Inference complete. Valid signals: {len(final_pred)}")
         return df_out, stats
     

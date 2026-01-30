@@ -27,18 +27,19 @@ VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。
 @dataclass
 class CommonDefine:
     # model / data
-    candlestick_num: int = 128     # 160 best for LSTM
+    candlestick_num: int = 96     # 160 best for LSTM
     predict_num: int = 12
     # risk / vol
-    vol_multiplier_long: float = 1.9
+    vol_multiplier_long: float = 1.7
     stop_multiplier_rate_long: float = 0.2
-    vol_multiplier_short: float = 1.9
+    vol_multiplier_short: float = 1.7
     stop_multiplier_rate_short: float = 0.2
     # training
     model_train_rate: float = 0.8
     # market
-    symbol: str = "DOGEUSDT"
-    interval: str = "5m"
+    symbol: str = "BTCUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
+    interval: str = "15m"
+    version:int = 0 
 
 log_level = logging.INFO
 
@@ -100,16 +101,15 @@ def load_test_df():
     else:
         return pd.read_feather(test_data_path)
 
-def attach_attr(df, feature_config_list, kline_interval_ms):
+def attach_attr(df, feature_config_list, para = CommonDefine):
     # 1. 基础处理
     # df.drop('ignore', axis=1, inplace=True)
     # --- 2. 指标计算 (生成所有原始、未缩放的特征列) ---
     # df = add_relative_features(df)
+    kline_interval_ms = get_interval_ms(para.interval)
     FeatureFactory(feature_config_list, kline_interval_ms).generate(df)
 
-def attach_label(df, 
-                interval_ms,
-                para = CommonDefine):
+def attach_label(df, para = CommonDefine):
     """
     基于路径依赖的非对称打标签逻辑
     """
@@ -120,6 +120,7 @@ def attach_label(df,
     df = calculate_thresholds(df, para)
 
     # 2. 物理时间锚定 (保持不变)
+    interval_ms = get_interval_ms(para.interval)
     target_times = time_values + (para.predict_num * interval_ms)
     target_indices = np.searchsorted(time_values, target_times, side='left')
     in_bounds = target_indices < len(df)

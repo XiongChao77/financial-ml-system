@@ -32,9 +32,9 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     df = common.clean_data_quality_auto(df,logger)  
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
-    common.attach_attr(df, feature_config_list , interval_ms)
+    common.attach_attr(df, feature_config_list , para)
     if True:
-        common.attach_label(df, interval_ms=interval_ms,para=para)
+        common.attach_label(df, para=para)
         # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
@@ -44,12 +44,12 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
         analyzer = LabelRegimeAnalyzer(df, interval_ms, common.CommonDefine.symbol,common.CommonDefine.interval)
         
         # 定义更精细的步长以捕捉梯度变化
-        vol_range = np.linspace(0.5, 3, 25)
-        stop_range = np.linspace(0.1, 1, 18)
+        vol_range = np.arange(0.5, 5.1, 0.1).round(1)   #not include 3.1
+        stop_range = np.arange(0.1, 2.1, 0.1).round(1)   #not include 1.6
         
         analyzer.run_parameter_sweep(vol_range, stop_range)
-        analyzer.analyze_and_plot(output_dir= common.PERSISTENCE_DIR)
-        analyzer.plot_null_hypothesis_comparison(output_dir= common.PERSISTENCE_DIR)
+        analyzer.analyze_and_plot()
+        analyzer.plot_null_hypothesis_comparison()
         exit()
     # ---------------- 统计输出 ----------------
     counts = df['label'].value_counts().sort_index()

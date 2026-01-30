@@ -1,4 +1,4 @@
-import json
+import json,os
 import hashlib
 from dataclasses import asdict
 import numpy as np
@@ -45,3 +45,25 @@ def calc_params_hash(*, strategy, common, train, algo="sha1", length=8):
     h = hashlib.new(algo, s.encode("utf-8")).hexdigest()
 
     return h[:length] if length else h
+
+def load_selected_configs(path):
+    """
+    读取 selected_configs.jsonl
+    返回：list[dict]，每个元素是一条完整 report
+    """
+    records = []
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                # 坏行直接跳过，符合你一贯的设计哲学
+                continue
+    return records
+

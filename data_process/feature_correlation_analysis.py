@@ -98,14 +98,13 @@ def single_run_analysis(pre_task: common.CommonDefine, train_cfg: train.TrainCon
         ratios = {f'ratio_{k}': label_counts.get(k, 0.0) for k in [0, 1, 2]}
 
         # 2. 提取归一化后的窗口数据 (取最后一帧)
-        feature_cols = train_cfg.data_cfg.feature_cols if train_cfg.data_cfg.feature_cols else list(df.columns)
-        print(f"Features num:{len(feature_cols)},: {feature_cols}")
+        feat_cols = [c for c in df.columns if c not in data_loader.DROP_FEATURES]
         # 使用 train_2head 中定义的特征列表
         ds = data_loader.TimeSeriesWindowDataset(
             df=df, 
             feature_config_list=common.FEATURE_CONFIG_LIST,
             kline_interval_ms=common.get_interval_ms(pre_task.interval),
-            feature_cols=feature_cols,
+            feature_cols=feat_cols,
             label_col='label',
             window=train_cfg.data_cfg.window,
             stride=train_cfg.stride,
@@ -174,7 +173,7 @@ def _unpack_and_run(args):
 # ==============================================================================
 
 def main():
-    logger, _ = common.setup_session_logger(sub_folder='correlation_analyze')
+    logger, _ = common.setup_session_logger(sub_folder='correlation_analyze_log')
     output_dir = os.path.join(common.PERSISTENCE_DIR, 'correlation_result')
     os.makedirs(output_dir, exist_ok=True)
     
@@ -182,7 +181,7 @@ def main():
     pre_task.interval = '15m'
     train_cfg = train.TrainConfig()
     
-    csv_path = common.origin_data_path
+    csv_path = os.path.join(common.PROJECT_DATA_DIR, f"{pre_task.symbol}_{pre_task.interval}.csv")
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Missing data: {csv_path}")
     
@@ -217,13 +216,42 @@ def main():
                     r.update({'period': res['period']})
                     redundancy_rows.append(r)
 
-    # 保存 CSV
+    # 保存并展示 2D 形式的结果
     if all_rows:
-        pd.DataFrame(all_rows).to_csv(os.path.join(output_dir, 'analysis_summary.csv'), index=False)
-        # 打印 Top 10
-        mi_cols = [c for c in all_rows[0].keys() if c.endswith('_mi')]
-        top_mi = pd.Series({c.replace('_mi',''): all_rows[0][c] for c in mi_cols}).sort_values(ascending=False).head(10)
-        print("\n🏆 Top 10 Features (Mutual Information):\n", top_mi)
+        df_summary = pd.DataFrame(all_rows)
+        df_summary.to_csv(os.path.join(output_dir, 'analysis_summary.csv'), index=False)
+        
+        # --- 新增：转换为 Feature x Metric 矩阵 ---
+        # 提取相关性列
+        metric_types = ['pearson', 'spearman', 'mi', 'hsic']
+        metric_cols = [c for c in df_summary.columns if any(m in c for m in metric_types)]
+        
+        # 假设我们只关心第一个周期的数据（如果是多周期，可在此循环）
+        first_row = df_summary.iloc[0][metric_cols]
+        
+        matrix_data = []
+        for col_name, value in first_row.items():
+            # 使用 rsplit 处理带下划线的特征名，如 MACD_12_26_DIF_pearson
+            parts = col_name.rsplit('_', 1)
+            if len(parts) == 2:
+                feature, metric = parts
+                matrix_data.append({'Feature': feature, 'Metric': metric, 'Value': value})
+        
+        df_matrix = pd.DataFrame(matrix_data).pivot(index='Feature', columns='Metric', values='Value')
+        
+        # 确保列序并按 MI 降序排列，方便对比
+        available_metrics = [m for m in metric_types if m in df_matrix.columns]
+        df_matrix = df_matrix[available_metrics]
+        if 'mi' in df_matrix.columns:
+            df_matrix = df_matrix.sort_values(by='mi', ascending=False)
+        
+        # 保存 2D 矩阵结果
+        matrix_path = os.path.join(output_dir, 'feature_comparison_matrix.csv')
+        df_matrix.to_csv(matrix_path)
+        
+        print("\n📊 Feature Correlation Comparison Matrix (Top 15 sorted by MI):")
+        print(df_matrix.head(15).to_string())
+        print(f"\n✅ Detailed 2D comparison saved to: {matrix_path}")
 
     if redundancy_rows:
         pd.DataFrame(redundancy_rows).to_csv(os.path.join(output_dir, 'redundancy_suggestions.csv'), index=False)
