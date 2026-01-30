@@ -564,13 +564,13 @@ class FeatureMA(FeatureBase):
         """
         # 均线值：跟随 close 波动，进行组归一化，解决“海拔”问题
         if self.absolute_features:
-            self._normalize_z_score_rel(X, feature_cols, self.absolute_features, "high", factory=factory, method='log')
+            self._normalize_z_score_rel(X, feature_cols, self.absolute_features, feature_base = "close", factory=factory, method='log')
         
         # 斜率：每个斜率的波动率差异极大，强制使用自缩放 + 长尾压制
         if self.ratio_features:
             for f in self.ratio_features:
                 #  这里使用带 suppress=True 的自缩放版本，防止分母塌陷和极端值
-                self._normalize_z_score_rel(X, feature_cols, [f], f, factory=factory, method='log')
+                self._normalize_z_score_rel(X, feature_cols, [f], feature_base= f, factory=factory, method='log')
     def _min_history_request(self, kline_interval_ms: int) -> int:
         """
         [实现] 根据当前 K 线周期，计算模型所需的最少历史 K 线数量
@@ -806,12 +806,12 @@ class FeatureATRRegime(FeatureBase):
         for w in self.windows:
             col = f'atr_{w}'
             if col in feature_cols:
-                self._normalize_z_score(X, feature_cols, [col], col, factory, method='tanh')
+                self._normalize_z_score(X, feature_cols, [col], feature_base= col, factory = factory, method='tanh')
 
         # 2. 处理环境参考特征 (Regime)
         regime_col = f'vol_regime_{self.long_w}'
         if regime_col in feature_cols:
-            self._normalize_z_score(X, feature_cols, [regime_col], regime_col, factory, method='log')
+            self._normalize_z_score(X, feature_cols, [regime_col], feature_base = regime_col, factory =factory, method='log')
 
         # 3. 处理 Vol_Trend (变化率)
         if 'Vol_Trend' in feature_cols:
@@ -1114,11 +1114,11 @@ class FeatureWAP(FeatureBase):
         """
         # 1. 原始 VWAP：属于价格量纲，必须和 close 挂钩进行组归一化
         if self.absolute_features:
-            self._normalize_z_score_rel(X, feature_cols, self.absolute_features, "high", factory=factory, method='log')
+            self._normalize_z_score_rel(X, feature_cols, self.absolute_features, feature_base = "close", factory=factory, method='log')
         
         # 2. VWAP Bias：属于百分比量纲，波动较小且平稳，单独归一化
         if self.ratio_features:
-            self._normalize_z_score_rel(X, feature_cols, self.ratio_features, self.ratio_features[-1], factory=factory, method='log')
+            self._normalize_z_score_rel(X, feature_cols, self.ratio_features, feature_base = self.ratio_features[-1], factory=factory, method='log')
             # for f in self.ratio_features:
             #     # 偏离度通常在 [-0.1, 0.1] 之间，使用自缩放即可
             #     self._normalize_z_score_rel(X, feature_cols, [f], f, factory=factory)
@@ -1186,7 +1186,7 @@ class FeatureCFM(FeatureBase):
         if self.ratio_features:
             for f in self.ratio_features:
                 # 这种震荡指标不需要和 close 挂钩，单独进行 Z-Score 即可
-                self._normalize_z_score_rel(X, feature_cols, [f], f, factory=factory, method='log')
+                self._normalize_z_score_rel(X, feature_cols, [f], feature_base = f, factory=factory, method='log')
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         # 取最大的窗口并增加缓冲区
