@@ -397,6 +397,10 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
             "end_value": end_value,
         },
 
+        "raw_analyzer":{
+            "customize":perf,
+        },
+
         "drawdown": {
             "max_dd_pct": maxdd_pct,
             "max_dd_amt": maxdd_amt,
