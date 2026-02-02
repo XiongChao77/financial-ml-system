@@ -17,6 +17,7 @@ def main():
                         help='Execute backtest simulation stage')
     parser.add_argument('-a', '--all', action='store_true', 
                         help='Execute all stages')
+    parser.add_argument('-r', '--resume', type=str, help='Resume experiment from specified directory')
 
     args = parser.parse_args()
 
@@ -24,6 +25,24 @@ def main():
     logger: logging.Logger
     logger, _ = common.setup_session_logger(sub_folder='experiment', file_level=logging.DEBUG)
     
+    if args.load:
+        selected_path = os.path.join(common.PERSISTENCE_DIR,'batch_experiments',"selected_configs.jsonl")
+
+        selected_records = common.load_selected_configs(selected_path)
+        logger.info(f"📥 Loaded {len(selected_records)} selected configs")
+
+        # 直接生成任务列表（而不是 grid search）
+        preparation_task = []
+        training_task = []
+        simulation_task = []
+
+        for rec in selected_records:
+            pre_para, train_para, sim_para = common.build_paras_from_record(rec)
+
+            preparation_task.append(pre_para)
+            training_task.append(train_para)
+            simulation_task.append(sim_para)
+
     # 是否开启全流程
     run_all = args.all
     
@@ -49,8 +68,6 @@ def main():
         logger.info(">>> [3/3] Starting Simulation...")
         start = time.time()
         simulation.StrategyPara.thresh = None
-        simulation.main(logger)
-        simulation.StrategyPara.thresh = 0.4
         simulation.main(logger)
         stats["simulation"] = time.time() - start
 

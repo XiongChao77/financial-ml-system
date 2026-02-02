@@ -22,30 +22,10 @@ class Signal(IntEnum):
 VOL_MULTIPLIER=1.0,1σ,约 31.8% 的价格变动会超出这个阈值（上下尾部）。
 VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号数量适中。
 VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
-VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。    
-''' 
-@dataclass
-class CommonDefine:
-    # model / data
-    candlestick_num: int = 96     # 160 best for LSTM
-    predict_num: int = 12
-    # risk / vol
-    vol_multiplier_long: float = 1.7
-    stop_multiplier_rate_long: float = 0.2
-    vol_multiplier_short: float = 1.7
-    stop_multiplier_rate_short: float = 0.2
-    # training
-    model_train_rate: float = 0.8
-    # market
-    symbol: str = "BTCUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
-    interval: str = "15m"
-    version:int = 0 
-
-log_level = logging.INFO
-
+VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。
+'''
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR)
-# --- 核心判断逻辑 ---
 TEMPORARY_DIR = os.path.join(PROJECT_DIR, 'output')
 if platform.system().lower() != 'windows':
     os.makedirs('/dev/shm/quant', exist_ok=True)
@@ -56,6 +36,28 @@ PERSISTENCE_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'quant_output')
 os.makedirs(PERSISTENCE_DIR, exist_ok=True)
 DATA_OUT_DIR = os.path.join(TEMPORARY_DIR, "data")
 os.makedirs(DATA_OUT_DIR, exist_ok=True)
+
+@dataclass
+class CommonDefine:
+    # model / data
+    candlestick_num: int = 96     # 160 best for LSTM
+    predict_num: int = 12
+    # risk / vol
+    vol_multiplier_long: float = 1.9
+    stop_multiplier_rate_long: float = 0.2
+    vol_multiplier_short: float = 1.9
+    stop_multiplier_rate_short: float = 0.2
+    # training
+    model_train_rate: float = 0.8
+    # market
+    symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
+    interval: str = "15m"
+    version:int = 0
+    # batch multiprocessing: 每次 preparation 输出到独立目录，默认 DATA_OUT_DIR
+    prep_output_dir: str = DATA_OUT_DIR
+
+log_level = logging.INFO
+
 PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency')
 origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{CommonDefine.symbol}_{CommonDefine.interval}.csv")
 train_data_path = os.path.join(DATA_OUT_DIR, "train_data.csv")
@@ -101,13 +103,66 @@ def load_test_df():
     else:
         return pd.read_feather(test_data_path)
 
-def attach_attr(df, feature_config_list, para = CommonDefine):
+# ---------- 按目录读写（用于 batch 多进程：每个 preparation 独立目录） ----------
+def _data_path_in_dir(base_dir, name):
+    return os.path.join(base_dir, name)
+
+def save_train_df_to_dir(df, base_dir):
+    os.makedirs(base_dir, exist_ok=True)
+    path = _data_path_in_dir(base_dir, "train_data.csv" if CONF_DF == 'to_csv' else "train_data.feather")
+    if os.path.exists(path):
+        os.remove(path)
+    if CONF_DF == 'to_csv':
+        df.to_csv(path, index=False, encoding="utf-8")
+    else:
+        df.columns = df.columns.astype(str)
+        df.to_feather(path)
+
+def save_test_df_to_dir(df, base_dir):
+    os.makedirs(base_dir, exist_ok=True)
+    path = _data_path_in_dir(base_dir, "test_data.csv" if CONF_DF == 'to_csv' else "test_data.feather")
+    if os.path.exists(path):
+        os.remove(path)
+    if CONF_DF == 'to_csv':
+        df.to_csv(path, index=False, encoding="utf-8")
+    else:
+        df.columns = df.columns.astype(str)
+        df.to_feather(path)
+
+def load_train_df_from_dir(base_dir):
+    path = _data_path_in_dir(base_dir, "train_data.csv" if CONF_DF == 'to_csv' else "train_data.feather")
+    if CONF_DF == 'to_csv':
+        return pd.read_csv(path, encoding="utf-8")
+    return pd.read_feather(path)
+
+def load_test_df_from_dir(base_dir):
+    path = _data_path_in_dir(base_dir, "test_data.csv" if CONF_DF == 'to_csv' else "test_data.feather")
+    if CONF_DF == 'to_csv':
+        return pd.read_csv(path, encoding="utf-8")
+    return pd.read_feather(path)
+
+def get_data_config_path_in_dir(base_dir):
+    return _data_path_in_dir(base_dir, "data_config_meta.json")
+
+def load_interval_ms_from_dir(base_dir):
+    """从指定目录的 data_config_meta.json 读取 interval_ms，不依赖全局路径，适用于多进程。"""
+    config_path = get_data_config_path_in_dir(base_dir)
+    if not os.path.exists(config_path):
+        raise RuntimeError(f"❌ 找不到配置文件: {config_path}")
+    with open(config_path, 'r', encoding='utf-8') as f:
+        meta = json.load(f)
+    interval_ms = meta.get("interval_ms")
+    if interval_ms is None:
+        raise RuntimeError(f"⚠️ 配置文件中缺失 'interval_ms' 字段！")
+    return interval_ms
+
+def attach_attr(df, feature_group_list, para = CommonDefine):
     # 1. 基础处理
     # df.drop('ignore', axis=1, inplace=True)
     # --- 2. 指标计算 (生成所有原始、未缩放的特征列) ---
     # df = add_relative_features(df)
     kline_interval_ms = get_interval_ms(para.interval)
-    FeatureFactory(feature_config_list, kline_interval_ms).generate(df)
+    FeatureFactory(kline_interval_ms,feature_group_list).generate(df)
 
 def attach_label(df, para = CommonDefine):
     """

@@ -30,6 +30,11 @@ def json_safe(x):
 
     return x
 
+def param_hash(d, length=12):
+    """对参数字典计算稳定 hash，用于区分不同参数组合。"""
+    s = json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:length]
+    
 def calc_params_hash(*, strategy, common, train, algo="sha1", length=8):
     """
     对参数快照计算稳定 hash
@@ -66,4 +71,5 @@ def load_selected_configs(path):
                 # 坏行直接跳过，符合你一贯的设计哲学
                 continue
     return records
+
 

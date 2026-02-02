@@ -104,14 +104,15 @@ class StrategyPara:
     # risk
     trade_risk: float = 0.4
     max_daily_loss_pct: float = 0.035
+    device: str = 'cuda' #'cpu'
 
 def main(logger:logging.Logger, para = StrategyPara(holdbar=CommonDefine.predict_num), pre_para = CommonDefine(),train_cfg= train_2head.TrainConfig()):
     logger.info(
         f"Backtest settings: Short={para.allow_short}, Long={para.allow_long}, Thresh={para.thresh}, commission={para.commission}"
     )
-    # 1. 数据加载
-    # 直接读取 CSV，假设其中已包含所有特征列和时间列
-    df = load_test_df()
+    # 1. 数据加载（从 pre_para.prep_output_dir 读，默认 DATA_OUT_DIR）
+    df = common.load_test_df_from_dir(pre_para.prep_output_dir)
+    _interval_ms = common.load_interval_ms_from_dir(pre_para.prep_output_dir)
     # df = load_train_df()
     # 【关键】检查时间列是否存在
     # if "open_time_date_utc" not in df.columns:
@@ -125,13 +126,13 @@ def main(logger:logging.Logger, para = StrategyPara(holdbar=CommonDefine.predict
     # 2. 封装的模型预测 (一行代码搞定加载和推理)
     # -----------------------------------------------------------
     try:
-        # 初始化处理类
-        # tarin_out_path = r"output/the5ers"
-        tarin_out_path = r"output/train"
-        tarin_out_path = os.path.join(PROJECT_DIR,tarin_out_path)
-        handler = model_loader.ModelHandler(tarin_out_path=tarin_out_path) #Best_F1/Best_Loss
+        # 使用 train_cfg.save_dir 作为模型目录（batch 实验时每个 training 独立目录，便于 training 与 simulation 对应）
+        tarin_out_path = train_cfg.save_dir
+        if not os.path.isabs(tarin_out_path):
+            tarin_out_path = os.path.join(PROJECT_DIR, tarin_out_path)
+        handler = model_loader.ModelHandler(tarin_out_path=tarin_out_path, device=para.device)  # Best_F1/Best_Loss
         # 执行预测，获取结果和指标
-        df_with_pred, model_stats = handler.predict(df, kline_interval_ms = load_interval_ms(), is_live = False, diff_thresh = None,
+        df_with_pred, model_stats = handler.predict(df, kline_interval_ms=_interval_ms, is_live = False, diff_thresh = None,
                                                        cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()

@@ -32,8 +32,6 @@ from model.model_factory import ModelFactory
 
 @dataclass
 class DataConfig:
-    csv_path: str = common.train_data_path
-    feature_cols: list = field(default_factory=list)
     label_col: str = "label"
     window: int = common.CommonDefine.predict_num
     train_ratio: float = 0.7
@@ -98,7 +96,7 @@ class ConvLSTMConfig:
     logit_clip: Optional[float] = None
     p_drop: Optional[float] = None
     task_proj_dim: int = 64
-    use_feature_selector: bool = True
+    use_feature_selector: bool = False
 
 @dataclass
 class TCNConfig:
@@ -153,14 +151,14 @@ class TrainConfig:
     seed: int = 42
     save_dir: str = common.TRAIN_OUT_DIR
     stride: int = 2
-    use_cache: bool = True
+    use_cache: bool = False
     lambda_trig: float = 0.5
     lambda_dir: float = 0.7
     lambda_gate: float = 1e-3
     mag_alpha: float = 0
     mag_limit: float = 4.0
-    flip_penalty: float = 2
-    miss_penalty: float = 1.4
+    flip_penalty: float = 3.9
+    miss_penalty: float = 3.4
 # ==============================================================================
 # 3. 核心逻辑 (Core Logic)
 # ==============================================================================
@@ -195,28 +193,57 @@ def get_balanced_sampler(dataset):
     )
     return sampler
 
-def run_training(feature_config_list:list[common.FeatureContainer], logger:logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg):
+def apply_feature_direction(X: torch.Tensor, feature_names: List[str], direction_map: Dict[str, int], logger) -> torch.Tensor:
     """
-    接收配置对象，执行训练。
+    对 direction=-1 的特征列乘以 -1，使其与收益正相关。
+    X: shape [N, T, F]，归一化后的特征张量
+    feature_names: 特征名列表，与 X 的第 3 维对应
+    direction_map: {feature_name: 1 or -1}
     """
+    if direction_map is None or len(direction_map) == 0:
+        return X
+    
+    flip_indices = []
+    flip_names = []
+    for i, fname in enumerate(feature_names):
+        if direction_map.get(fname, 1) == -1:
+            flip_indices.append(i)
+            flip_names.append(fname)
+    
+    if flip_indices:
+        logger.info(f"🔄 Flipping {len(flip_indices)} features with ic_direction=-1: {flip_names[:10]}{'...' if len(flip_names) > 10 else ''}")
+        X[:, :, flip_indices] = -X[:, :, flip_indices]
+    
+    return X
+
+
+def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg, pre_para: common.CommonDefine = None):
+    """
+    接收配置对象，执行训练。pre_para 未传时使用 common.CommonDefine()，数据从 pre_para.prep_output_dir 读取。
+    """
+    if pre_para is None:
+        pre_para = common.CommonDefine()
     # 0. 初始化环境
     set_seed(train_cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device} | Model: {model_cfg.model_type} version: {model_cfg.model_version}")
 
-    # 1. 准备数据
-    df = common.load_train_df()
+    # 1. 准备数据（从 pre_para.prep_output_dir 读，默认 DATA_OUT_DIR）
+    df = common.load_train_df_from_dir(pre_para.prep_output_dir)
+    kline_interval_ms = common.load_interval_ms_from_dir(pre_para.prep_output_dir)
     logger.info(f"Using TimeSeriesWindowDataset with window={data_cfg.window} Origin data len {len(df)}...")
-    
-    feature_cols = data_cfg.feature_cols if data_cfg.feature_cols else list(df.columns)
-    logger.info(f"Features num:{len(feature_cols)},: {feature_cols}")
 
-    full_ds = TimeSeriesWindowDataset(feature_config_list = feature_config_list,
-        df=df, kline_interval_ms= common.load_interval_ms() , feature_cols=feature_cols, label_col=data_cfg.label_col, window=data_cfg.window,
+    feature_list = list(feature_direction_map.keys())
+    full_ds = TimeSeriesWindowDataset(
+        df=df, kline_interval_ms=kline_interval_ms, feature_cols=feature_list, label_col=data_cfg.label_col, window=data_cfg.window,
         cache_path=os.path.join(common.TEMPORARY_DIR,"train_cache.pt"), stride =train_cfg.stride, use_cache = train_cfg.use_cache, show_feature_distribution=True
     )
-    logger.info(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):")
-    logger.warning(f"{full_ds.feature_names}")
+    logger.warning(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):"
+                   f"{full_ds.feature_names}")
+    
+    # 对 ic_direction=-1 的特征进行反向（乘以 -1），使其与收益正相关
+    if feature_direction_map:
+        full_ds.X = apply_feature_direction(full_ds.X, full_ds.feature_names, feature_direction_map, logger)
 
     # 显存预加载优化
     logger.info(f"Pre-loading entire dataset to {device}...")
@@ -355,7 +382,7 @@ def run_training(feature_config_list:list[common.FeatureContainer], logger:loggi
         data_cfg=data_cfg,
         train_cfg=train_cfg,
         full_ds=full_ds,
-        feature_config_list = feature_config_list,
+        feature_list = feature_list,
         classes=classes,
         logger=logger,
         mtl_manager = mtl,
@@ -388,21 +415,6 @@ class SeqDataset(Dataset):
 
     def __getitem__(self, i): 
         return self.X[i], self.y[i], self.r[i] #  返回三元组
-
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
-        super().__init__()
-        self.gamma = gamma
-        self.reduction = reduction
-        self.register_buffer('alpha', alpha) 
-    def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-ce_loss)
-        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-        if self.alpha is not None: alpha_t = self.alpha[targets]; focal_loss = alpha_t * focal_loss
-        if self.reduction == 'mean': return focal_loss.mean()
-        elif self.reduction == 'sum': return focal_loss.sum()
-        else: return focal_loss
 
 class MTLManager:
     def __init__(self, device, train_cfg:TrainConfig):
@@ -738,7 +750,7 @@ def evaluate_and_save_results(
     data_cfg: DataConfig,
     train_cfg: TrainConfig,
     full_ds: TimeSeriesWindowDataset,
-    feature_config_list:list[common.FeatureContainer],
+    feature_list:list[str],
     classes: np.ndarray,
     logger: logging.Logger,
     mtl_manager: MTLManager
@@ -795,15 +807,11 @@ def evaluate_and_save_results(
         cm_path = os.path.join(train_cfg.save_dir, f"confmat_{suffix.lower()}.csv")
         pd.DataFrame(cm, index=[f"true_{c}" for c in classes], columns=[f"pred_{c}" for c in classes]).to_csv(cm_path, index=True)
 
-        feature_config_info = [
-        (container.feature.__name__, container.parameters) for container in feature_config_list
-        ]
-
         # 保存 .pt 和 Meta (保留)
         pt_path = os.path.join(train_cfg.save_dir, f"model_{suffix.lower()}_info.pt")
         torch.save({
             "state_dict": state,
-            "feature_config_list": feature_config_info, #  保存配置
+            "feature_list" : feature_list,
             "classes": classes.tolist(),
             "channel": full_ds.feature_count,
             "window": data_cfg.window,
@@ -820,7 +828,6 @@ def evaluate_and_save_results(
             classes=classes.tolist(),
             window=data_cfg.window,
             model_version_tag=suffix,
-            feature_config_list = feature_config_info
         )
         with open(os.path.join(train_cfg.save_dir, f"model_{suffix.lower()}_meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -1130,59 +1137,166 @@ def eval_epoch(model, loader, device, mtl_manager:MTLManager):
     # 返回增加了一个返回值：拼接后的收益率数组
     return tl/len(loader.dataset), np.concatenate(yt), np.concatenate(yp), np.concatenate(yr)
 
-feature_config_list = [
-    # 1. 自定义的成交量爆发特征 (窗口 512，对比前 2 强)
-    # FCVolumeEvent, 
+# feature_direction_map: 特征名 -> ic_direction (1 正向 / -1 负向)
+# 训练前会对 direction=-1 的特征乘以 -1，使其与收益正相关
+feature_direction_map = {
+    "PVT": -1,
+    "BOLL_PB_25": -1,
+    "RSI_14": -1,
+    "close": -1,
+    "KELTNER_MIDDLE_14": -1,
+    "low": -1,
+    "MOM_20_RV20": -1,
+    "DONCHIAN_POS_20": -1,
+    "high": -1,
+    "OBV": -1,
+    "MOM_20_SKIP1": -1,
+    "KELTNER_UPPER_14": -1,
+    "open": -1,
+    "DONCHIAN_DIST_L_20": -1,
+    "DONCHIAN_DIST_U_20": 1,
+    "MACD_12_26_DIF_PCT": -1,
+    "MOM_20": -1,
+    "KELTNER_LOWER_14": -1,
+    "DONCHIAN_MIDDLE_20": -1,
+    "DONCHIAN_LOWER_20": -1,
+    "DONCHIAN_UPPER_20": -1,
+    "VWAP_7": -1,
+    "MFI_25": -1,
+    "MOM_10": -1,
+    "BOLL_MIDDLE_25": -1,
+    "dist_to_high_100": 1,
+    "KDJ_K": -1,
+    "MA_BAR_S_L": -1,
+    "KDJ_D": -1,
+    "BOLL_LOWER_25": -1,
+    "KDJ_J": -1,
+    "vpin_49": 1,
+    "MA_BAR_M_L": -1,
+    "MACD_12_26_HIST_PCT": -1,
+    "BOLL_BW_25": 1,
+    "poc_bias_49": -1,
+    "BOLL_UPPER_25": -1,
+    "MACD_12_26_DIF": -1,
+    "vpin_14": 1,
+    "MOM_60": -1,
+    "D_MA_DAY_S_L": -1,
+    "id_factor_20": -1,
+    "MACD_12_26_DEA": -1,
+    "MACD_12_26_SIG_DIST": -1,
+    "VWAP_Bias_7": -1,
+    "close_pos": -1,
+    "vol_parkinson_100": 1,
+    "vol_gk_100": 1,
+    "id_factor_100": -1,
+    "dist_to_high_20": 1,
+    "skew_20": 1,
+    "D_MA_BAR_S_L": -1,
+    "er_126": 1,
+    "imbalance_14": -1,
+    "CMF_25": 1,
+    # "VWAP_BIAS": -1,
+    # "MACD_12_26_HIST_ACCEL": -1,
+    # "vol_gk_14": 1,
+    # "hurst_126": 1,
+    # "atr_14": 1,
+    # "vol_parkinson_14": 1,
+    # "body": 1,
+    # "body_pct": 1,
+    # "doji_score": 1,
+    # "body_mom": 1,
+    # "imbalance_49": 1,
+    # "max_range": 1,
+    # "kurt_100": 1,
+    # "MACD_12_26_HIST": 1,
+    # "skew_100": 1,
+    # "Vol_Trend": 1,
+    # "poc_bias_14": 1,
+    # "upper_wick_pct": 1,
+    # "VOL_ratio_14": 1,
+    # "kurt_20": 1,
+    # "ATS": 1,
+    # "DONCHIAN_BW_20": 1,
+    # "QAV_SLOPE_49": 1,
+    # "lower_wick_pct": 1,
+    # "hurst_14": 1,
+    # "QAV_SURGE_49": 1,
+    # "lower_wick": 1,
+    # "vol_regime_14": 1,
+    # "wick_bias": 1,
+    # "trade_density_14": 1,
+    # "er_14": 1,
+    "quote_asset_volume": 1,
+    # "MA_DAY_S_L": 1,
+    # "number_of_trades": 1,
+    # "taker_buy_quote_volume": 1,
+    # "MA_WEEK_M_L": -1,
+    # "VOL_MA_14": 1,
+    # "trade_density_49": 1,
+    # "upper_wick": 1,
+    # "volume": 1,
+    # "taker_buy_base_volume": 1,
+}
 
-    # 2. 价格趋势与指标类    FeatureMA > FeatureRsi/FeatureKdj/FeatureMACD   what happen to FeatureMACD??
-    common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
-    # common.FCMA,     # slope 值搭配使用
-    # common.FCRSI,
-    common.FCKDJ,
+feature_direction_map = {
+    # ===== 价格 / 位置（强信息，避免全家桶） =====
+    "close": -1,
+    "close_pos": -1,
+    "dist_to_high_100": 1,
+    "dist_to_high_20": 1,
+    "DONCHIAN_POS_20": -1,
 
-    # # 价格通道类，2选1   FeatureKeltner >> FeatureBoll/FeatureDonchian
-    # common.FCDonchian, 
-    common.FCKeltner,
-    # common.FCBoll,
+    # ===== 动量 / 反转（多尺度） =====
+    "RSI_14": -1,
+    "MOM_20": -1,
+    "MOM_60": -1,
+    "MACD_12_26_DIF_PCT": -1,
+    "MACD_12_26_HIST_PCT": -1,
 
-    # # 3. 量能与成交活跃度类 FeatureQavMa > FeatureMFI/FeatureWAP > FeatureCFM  > FeaturePVT >FeatureVolMa
-    # # FCVolMa,
-    common.FCQavMa,
-    # common.FCOBV,    # 等于 FeaturePVT 丢掉幅度信息。不如 FeaturePVT，直接丢弃
-    common.FCPVT,    # 累积性变量，对短期预测作用小，不如动量
-    # common.FCWAP,
-    common.FCCFM,
-    # common.FCMFI,
-    # # FCATS,  # 负作用
-    # common.FCATR,
+    # ===== 通道 / 偏离 =====
+    "BOLL_BW_25": 1,
+    "BOLL_PB_25": -1,
+    "KELTNER_MIDDLE_14": -1,
+    "DONCHIAN_DIST_U_20": 1,
+    "DONCHIAN_DIST_L_20": -1,
 
-    # # 4. K线形态类
-    common.FCCandle,
-    common.FCOrigin,
-]
+    # ===== 波动率 / regime =====
+    "vol_parkinson_100": 1,
+    "vol_gk_100": 1,
+    "skew_20": 1,
+    "er_126": 1,
 
-def main(logger:logging.Logger,feature_config_list = feature_config_list, train_cfg = TrainConfig()):
+    # ===== 成交量 / 资金流 =====
+    "PVT": -1,
+    # "OBV": -1,
+    "CMF_25": 1,
+
+    # ===== 订单流 / 微观结构 =====
+    "poc_bias_49": -1,
+    "id_factor_20": -1,
+    "vpin_49": 1,
+
+    # ===== 补充（弱相关但非冗余） =====
+    "VWAP_7": -1,
+    # ======basement features=======
+    "quote_asset_volume": 1,
+}
+
+
+def main(logger: logging.Logger, feature_direction_map=feature_direction_map, train_cfg=TrainConfig(), pre_para=common.CommonDefine()):
     if os.path.exists(common.TRAIN_OUT_DIR):
         shutil.rmtree(common.TRAIN_OUT_DIR)
     os.makedirs(common.TRAIN_OUT_DIR, exist_ok=True)
-    
-    # 4. 打印结果
-    logger.info("🏆 === 最终选中的特征组合 (Final Selection) ===")
-    logger.info("-" * 50)
-    for i, container in enumerate(feature_config_list):
-        logger.info(f"{i+1}. {container.feature.__name__:<20} | 参数: {container.parameters}")
-    logger.info("-" * 50)
-    logger.info(f"📊 总特征组数量: {len(feature_config_list)}")
-    
+
     # 1. 数据配置
     d_cfg = DataConfig()
-    
+
             # 0             1                   2                   3           4               5               6
     m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig(), TCNConfig(), MambaConfig()][2]
     # m_cfg.model_version = 1
 
     logger.info(f"Training {m_cfg.model_type}...")
-    return run_training(feature_config_list, logger,d_cfg, train_cfg, m_cfg)
+    return run_training(feature_direction_map, logger, d_cfg, train_cfg, m_cfg, pre_para=pre_para)
 # ==============================================================================
 # 5. 调用入口 (Main Entry)
 # ==============================================================================
