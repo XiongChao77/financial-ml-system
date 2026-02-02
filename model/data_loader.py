@@ -17,43 +17,32 @@ LOW_CORRELATION_FEATURES = ['number_of_trades','quote_asset_volume', 'taker_buy_
 class TimeSeriesWindowDataset(torch.utils.data.Dataset):
     def __init__(
             self,
-            df: pd.DataFrame = None,
-            feature_config_list = common.FEATURE_CONFIG_LIST,
-            kline_interval_ms: int = None,
-            feature_cols: List[str] = None,
+            df: pd.DataFrame,
+            kline_interval_ms,
+            feature_cols,
             label_col: str = None,
             window: int = common.CommonDefine.predict_num,
             stride: int = 1,
             is_live: bool = False,
             cache_path: Optional[str] = None,
             use_cache: bool = False,
-            show_feature_distribution = False
+            show_feature_distribution = True
     ):
-        self.logger = logging.getLogger()
+        self.logger = logging.getLogger("dataset")
         self.is_live = is_live
         self.show_feature_distribution = show_feature_distribution
         self.stride = stride
         self.window = window
         self.kline_interval_ms = kline_interval_ms
-        self.feature_cols_requested = feature_cols  # 记录请求的特征列表
+        self.feature_cols = feature_cols  # 记录请求的特征列表
         self.label_col = label_col
         self.time_col = 'open_time_ms_utc'
-        self.factory = common.FeatureFactory(feature_config_list, self.kline_interval_ms)
+        self.factory = common.FeatureFactory(self.kline_interval_ms)
 
-
-        #  核心修改：增加特征过滤逻辑
-        if feature_cols is not None:
-            # 由于 self.factory.all_feature_list 已是一维列表，直接转 set 进行高效匹配
-            available_features = set(self.factory.all_feature_list)
-            # 过滤请求列表：只保留 Factory 确实能够生成的特征
-            filtered_cols = [f for f in feature_cols if f in available_features]
-            # 如果有特征被剔除，打印警告以便排查配置问题
-            if len(filtered_cols) < len(feature_cols):
-                missing = set(feature_cols) - available_features
-                self.logger.warning(f"🚫 过滤掉 Factory 未定义的特征: {missing}")
-            # 更新请求参数，确保后续 _prepare_data 和缓存校验使用的是过滤后的列表
-            feature_cols = filtered_cols
-            self.feature_cols_requested = feature_cols 
+        missing = set(feature_cols) - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing features: {list(missing)}")
+        self.logger.info(f"Features num:{len(feature_cols)},: {feature_cols}")
 
         # --- 1. Load from Cache ---
         if use_cache and cache_path and os.path.exists(cache_path):
@@ -73,7 +62,9 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         df_work, clean_features = self._prepare_data(df, feature_cols, label_col)
         self.feature_names = clean_features
         self.feature_count = len(clean_features)
-
+        cols_set = set(self.feature_cols)
+        unused = [f for f in self.factory.all_feature_list if f not in cols_set]    #keep order
+        self.logger.info(f"feature unused: {unused}")
         # B. Window Generation
         X3d, time_windows = self._generate_windows(df_work)
 
@@ -103,7 +94,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             "window": self.window,
             "kline_interval_ms": self.kline_interval_ms,
             "label_col": self.label_col,
-            "feature_cols_requested": self.feature_cols_requested,
+            "feature_cols": self.feature_cols,
             "symbol": common.CommonDefine.symbol,
             "interval": common.CommonDefine.interval,
         }
@@ -144,8 +135,8 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
                 mismatch_reasons.append(f"interval ({checkpoint.get('interval')} -> {common.CommonDefine.interval})")
 
             # 2. 特征列表校验 (内容与顺序)
-            cached_features = checkpoint.get("feature_cols_requested", [])
-            if self.feature_cols_requested != cached_features:
+            cached_features = checkpoint.get("feature_cols", [])
+            if self.feature_cols != cached_features:
                 mismatch_reasons.append("feature_cols (列表内容或顺序已变更)")
 
             # 如果有任何不匹配，返回 False 触发重算

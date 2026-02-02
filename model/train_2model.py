@@ -418,7 +418,7 @@ def train_binary_model(
 # 5. Pipeline Logic & Fusion
 # ==============================================================================
 
-def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
+def run_pipeline(feature_group_list, logger, train_cfg: TrainConfig):
     set_seed(train_cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -429,7 +429,6 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
     feature_cols = train_cfg.data_cfg.feature_cols if train_cfg.data_cfg.feature_cols else list(df.columns)
     logger.info(f"Features num:{len(feature_cols)},: {feature_cols}")
     full_ds = TimeSeriesWindowDataset(
-        feature_config_list=feature_config_list,
         df=df, kline_interval_ms=common.load_interval_ms(),
         feature_cols=feature_cols, 
         label_col=train_cfg.data_cfg.label_col,
@@ -531,7 +530,7 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
             device=device,
             train_cfg=train_cfg,
             full_ds=full_ds,
-            feature_config_list=feature_config_list,
+            feature_group_list=feature_group_list,
             logger=logger
         )
 
@@ -638,7 +637,7 @@ def evaluate_and_save_pipeline(
     device, 
     train_cfg: TrainConfig, 
     full_ds,
-    feature_config_list,
+    feature_group_list,
     logger
 ):
     """
@@ -675,7 +674,7 @@ def evaluate_and_save_pipeline(
     # --- 3. 独立保存子模型 ---
     save_dir = train_cfg.save_dir
     feature_config_info = [
-        (c.feature.__name__, c.parameters) for c in feature_config_list
+        (c.feature.__name__, c.parameters) for c in feature_group_list
     ]
     
     sub_model_map = {}
@@ -694,7 +693,7 @@ def evaluate_and_save_pipeline(
             feature_cols=full_ds.feature_names,
             label_col=train_cfg.data_cfg.label_col,
             classes=[0, 1], # 子模型固定为二分类
-            feature_config_list=feature_config_info
+            feature_group_list=feature_config_info
         )
         
         sub_model_map[name] = {
@@ -721,13 +720,13 @@ def main(logger:logging.Logger):
     os.makedirs(common.TRAIN_OUT_DIR, exist_ok=True)
 
     # Configure Features
-    feature_config_list = [
+    feature_group_list = [
         common.FCMA,
         common.FCQavMa,
         common.FCCandle,
         common.FCOrigin,
     ]
-    feature_config_list = [
+    feature_group_list = [
         # 1. 自定义的成交量爆发特征 (窗口 512，对比前 2 强)
         # FCVolumeEvent, 
 
@@ -765,7 +764,7 @@ def main(logger:logging.Logger):
     cfg.pipeline_mode = "long_short_ovr"  # Change this to switch modes
     
     # Run
-    run_pipeline(feature_config_list, logger, cfg)
+    run_pipeline(feature_group_list, logger, cfg)
 # ==============================================================================
 # 6. Main Entry
 # ==============================================================================

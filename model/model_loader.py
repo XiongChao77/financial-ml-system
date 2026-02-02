@@ -53,12 +53,12 @@ class ModelHandler:
         self.classes = meta.get("classes", [0, 1]) 
         self.label_col = meta.get("label_col", "label")
         
-        self.raw_config = meta.get("feature_config_list", [])
-        self.feature_config_list = []
+        self.raw_config = meta.get("feature_group_list", [])
+        self.feature_group_list = []
         for class_name, params in self.raw_config:
             if class_name in globals():
                 cls = globals()[class_name] 
-                self.feature_config_list.append(FeatureContainer(cls, **params))
+                self.feature_group_list.append(FeatureContainer(cls, **params))
 
     def _load_single_mode(self):
         files = self.task_desc["models"]["main"]
@@ -150,7 +150,6 @@ class ModelHandler:
         ds = TimeSeriesWindowDataset(
             df=df, 
             kline_interval_ms = kline_interval_ms,
-            feature_config_list = self.feature_config_list,
             feature_cols=self.feature_cols, 
             label_col=self.label_col, 
             window=self.window,
@@ -262,7 +261,7 @@ class ModelHandler:
         ds = TimeSeriesWindowDataset(
             df=df, 
             kline_interval_ms = kline_interval_ms,
-            feature_config_list = self.feature_config_list,
+            feature_config_list = self.feature_group_list,
             feature_cols=self.feature_cols, 
             label_col=self.label_col, 
             window=self.window,

@@ -1,21 +1,18 @@
-import pandas as pd 
+import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import datetime,os,sys, re, math, json, logging,shutil
+import datetime, os, sys, re, math, json, logging
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
-from data_process.regime_discovery import LabelRegimeAnalyzer
 
-def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST,para = common.CommonDefine):
+def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,para = common.CommonDefine):
     file = common.origin_data_path
     # 1. 获取周期字符串并转为毫秒
-    interval_str = common.get_interval_from_filename(file)
-    interval_ms = common.get_interval_ms(interval_str)
+    interval_ms = common.get_interval_ms(para.interval)
     
     # 2. 存入元数据，方便 attach_label_v2 和后续模型使用
     metadata = {
-        "symbol_interval": interval_str,
+        "symbol_interval": para.interval,
         "interval_ms": interval_ms, # <--- 新增
         "candlestick_num": para.predict_num,
         "predict_num": para.predict_num,
@@ -32,7 +29,7 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     df = common.clean_data_quality_auto(df,logger)  
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
-    common.attach_attr(df, feature_config_list , para)
+    common.attach_attr(df, feature_group_list , para)
     if True:
         common.attach_label(df, para=para)
         # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
@@ -41,6 +38,7 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     # # common.attach_sma_7_25_crossover_label(df, interval_ms=interval_ms)
     else:
         # 4. 执行分析
+        from data_process.regime_discovery import LabelRegimeAnalyzer
         analyzer = LabelRegimeAnalyzer(df, interval_ms, common.CommonDefine.symbol,common.CommonDefine.interval)
         
         # 定义更精细的步长以捕捉梯度变化
@@ -75,26 +73,21 @@ def main(logger:logging.Logger, feature_config_list = common.FEATURE_CONFIG_LIST
     train_df = df.iloc[:split_idx]
     test_df  = df.iloc[split_idx:]
 
-    # 创建临时目录
-    shutil.rmtree(common.DATA_OUT_DIR, ignore_errors=True)
-    shutil.rmtree(common.TRAIN_OUT_DIR, ignore_errors=True)
-    os.makedirs(common.DATA_OUT_DIR, exist_ok=True)
-    
-    # A. 保存 CSV 数据
-    common.save_train_df(train_df)
-    common.save_test_df(test_df)
-
-    # B. 保存元数据 JSON (关键步骤)
-    meta_path = common.data_config_path
+    # 统一写入 para.prep_output_dir（默认 common.DATA_OUT_DIR，batch 多进程时为独立目录）
+    out_dir = para.prep_output_dir
+    os.makedirs(out_dir, exist_ok=True)
+    common.save_train_df_to_dir(train_df, out_dir)
+    common.save_test_df_to_dir(test_df, out_dir)
+    meta_path = common.get_data_config_path_in_dir(out_dir)
     with open(meta_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=4, ensure_ascii=False)
 
     logger.info(f"✅ 数据处理完成！")
-    logger.info(f"📍 周期识别: {interval_str}")
+    logger.info(f"📍 周期识别: {para.interval}")
     logger.info(f"📍 配置已写入: {meta_path}")
 
 
 if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     logger, _ = common.setup_session_logger(sub_folder='data_process')
-    main(logger,common.FEATURE_CONFIG_LIST)
+    main(logger,common.FEATURE_GROUP_LIST)

@@ -344,7 +344,7 @@ def train_binary_model(
 # 5. Pipeline Logic & Fusion
 # ==============================================================================
 
-def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
+def run_pipeline(feature_group_list, logger, train_cfg: TrainConfig):
     set_seed(train_cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -355,7 +355,6 @@ def run_pipeline(feature_config_list, logger, train_cfg: TrainConfig):
     feature_cols = train_cfg.data_cfg.feature_cols if train_cfg.data_cfg.feature_cols else list(df.columns)
     logger.info(f"Features num:{len(feature_cols)},: {feature_cols}")
     full_ds = TimeSeriesWindowDataset(
-        feature_config_list=feature_config_list,
         df=df, kline_interval_ms=common.load_interval_ms(),
         feature_cols=feature_cols, 
         label_col=train_cfg.data_cfg.label_col,
@@ -533,13 +532,13 @@ if __name__ == "__main__":
     logger, _ = common.setup_session_logger(sub_folder='train', file_level=logging.DEBUG)
     
     # Configure Features
-    feature_config_list = [
+    feature_group_list = [
         common.FCMA,
         common.FCQavMa,
         common.FCCandle,
         common.FCOrigin,
     ]
-    feature_config_list = [
+    feature_group_list = [
         # 1. 自定义的成交量爆发特征 (窗口 512，对比前 2 强)
         # FCVolumeEvent, 
 
@@ -577,4 +576,4 @@ if __name__ == "__main__":
     cfg.pipeline_mode = "long_short_ovr"  # Change this to switch modes
     
     # Run
-    run_pipeline(feature_config_list, logger, cfg)
+    run_pipeline(feature_group_list, logger, cfg)
