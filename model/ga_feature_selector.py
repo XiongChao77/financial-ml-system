@@ -30,7 +30,7 @@ PENALTY_OVERFIT = 0.3           # 过拟合惩罚权重
 
 # 1. 识别并提取必选组和可选组
 # 强制保留 Origin 和 Candle 作为语义底座
-FULL_CONFIG = common.FEATURE_CONFIG_LIST
+FULL_CONFIG = common.FEATURE_GROUP_LIST
 MANDATORY_CONFIG = [item for item in FULL_CONFIG if item[0].__name__ in ["FeatureOrigin"]]
 EVOLVABLE_CONFIG = [item for item in FULL_CONFIG if item[0].__name__ not in ["FeatureOrigin"]]
 

@@ -14,7 +14,7 @@ sys.path.append(os.path.join(current_work_dir, "..", '..' , '..'))
 
 # 引入自定义模块
 from data_process import common
-from data_process.common import FeatureFactory, FEATURE_CONFIG_LIST
+from data_process.common import FeatureFactory
 from model import model_loader
 from trade.strategy.strategy_ml import FtmoBrain, MarketState, PositionDir, ActionType, Signal
 from trade.market.ftmo import mt5_executor
@@ -52,9 +52,6 @@ class LiveConfig:
     MAGIC_NUMBER = 888888
     # 轮询间隔 (秒)
     POLL_INTERVAL = 5
-
-    feature_config_list = [common.FCKeltner, common.FCCFM, common.FCCandle, common.FCATR, common.FCOrigin]
-
 # ============================================================
 # 3. 主控程序：LiveBot
 # ============================================================
@@ -73,7 +70,7 @@ class LiveBot:
 
         # 1. 设置参数
         self.interval_ms = common.get_interval_ms(LiveConfig.TIMEFRAME) 
-        self.factory = FeatureFactory(LiveConfig.feature_config_list, self.interval_ms)
+        self.factory = FeatureFactory(self.interval_ms)
         
         # 2. 计算历史需求 (数量)
         self.min_bars_needed = self.factory.get_global_min_history() + common.CommonDefine.predict_num
@@ -152,8 +149,6 @@ class LiveBot:
         
         # 2. 特征工程 & 模型预测
         try:
-            # A. 特征计算 (FeatureFactory)
-            # 使用 FeatureFactory 生成特征
             self.factory.generate(df)
 
             # C. 模型推理

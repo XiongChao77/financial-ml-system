@@ -25,9 +25,10 @@ class CusAnalyzer(bt.Analyzer):
         self._global_min_equity = self.strategy.broker.getvalue()
 
         # --- FLAT DIST: 空仓分布状态（新增）---
-        self._flat_start_date = None        # 连续空仓段起始日期
+        self._last_exit_dt = None
+        self._prev_has_pos = False
+        self._flat_days_round = 2 
         self._flat_periods_days = []        # 每段空仓长度（单位：天）
-        self._flat_bucket_edges = [1, 3, 7, 14, 30]  # 桶边界：0-1,2-3,4-7,8-14,15-30,>30
 
     def next(self):
         """每个 Bar 结束时调用，分发逻辑"""
@@ -158,26 +159,35 @@ class CusAnalyzer(bt.Analyzer):
         return False
 
     def _track_flat_distribution(self):
-        dt = self.strategy.data.datetime.date(0)
-        has_pos = self._has_any_position()
+        cur_has_pos = self._has_any_position()
+        prev_has_pos = self._prev_has_pos
 
-        if not has_pos:
-            if self._flat_start_date is None:
-                self._flat_start_date = dt
-        else:
-            if self._flat_start_date is not None:
-                # 这里按“空仓起始日到开仓日之前”的天数来算
-                days = (dt - self._flat_start_date).days
-                self._flat_periods_days.append(int(days))
-                self._flat_start_date = None
+        if cur_has_pos == prev_has_pos:
+            return
 
+        dt = self.strategy.data.datetime.datetime(0)
+
+        # 有仓 -> 空仓：记录空仓开始时间
+        if prev_has_pos and (not cur_has_pos):
+            self._last_exit_dt = dt
+
+        # 空仓 -> 有仓：结算上一段空仓
+        elif (not prev_has_pos) and cur_has_pos:
+            if self._last_exit_dt is not None:
+                flat_days = (dt - self._last_exit_dt).total_seconds() / 86400.0
+                if flat_days > 0:
+                    self._flat_periods_days.append(flat_days)
+            self._last_exit_dt = None
+
+        self._prev_has_pos = cur_has_pos
+
+            
     def _finalize_flat_distribution(self):
-        # stop 时如果还在空仓，把最后一段也记上（包含最后一天，所以 +1）
-        if self._flat_start_date is not None:
-            dt_end = self.strategy.data.datetime.date(0)
-            days = (dt_end - self._flat_start_date).days + 1
-            self._flat_periods_days.append(int(days))
-            self._flat_start_date = None
+        if (not self._prev_has_pos) and (self._last_exit_dt is not None):
+            dt_end = self.strategy.data.datetime.datetime(0)
+            flat_days = (dt_end - self._last_exit_dt).total_seconds() / 86400.0
+            if flat_days > 0:
+                self._flat_periods_days.append(flat_days)
 
         if not self._flat_periods_days:
             return {
@@ -193,54 +203,32 @@ class CusAnalyzer(bt.Analyzer):
             }
 
         arr = np.asarray(self._flat_periods_days, dtype=float)
+        r = self._flat_days_round
 
-        # 分位数
-        p50 = int(np.percentile(arr, 50))
-        p75 = int(np.percentile(arr, 75))
-        p90 = int(np.percentile(arr, 90))
-        p95 = int(np.percentile(arr, 95))
-        p99 = int(np.percentile(arr, 99))
+        p50 = round(float(np.percentile(arr, 50)), r)
+        p75 = round(float(np.percentile(arr, 75)), r)
+        p90 = round(float(np.percentile(arr, 90)), r)
+        p95 = round(float(np.percentile(arr, 95)), r)
+        p99 = round(float(np.percentile(arr, 99)), r)
 
-        # 尾部均值（抗异常值，比 max 更稳）
+        flat_max = round(float(arr.max()), r)
+        flat_mean = round(float(arr.mean()), r)
+
         q90 = np.percentile(arr, 90)
         q95 = np.percentile(arr, 95)
-        tail10 = float(arr[arr >= q90].mean()) if (arr >= q90).any() else 0.0
-        tail5  = float(arr[arr >= q95].mean()) if (arr >= q95).any() else 0.0
-
-        # 桶分布：0-1, 2-3, 4-7, 8-14, 15-30, >30
-        # 注意：这里用“段长度 days”来分桶
-        edges = self._flat_bucket_edges
-        labels = ["0-1", "2-3", "4-7", "8-14", "15-30", ">30"]
-        counts = [0] * 6
-        for v in arr:
-            v = int(v)
-            if v <= edges[0]:
-                counts[0] += 1
-            elif v <= edges[1]:
-                counts[1] += 1
-            elif v <= edges[2]:
-                counts[2] += 1
-            elif v <= edges[3]:
-                counts[3] += 1
-            elif v <= edges[4]:
-                counts[4] += 1
-            else:
-                counts[5] += 1
-        total = float(len(arr))
-        bucket_pct = {labels[i]: float(counts[i] / total) for i in range(6)}
+        tail10 = round(float(arr[arr >= q90].mean()), r) if (arr >= q90).any() else 0.0
+        tail5  = round(float(arr[arr >= q95].mean()), r) if (arr >= q95).any() else 0.0
 
         return {
             'flat_count': int(len(arr)),
-            'flat_max_days': int(arr.max()),
-            'flat_mean_days': float(arr.mean()),
+            'flat_max_days': flat_max,
+            'flat_mean_days': flat_mean,
             'flat_p50': p50, 'flat_p75': p75, 'flat_p90': p90, 'flat_p95': p95, 'flat_p99': p99,
             'flat_tail_mean_10pct': tail10,
             'flat_tail_mean_5pct': tail5,
             'flat_ge_7d': int((arr >= 7).sum()),
             'flat_ge_14d': int((arr >= 14).sum()),
             'flat_ge_30d': int((arr >= 30).sum()),
-            'flat_bucket_pct': bucket_pct,
-            'flat_periods_raw': [int(x) for x in self._flat_periods_days],
         }
 
     @property
