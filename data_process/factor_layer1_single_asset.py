@@ -561,7 +561,7 @@ def build_from_timeseries_window_dataset(
 def main():
     # 1. 基础准备
     logger, _ = common.setup_session_logger(sub_folder='correlation_result')
-    pre_task = common.CommonDefine()
+    pre_task = common.BaseDefine()
     pre_task.interval = '15m'
     train_cfg = train.TrainConfig()
     

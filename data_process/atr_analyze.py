@@ -25,8 +25,8 @@ def plot_doge_vol_variance():
     metadata = {
         "symbol_interval": interval_str,
         "interval_ms": interval_ms, # <--- 新增
-        "candlestick_num": common.CommonDefine.predict_num,
-        "predict_num": common.CommonDefine.predict_num,
+        "candlestick_num": common.BaseDefine.predict_num,
+        "predict_num": common.BaseDefine.predict_num,
         "vol_multiplier": common.VOL_MULTIPLIER,
         "stop_multiplier_rate": common.STOP_MULTIPLIER_RATE,
     }

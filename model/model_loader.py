@@ -15,8 +15,8 @@ from model.models.fusion_wrapper import FusionWrapper
 # model_loader.py
 
 class ModelHandler:
-    def __init__(self,tarin_out_path = TRAIN_OUT_DIR , device=None, task_desc_path=None):
-        self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self,tarin_out_path , device, task_desc_path = None):
+        self.device = device
         self.logger = logging.getLogger("trade")
         
         # 1. 读取 Task Index
@@ -243,6 +243,7 @@ class ModelHandler:
                 y_pred = df_valid['pred'].values.astype(int)
                 stats = self.evaluate_performance(y_true, y_pred)
         stats['feature_config'] = self.raw_config
+        stats['feature_cols']   = self.feature_cols
         self.logger.info(f"Inference complete. Valid signals: {len(final_pred)}")
         return df_out, stats
     

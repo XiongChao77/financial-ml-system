@@ -31,10 +31,10 @@ class LiveConfig:
     SYMBOL_FTMO = "ETHUSD"      # 交易执行品种 (FTMO通常是 BTCUSD)
     
     # 时间周期 (分钟)
-    TIMEFRAME = common.CommonDefine.interval
+    TIMEFRAME = common.BaseDefine.interval
     allow_short = True
     allow_long = True
-    holdbar = common.CommonDefine.predict_num#CommonDefine.predict_num
+    holdbar = common.BaseDefine.predict_num#BaseDefine.predict_num
 
     thresh: float =None#0.5#None#0.45
     stop_loss_long = 0.03  # 0-1
@@ -73,7 +73,7 @@ class LiveBot:
         self.factory = FeatureFactory(self.interval_ms)
         
         # 2. 计算历史需求 (数量)
-        self.min_bars_needed = self.factory.get_global_min_history() + common.CommonDefine.predict_num
+        self.min_bars_needed = self.factory.get_global_min_history() + common.BaseDefine.predict_num
         self.logger.info(f"History Required: {self.min_bars_needed} bars")
         
         # 3. 初始化数据源 (带缓存)

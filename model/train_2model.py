@@ -56,7 +56,7 @@ class DataConfig:
     csv_path: str = common.train_data_path
     feature_cols: list = field(default_factory=list)
     label_col: str = "label"
-    window: int = common.CommonDefine.predict_num
+    window: int = common.BaseDefine.predict_num
     train_ratio: float = 0.7
     val_ratio: float = 0.15
 
