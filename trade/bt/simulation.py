@@ -2,7 +2,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 import argparse
 import datetime
-import os, sys, time, json
+import os, sys, time, json,torch
 import backtrader as bt
 import backtrader.analyzers as btanalyzers
 import pandas as pd
@@ -104,33 +104,27 @@ class StrategyPara:
     # risk
     trade_risk: float = 0.4
     max_daily_loss_pct: float = 0.035
-    device: str = 'cuda' #'cpu'
 
-def main(logger:logging.Logger, para = StrategyPara(holdbar=CommonDefine.predict_num), pre_para = CommonDefine(),train_cfg= train_2head.TrainConfig()):
-    logger.info(
-        f"Backtest settings: Short={para.allow_short}, Long={para.allow_long}, Thresh={para.thresh}, commission={para.commission}"
-    )
-    # 1. 数据加载（从 pre_para.prep_output_dir 读，默认 DATA_OUT_DIR）
-    df = common.load_test_df_from_dir(pre_para.prep_output_dir)
-    _interval_ms = common.load_interval_ms_from_dir(pre_para.prep_output_dir)
-    # df = load_train_df()
-    # 【关键】检查时间列是否存在
-    # if "open_time_date_utc" not in df.columns:
-    #     logger.error("CRITICAL: 'open_time_date_utc' column missing.")
-    #     sys.exit(1)
-    # # 【关键】解析时间列
-    # # 不再调用 attach_attr，避免重复计算和潜在的数据修改
+def main(logger:logging.Logger, para = StrategyPara(holdbar=BaseDefine.predict_num), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
+         device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'short'):
+    if period == 'short':
+        df = common.load_test_df_from_dir(prep_output_dir)
+        logger.info(f"Using short period for backtest.Backtest settings: Short={para.allow_short}, Long={para.allow_long}")
+    else:
+        df = common.load_train_df_from_dir(prep_output_dir)
+        logger.info(f"Using long period for backtest.Backtest settings: Short={para.allow_short}, Long={para.allow_long}")
+    _interval_ms = common.get_interval_ms(pre_para.interval)
     df["open_time_date_utc"] = pd.to_datetime(df["open_time_date_utc"], utc=True)
 
     # -----------------------------------------------------------
     # 2. 封装的模型预测 (一行代码搞定加载和推理)
     # -----------------------------------------------------------
     try:
-        # 使用 train_cfg.save_dir 作为模型目录（batch 实验时每个 training 独立目录，便于 training 与 simulation 对应）
-        tarin_out_path = train_cfg.save_dir
+        # 使用 train_output_dir 作为模型目录（batch 实验时每个 training 独立目录，便于 training 与 simulation 对应）
+        tarin_out_path = train_output_dir
         if not os.path.isabs(tarin_out_path):
             tarin_out_path = os.path.join(PROJECT_DIR, tarin_out_path)
-        handler = model_loader.ModelHandler(tarin_out_path=tarin_out_path, device=para.device)  # Best_F1/Best_Loss
+        handler = model_loader.ModelHandler(tarin_out_path=tarin_out_path, device=device)  # Best_F1/Best_Loss
         # 执行预测，获取结果和指标
         df_with_pred, model_stats = handler.predict(df, kline_interval_ms=_interval_ms, is_live = False, diff_thresh = None,
                                                        cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
@@ -162,7 +156,7 @@ def main(logger:logging.Logger, para = StrategyPara(holdbar=CommonDefine.predict
         sys.exit(1)
 
     # 4. Backtrader 执行
-    cerebro = bt.Cerebro(runonce=False,cheat_on_open=True)
+    cerebro = bt.Cerebro(runonce=False,cheat_on_open=True,maxcpus=1)
     cerebro.addstrategy(
         FtmoStrategy,
         holdbar=para.holdbar,
@@ -246,7 +240,174 @@ def main(logger:logging.Logger, para = StrategyPara(holdbar=CommonDefine.predict
 
     return {"candles": candles_json, "markers": markers, "statistics": statistics}
 
-def generate_backtest_report(logger,strat, model_stats, save_path, para:StrategyPara,pre_para:CommonDefine,train_cfg:train_2head.TrainConfig):
+def build_daily_df(daily_stats):
+    """Convert daily stats list (dict with 'date', 'dd_pct', 'equity') to DataFrame."""
+    if not daily_stats:
+        return pd.DataFrame()
+    df = pd.DataFrame(daily_stats)
+    if 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date').reset_index(drop=True)
+    return df
+
+#6 个月（crypto 推荐 180 或 365）
+def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30):
+    """
+    df 必须包含: date, equity
+    """
+    results = []
+
+    dates = df['date']
+    equity = df['equity'].values
+
+    start_idx = 0
+    n = len(df)
+
+    while True:
+        start_date = dates.iloc[start_idx]
+        end_date = start_date + pd.Timedelta(days=window_days)
+
+        # 找到窗口结束索引
+        end_idx = df.index[df['date'] <= end_date].max()
+        if pd.isna(end_idx) or end_idx <= start_idx:
+            break
+
+        eq_start = equity[start_idx]
+        eq_end = equity[end_idx]
+
+        # CAGR
+        years = (dates.iloc[end_idx] - dates.iloc[start_idx]).days / 365
+        if years <= 0 or eq_start <= 0:
+            start_idx += step_days
+            continue
+
+        cagr = (eq_end / eq_start) ** (1 / years) - 1
+
+        # Max Drawdown（窗口内）
+        window_eq = equity[start_idx:end_idx + 1]
+        peak = np.maximum.accumulate(window_eq)
+        dd = (window_eq - peak) / peak
+        max_dd = dd.min()
+
+        calmar = cagr / abs(max_dd) if max_dd < 0 else np.inf
+
+        results.append({
+            "start": dates.iloc[start_idx],
+            "end": dates.iloc[end_idx],
+            "cagr": cagr,
+            "max_dd": max_dd,
+            "calmar": calmar,
+        })
+
+        # 向前滚动
+        next_date = start_date + pd.Timedelta(days=step_days)
+        next_idx = df.index[df['date'] >= next_date].min()
+        if pd.isna(next_idx):
+            break
+        start_idx = next_idx
+
+    return pd.DataFrame(results)
+
+def summarize_rolling_calmar(rc_df: pd.DataFrame) -> dict:
+    """
+    rc_df columns: start,end,cagr,max_dd,calmar
+    返回更细的 rolling 指标：分布 + 尾部风险 + 连续性 + 稳健性
+    """
+    if rc_df is None or len(rc_df) == 0:
+        return {"rc_n": 0}
+
+    s = rc_df["calmar"].replace([np.inf, -np.inf], np.nan).dropna()
+    if len(s) == 0:
+        return {"rc_n": 0}
+
+    # 基本分布
+    q = s.quantile([0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]).to_dict()
+
+    # 连续性：最长“差窗口”/“好窗口”连续段（按窗口顺序）
+    # 注意：窗口是重叠的，但连续段仍然能反映“长时间不适用”
+    flags_neg = (s < 0).to_numpy()
+    flags_ge1 = (s >= 1).to_numpy()
+    flags_ge2 = (s >= 2).to_numpy()
+
+    def longest_run(flags: np.ndarray) -> int:
+        best = cur = 0
+        for f in flags:
+            cur = cur + 1 if f else 0
+            best = max(best, cur)
+        return int(best)
+
+    # 尾部风险：Expected Shortfall（条件均值）
+    def expected_shortfall(x: pd.Series, alpha: float) -> float:
+        thr = x.quantile(alpha)
+        tail = x[x <= thr]
+        return float(tail.mean()) if len(tail) else float("nan")
+
+    # 稳健性：MAD / IQR 等
+    median = float(q[0.50])
+    mad = float((s - median).abs().median())  # median absolute deviation
+    iqr = float(q[0.75] - q[0.25])
+
+    # “合格窗口”比例（你偏好 Calmar>=2）
+    out = {
+        "rc_n": int(len(s)),  # Total number of valid rolling calmar values
+
+        # 分位数（更细）
+        "rc_q01": float(q[0.01]),  # 1st percentile of rolling calmar
+        "rc_q05": float(q[0.05]),  # 5th percentile of rolling calmar
+        "rc_q10": float(q[0.10]),  # 10th percentile of rolling calmar
+        "rc_q25": float(q[0.25]),  # 25th percentile (lower quartile) of rolling calmar
+        "rc_median": float(q[0.50]),  # Median (50th percentile) of rolling calmar
+        "rc_q75": float(q[0.75]),  # 75th percentile (upper quartile) of rolling calmar
+        "rc_q90": float(q[0.90]),  # 90th percentile of rolling calmar
+        "rc_q95": float(q[0.95]),  # 95th percentile of rolling calmar
+        "rc_q99": float(q[0.99]),  # best 99th percentile of rolling calmar
+
+        # 比例类
+        "rc_pos_ratio": float((s > 0).mean()),  # Proportion of positive rolling calmar values
+        "rc_neg_ratio": float((s < 0).mean()),  # Proportion of negative rolling calmar values
+        "rc_ge_1_ratio": float((s >= 1).mean()),  # Proportion of rolling calmar values >= 1
+        "rc_ge_2_ratio": float((s >= 2).mean()),  # Proportion of rolling calmar values >= 2
+        "rc_ge_3_ratio": float((s >= 3).mean()),  # Proportion of rolling calmar values >= 3
+
+        # 尾部（最坏窗口的平均水平，比 min 更稳健）
+        "rc_es_05": expected_shortfall(s, 0.05),  # Average of the worst 5% rolling calmar values
+        "rc_es_10": expected_shortfall(s, 0.10),  # Average of the worst 10% rolling calmar values
+
+        # 连续性（衡量“穿越2022-2023这种死亡带”的能力）
+        "rc_longest_neg_run": longest_run(flags_neg),  # Longest consecutive run of negative rolling calmar values
+        "rc_longest_ge1_run": longest_run(flags_ge1),  # Longest consecutive run of rolling calmar values >= 1
+        "rc_longest_ge2_run": longest_run(flags_ge2),  # Longest consecutive run of rolling calmar values >= 2
+
+        # 稳健性/离散度
+        "rc_mean": float(s.mean()),  # Mean of rolling calmar values
+        "rc_std": float(s.std(ddof=1)) if len(s) > 1 else 0.0,  # Standard deviation of rolling calmar values
+        "rc_mad": mad,  # Median absolute deviation of rolling calmar values
+        "rc_iqr": iqr,  # Interquartile range (Q3 - Q1) of rolling calmar values
+        "rc_cv": float(s.std(ddof=1) / s.mean()) if len(s) > 1 and s.mean() != 0 else float("nan"),  # Coefficient of variation (std/mean) of rolling calmar values
+    }
+
+    # 可选：同时把 rolling 的 cagr / max_dd 的分布也带上（更可解释）
+    if "cagr" in rc_df.columns:
+        c = rc_df["cagr"].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(c):
+            out.update({
+                "rc_cagr_median": float(c.median()),
+                "rc_cagr_q10": float(c.quantile(0.10)),
+                "rc_cagr_q25": float(c.quantile(0.25)),
+            })
+    if "max_dd" in rc_df.columns:
+        d = rc_df["max_dd"].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(d):
+            out.update({
+                "rc_dd_median": float(d.median()),
+                "rc_dd_q90": float(d.quantile(0.90)),  # 回撤是负值，q90更接近0
+                "rc_dd_min": float(d.min()),           # 最差回撤
+            })
+
+    return out
+
+
+def generate_backtest_report(logger,strat, model_stats, save_path, para:StrategyPara,pre_para:BaseDefine,train_cfg:train_2head.TrainConfig):
     """
     修复版报告生成器：
     1. 修正 Profit Factor 计算公式 (Gross Won / Gross Lost)
@@ -273,6 +434,12 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     maxdd_amt = dd.get("max", {}).get("moneydown", 0.0)
     maxdd_len = dd.get("max", {}).get("len", 0)
     calmar = (cagr*100 / abs(maxdd_pct)) if maxdd_pct > 0 else 0.0
+    #rolling calmar
+    daily_returns_list = strat.analyzers.customize.get_analysis()['daily_returns_list']
+    df = build_daily_df(daily_returns_list)
+    rc_df = rolling_calmar(df,window_days=180, step_days=30 )
+    rc_summary = summarize_rolling_calmar(rc_df)
+
     lost_longest = trade_analysis.streak.lost.longest
     won_longest = trade_analysis.streak.won.longest
     # --- 读取日内回撤数据 ---
@@ -356,13 +523,23 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     # ============================================================
     # === 【新增：鲁棒风险统计逻辑】仅修改此块以支持 Top-N 展示 ===
     # ============================================================
-    daily_losses = perf.get('daily_returns_list', []) # 需要 CusAnalyzer 配合暴露此列表
+    daily_returns_list = perf.get('daily_returns_list', []) # 需要 CusAnalyzer 配合暴露此列表 (list of dicts)
     top_10_str = "N/A"
     robust_max_loss = 0.0
     
-    if daily_losses:
+    if daily_returns_list:
         # 筛选负收益并排序 (最惨的排在前面)
-        sorted_losses = sorted([l for l in daily_losses if l < 0])
+        # daily_returns_list 现在是字典列表，每个字典有 'dd_pct' 字段
+        losses_values = []
+        for item in daily_returns_list:
+            if isinstance(item, dict):
+                val = item.get('dd_pct', 0)
+            else:
+                val = item
+            if val < 0:
+                losses_values.append(val)
+        
+        sorted_losses = sorted(losses_values)
         top_5_losses = sorted_losses[:20]
         top_10_str = " | ".join([f"{l*100:.2f}%" for l in top_5_losses])
         
@@ -378,94 +555,86 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
         train=train_cfg,
     )
     report = {
-        "params": {
-            "strategy": asdict(para),
-            "common": asdict(pre_para),
-            "train": asdict(train_cfg),
-            "hash": params_hash,
+        f"params": {
+            f"strategy": asdict(para),
+            f"common": asdict(pre_para),
+            f"train": asdict(train_cfg),
+            f"hash": params_hash,
+            f"git_commit": common.get_git_info(logger),
         },
-        "time": {
-            "start": bt.num2date(strat.datas[0].datetime.array[0]),
-            "end": bt.num2date(strat.datas[0].datetime.array[-1]),
-        },
-
-        "performance": {
-            "gross_return": gross_return,
-            "cagr": cagr,
-            "calmar": calmar,
-            "sharpe": sr,
-            "start_value": start_value,
-            "end_value": end_value,
+        f"time": {
+            f"start": bt.num2date(strat.datas[0].datetime.array[0]),
+            f"end": bt.num2date(strat.datas[0].datetime.array[-1]),
         },
 
-        "raw_analyzer":{
-            "customize":perf,
+        f"performance": {
+            f"gross_return": gross_return,
+            f"cagr": cagr,
+            f"calmar": calmar,
+            f"sharpe": sr,
+            f"start_value": start_value,
+            f"end_value": end_value,
+            f"rc_summary":rc_summary,
+        },
+        f"drawdown": {
+            f"max_dd_pct": maxdd_pct,
+            f"max_dd_amt": maxdd_amt,
+            f"max_daily_dd": max_daily_dd,
+            f"max_daily_date": max_daily_date,
+            f"robust_max_daily_loss": robust_max_loss,
+            f"dd_3_pct_days": max_3_violation_days,
+            f"dd_4_pct_days": violation_days,
+            f"dd_5_pct_days": max_violation_days,
         },
 
-        "drawdown": {
-            "max_dd_pct": maxdd_pct,
-            "max_dd_amt": maxdd_amt,
-            "max_daily_dd": max_daily_dd,
-            "max_daily_date": max_daily_date,
-            # "daily_loss_list": daily_losses,          # 原始 list（负数）
-            "robust_max_daily_loss": robust_max_loss,
-            "dd_3_pct_days": max_3_violation_days,
-            "dd_4_pct_days": violation_days,
-            "dd_5_pct_days": max_violation_days,
+        f"exposure": {
+            f"avg_pos": avg_pos,
+            f"max_pos": max_pos,
+            f"p95_pos": p95_pos,
+            f"trade_risk": para.trade_risk,
         },
 
-        "exposure": {
-            "avg_pos": avg_pos,
-            "max_pos": max_pos,
-            "p95_pos": p95_pos,
-            "trade_risk": para.trade_risk,
+        f"trades": {
+            f"total": total_trades,
+            f"daily_freq": daily_trades,
+            f"win_rate": win_rate,
+            f"lost_longest": lost_longest,
+            f"won_longest": won_longest,
+            f"avg_pnl_gross": avg_pnl_gross,
+            f"avg_pct_gross": avg_pct_gross,
+            f"avg_pnl_net": avg_pnl_net,
+            f"avg_pct_net": avg_pct_net,
+            f"avg_cost": avg_cost,
+            f"long_pnl": long_pnl_total,
+            f"long_win_rate": long_win_rate,
+            f"short_pnl": short_pnl_total,
+            f"short_win_rate": short_win_rate,
         },
-
-        "trades": {
-            "total": total_trades,
-            "daily_freq": daily_trades,
-            "win_rate": win_rate,
-            "lost_longest": lost_longest,
-            "won_longest": won_longest,
-            "avg_pnl_gross": avg_pnl_gross,
-            "avg_pct_gross": avg_pct_gross,
-            "avg_pnl_net": avg_pnl_net,
-            "avg_pct_net": avg_pct_net,
-            "avg_cost": avg_cost,
-            "long_pnl": long_pnl_total,
-            "long_win_rate": long_win_rate,
-            "short_pnl": short_pnl_total,
-            "short_win_rate": short_win_rate,
-        },
-
-        "model_metrics": model_stats or {},
     }
 
-    r = report
+    report_additional = {
+        f"drawdown": {
+            f"daily_loss_list": daily_returns_list,          # list）
+        },
+        f"raw_analyzer":{
+            f"customize":perf,
+        },
+        f"model_metrics": model_stats,
+    }
 
     dump_params_json(train_cfg,logger)
     dump_params_json(para,logger)
     dump_params_json(pre_para,logger)
-
-    # 筛选负收益并排序 (最惨的排在前面)
-    sorted_losses = sorted([l for l in daily_losses if l < 0])
-    top_5_losses = sorted_losses[:10]
-    top_10_str = " | ".join([f"{l*100:.2f}%" for l in top_5_losses])
-    
-    # 计算 Robust Max Loss: 剔除第1名离群值，取 2-5 名均值
-    if len(top_5_losses) > 1:
-        robust_max_loss = sum(top_5_losses[1:]) / len(top_5_losses[1:])
-    else:
-        robust_max_loss = top_5_losses[0] if top_5_losses else 0.0
         
     # summary 输出
     logger.info("-" * 29 + f"PARAMS_HASH | {params_hash}"+"-" * 29)
 
     logger.info(f"RISK(Daily)| Top 10 Losses: [{top_10_str}]")
-    logger.info(
-        f"RISK(Daily)| Robust Max Loss (Avg 2nd-5th): "
-        f"{report['drawdown']['robust_max_daily_loss']*100:.2f}%"
-    )
+    if robust_max_loss:  # Only log if we calculated it
+        logger.info(
+            f"RISK(Daily)| Robust Max Loss (Avg 2nd-5th): "
+            f"{robust_max_loss*100:.2f}%"
+        )
     logger.info(
         f"RISK(Daily)| Worst Day: "
         f"{report['drawdown']['max_daily_dd']*100:.2f}% "
@@ -521,18 +690,17 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
 
     logger.info("-" * 80)
 
-    return report
+    return (report_additional,report)
 
 if __name__ == "__main__":
-    exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'batch_experiments'),common.CommonDefine.symbol, common.CommonDefine.interval)
+    exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'batch_experiments'),common.BaseDefine.symbol, common.BaseDefine.interval)
     logger: logging.Logger
     logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
-    common.get_git_info(logger)
     start_time = time.time()
     report = main(logger)
     append_jsonl(
         os.path.join(exp_dir, "reports.jsonl"),
-        report["statistics"]
+        report["statistics"][1]
     )
     end_time = time.time()
     run_time = end_time - start_time

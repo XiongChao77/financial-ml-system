@@ -1,3 +1,5 @@
+from pickle import FALSE
+from tkinter import TRUE
 import pandas as pd
 import numpy as np
 import datetime, os, sys, re, math, json, logging
@@ -5,8 +7,8 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 
-def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,para = common.CommonDefine):
-    file = common.origin_data_path
+def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,para = common.BaseDefine, prep_output_dir =common.DATA_OUT_DIR ):
+    file = os.path.join(common.PROJECT_DATA_DIR, f"{para.symbol}_{para.interval}.csv")
     # 1. 获取周期字符串并转为毫秒
     interval_ms = common.get_interval_ms(para.interval)
     
@@ -29,8 +31,8 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,p
     df = common.clean_data_quality_auto(df,logger)  
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
-    common.attach_attr(df, feature_group_list , para)
     if True:
+        common.attach_attr(df, feature_group_list , para)
         common.attach_label(df, para=para)
         # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
@@ -39,15 +41,17 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,p
     else:
         # 4. 执行分析
         from data_process.regime_discovery import LabelRegimeAnalyzer
-        analyzer = LabelRegimeAnalyzer(df, interval_ms, common.CommonDefine.symbol,common.CommonDefine.interval)
+        analyzer = LabelRegimeAnalyzer(df, interval_ms, para)
         
         # 定义更精细的步长以捕捉梯度变化
-        vol_range = np.arange(0.5, 5.1, 0.1).round(1)   #not include 3.1
-        stop_range = np.arange(0.1, 2.1, 0.1).round(1)   #not include 1.6
+        vol_range = np.arange(0.5, 3.1, 0.05).round(2)   #not include 3.1
+        stop_range = [0.1,0.2, 0.3, 0.5,2,100]  #np.arange(100, 100.1, 0.1).round(1)   #not include 1.6
         
-        analyzer.run_parameter_sweep(vol_range, stop_range)
-        analyzer.analyze_and_plot()
+        analyzer.run_parameter_sweep(vol_range, stop_range, common.attach_label)
+        # analyzer.analyze_and_plot()
+        analyzer.plot_vol_vs_distribution()
         analyzer.plot_null_hypothesis_comparison()
+        analyzer.plot_long_ratio_vs_vol_multiplier()
         exit()
     # ---------------- 统计输出 ----------------
     counts = df['label'].value_counts().sort_index()
@@ -74,7 +78,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,p
     test_df  = df.iloc[split_idx:]
 
     # 统一写入 para.prep_output_dir（默认 common.DATA_OUT_DIR，batch 多进程时为独立目录）
-    out_dir = para.prep_output_dir
+    out_dir = prep_output_dir
     os.makedirs(out_dir, exist_ok=True)
     common.save_train_df_to_dir(train_df, out_dir)
     common.save_test_df_to_dir(test_df, out_dir)

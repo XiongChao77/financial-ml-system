@@ -11,7 +11,7 @@ logger, _= common.setup_session_logger(sub_folder='backend',console_level= loggi
 result = simulation.main(logger)
 candles = result["candles"]
 markers = result["markers"]
-statistics = result["statistics"]
+statistics = result["statistics"][0]  # full report
 
 # 允许跨域（前后端分离必需）
 app.add_middleware(

@@ -19,32 +19,16 @@ from model import model_loader
 from trade.strategy.strategy_ml import FtmoBrain, MarketState, PositionDir, ActionType, Signal
 from trade.market.ftmo import mt5_executor
 from trade.market.binance_data_feed import  BinanceDataFeed
+from trade.bt.simulation import StrategyPara
 pd.set_option("display.max_columns", None)   # 不限制列数
 pd.set_option("display.width", None)         # 自动宽度（别强行换行）
 pd.set_option("display.max_colwidth", None)  # 单元格内容不截断
 # ============================================================
 # 配置区域
 # ============================================================
+SYMBOL_FTMO_MAP = {"DOGEUSDT": "DOGEUSD", "ETHUSDT": "ETHUSD", "BTCUSDT": "BTCUSD"}
+
 class LiveConfig:
-    # 交易品种映射
-    SYMBOL_BINANCE = "DOGEUSDT"  # 数据源品种
-    SYMBOL_FTMO = "DOGEUSD"      # 交易执行品种 (FTMO通常是 BTCUSD)
-    
-    # 时间周期 (分钟)
-    TIMEFRAME = common.CommonDefine.interval
-    allow_short = True
-    allow_long = True
-    holdbar = common.CommonDefine.predict_num#CommonDefine.predict_num
-
-    thresh: float =None#0.5#None#0.45
-    stop_loss_long = 0.03  # 0-1
-    stop_loss_short = 0.015  # 0-1
-    atr_sl_mult_long = 5 #2.5
-    atr_sl_mult_short = 2.5 #2.5
-    take_profit = 0.99 #止盈. 0 - n倍
-    trade_risk = 0.5     #0-1
-    max_daily_loss_pct = 0.04
-
     mt5_path = r"C:\Program Files\FTMO Global Markets MT5 Terminal\terminal64.exe"
     tarin_out_path = os.path.join(common.PROJECT_DIR, r"output\FTMO")
     max_layers = 1
@@ -59,44 +43,46 @@ class LiveBot:
     def __init__(self):
         self.logger, log_path = common.setup_session_logger(
                     sub_folder=f'market_ml',
-                    symbol=LiveConfig.SYMBOL_FTMO
+                    symbol=self.pre_para.symbol
                 )
         
         self.logger.info("Initializing Live Bot...")
 
+        self.pre_para, self.strategy_para = self._load_strategy()
+        self.ftmo_symbol = SYMBOL_FTMO_MAP[self.pre_para.symbol]
         self._log_startup_info(log_path)
-        self.executor = mt5_executor.MT5Executor(LiveConfig.mt5_path,LiveConfig.SYMBOL_FTMO, LiveConfig.MAGIC_NUMBER,logger= self.logger)
+        self.executor = mt5_executor.MT5Executor(LiveConfig.mt5_path,self.ftmo_symbol, LiveConfig.MAGIC_NUMBER,logger= self.logger)
         self.model_handler = model_loader.ModelHandler(tarin_out_path = LiveConfig.tarin_out_path) # 自动加载训练好的模型
 
         # 1. 设置参数
-        self.interval_ms = common.get_interval_ms(LiveConfig.TIMEFRAME) 
+        self.interval_ms = common.get_interval_ms(self.pre_para.interval) 
         self.factory = FeatureFactory(self.interval_ms)
         
         # 2. 计算历史需求 (数量)
-        self.min_bars_needed = self.factory.get_global_min_history() + common.CommonDefine.predict_num
+        self.min_bars_needed = self.factory.get_global_min_history() + common.BaseDefine.predict_num
         self.logger.info(f"History Required: {self.min_bars_needed} bars")
         
         # 3. 初始化数据源 (带缓存)
         # max_len 设置得比 min_bars_needed 大一些，比如 +500，留有余地
         self.data_feed = BinanceDataFeed(
-            LiveConfig.SYMBOL_BINANCE, 
-            LiveConfig.TIMEFRAME, 
+            self.pre_para.symbol, 
+            self.pre_para.interval, 
             max_len = self.min_bars_needed + 500
         )
         #strategy
         self.brain = FtmoBrain(
             self.executor,
-            trade_risk=LiveConfig.trade_risk,
+            trade_risk=self.strategy_para.trade_risk,
             max_layers=LiveConfig.max_layers,
-            holdbar=LiveConfig.holdbar,
-            allow_long=LiveConfig.allow_long,
-            allow_short=LiveConfig.allow_short,
-            thresh=LiveConfig.thresh,
-            stop_loss_long = LiveConfig.stop_loss_long,
-            stop_loss_short = LiveConfig.stop_loss_short,
-            atr_sl_mult_long = LiveConfig.atr_sl_mult_long,
-            atr_sl_mult_short = LiveConfig.atr_sl_mult_short,
-            max_daily_loss_pct = LiveConfig.max_daily_loss_pct,
+            holdbar=self.strategy_para.holdbar,
+            allow_long=self.strategy_para.allow_long,
+            allow_short=self.strategy_para.allow_short,
+            thresh=self.strategy_para.thresh,
+            stop_loss_long = self.strategy_para.stop_loss_long,
+            stop_loss_short = self.strategy_para.stop_loss_short,
+            atr_sl_mult_long = self.strategy_para.atr_sl_mult_long,
+            atr_sl_mult_short = self.strategy_para.atr_sl_mult_short,
+            max_daily_loss_pct = self.strategy_para.max_daily_loss_pct,
         )
 
         # 4. 执行数据预热 (Warmup) -> 填充内存
@@ -114,8 +100,8 @@ class LiveBot:
         self.logger.info(f"🚀 LIVE BOT SESSION STARTED")
         self.logger.info(f"📅 Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self.logger.info(f"📂 Log File: {log_path}")
-        self.logger.info(f"📊 Target Symbol: {LiveConfig.SYMBOL_FTMO}")
-        self.logger.info(f"🔗 Data Source: {LiveConfig.SYMBOL_BINANCE}")
+        self.logger.info(f"📊 Target Symbol: {self.ftmo_symbol}")
+        self.logger.info(f"🔗 Data Source: {self.pre_para.symbol}")
         self.logger.info("-" * 20 + " PARAMETERS " + "-" * 20)
         
         # 自动遍历 Config 类的所有参数
@@ -125,6 +111,11 @@ class LiveBot:
                 self.logger.info(f"{key.ljust(20)}: {val}")
         
         self.logger.info("=" * 60)
+
+    def _load_strategy(self)-> tuple[common.BaseDefine, StrategyPara]:
+        r = common.load_selected_configs(os.path.join(LiveConfig.tarin_out_path,'candidate.jsonl'))[0]  # just to validate file and format
+        params = r["short"] if "short" in r else r
+        return common.BaseDefine(**params["params"]["common"]), StrategyPara(**params["params"]["strategy"])
 
     def run_step(self):
         """

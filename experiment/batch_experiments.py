@@ -1,45 +1,136 @@
-import os, sys, time, logging, argparse, copy, json, hashlib
-from datetime import datetime, timedelta
-from dataclasses import asdict
-from itertools import product
-from queue import Empty
-import numpy as np
-import multiprocessing
-from multiprocessing import Process
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Batch experiment runner (prep -> train -> sim) with resume support.
 
+Key design goals
+- Deterministic task spec (tasks_spec.json) and stable param hashing
+- Resume by skipping reports already present in reports.jsonl
+- Simple process model: prep workers + sim workers; train runs in main process
+- Clean separation: path/layout, spec I/O, worker loops, main orchestration
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import logging
+import multiprocessing as mp
+import os
+import sys
+import time
+from dataclasses import asdict
+from queue import Empty
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+
+try:
+    import psutil  # optional
+except ImportError:  # pragma: no cover
+    psutil = None
+
+# -----------------------------------------------------------------------------
+# Project imports
+# -----------------------------------------------------------------------------
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
-from data_process import preparation, common
-from data_process.utils import json_safe, calc_params_hash, param_hash
 
-# train / simulation 不在顶层 import；prep/sim 子进程不使用 CUDA，使用 fork 启动
+from data_process import common, preparation
+from data_process.utils import (
+    calc_params_hash,
+    json_safe,
+    load_selected_configs,
+    param_hash,
+)
+
+# NOTE: train/simulation are imported lazily inside the process that needs them.
+#       This avoids CUDA / heavy imports in workers.
+
 TASKS_SPEC_FILE = "tasks_spec.json"
 REPORTS_FILE = "reports.jsonl"
+SELECTED_FILE = "selected_configs.jsonl"
 
 
-def build_task_spec(preparation_task, training_task, simulation_task):
-    """构建与 tasks_spec.json 同构的 pre -> train -> sim_tasks 嵌套结构。"""
-    spec = {}
-    for i, pre in enumerate(preparation_task):
+# -----------------------------------------------------------------------------
+# Path layout helpers
+# -----------------------------------------------------------------------------
+def _batch_temp_dir(exp_dir: str) -> str:
+    """
+    Put all intermediate artifacts under TEMPORARY_DIR so persistence stays clean.
+    """
+    if exp_dir.startswith(common.PERSISTENCE_DIR):
+        rel = os.path.relpath(exp_dir, common.PERSISTENCE_DIR)
+        return os.path.join(common.TEMPORARY_DIR, rel)
+    base = os.path.basename(exp_dir.rstrip(os.sep)) or "run"
+    return os.path.join(common.TEMPORARY_DIR, "batch_resume", base)
+
+
+def _prep_output_dir(temp_dir: str, pre_h: str) -> str:
+    return os.path.join(temp_dir, f"pre_{pre_h}")
+
+
+def _train_output_dir(temp_dir: str, pre_h: str, tr_h: str) -> str:
+    return os.path.join(temp_dir, f"pre_{pre_h}", f"train_{tr_h}")
+
+
+def _sim_output_dir(temp_dir: str, pre_h: str, tr_h: str, sim_h: str) -> str:
+    return os.path.join(temp_dir, f"pre_{pre_h}", f"train_{tr_h}", f"sim_{sim_h}")
+
+
+# -----------------------------------------------------------------------------
+# Spec build / load
+# -----------------------------------------------------------------------------
+def build_task_spec(
+    preparation_task: List[Any],
+    training_task: List[Any],
+    simulation_task: List[Any],
+) -> Dict[str, Any]:
+    """
+    Build a tree spec:
+      pre_hash -> {params, train: train_hash -> {params, sim_tasks:[{hash, params}, ...]}}
+    NOTE: prep_output_dir/save_dir are NOT written to spec; they are derived from hash layout.
+    """
+    spec: Dict[str, Any] = {}
+    for pre in preparation_task:
         pre_d = asdict(pre)
+        pre_d.pop("prep_output_dir", None)
         pre_h = param_hash(pre_d)
-        if pre_h not in spec:
-            spec[pre_h] = {"params": json_safe(pre_d), "train": {}}
-        for j, tr in enumerate(training_task):
+
+        node_pre = spec.setdefault(pre_h, {"params": json_safe(pre_d), "train": {}})
+
+        for tr in training_task:
             tr_d = asdict(tr)
+            tr_d.pop("save_dir", None)
             tr_h = param_hash(tr_d)
-            if tr_h not in spec[pre_h]["train"]:
-                spec[pre_h]["train"][tr_h] = {"params": json_safe(tr_d), "sim_tasks": []}
-            for k, sim in enumerate(simulation_task):
+
+            node_tr = node_pre["train"].setdefault(tr_h, {"params": json_safe(tr_d), "sim_tasks": []})
+
+            # de-dup sim tasks by hash
+            existing = {s["hash"] for s in node_tr["sim_tasks"]}
+            for sim in simulation_task:
                 sim_d = asdict(sim)
                 sim_h = param_hash(sim_d)
-                spec[pre_h]["train"][tr_h]["sim_tasks"].append({"hash": sim_h, "params": json_safe(sim_d)})
+                if sim_h in existing:
+                    continue
+                node_tr["sim_tasks"].append({"hash": sim_h, "params": json_safe(sim_d)})
+                existing.add(sim_h)
     return spec
 
 
-def load_done_set(reports_path):
-    """从 reports.jsonl 中读取已完成的 params.hash。"""
-    done = set()
+def _count_spec_tasks(task_spec: Dict[str, Any]) -> Tuple[int, int, int]:
+    n_prep = len(task_spec)
+    n_train = sum(len(n["train"]) for n in task_spec.values())
+    n_sim = sum(len(tr["sim_tasks"]) for pre in task_spec.values() for tr in pre["train"].values())
+    return n_prep, n_train, n_sim
+
+
+def load_done_set(reports_path: str) -> set[str]:
+    """
+    Read reports.jsonl and collect completed params.hash.
+    """
+    done: set[str] = set()
     if not os.path.exists(reports_path):
         return done
     with open(reports_path, "r", encoding="utf-8") as f:
@@ -49,18 +140,23 @@ def load_done_set(reports_path):
                 continue
             try:
                 d = json.loads(line)
-                if d.get("params") and "hash" in d["params"]:
-                    done.add(d["params"]["hash"])
-            except (json.JSONDecodeError, KeyError, TypeError):
+            except json.JSONDecodeError:
                 continue
+            h = (((d or {}).get("params") or {}).get("hash"))
+            if isinstance(h, str) and h:
+                done.add(h)
     return done
 
 
-def _config_from_dict_train(train_params):
-    """从 task_spec 的 train params 字典恢复 TrainConfig。"""
+def _config_from_dict_train(train_params: Dict[str, Any]):
+    """
+    Restore TrainConfig from dict stored in task spec.
+    Intentionally ignores nested model_cfg/data_cfg dicts in spec (those fields are dataclasses).
+    """
     import model.train_2head as train
+
     t_cfg = train.TrainConfig()
-    for k, v in train_params.items():
+    for k, v in (train_params or {}).items():
         if isinstance(v, dict) and k in ("model_cfg", "data_cfg"):
             continue
         if hasattr(t_cfg, k):
@@ -68,427 +164,680 @@ def _config_from_dict_train(train_params):
     return t_cfg
 
 
-def filter_pending_from_spec(task_spec, done_set):
+def filter_pending_from_spec(task_spec: Dict[str, Any], done_set: set[str]) -> Dict[str, Any]:
     """
-    从 task_spec（与 tasks_spec.json 同构）中过滤掉 reports.jsonl 已完成的部分。
-    返回仅含待完成任务的 pending_task_spec，结构同 task_spec。
+    Filter sim leaf tasks that are already present in reports.jsonl.
     """
     from trade.bt import simulation
-    pending = {}
+
+    pending: Dict[str, Any] = {}
     for pre_h, pre_node in task_spec.items():
         pre_params = pre_node["params"]
-        train_pending = {}
+        train_pending: Dict[str, Any] = {}
+
         for tr_h, tr_node in pre_node["train"].items():
             train_params = tr_node["params"]
             sim_pending = []
-            for sim in tr_node["sim_tasks"]:
+            for sim in tr_node.get("sim_tasks", []):
                 task_hash = calc_params_hash(
                     strategy=simulation.StrategyPara(**sim["params"]),
-                    common=common.CommonDefine(**pre_params),
+                    common=common.BaseDefine(**pre_params),
                     train=_config_from_dict_train(train_params),
                 )
                 if task_hash not in done_set:
                     sim_pending.append(sim)
+
             if sim_pending:
                 train_pending[tr_h] = {"params": train_params, "sim_tasks": sim_pending}
+
         if train_pending:
             pending[pre_h] = {"params": pre_params, "train": train_pending}
+
     return pending
 
 
-def _batch_temp_dir(exp_dir):
-    """与 exp_dir 对应的临时目录，用于 prep/train 产物，放在 TEMPORARY_DIR 下。"""
-    if exp_dir.startswith(common.PERSISTENCE_DIR):
-        rel = os.path.relpath(exp_dir, common.PERSISTENCE_DIR)
-        return os.path.join(common.TEMPORARY_DIR, rel)
-    return os.path.join(common.TEMPORARY_DIR, "batch_resume", os.path.basename(exp_dir.rstrip(os.sep)) or "run")
-
-
-def spec_to_pipeline(pending_spec, exp_dir, temp_dir):
+def load_pending_tasks(exp_dir: str, done_set: set[str]) -> Tuple[Dict[str, Any], Tuple[int, int, int]]:
     """
-    将 pending_task_spec（与 tasks_spec.json 同构）转换为流水线所需的平面结构。
-    prep/train 产出目录使用 temp_dir；log/报告等仍用 exp_dir（PERSISTENCE_DIR）。
-    返回: (prep_items, train_items, sim_items, train_by_prep, sim_by_train)
-    """
-    from trade.bt import simulation
-    prep_items = []
-    train_items = []
-    sim_items = []
-    train_by_prep = {}
-    sim_by_train = {}
-
-    for pre_h, pre_node in pending_spec.items():
-        pre_para = common.CommonDefine(**pre_node["params"])
-        pre_para.prep_output_dir = os.path.join(temp_dir, "preparation", f"pre_{pre_h}")
-        prep_items.append((pre_h, pre_para))
-
-        for tr_h, tr_node in pre_node["train"].items():
-            t_cfg = _config_from_dict_train(tr_node["params"])
-            t_cfg.save_dir = os.path.join(temp_dir, "training", f"pre_{pre_h}_train_{tr_h}")
-            pre_para_cp = copy.deepcopy(pre_para)
-            tr_item = (pre_h, tr_h, t_cfg, pre_para_cp)
-            train_items.append(tr_item)
-            train_by_prep.setdefault(pre_h, []).append(tr_item)
-
-            for sim in tr_node["sim_tasks"]:
-                sim_h, sim_params = sim["hash"], sim["params"]
-                pre_para_cp2 = copy.deepcopy(pre_para)
-                t_cfg_cp = copy.deepcopy(t_cfg)
-                s_para = simulation.StrategyPara(**sim_params)
-                sim_item = (pre_h, tr_h, sim_h, pre_para_cp2, t_cfg_cp, s_para)
-                sim_items.append(sim_item)
-                sim_by_train.setdefault((pre_h, tr_h), []).append(sim_item)
-
-    return prep_items, train_items, sim_items, train_by_prep, sim_by_train
-
-
-def load_pending_tasks(exp_dir, done_set):
-    """
-    从 tasks_spec.json 直接加载，过滤掉 reports.jsonl 已完成部分，得到待完成任务。
-    返回: (prep_items, train_items, sim_items, train_by_prep, sim_by_train)
+    Load tasks_spec.json then filter already-finished tasks based on reports.jsonl.
     """
     tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
     if not os.path.exists(tasks_spec_path):
         raise FileNotFoundError(f"Tasks spec not found: {tasks_spec_path}")
     with open(tasks_spec_path, "r", encoding="utf-8") as f:
         task_spec = json.load(f)
-    pending_spec = filter_pending_from_spec(task_spec, done_set)
-    temp_dir = _batch_temp_dir(exp_dir)
-    return spec_to_pipeline(pending_spec, exp_dir, temp_dir)
+    total_counts = _count_spec_tasks(task_spec)
+    pending = filter_pending_from_spec(task_spec, done_set)
+    return pending, total_counts
 
 
-# ---------- 辅助函数 ----------
-def _process_sim_results(sim_result_queue, stats, logger, eta_msg):
-    """排空 sim_result_queue，处理 sim 子进程返回的结果。"""
+def _create_output_dirs(task_spec: Dict[str, Any], temp_dir: str) -> None:
+    """
+    Create prep/train/sim output dirs for all pending tasks.
+    """
+    for pre_h, pre_node in task_spec.items():
+        os.makedirs(_prep_output_dir(temp_dir, pre_h), exist_ok=True)
+        for tr_h, tr_node in pre_node["train"].items():
+            os.makedirs(_train_output_dir(temp_dir, pre_h, tr_h), exist_ok=True)
+            for sim_task in tr_node.get("sim_tasks", []):
+                sim_h = sim_task.get("hash")
+                if sim_h:
+                    os.makedirs(_sim_output_dir(temp_dir, pre_h, tr_h, sim_h), exist_ok=True)
+
+
+# -----------------------------------------------------------------------------
+# Worker logging
+# -----------------------------------------------------------------------------
+def _worker_logger(log_file: str) -> logging.Logger:
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers = []
+    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(processName)s] %(levelname)s %(message)s"))
+    root.addHandler(fh)
+    return root
+
+
+# -----------------------------------------------------------------------------
+# Worker loops
+# -----------------------------------------------------------------------------
+def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Queue, task_spec: Dict[str, Any], temp_dir: str):
+    logger = _worker_logger(worker_log_file)
+    while True:
+        try:
+            msg = task_queue.get(timeout=0.5)
+        except Empty:
+            continue
+        if msg is None:
+            break
+
+        pre_h = msg
+        pre_node = task_spec.get(pre_h, {})
+        prep_dir = _prep_output_dir(temp_dir, pre_h)
+
+        para = common.BaseDefine(**pre_node["params"])
+        t0 = time.time()
+        try:
+            preparation.main(logger, para=para, prep_output_dir=prep_dir)
+        except Exception:
+            logger.exception(f"Prep failed: {pre_h}")
+            # still notify main so it can terminate early
+            train_queue.put(("prep_failed", pre_h, time.time() - t0, []))
+            continue
+
+        elapsed = time.time() - t0
+
+        # Build train items for this prep hash
+        train_items = []
+        for tr_h, tr_node in pre_node.get("train", {}).items():
+            t_cfg = _config_from_dict_train(tr_node["params"])
+            save_dir = _train_output_dir(temp_dir, pre_h, tr_h)
+            train_items.append((pre_h, tr_h, t_cfg, copy.deepcopy(para), prep_dir, save_dir))
+
+        train_queue.put(("prep_done", pre_h, elapsed, train_items))
+
+
+def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Queue, reports_path: str, task_spec: Dict[str, Any], temp_dir: str):
+    logger = _worker_logger(worker_log_file)
+
+    from trade.bt import simulation
+
+    while True:
+        try:
+            msg = task_queue.get(timeout=0.5)
+        except Empty:
+            continue
+        if msg is None:
+            break
+
+        pre_h, tr_h, sim_h = msg
+        
+        # Lookup task details from spec
+        pre_node = task_spec.get(pre_h, {})
+        tr_node = pre_node.get("train", {}).get(tr_h, {})
+        
+        # Find sim task in the list
+        sim_task = None
+        for sim in tr_node.get("sim_tasks", []):
+            if sim["hash"] == sim_h:
+                sim_task = sim
+                break
+        
+        if sim_task is None:
+            logger.error(f"Sim task not found: {pre_h}/{tr_h}/{sim_h}")
+            continue
+        
+        # Reconstruct objects from params
+        pre_para = common.BaseDefine(**pre_node["params"])
+        t_cfg = _config_from_dict_train(tr_node["params"])
+        s_para = simulation.StrategyPara(**sim_task["params"])
+        prep_output_dir = _prep_output_dir(temp_dir, pre_h)
+        train_output_dir = _train_output_dir(temp_dir, pre_h, tr_h)
+        
+        t0 = time.time()
+        try:
+            report_stat = None
+            report = {'short':{}, 'long':{}}
+            report['short'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_output_dir,
+                                train_output_dir=train_output_dir, device="cpu", period='short' )["statistics"][1]
+            if report['short']["performance"]["cagr"] > 0.2 :
+                report['long'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_output_dir,
+                                    train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
+                if report['long']["performance"]["cagr"] > 0.1 :
+                    report_stat = report
+                else:
+                    logger.info(f"Sim {pre_h}/{tr_h}/{sim_h} drop report due to long period performance cagr:{report['long']['performance']['cagr']}")
+            else:
+                logger.info(f"Sim {pre_h}/{tr_h}/{sim_h} drop report due to long period performance cagr:{report['short']['performance']['cagr']}")
+        except Exception:
+            logger.exception(f"Sim failed: {pre_h}/{tr_h}/{sim_h}")
+            report_stat = None
+
+        elapsed = time.time() - t0
+        result_queue.put(("sim_done", pre_h, tr_h, sim_h, elapsed, report_stat, reports_path))
+
+
+# -----------------------------------------------------------------------------
+# Result handling
+# -----------------------------------------------------------------------------
+def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger: logging.Logger, eta_msg) -> None:
     while True:
         try:
             msg = sim_result_queue.get_nowait()
         except Empty:
             break
+
+        if not msg:
+            continue
         typ = msg[0]
-        if typ == "sim_done":
-            _, pre_h, tr_h, sim_h, elapsed, report_stat, rp = msg
-            stats["simulation"]["time"] += elapsed
-            stats["simulation"]["count"] += 1
-            if report_stat is not None:
-                common.append_jsonl(rp, report_stat)
-            logger.info(f"    Sim {pre_h}/{tr_h}/{sim_h} done in {elapsed:.2f}s")
-            em = eta_msg()
-            if em:
-                logger.info(f"    {em}")
+        if typ != "sim_done":
+            continue
+
+        _, pre_h, tr_h, sim_h, elapsed, report_stat, rp = msg
+        stats["simulation"]["time"] += elapsed
+        stats["simulation"]["count"] += 1
+        if report_stat is not None:
+            common.append_jsonl(rp, report_stat)
+
+        logger.info(f"    Sim {pre_h}/{tr_h}/{sim_h} done in {elapsed:.2f}s")
+        em = eta_msg()
+        if em:
+            logger.info(f"    {em}")
 
 
-def _run_train_and_dispatch_sim(pre_h, tr_h, t_cfg, pre_para, sim_by_train, sim_task_queue, 
-                                  stats, n_train, max_sim, sim_nones_sent, logger):
-    """执行 train 任务并投递对应的 sim 任务。返回更新后的 sim_nones_sent。"""
-    t0 = time.time()
+def _run_train_and_dispatch_sim(
+    pre_h: str,
+    tr_h: str,
+    t_cfg: Any,
+    pre_para: Any,
+    prep_output_dir: str,
+    save_dir: str,
+    tr_node: Dict[str, Any],
+    sim_task_queue: mp.Queue,
+    stats: Dict[str, Any],
+    n_train: int,
+    max_sim: int,
+    sim_nones_sent: bool,
+    logger: logging.Logger,
+) -> bool:
+    """
+    Run a train task in main process, then enqueue sim tasks for workers.
+    """
+    from trade.bt import simulation
     import model.train_2head as train
-    train.main(logger, train_cfg=t_cfg, pre_para=pre_para)
+
+    t0 = time.time()
+    train.main(logger, train_cfg=t_cfg, pre_para=pre_para, prep_output_dir=prep_output_dir, save_dir=save_dir)
     el = time.time() - t0
+
     stats["train"]["time"] += el
     stats["train"]["count"] += 1
     logger.info(f"    Train {pre_h}/{tr_h} done in {el:.2f}s")
-    for (_, _, sim_h, pre_para_sim, t_cfg_sim, s_para) in sim_by_train.get((pre_h, tr_h), []):
-        sim_task_queue.put((pre_h, tr_h, sim_h, pre_para_sim, t_cfg_sim, s_para))
+
+    for sim in tr_node.get("sim_tasks", []):
+            sim_h = sim["hash"]
+            sim_task_queue.put((pre_h, tr_h, sim_h))
+    # when all train tasks finished, we can stop sim workers once queue drained
     if stats["train"]["count"] >= n_train and not sim_nones_sent:
         for _ in range(max_sim):
             sim_task_queue.put(None)
         return True
+
     return sim_nones_sent
 
 
-def _send_none_to_workers(queue, count):
-    """向队列发送 count 个 None，用于通知 workers 结束。"""
-    for _ in range(count):
-        queue.put(None)
+def _send_none_to_workers(q: mp.Queue, n: int) -> None:
+    for _ in range(n):
+        q.put(None)
 
 
-def _create_output_dirs(prep_items, train_items, temp_dir):
-    """创建 prep 和 train 的输出目录。"""
-    for pre_h, _ in prep_items:
-        os.makedirs(os.path.join(temp_dir, "preparation", f"pre_{pre_h}"), exist_ok=True)
-    for pre_h, tr_h, t_cfg, _ in train_items:
-        os.makedirs(t_cfg.save_dir, exist_ok=True)
+# -----------------------------------------------------------------------------
+# Reporting: compare old/new (valid mode)
+# -----------------------------------------------------------------------------
+def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output_dir: str, logger: logging.Logger):
+    """
+    Compare selected_configs.jsonl (old) vs reports.jsonl (new), by params.hash.
+    """
+    logger.info("\n" + "=" * 40)
+    logger.info("📊 Comparing old and new results...")
+
+    old_reports: Dict[str, Dict[str, Any]] = {}
+    if os.path.exists(old_reports_path):
+        for record in load_selected_configs(old_reports_path):
+            params = record.get("params", {}) or {}
+            h = params.get("hash")
+            if isinstance(h, str) and h:
+                old_reports[h] = {"params": params, "performance": record.get("performance", {}) or {}}
+        logger.info(f"📥 Loaded {len(old_reports)} old reports from {old_reports_path}")
+    else:
+        logger.warning(f"⚠️  Old reports file not found: {old_reports_path}")
+
+    new_reports: Dict[str, Dict[str, Any]] = {}
+    if os.path.exists(new_reports_path):
+        with open(new_reports_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                params = record.get("params", {}) or {}
+                h = params.get("hash")
+                if isinstance(h, str) and h:
+                    new_reports[h] = {"params": params, "performance": record.get("performance", {}) or {}}
+        logger.info(f"📥 Loaded {len(new_reports)} new reports from {new_reports_path}")
+    else:
+        logger.warning(f"⚠️  New reports file not found: {new_reports_path}")
+
+    compare_reports = []
+    only_in_old = []
+    only_in_new = []
+
+    for h, old_r in old_reports.items():
+        if h in new_reports:
+            compare_reports.append({
+                "params": old_r["params"],
+                "performance": old_r["performance"],
+                "performance_r": new_reports[h]["performance"],
+            })
+        else:
+            only_in_old.append(h)
+
+    for h in new_reports:
+        if h not in old_reports:
+            only_in_new.append(h)
+
+    if not compare_reports:
+        logger.warning("⚠️  No matching configurations found for comparison")
+        return None, 0, len(only_in_old), len(only_in_new)
+
+    compare_file_path = os.path.join(output_dir, "compare_reports.jsonl")
+    with open(compare_file_path, "w", encoding="utf-8") as f:
+        for report in compare_reports:
+            f.write(json.dumps(report, ensure_ascii=False, default=str) + "\n")
+
+    logger.info(f"📄 Compare reports saved: {compare_file_path} ({len(compare_reports)} matched)")
+    if only_in_old:
+        logger.info(f"ℹ️  {len(only_in_old)} only in old (not rerun)")
+    if only_in_new:
+        logger.info(f"ℹ️  {len(only_in_new)} only in new")
+
+    return compare_file_path, len(compare_reports), len(only_in_old), len(only_in_new)
 
 
-# ---------- Worker 进程（各自写独立 log 文件） ----------
-def _worker_logger(log_file):
-    """子进程内配置 root logger，仅写当前进程的 log 文件。"""
+# -----------------------------------------------------------------------------
+# ETA helper
+# -----------------------------------------------------------------------------
+def _make_eta_fn(n_prep: int, n_train: int, n_sim: int, stats: Dict[str, Any], max_prep: int, max_sim: int):
+    def phase_eta(total: int, count: int, elapsed: float, workers: int) -> Optional[float]:
+        if total <= 0 or count >= total:
+            return 0.0
+        if count <= 0:
+            return None
+        return (elapsed / count) * (total - count) / max(1, workers)
+
+    def fmt(seconds: Optional[float]) -> str:
+        if seconds is None:
+            return "—"
+        if seconds <= 0:
+            return "0h"
+        hours = seconds / 3600
+        return f"{seconds:.0f}s" if hours < 0.1 else f"{hours:.2f}h"
+
+    def eta_msg() -> str:
+        prep_eta = phase_eta(n_prep, stats["preparation"]["count"], stats["preparation"]["time"], max_prep)
+        train_eta = phase_eta(n_train, stats["train"]["count"], stats["train"]["time"], 1)
+        sim_eta = phase_eta(n_sim, stats["simulation"]["count"], stats["simulation"]["time"], max_sim)
+
+        parts = []
+        if n_prep > 0:
+            parts.append(f"prep:{fmt(prep_eta)}")
+        if n_train > 0:
+            parts.append(f"train:{fmt(train_eta)}")
+        if n_sim > 0:
+            parts.append(f"sim:{fmt(sim_eta)}")
+
+        if not parts:
+            return ""
+
+        total_eta = None
+        if (n_prep == 0 or stats["preparation"]["count"] > 0) and (n_train == 0 or stats["train"]["count"] > 0) and (n_sim == 0 or stats["simulation"]["count"] > 0):
+            total_eta = (prep_eta or 0) + (train_eta or 0) + (sim_eta or 0)
+
+        msg = "[ETA] " + ", ".join(parts)
+        if total_eta is not None and total_eta > 0:
+            msg += f" | total ~{fmt(total_eta)}"
+        return msg
+
+    return eta_msg
+
+
+# -----------------------------------------------------------------------------
+# CLI / entry
+# -----------------------------------------------------------------------------
+def _setup_root_logger(exp_dir: str) -> logging.Logger:
+    log_file_path = os.path.join(exp_dir, "experiment.log")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers = []
-    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
-    root.addHandler(fh)
-    return root
 
-
-def _worker_prep(worker_log_file, task_queue, train_queue, train_by_prep):
-    _worker_logger(worker_log_file)
-    while True:
-        try:
-            msg = task_queue.get(timeout=0.5)
-            if msg is None:
-                break
-        except Empty:
-            continue
-        pre_h, p_dict = msg
-        # prep_output_dir 已在 spec_to_pipeline 中设为 temp_dir 下路径，不再覆盖
-        para = common.CommonDefine(**p_dict)
-        t0 = time.time()
-        preparation.main(logging.getLogger(), para=para)
-        elapsed = time.time() - t0
-        train_queue.put(("prep_done", pre_h, elapsed, train_by_prep.get(pre_h, [])))
-
-
-def _worker_sim(worker_log_file, task_queue, result_queue, reports_path):
-    from trade.bt import simulation
-    _worker_logger(worker_log_file)
-    while True:
-        try:
-            msg = task_queue.get(timeout=0.5)
-            if msg is None:
-                break
-        except Empty:
-            continue
-        pre_h, tr_h, sim_h, pre_para, t_cfg, s_para = msg
-        t0 = time.time()
-        s_para.holdbar = pre_para.predict_num
-        report = simulation.main(logging.getLogger(), para=s_para, pre_para=pre_para, train_cfg=t_cfg)
-        elapsed = time.time() - t0
-        result_queue.put(("sim_done", pre_h, tr_h, sim_h, elapsed, report["statistics"], reports_path))
-
-
-def main():
-    import model.train_2head as train
-    from trade.bt import simulation
-
-    parser = argparse.ArgumentParser(description="Quant Trading Pipeline Control")
-    parser.add_argument('-p', '--prep', action='store_true', help='Execute data preparation stage')
-    parser.add_argument('-t', '--train', action='store_true', help='Execute model training stage')
-    parser.add_argument('-s', '--sim', action='store_true', help='Execute backtest simulation stage')
-    parser.add_argument('-a', '--all', action='store_true', default=True, help='Execute all stages')
-    parser.add_argument('-l', '--load', action='store_true', help='Load unfinished tasks from existing exp_dir')
-    parser.add_argument('-r', '--resume', type=str, help='Resume experiment from specified directory')
-    parser.add_argument('--max-prep', type=int, default=1, help='Max concurrent preparation tasks')
-    parser.add_argument('--max-sim', type=int, default=1, help='Max concurrent simulation tasks')
-
-    args = parser.parse_args()
-
-    if args.resume:
-        exp_dir = args.resume
-        if not os.path.exists(exp_dir):
-            print(f"❌ Error: Resume directory {exp_dir} not found.")
-            return
-    else:
-        exp_dir = common.create_experiment_dir(
-            os.path.join(common.PERSISTENCE_DIR, 'batch_experiments'),
-            common.CommonDefine.symbol,
-            common.CommonDefine.interval
-        )
-
-    log_file_path = os.path.join(exp_dir, 'experiment.log')
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    root_logger.handlers = []
     file_handler = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
+
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
+
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
 
     logger = logging.getLogger("batch")
     logger.setLevel(logging.INFO)
+    return logger
+
+
+def _start_method_fork_if_possible():
+    try:
+        if hasattr(mp, "get_all_start_methods") and "fork" in mp.get_all_start_methods():
+            mp.set_start_method("fork", force=True)
+    except RuntimeError:
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Batch experiments: prep -> train -> sim (with resume)")
+    parser.add_argument("-p", "--prep", action="store_true", help="Execute data preparation stage")
+    parser.add_argument("-t", "--train", action="store_true", help="Execute model training stage")
+    parser.add_argument("-s", "--sim", action="store_true", help="Execute backtest simulation stage")
+    parser.add_argument("-a", "--all", action="store_true", default=True, help="Execute all stages")
+    parser.add_argument("-v", "--valid", action="store_true", default=False, help="Rerun selected_configs.jsonl then compare")
+    parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
+    parser.add_argument("-l", "--load", type=str, help="load condidate configs for verification,befor applying to market")
+    parser.add_argument("--max-prep", type=int, default=1, help="Max concurrent preparation tasks")
+    parser.add_argument("--max-sim", type=int, default=4, help="Max concurrent simulation tasks")
+
+    args = parser.parse_args()
+    run_all = args.all
+
+    # ---------------- resolve exp_dir ----------------
+    if args.resume:
+        exp_dir = os.path.join(common.PERSISTENCE_DIR, args.resume)
+        if not os.path.exists(exp_dir):
+            print(f"❌ Error: Resume directory not found: {exp_dir}")
+            return
+    elif args.valid:
+        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
+        exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs")
+        os.makedirs(exp_dir, exist_ok=True)
+        if not os.path.exists(selected_configs):
+            print(f"❌ Error: valid file not found: {selected_configs}")
+            return
+    elif args.load:
+        load_file = os.path.join(common.PERSISTENCE_DIR, args.load)
+        records = common.load_selected_configs(load_file)  # just to validate file and format
+        from trade.bt import simulation
+        import model.train_2head as train
+        exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "load_configs")
+        os.makedirs(exp_dir, exist_ok=True)
+        logger = _setup_root_logger(exp_dir)
+        common.get_git_info(logger)
+        begin_time = time.time()
+        report_list = []
+        for r in records:
+            report = {'short':{}, 'long':{}}
+            params = r["short"] if "short" in r else r
+            sim_para =simulation.StrategyPara(**params["params"]["strategy"])
+            pre_para =common.BaseDefine(**params["params"]["common"])
+            train_para=_config_from_dict_train(params["params"]["train"])
+            
+            preparation.main(logger, para=pre_para)
+            train_para.use_cache = False
+            train.main(logger, train_cfg=train_para, pre_para=pre_para)
+            report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
+            report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
+            report_list.append(report)
+        output_path = os.path.join(exp_dir, "loaded_reports.jsonl")
+        with open(output_path, "w", encoding="utf-8") as f:
+            for report in report_list:
+                f.write(json.dumps(report, ensure_ascii=False, default=str) + "\n")
+        logger.info(f"✅ Completed in {time.time() - begin_time:.2f}s")
+        exit(0)
+    else:
+        exp_dir = common.create_experiment_dir(
+            os.path.join(common.PERSISTENCE_DIR, "batch_experiments"),
+            common.BaseDefine.symbol,
+            common.BaseDefine.interval,
+        )
+
+    logger = _setup_root_logger(exp_dir)
     common.get_git_info(logger)
 
-    run_all = args.all
     begin_time = time.time()
-    stats = {"preparation": {"time": 0, "count": 0}, "train": {"time": 0, "count": 0}, "simulation": {"time": 0, "count": 0}}
+    stats = {"preparation": {"time": 0.0, "count": 0}, "train": {"time": 0.0, "count": 0}, "simulation": {"time": 0.0, "count": 0}}
     reports_path = os.path.join(exp_dir, REPORTS_FILE)
+
     temp_dir = _batch_temp_dir(exp_dir)
     os.makedirs(temp_dir, exist_ok=True)
 
-    if args.load:
-        if not args.resume:
-            logger.error("❌ --load requires --resume <exp_dir>")
-            return
+    # ---------------- build/load spec ----------------
+    if args.resume:
         done_set = load_done_set(reports_path)
-        prep_items, train_items, sim_items, train_by_prep, sim_by_train = load_pending_tasks(exp_dir, done_set)
-        logger.info(f"📥 Loaded pending from {exp_dir}; prep={len(prep_items)}, train={len(train_items)}, sim={len(sim_items)}")
+        task_spec, (n_prep_total, n_train_total, n_sim_total) = load_pending_tasks(exp_dir, done_set)
+        n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
+        total_all = n_prep_total + n_train_total + n_sim_total
+        total_pending = n_prep + n_train + n_sim
+        logger.info(f"📥 Loaded from {exp_dir}")
+        logger.info(f"📊 Total: {total_all} (prep={n_prep_total}, train={n_train_total}, sim={n_sim_total})")
+        logger.info(f"📊 Pending: {total_pending} (prep={n_prep}, train={n_train}, sim={n_sim}), done: {total_all - total_pending}")
+
+    elif args.valid:
+        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
+        task_spec = _load_task_from_configs(selected_configs)
+        n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
+        logger.info(f"📥 Loaded from {selected_configs}")
+        logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim}")
+
+        tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
+        with open(tasks_spec_path, "w", encoding="utf-8") as f:
+            json.dump(task_spec, f, indent=2, ensure_ascii=False, default=str)
+        logger.info(f"📄 Tasks spec saved: {tasks_spec_path}")
+
     else:
-        preparation_task = []
+        import model.train_2head as train
+        from trade.bt import simulation
+
+        preparation_task: List[Any] = []
         if args.prep or run_all:
-            for cn in [96]:
-                for pn in range(10,31,1):
+            for cn in [96,120]:
+                for pn in [20, 24, 36]:
                     for vol_multiplier in [1.9]:
-                        item = common.CommonDefine()
+                        item = common.BaseDefine()
                         item.candlestick_num = cn
                         item.predict_num = pn
                         item.vol_multiplier_long = vol_multiplier
                         item.vol_multiplier_short = vol_multiplier
                         preparation_task.append(item)
         else:
-            preparation_task.append(common.CommonDefine())
+            preparation_task.append(common.BaseDefine())
 
-        training_task = []
+        training_task: List[Any] = []
         if args.train or run_all:
-            for flip_penalty in np.arange(3, 3.5, 0.1).round(1):
-                for miss_penalty in np.arange(3, 3.5, 0.1).round(1):
+            for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
+                for miss_penalty in np.arange(0.5, 2.5, 0.1).round(1):
                     t_cfg = train.TrainConfig()
-                    t_cfg.use_cache = True
+                    t_cfg.use_cache = False
                     t_cfg.flip_penalty = float(flip_penalty)
                     t_cfg.miss_penalty = float(miss_penalty)
                     training_task.append(t_cfg)
         else:
             training_task.append(train.TrainConfig())
 
-        simulation_task = []
+        simulation_task: List[Any] = []
         if args.sim or run_all:
-            s_cfg = simulation.StrategyPara(device='cpu')
-            s_cfg.holdbar = 20
-            simulation_task.append(s_cfg)
+            for holdbar in [28, 32, 36]:
+                s_cfg = simulation.StrategyPara()
+                s_cfg.holdbar = holdbar
+                simulation_task.append(s_cfg)
         else:
-            simulation_task.append(simulation.StrategyPara(device='cpu'))
+            simulation_task.append(simulation.StrategyPara())
 
         task_spec = build_task_spec(preparation_task, training_task, simulation_task)
+
         tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
         with open(tasks_spec_path, "w", encoding="utf-8") as f:
             json.dump(task_spec, f, indent=2, ensure_ascii=False, default=str)
         logger.info(f"📄 Tasks spec saved: {tasks_spec_path}")
 
-        prep_items, train_items, sim_items, train_by_prep, sim_by_train = spec_to_pipeline(task_spec, exp_dir, temp_dir)
-        logger.info(f"📊 Pending: prep={len(prep_items)}, train={len(train_items)}, sim={len(sim_items)}")
+        n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
+        logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim} (new run)")
 
-    if not prep_items and not train_items and not sim_items:
+    if not task_spec:
         logger.info("✅ No pending tasks.")
         return
 
-    _create_output_dirs(prep_items, train_items, temp_dir)
+    _create_output_dirs(task_spec, temp_dir)
 
     max_prep = max(1, args.max_prep)
     max_sim = max(1, args.max_sim)
-    logger.info(f"🚀 Process+Queue pipeline: max_prep={max_prep}, train=main, max_sim={max_sim}")
+    logger.info(f"🚀 Pipeline: max_prep={max_prep}, train=1, max_sim={max_sim}")
 
-    try:
-        if hasattr(multiprocessing, "get_all_start_methods") and "fork" in multiprocessing.get_all_start_methods():
-            multiprocessing.set_start_method("fork", force=True)  # 子进程不用 CUDA，fork 避免 spawn 重复导入
-    except RuntimeError:
-        pass
+    _start_method_fork_if_possible()
 
-    prep_task_queue = multiprocessing.Queue()
-    sim_task_queue = multiprocessing.Queue()
-    train_done_queue = multiprocessing.Queue()
-    sim_result_queue = multiprocessing.Queue()
+    # ---------------- queues & workers ----------------
+    prep_task_queue: mp.Queue = mp.Queue()
+    train_done_queue: mp.Queue = mp.Queue()
+    sim_task_queue: mp.Queue = mp.Queue()
+    sim_result_queue: mp.Queue = mp.Queue()
 
-    n_prep, n_train, n_sim = len(prep_items), len(train_items), len(sim_items)
-
-    def eta_msg():
-        def phase_eta(total, count, elapsed, max_w):
-            if total == 0 or count >= total:
-                return 0.0
-            if count == 0:
-                return None
-            return (elapsed / count) * (total - count) / max(1, max_w)
-        
-        def format_hours(seconds):
-            """将秒数转换为小时格式显示。"""
-            if seconds is None:
-                return "—"
-            if seconds == 0:
-                return "0h"
-            hours = seconds / 3600
-            if hours < 0.1:
-                return f"{seconds:.0f}s"  # 小于 0.1 小时时仍显示秒
-            return f"{hours:.2f}h"
-
-        prep_eta = phase_eta(n_prep, stats["preparation"]["count"], stats["preparation"]["time"], max_prep)
-        train_eta = phase_eta(n_train, stats["train"]["count"], stats["train"]["time"], 1)  # train 在主进程执行
-        sim_eta = phase_eta(n_sim, stats["simulation"]["count"], stats["simulation"]["time"], max_sim)
-        total_eta = None
-        if (n_prep == 0 or stats["preparation"]["count"] > 0) and (n_train == 0 or stats["train"]["count"] > 0) and (n_sim == 0 or stats["simulation"]["count"] > 0):
-            total_eta = (prep_eta or 0) + (train_eta or 0) + (sim_eta or 0)
-        parts = []
-        if n_prep > 0:
-            parts.append(f"prep:{format_hours(prep_eta)}")
-        if n_train > 0:
-            parts.append(f"train:{format_hours(train_eta)}")
-        if n_sim > 0:
-            parts.append(f"sim:{format_hours(sim_eta)}")
-        if parts:
-            msg = "[ETA] " + ", ".join(parts)
-            if total_eta is not None and total_eta > 0:
-                msg += f" | total ~{format_hours(total_eta)}"
-            return msg
-        return ""
-
+    # start workers
     prep_workers = []
     for i in range(max_prep):
         worker_log = os.path.join(exp_dir, f"prep_{i}.log")
-        p = Process(target=_worker_prep, args=(worker_log, prep_task_queue, train_done_queue, train_by_prep))
+        p = mp.Process(target=_worker_prep, args=(worker_log, prep_task_queue, train_done_queue, task_spec, temp_dir))
         p.start()
         prep_workers.append(p)
 
     sim_workers = []
     for i in range(max_sim):
         worker_log = os.path.join(exp_dir, f"sim_{i}.log")
-        p = Process(target=_worker_sim, args=(worker_log, sim_task_queue, sim_result_queue, reports_path))
+        p = mp.Process(target=_worker_sim, args=(worker_log, sim_task_queue, sim_result_queue, reports_path, task_spec, temp_dir))
         p.start()
         sim_workers.append(p)
 
-    for (pre_h, pre_para) in prep_items:
-        prep_task_queue.put((pre_h, asdict(pre_para)))
+    # enqueue prep tasks (only hash)
+    for pre_h in task_spec.keys():
+        prep_task_queue.put(pre_h)
     _send_none_to_workers(prep_task_queue, max_prep)
 
-    # train 在主进程执行；无 prep 时先跑完所有 train 并直接投递 sim 任务
-    if n_prep == 0 and n_train > 0:
-        for (pre_h, tr_h, t_cfg, pre_para) in train_items:
-            sim_nones_sent = _run_train_and_dispatch_sim(
-                pre_h, tr_h, t_cfg, pre_para, sim_by_train, sim_task_queue,
-                stats, n_train, max_sim, sim_nones_sent, logger
-            )
-            _process_sim_results(sim_result_queue, stats, logger, eta_msg)
-        # 所有 train 完成后，发送 None 给 sim workers
-        _send_none_to_workers(sim_task_queue, max_sim)
-        sim_nones_sent = True
-    else:
-        sim_nones_sent = n_train == 0
+    # ETA printer
+    n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
+    eta_msg = _make_eta_fn(n_prep, n_train, n_sim, stats, max_prep, max_sim)
 
-    if n_train == 0 and n_sim > 0:
-        for (pre_h, tr_h, sim_h, pre_para, t_cfg, s_para) in sim_items:
-            sim_task_queue.put((pre_h, tr_h, sim_h, pre_para, t_cfg, s_para))
-        _send_none_to_workers(sim_task_queue, max_sim)
-    sim_nones_sent = n_train == 0
+    # If no train stage exists, we should stop sim workers after we enqueue all sims.
+    sim_nones_sent = (n_train == 0)
 
-    while stats["preparation"]["count"] < n_prep or stats["train"]["count"] < n_train or stats["simulation"]["count"] < n_sim:
-        try:
-            msg = train_done_queue.get(timeout=0.2)
-        except Empty:
-            msg = None
-        if msg is not None:
-            typ, pre_h, elapsed, next_trains = msg
-            stats["preparation"]["time"] += elapsed
-            stats["preparation"]["count"] += 1
-            logger.info(f"    Prep {pre_h} done in {elapsed:.2f}s")
-            for (_, tr_h, t_cfg, pre_para) in next_trains:
-                sim_nones_sent = _run_train_and_dispatch_sim(
-                    pre_h, tr_h, t_cfg, pre_para, sim_by_train, sim_task_queue,
-                    stats, n_train, max_sim, sim_nones_sent, logger
-                )
-                # 每次执行完 train_task 后立即检查队列，处理 sim 子进程返回的结果
-                _process_sim_results(sim_result_queue, stats, logger, eta_msg)
+    # main loop: consume prep_done -> run train -> enqueue sims; also drain sim results
+    try:
+        while stats["preparation"]["count"] < n_prep or stats["train"]["count"] < n_train or stats["simulation"]["count"] < n_sim:
+            # consume prep->train messages
+            try:
+                msg = train_done_queue.get(timeout=0.2)
+            except Empty:
+                msg = None
 
-        # 也检查队列（处理可能在其他时机完成的 sim 任务）
-        _process_sim_results(sim_result_queue, stats, logger, eta_msg)
+            if msg is not None:
+                typ, pre_h, elapsed, next_trains = msg
+                if typ == "prep_failed":
+                    logger.error(f"❌ Prep failed for {pre_h}, aborting.")
+                    break
 
-    for p in prep_workers + sim_workers:
-        p.join(timeout=5)
-        if p.is_alive():
-            p.terminate()
+                stats["preparation"]["time"] += float(elapsed)
+                stats["preparation"]["count"] += 1
+                logger.info(f"    Prep {pre_h} done in {elapsed:.2f}s")
+
+                pre_node = task_spec.get(pre_h, {})
+                for (_, tr_h, t_cfg, pre_para, prep_output_dir, save_dir) in next_trains:
+                    tr_node = pre_node.get("train", {}).get(tr_h, {})
+                    sim_nones_sent = _run_train_and_dispatch_sim(
+                        pre_h, tr_h, t_cfg, pre_para, prep_output_dir, save_dir, tr_node,
+                        sim_task_queue, stats, n_train, max_sim, sim_nones_sent, logger
+                    )
+                    _drain_sim_results(sim_result_queue, stats, logger, eta_msg)
+
+            # always drain sim results
+            _drain_sim_results(sim_result_queue, stats, logger, eta_msg)
+
+        # if train existed but we didn't send sim stop signals yet (e.g. early break), send them
+        if not sim_nones_sent:
+            _send_none_to_workers(sim_task_queue, max_sim)
+
+    finally:
+        # best-effort shutdown
+        for p in prep_workers + sim_workers:
+            p.join(timeout=5)
+            if p.is_alive():
+                p.terminate()
+
+    if args.valid:
+        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
+        compare_old_new_reports(selected_configs, reports_path, exp_dir, logger)
 
     logger.info("\n" + "=" * 40)
-    logger.info(f"✅ All tasks completed in {time.time() - begin_time:.2f}s")
+    logger.info(f"✅ Completed in {time.time() - begin_time:.2f}s")
     logger.info("=" * 40)
+
+
+def _load_task_from_configs(path: str) -> Dict[str, Any]:
+    """
+    Build a task spec tree from selected_configs.jsonl.
+    Each record is a full report with {"params": {"strategy":.., "common":.., "train":.., "hash":..}}
+    """
+    task_spec: Dict[str, Any] = {}
+    for r in load_selected_configs(path):
+        params = (r or {}).get("params", {}) or {}
+
+        pre_conf = (params.get("common") or {}).copy()
+        tr_conf = (params.get("train") or {}).copy()
+        sim_conf = (params.get("strategy") or {}).copy()
+
+        if not pre_conf or not tr_conf or not sim_conf:
+            continue
+
+        if "prep_output_dir" in pre_conf or "save_dir" in tr_conf:
+            raise ValueError("Unexpected prep_output_dir/save_dir in config params")
+
+        pre_h = param_hash(pre_conf)
+        tr_h = param_hash(tr_conf)
+        sim_h = param_hash(sim_conf)
+
+        node_pre = task_spec.setdefault(pre_h, {"params": json_safe(pre_conf), "train": {}})
+        node_tr = node_pre["train"].setdefault(tr_h, {"params": json_safe(tr_conf), "sim_tasks": []})
+
+        existing = {s["hash"] for s in node_tr["sim_tasks"]}
+        if sim_h not in existing:
+            node_tr["sim_tasks"].append({"hash": sim_h, "params": json_safe(sim_conf)})
+
+    return task_spec
 
 
 if __name__ == "__main__":

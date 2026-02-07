@@ -122,7 +122,13 @@ class CusAnalyzer(bt.Analyzer):
         else:
             dd_pct = 0.0
 
-        self._daily_stats.append({'date': str(date_obj), 'dd_pct': dd_pct})
+        day_end_equity = self.strategy.broker.getvalue()
+
+        self._daily_stats.append({
+            'date': str(date_obj),
+            'dd_pct': dd_pct,
+            'equity': day_end_equity,   # ⭐ 新增
+        })
 
     def _finalize_drawdown(self):
         if not self._daily_stats:
@@ -136,7 +142,6 @@ class CusAnalyzer(bt.Analyzer):
         violation_count_4 = sum(1 for x in self._daily_stats if x['dd_pct'] < -0.04)
         violation_count_5 = sum(1 for x in self._daily_stats if x['dd_pct'] < -0.049)
         violation_count_3 = sum(1 for x in self._daily_stats if x['dd_pct'] < -0.029)
-        all_drawdowns = [x['dd_pct'] for x in self._daily_stats]
 
         return {
             'max_daily_dd': worst_day['dd_pct'],
@@ -144,7 +149,7 @@ class CusAnalyzer(bt.Analyzer):
             'daily_dd_violation_days': violation_count_4,
             'daily_dd_max_violation_days': violation_count_5,
             'daily_dd_max_3_violation_days': violation_count_3,
-            'daily_returns_list': all_drawdowns,
+            'daily_returns_list': self._daily_stats,
         }
 
     # =========================================================

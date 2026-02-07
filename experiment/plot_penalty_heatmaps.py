@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # 默认输入路径（相对项目根或可传参）
-DEFAULT_REPORTS_PATH = r"/home/chao/work/quant_output/batch_experiments/2026-02-01/ETHUSDT_1h/19_48_08/reports.jsonl"
+DEFAULT_REPORTS_PATH = r"/home/chao/work/quant_output/batch_experiments/2026-02-02/DOGEUSDT_15m/07_55_05/reports.jsonl"
 
 
 def load_reports(path: Path) -> list[dict]:
@@ -32,8 +32,8 @@ def extract_penalty_metrics(records: list[dict]) -> pd.DataFrame:
     rows = []
     for r in records:
         try:
-            fp = r["params"]["train"]["flip_penalty"]
-            mp = r["params"]["train"]["miss_penalty"]
+            fp = r["params"]["strategy"]["holdbar"]
+            mp = r["params"]["common"]["predict_num"]
             cagr = r["performance"]["cagr"]
             calmar = r["performance"]["calmar"]
             rows.append({"flip_penalty": fp, "miss_penalty": mp, "cagr": cagr, "calmar": calmar})

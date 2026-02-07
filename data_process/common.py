@@ -38,10 +38,10 @@ DATA_OUT_DIR = os.path.join(TEMPORARY_DIR, "data")
 os.makedirs(DATA_OUT_DIR, exist_ok=True)
 
 @dataclass
-class CommonDefine:
+class BaseDefine:
     # model / data
     candlestick_num: int = 96     # 160 best for LSTM
-    predict_num: int = 12
+    predict_num: int = 24
     # risk / vol
     vol_multiplier_long: float = 1.9
     stop_multiplier_rate_long: float = 0.2
@@ -50,16 +50,14 @@ class CommonDefine:
     # training
     model_train_rate: float = 0.8
     # market
-    symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
+    symbol: str = "ETHUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
     interval: str = "15m"
     version:int = 0
-    # batch multiprocessing: 每次 preparation 输出到独立目录，默认 DATA_OUT_DIR
-    prep_output_dir: str = DATA_OUT_DIR
 
 log_level = logging.INFO
 
 PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency')
-origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{CommonDefine.symbol}_{CommonDefine.interval}.csv")
+origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{BaseDefine.symbol}_{BaseDefine.interval}.csv")
 train_data_path = os.path.join(DATA_OUT_DIR, "train_data.csv")
 test_data_path  = os.path.join(DATA_OUT_DIR, "test_data.csv")
 data_config_path  = os.path.join(DATA_OUT_DIR, "data_config_meta.json")
@@ -156,7 +154,7 @@ def load_interval_ms_from_dir(base_dir):
         raise RuntimeError(f"⚠️ 配置文件中缺失 'interval_ms' 字段！")
     return interval_ms
 
-def attach_attr(df, feature_group_list, para = CommonDefine):
+def attach_attr(df, feature_group_list, para = BaseDefine):
     # 1. 基础处理
     # df.drop('ignore', axis=1, inplace=True)
     # --- 2. 指标计算 (生成所有原始、未缩放的特征列) ---
@@ -164,7 +162,7 @@ def attach_attr(df, feature_group_list, para = CommonDefine):
     kline_interval_ms = get_interval_ms(para.interval)
     FeatureFactory(kline_interval_ms,feature_group_list).generate(df)
 
-def attach_label(df, para = CommonDefine):
+def attach_label(df, para = BaseDefine):
     """
     基于路径依赖的非对称打标签逻辑
     """
@@ -217,7 +215,7 @@ def attach_label(df, para = CommonDefine):
 
 def attach_triple_barrier_label(df, 
                                  interval_ms,
-                                 para = CommonDefine,):
+                                 para = BaseDefine,):
     """
     严苛版非对称 Triple Barrier 标签
     """
@@ -273,7 +271,7 @@ def attach_triple_barrier_label(df,
     return df
 
 def calculate_thresholds(df, 
-                         para = CommonDefine,
+                         para = BaseDefine,
                          **kwargs): 
     """
     计算非对称动态止盈和止损阈值
@@ -301,7 +299,7 @@ def calculate_thresholds(df,
 
 def attach_macd_event_lifecycle_label(df, 
                                 interval_ms,
-                                para = CommonDefine,):
+                                para = BaseDefine,):
     """
     严格时间对齐版 MACD 生命周期标签 (自动匹配特征列名):
     移除 min_threshold 逻辑。
@@ -385,7 +383,7 @@ def attach_macd_event_lifecycle_label(df,
 
 def attach_boll_event_lifecycle_label(df, 
                                 interval_ms,
-                                para = CommonDefine,):
+                                para = BaseDefine,):
     """
     均值回归版 布林带生命周期标签：
     移除 min_threshold 逻辑。
@@ -470,7 +468,7 @@ def _boll_audit(df, event_indices):
     print(f"  - NEUTRAL (1) 噪音: {stats.get(Signal.NEUTRAL, 0)}")
 
 def attach_sma_7_25_crossover_label(df, 
-                                interval_ms,para = CommonDefine,):
+                                interval_ms,para = BaseDefine,):
     """
     指定 SMA 7/25 交叉生命周期标签：
     移除 min_threshold 逻辑。
@@ -587,7 +585,7 @@ def load_interval_ms(config_path = data_config_path):
     except Exception as e:
         raise RuntimeError(f"💥 读取 JSON 时发生意外错误: {e}")
 
-def setup_session_logger(sub_folder: str = None, log_file_path=None, symbol: str = CommonDefine.symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
+def setup_session_logger(sub_folder: str = None, log_file_path=None, symbol: str = BaseDefine.symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
     if log_file_path ==None:
         assert sub_folder!=None
         log_dir = os.path.join(PERSISTENCE_DIR, sub_folder)
@@ -665,11 +663,12 @@ def get_interval_ms(interval_str: str) -> int:
 def get_git_info(logger):
     repo = git.Repo(PROJECT_DIR)
     sha = repo.head.object.hexsha
-    short_sha = repo.git.rev_parse(sha, short=7)
+    short_sha = repo.git.rev_parse(sha, short=8)
     
     logger.info(f"Full SHA: {sha}")
     logger.info(f"Short SHA: {short_sha}")
     logger.info(f"Commit Message: {repo.head.object.message.strip()}")
+    return short_sha
 
 def save_params(path, *, strategy, common, train):
     data = {

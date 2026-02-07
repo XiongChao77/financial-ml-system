@@ -11,10 +11,24 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
+            "args": ["-l","batch_experiments/selected_configs_candidate/candidate.jsonl"],
             "justMyCode": false,
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             },
+        },
+        {
+            "name": "Batch Experiments: Resume DOGEUSDT_15m",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "args": ["-v"],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
         }
     ]
 }
