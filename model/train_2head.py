@@ -30,10 +30,51 @@ from model.model_factory import ModelFactory
 # 1. 配置定义 (Configuration)
 # ==============================================================================
 
+feature_conf_list = [
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "number_of_trades",
+    "quote_asset_volume",
+    "taker_buy_base_volume",
+    "taker_buy_quote_volume",
+    "MACD_12_26_DIF",
+    "MACD_12_26_DEA",
+    "MACD_12_26_HIST",
+    "MACD_12_26_DIF_PCT",
+    "MACD_12_26_HIST_PCT",
+    "MACD_12_26_HIST_ACCEL",
+    "MACD_12_26_SIG_DIST",
+    "KDJ_K",
+    "KDJ_D",
+    "KDJ_J",
+    "KELTNER_UPPER_14",
+    "KELTNER_LOWER_14",
+    "KELTNER_MIDDLE_14",
+    "QAV_SURGE_49",
+    "QAV_SLOPE_49",
+    "VWAP_BIAS",
+    "PVT",
+    "CMF_25",
+    "body",
+    "upper_wick",
+    "lower_wick",
+    "max_range",
+    "body_mom",
+    "body_pct",
+    "upper_wick_pct",
+    "lower_wick_pct",
+    "close_pos",
+    "doji_score",
+    "wick_bias",
+]    
+
 @dataclass
 class DataConfig:
     label_col: str = "label"
-    window: int = common.CommonDefine.predict_num
+    window: int = common.BaseDefine.predict_num
     train_ratio: float = 0.7
     val_ratio: float = 0.15
 
@@ -128,7 +169,7 @@ class XGBoostConfig:
     xgb_estimators: int = 100
     learning_rate: float = 3e-4
     # 新增：用于 Flatten 维度计算
-    window_size: int = common.CommonDefine.predict_num
+    window_size: int = common.BaseDefine.predict_num
 
 @dataclass
 class CNNConfig:
@@ -142,14 +183,14 @@ class CNNConfig:
 class TrainConfig:
     model_cfg: ConvLSTMConfig = field(default_factory=ConvLSTMConfig)
     data_cfg: DataConfig = field(default_factory=DataConfig)
-    epochs: int = 30
-    batch_size: int = 512
+    feature_conf_list: List[str] = field(default_factory=lambda: feature_conf_list)
+    epochs: int = 50
+    batch_size: int = 256
     lr: float = 3e-4
     gate_lr: float = 1e-2
     weight_decay: float = 5e-4
     patience: int = 8
     seed: int = 42
-    save_dir: str = common.TRAIN_OUT_DIR
     stride: int = 2
     use_cache: bool = False
     lambda_trig: float = 0.5
@@ -157,8 +198,9 @@ class TrainConfig:
     lambda_gate: float = 1e-3
     mag_alpha: float = 0
     mag_limit: float = 4.0
-    flip_penalty: float = 3.9
-    miss_penalty: float = 3.4
+    flip_penalty: float = 1.6
+    miss_penalty: float = 1.8
+    mag_warmup_epochs:int = 8
 # ==============================================================================
 # 3. 核心逻辑 (Core Logic)
 # ==============================================================================
@@ -217,20 +259,14 @@ def apply_feature_direction(X: torch.Tensor, feature_names: List[str], direction
     return X
 
 
-def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg, pre_para: common.CommonDefine = None):
-    """
-    接收配置对象，执行训练。pre_para 未传时使用 common.CommonDefine()，数据从 pre_para.prep_output_dir 读取。
-    """
-    if pre_para is None:
-        pre_para = common.CommonDefine()
+def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg, pre_para: common.BaseDefine,prep_output_dir:str, save_dir):
     # 0. 初始化环境
     set_seed(train_cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device} | Model: {model_cfg.model_type} version: {model_cfg.model_version}")
 
-    # 1. 准备数据（从 pre_para.prep_output_dir 读，默认 DATA_OUT_DIR）
-    df = common.load_train_df_from_dir(pre_para.prep_output_dir)
-    kline_interval_ms = common.load_interval_ms_from_dir(pre_para.prep_output_dir)
+    df = common.load_train_df_from_dir(prep_output_dir)
+    kline_interval_ms = common.load_interval_ms_from_dir(prep_output_dir)
     logger.info(f"Using TimeSeriesWindowDataset with window={data_cfg.window} Origin data len {len(df)}...")
 
     feature_list = list(feature_direction_map.keys())
@@ -273,7 +309,6 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
     logger.info(f"Class weights: {dict(zip(classes, cw_balanced))}")
 
     # 4. DataLoader
-    #  针对 5090 优化：增加 num_workers，开启 pin_memory
     dl_tr = DataLoader(
         ds_tr, 
         batch_size=train_cfg.batch_size, 
@@ -386,8 +421,10 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
         classes=classes,
         logger=logger,
         mtl_manager = mtl,
+        pre_para=pre_para,
+        save_dir = save_dir,
     )
-    diagnose_confidence(results, model=model,dl_te=dl_te, device=device,logger=logger,save_dir = common.TRAIN_OUT_DIR)
+    diagnose_confidence(results, model=model,dl_te=dl_te, device=device,logger=logger,save_dir = save_dir)
     # find_best_threshold(results, model=model,dl_te=dl_te, device=device,logger=logger)
     return final_metrics
 # ==============================================================================
@@ -457,7 +494,87 @@ class MTLManager:
         action_mask = (yb != 1)
         return target_trig, target_dir, action_mask
 
-    def compute_combined_loss(self, logits_trig, logits_dir, yb, rb):
+    def compute_combined_loss(self, logits_trig, logits_dir, yb, rb, epoch):
+        return self.compute_combined_loss_v2(logits_trig, logits_dir, yb, rb, epoch)
+
+    def compute_combined_loss_v1(self, logits_trig, logits_dir, yb, rb, epoch: int = 0):
+        """
+        全功能量化版 Loss：整合了非对称距离惩罚、能量归一化与对称性约束。
+        
+        flip_penalty: 致命错误惩罚 (0 <-> 2)
+        miss_penalty: 保守错误惩罚 (0/2 -> 1)
+        """
+        t_trig, t_dir, act_mask = self.get_targets(yb)
+        
+        # 1. 基础子任务 Loss
+        loss_trig = self.criteria['trig'](logits_trig, t_trig)
+        loss_dir = torch.tensor(0.0, device=self.device)
+        if act_mask.any():
+            loss_dir = self.criteria['dir'](logits_dir[act_mask], t_dir[act_mask])
+        
+        # 2. 融合 3-Class 概率分布 [Short(0), Neutral(1), Long(2)]
+        p_trig = torch.softmax(logits_trig, dim=1)
+        p_dir = torch.softmax(logits_dir, dim=1)
+        fused_probs = torch.stack([
+            p_trig[:, 1] * p_dir[:, 0], # Short
+            p_trig[:, 0],               # Neutral
+            p_trig[:, 1] * p_dir[:, 1]  # Long
+        ], dim=1)
+        
+        # 3. 计算逐样本基础 Main Loss (NLL)
+        # 使用 1e-10 防止 log(0) 崩溃
+        sample_main_loss = F.nll_loss(torch.log(fused_probs + 1e-10), yb, weight=self.weights['main'], reduction='none')
+
+        # --- 🌟 逻辑 A: 三级非对称距离惩罚 ---
+        penalty = torch.ones_like(sample_main_loss)
+        preds = torch.argmax(fused_probs, dim=1)
+        trend_mask = (yb != 1) # 真实标签为趋势的样本
+
+        if trend_mask.any():
+            # 1. 致命错误：多空做反 (例如 y=2, pred=0)
+            fatal_mask = trend_mask & (preds != yb) & (preds != 1)
+            penalty[fatal_mask] = self.cfg.flip_penalty
+            
+            # 2. 保守错误：趋势预测成了震荡 (例如 y=2, pred=1)
+            # 增加此惩罚，防止模型逃向震荡类，迫使其在趋势中寻找微弱信号
+            miss_mask = trend_mask & (preds == 1)
+            penalty[miss_mask] = self.cfg.miss_penalty
+            
+            # --- 🌟 逻辑 B: 惩罚能量归一化 ---
+            # 核心：确保 penalty 均值为 1.0。
+            # 这样放大错误权重的同事，会相对缩小正确预测的权重，
+            # 且保证 Main Loss 总量稳定，不会淹没 lambda_trig/dir 的梯度。
+            penalty = penalty / (penalty.mean() + 1e-8)
+
+        # 应用归一化惩罚
+        loss_main = (sample_main_loss * penalty).mean()
+
+        # --- 🌟 逻辑 C: 方向对称性约束 (Bias Constraint) ---
+        # 计算当前 Batch 预测多头和空头的平均概率差
+        # 用于强制拉平模型在不同训练轮次中产生的随机“多/空偏心”
+        avg_p_short = fused_probs[:, 0].mean()
+        avg_p_long = fused_probs[:, 2].mean()
+        bias_loss = torch.zeros((), device=logits_dir.device)
+
+        act = (p_trig[:, 1] > 0.5)   # 或 act = (yb != 1)
+        if act.any():
+            bias_loss = torch.abs(
+                p_dir[act, 0].mean() - p_dir[act, 1].mean()
+            )
+
+        
+        # 获取 bias_lambda 配置，默认设为 0.5
+        bias_lambda = getattr(self.cfg, 'bias_lambda', 0.5)
+
+        # 4. 最终多任务组合
+        total_loss = loss_main + \
+                    (self.cfg.lambda_trig * loss_trig) + \
+                    (self.cfg.lambda_dir * loss_dir) + \
+                    (bias_lambda * bias_loss)
+        
+        return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
+        
+    def compute_combined_loss_v2(self, logits_trig, logits_dir, yb, rb, epoch: int = 0):
         """
         平滑优化版：Soft Magnitude-Aware MTL Loss
         解决硬阶跃、权重爆炸和梯度饥饿问题。
@@ -538,7 +655,165 @@ class MTLManager:
         
         return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
 
-    
+    def compute_combined_loss_v3(self, logits_trig, logits_dir, yb, rb, epoch: int = 0):
+        """
+        v3: Stable Risk-Sensitive MTL Loss (2-head -> fused 3-class)
+        - Soft penalty: probabilistic & smooth (square risk)
+        - RCC: reward-for-correct-confidence (reward, not penalty) with gate
+        - Magnitude annealing: warm up mag_alpha over epochs
+        - Coupling: move to reward shaping (decouple from sample weights)
+        - Bias regularization: confidence-aware
+        """
+        eps = 1e-8
+
+        # ---- 0) targets ----
+        t_trig, t_dir, act_mask = self.get_targets(yb)
+
+        # ---- 1) magnitude weights (annealed) ----
+        mag_alpha = self.cfg.mag_alpha
+        mag_limit = self.cfg.mag_limit
+
+        warmup_epochs = self.cfg.mag_warmup_epochs
+        if warmup_epochs > 0:
+            alpha_eff = mag_alpha * min(1.0, max(0.0, epoch / warmup_epochs))
+        else:
+            alpha_eff = mag_alpha
+
+        # log compression
+        mag_weights = 1.0 + torch.log1p(alpha_eff * torch.abs(rb))
+        mag_weights = torch.clamp(mag_weights, max=mag_limit)
+
+        # ---- 2) sub-task losses (magnitude-soft) ----
+        # trig
+        loss_trig_raw = F.cross_entropy(
+            logits_trig, t_trig, weight=self.weights["trig"], reduction="none"
+        )
+        mw = mag_weights / (mag_weights.mean() + eps)
+        loss_trig = (loss_trig_raw * mw).mean()
+
+        # dir (only on action samples)
+        loss_dir = torch.tensor(0.0, device=self.device)
+        if act_mask.any():
+            loss_dir_raw = F.cross_entropy(
+                logits_dir[act_mask], t_dir[act_mask], weight=self.weights["dir"], reduction="none"
+            )
+            mw_act = mag_weights[act_mask]
+            mw_act = mw_act / (mw_act.mean() + eps)
+            loss_dir = (loss_dir_raw * mw_act).mean()
+
+        # ---- 3) fused probs ----
+        p_trig = torch.softmax(logits_trig, dim=1)  # [B,2]
+        p_dir  = torch.softmax(logits_dir, dim=1)   # [B,2]
+
+        fused_probs = torch.stack([
+            p_trig[:, 1] * p_dir[:, 0],  # Short
+            p_trig[:, 0],                # Neutral
+            p_trig[:, 1] * p_dir[:, 1],  # Long
+        ], dim=1)
+
+        p_short   = fused_probs[:, 0]
+        p_neutral = fused_probs[:, 1]
+        p_long    = fused_probs[:, 2]
+
+        is_long  = (yb == 2)
+        is_short = (yb == 0)
+
+        # ---- 4) main NLL (per-sample) ----
+        sample_main_loss = F.nll_loss(
+            torch.log(fused_probs + 1e-10),
+            yb,
+            weight=self.weights["main"],
+            reduction="none"
+        )
+
+        # ---- 5) soft structural penalty (smooth risk) ----
+        flip_penalty = float(getattr(self.cfg, "flip_penalty", 1.6))
+        miss_penalty = float(getattr(self.cfg, "miss_penalty", 1.8))
+
+        def sq_risk(p, scale: float):
+            return scale * (p ** 2)
+
+        soft_penalty = torch.ones_like(sample_main_loss)
+
+        if is_long.any():
+            soft_penalty[is_long] += (
+                sq_risk(p_short[is_long], flip_penalty) +
+                sq_risk(p_neutral[is_long], miss_penalty)
+            )
+        if is_short.any():
+            soft_penalty[is_short] += (
+                sq_risk(p_long[is_short], flip_penalty) +
+                sq_risk(p_neutral[is_short], miss_penalty)
+            )
+
+        # ---- 6) RCC: reward-for-correct-confidence (reward, gated) ----
+        rcc_gamma = float(getattr(self.cfg, "rcc_gamma", 0.3))      # 0.1~0.6 常见
+        rcc_gate  = float(getattr(self.cfg, "rcc_gate", 0.55))      # 0.5~0.7 常见
+
+        reward = torch.zeros_like(soft_penalty)
+
+        # “方向正确”判定：Long 要 p_long>p_short，Short 要 p_short>p_long
+        correct_long  = is_long  & (p_long  > p_short) & (p_long  > rcc_gate)
+        correct_short = is_short & (p_short > p_long)  & (p_short > rcc_gate)
+
+        if correct_long.any():
+            reward[correct_long] = rcc_gamma * p_long[correct_long]
+        if correct_short.any():
+            reward[correct_short] = rcc_gamma * p_short[correct_short]
+
+        soft_penalty = soft_penalty - reward
+        soft_penalty = torch.clamp(soft_penalty, min=0.1)  # 防止翻号/负权
+
+        # ---- 7) main weights: decoupled & normalized ----
+        # 主权重只吃：结构惩罚 + 幅度信息（若你想更“纯分类”，可把 mag_weights 去掉）
+        w_struct = soft_penalty / (soft_penalty.mean() + eps)
+        w_mag    = mag_weights / (mag_weights.mean() + eps)
+
+        # 混合系数（可控）
+        w_struct_k = float(getattr(self.cfg, "w_struct_k", 1.0))   # 结构权重强度
+        w_mag_k    = float(getattr(self.cfg, "w_mag_k", 1.0))      # 幅度权重强度
+
+        main_weights = (w_struct_k * w_struct) + (w_mag_k * w_mag)
+        main_weights = main_weights / (main_weights.mean() + eps)
+
+        loss_main = (sample_main_loss * main_weights).mean()
+
+        # ---- 8) coupling: reward shaping (NOT in sample weights) ----
+        # 只在“错方向概率高”且“收益幅度大”时，加额外 shaping，让模型更关注致命错
+        beta_couple = float(getattr(self.cfg, "beta_couple", 0.0))  # 建议 0~0.3，先从 0.05 试
+        if beta_couple > 0:
+            # flip probability: long->short or short->long
+            soft_flip_prob = torch.zeros_like(p_neutral)
+            soft_flip_prob = torch.where(is_long,  p_short, soft_flip_prob)
+            soft_flip_prob = torch.where(is_short, p_long,  soft_flip_prob)
+
+            # 使用 detach，避免 shaping 直接“改写”主分类梯度方向（更稳）
+            shaping = (sample_main_loss.detach() * soft_flip_prob * torch.abs(rb)).mean()
+            loss_main = loss_main + beta_couple * shaping
+
+        # ---- 9) bias regularization: confidence-aware ----
+        bias_lambda = float(getattr(self.cfg, "bias_lambda", 0.5))
+        bias_loss = torch.zeros((), device=logits_trig.device)
+        if bias_lambda > 0:
+            # action confidence
+            conf = p_trig[:, 1]  # 越大越像 action
+            # 只在 conf 较高时生效（软门控）
+            w_conf = conf / (conf.mean() + eps)
+            bias_loss = torch.abs(
+                (w_conf * p_dir[:, 0]).mean() - (w_conf * p_dir[:, 1]).mean()
+            )
+
+        # ---- 10) total ----
+        total_loss = (
+            loss_main
+            + (self.cfg.lambda_trig * loss_trig)
+            + (self.cfg.lambda_dir  * loss_dir)
+            + (bias_lambda * bias_loss)
+        )
+
+        return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
+
+
 class MTLLossTracker:
     def __init__(self, alpha=0.9):
         self.alpha = alpha  # 用于平滑损耗的动量系数
@@ -676,7 +951,7 @@ def train_engine(
                 logits_trig, logits_dir = model(xb, return_fused=False)
 
                 #  调用统一的 Loss 计算
-                loss, l_m, l_t, l_d, lam_d = mtl_manager.compute_combined_loss(logits_trig, logits_dir, yb, rb)
+                loss, l_m, l_t, l_d, lam_d = mtl_manager.compute_combined_loss(logits_trig, logits_dir, yb, rb, epoch)
 
                 # 6. 反向传播
                 optimizer.zero_grad(set_to_none=True)
@@ -753,7 +1028,9 @@ def evaluate_and_save_results(
     feature_list:list[str],
     classes: np.ndarray,
     logger: logging.Logger,
-    mtl_manager: MTLManager
+    mtl_manager: MTLManager,
+    pre_para,
+    save_dir:str
 ):
     """
     评估函数：通过传入 train_cfg 来协调 2+2 分类的 Loss 权重。
@@ -773,8 +1050,8 @@ def evaluate_and_save_results(
             print_feature_importance(model, full_ds.feature_names, logger, suffix)
         test_loss, yt_true, yt_pred, yt_ret = eval_epoch(model, dl_te, device, mtl_manager)
 
-        # 2. 调用存粹版评估
-        avg_ret, trade_count, win_rate= calculate_pure_trading_metrics(yt_true, yt_pred, yt_ret, logger)
+        # 2. 调用存粹版评估（同时运行两种评估：原始逻辑 + 冷却期逻辑）
+        avg_ret, trade_count, win_rate, trades_pnl = calculate_pure_trading_metrics(yt_true, yt_pred, yt_ret, logger, pre_para,pre_para.predict_num)
 
         # 3. 将结果存入 final_metrics，方便以后对比不同模型
         final_metrics["pure_avg_ret"] = avg_ret
@@ -790,8 +1067,6 @@ def evaluate_and_save_results(
         # 使用你原本的格式化打印函数
         logger.info(format_custom_report(report_dict))
         # --- 新增指标计算 ---
-        t_f1, d_prec, f_rate = calculate_quant_metrics(yt_true, yt_pred, report_dict)
-        logger.info(f"🎯 [Quant Metrics] Trend-F1: {t_f1:.4f} | Dir-Precision: {d_prec:.4f} | Flip-Rate: {f_rate:.2%} ")
         logger.info(f"| avg_ret: {avg_ret} | trade_count: {trade_count}| win_rate: {win_rate}")
         logger.info(f"Test macro-F1: {test_f1:.4f}")
 
@@ -804,11 +1079,11 @@ def evaluate_and_save_results(
 
         # 保存混淆矩阵 (保留)
         cm = confusion_matrix(yt_true, yt_pred, labels=classes)
-        cm_path = os.path.join(train_cfg.save_dir, f"confmat_{suffix.lower()}.csv")
+        cm_path = os.path.join(save_dir, f"confmat_{suffix.lower()}.csv")
         pd.DataFrame(cm, index=[f"true_{c}" for c in classes], columns=[f"pred_{c}" for c in classes]).to_csv(cm_path, index=True)
 
         # 保存 .pt 和 Meta (保留)
-        pt_path = os.path.join(train_cfg.save_dir, f"model_{suffix.lower()}_info.pt")
+        pt_path = os.path.join(save_dir, f"model_{suffix.lower()}_info.pt")
         torch.save({
             "state_dict": state,
             "feature_list" : feature_list,
@@ -829,7 +1104,7 @@ def evaluate_and_save_results(
             window=data_cfg.window,
             model_version_tag=suffix,
         )
-        with open(os.path.join(train_cfg.save_dir, f"model_{suffix.lower()}_meta.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(save_dir, f"model_{suffix.lower()}_meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
         if suffix == "Best_F1":
@@ -859,46 +1134,73 @@ def evaluate_and_save_results(
         }
     }
     
-    task_path = os.path.join(train_cfg.save_dir, "task_description.json")
+    task_path = os.path.join(save_dir, "task_description.json")
     with open(task_path, "w", encoding="utf-8") as f:
         json.dump(task_desc, f, ensure_ascii=False, indent=2)
         
     logger.info(f"🎉 Task description saved to: {task_path}")
     return final_metrics
 
-def calculate_pure_trading_metrics(y_true, y_pred, returns, logger):
+def calculate_pure_trading_metrics(y_true, y_pred, returns, logger, pre_para, cooldown_period):
     """
-    更存粹的评估方法：
+    更存粹的评估方法，同时运行两种评估：
+    
+    评估1（原始逻辑）：
     1. 只要预测为 Long 或 Short 就视为入场。
     2. PnL = 信号方向 * 实际收益率 (即：Long正确得正，Long错误得负)。
+    
+    评估2（冷却期逻辑）：
+    1. 在一次交易发生后，cooldown_period 之内不会再发生交易。
+    2. 默认 cooldown_period = pre_para.predict_num（若未指定）。
     """
+    
     # 信号映射: 0(Short)->-1, 1(Neutral)->0, 2(Long)->1
     signals = np.zeros_like(y_pred)
     signals[y_pred == 2] = 1
     signals[y_pred == 0] = -1
     
-    # 核心计算：信号方向 * 实际回报
-    # 如果预测 Long(1) 且回报为 0.02 -> +0.02 (正确)
-    # 如果预测 Long(1) 且回报为 -0.02 -> -0.02 (错误)
-    # 如果预测 Short(-1) 且回报为 -0.02 -> +0.02 (正确)
+    # ========== 评估1：原始逻辑（每次信号都交易） ==========
     pnl_per_sample = signals * returns
-    
-    # 筛选出所有发生了交易的样本
     trade_mask = (signals != 0)
-    trades_pnl = pnl_per_sample[trade_mask]
-    num_trades = len(trades_pnl)
+    trades_pnl_1 = pnl_per_sample[trade_mask]
+    num_trades_1 = len(trades_pnl_1)
     
-    if num_trades == 0:
+    if num_trades_1 == 0:
         logger.warning("⚠️ 本轮评估未产生任何交易信号 (Long/Short)")
-        return 0.0, 0
+        avg_ret_1, win_rate_1 = 0.0, 0.0
+    else:
+        avg_ret_1 = np.mean(trades_pnl_1)
+        win_rate_1 = (trades_pnl_1 > 0).sum() / num_trades_1
     
-    # 计算核心指标
-    total_return = np.sum(trades_pnl)
-    avg_return_per_trade = np.mean(trades_pnl)
+    # ========== 评估2：冷却期逻辑（交易后 cooldown_period 内不交易） ==========
+    filtered_signals = np.zeros_like(signals)
+    last_trade_idx = -cooldown_period - 1  # 初始化为足够早的位置
     
-    # 辅助：胜率 (仅统计 PnL > 0 的交易)
-    win_rate = (trades_pnl > 0).sum() / num_trades
-    return avg_return_per_trade, num_trades, win_rate
+    for i in range(len(signals)):
+        if signals[i] != 0:  # 有交易信号
+            if i - last_trade_idx > cooldown_period:  # 距离上次交易超过冷却期
+                filtered_signals[i] = signals[i]
+                last_trade_idx = i
+    
+    pnl_per_sample_2 = filtered_signals * returns
+    trade_mask_2 = (filtered_signals != 0)
+    trades_pnl_2 = pnl_per_sample_2[trade_mask_2]
+    num_trades_2 = len(trades_pnl_2)
+    
+    if num_trades_2 == 0:
+        avg_ret_2, win_rate_2 = 0.0, 0.0
+    else:
+        avg_ret_2 = np.mean(trades_pnl_2)
+        win_rate_2 = (trades_pnl_2 > 0).sum() / num_trades_2
+    
+    # 输出两种评估结果
+    logger.info(f"\n{'='*20} Trading Metrics Comparison {'='*20}")
+    logger.info(f"评估1（原始）: avg_ret={avg_ret_1:.6f}, trades={num_trades_1}, win_rate={win_rate_1:.4f}")
+    logger.info(f"评估2（冷却期={cooldown_period}）: avg_ret={avg_ret_2:.6f}, trades={num_trades_2}, win_rate={win_rate_2:.4f}")
+    logger.info(f"{'='*60}\n")
+    
+    # 返回评估1的结果（保持向后兼容）
+    return avg_ret_1, num_trades_1, win_rate_1, trades_pnl_1
 
 def print_feature_importance(model, feature_names, logger, subtask_name, tag=""):
     """
@@ -925,34 +1227,6 @@ def print_feature_importance(model, feature_names, logger, subtask_name, tag="")
         logger.info("-" * 45 + "\n")
     else:
         logger.info(f"ℹ️ Feature Selector is disabled for {subtask_name.upper()}.")
-
-def calculate_quant_metrics(y_true, y_pred, report_dict=None):
-    """
-    专门为量化设计的评估指标
-    0: Short, 1: Sideways, 2: Long
-    """
-    if report_dict is None:
-        report_dict = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
-    
-    # 1. Trend-F1 (只看涨跌两类的平均)
-    f1_0 = report_dict.get('0', {}).get('f1-score', 0)
-    f1_2 = report_dict.get('2', {}).get('f1-score', 0)
-    trend_f1 = (f1_0 + f1_2) / 2
-    
-    # 2. Directional Precision (预测为趋势时的准确率)
-    # 预测为 0 或 2 的样本中，真正是 0 或 2 的比例
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2])
-    pred_trend_total = (y_pred == 0).sum() + (y_pred == 2).sum()
-    true_trend_correct = cm[0, 0] + cm[2, 2]
-    dir_precision = true_trend_correct / pred_trend_total if pred_trend_total > 0 else 0
-    
-    # 3. Fatal Flip Rate (做反的概率)
-    # 在真实为趋势的样本中，有多少被预测成了相反的方向 (0->2 或 2->0)
-    actual_trend_total = (y_true == 0).sum() + (y_true == 2).sum()
-    fatal_flips = cm[0, 2] + cm[2, 0]
-    flip_rate = fatal_flips / actual_trend_total if actual_trend_total > 0 else 0
-    
-    return trend_f1, dir_precision, flip_rate
 
 def format_custom_report(report_dict):
     """
@@ -1125,7 +1399,7 @@ def eval_epoch(model, loader, device, mtl_manager:MTLManager):
         logits_trig, logits_dir = model(xb, return_fused=False)
         
         # 使用 MTLManager 计算损失
-        loss, _, _, _, _ = mtl_manager.compute_combined_loss(logits_trig, logits_dir, yb, rb)
+        loss, _, _, _, _ = mtl_manager.compute_combined_loss(logits_trig, logits_dir, yb, rb, epoch=0)
         tl += loss.item() * xb.size(0)
 
         # 获取预测标签
@@ -1195,98 +1469,105 @@ feature_direction_map = {
     "er_126": 1,
     "imbalance_14": -1,
     "CMF_25": 1,
-    # "VWAP_BIAS": -1,
-    # "MACD_12_26_HIST_ACCEL": -1,
-    # "vol_gk_14": 1,
-    # "hurst_126": 1,
-    # "atr_14": 1,
-    # "vol_parkinson_14": 1,
-    # "body": 1,
-    # "body_pct": 1,
-    # "doji_score": 1,
-    # "body_mom": 1,
-    # "imbalance_49": 1,
-    # "max_range": 1,
-    # "kurt_100": 1,
-    # "MACD_12_26_HIST": 1,
-    # "skew_100": 1,
-    # "Vol_Trend": 1,
-    # "poc_bias_14": 1,
-    # "upper_wick_pct": 1,
-    # "VOL_ratio_14": 1,
-    # "kurt_20": 1,
-    # "ATS": 1,
-    # "DONCHIAN_BW_20": 1,
-    # "QAV_SLOPE_49": 1,
-    # "lower_wick_pct": 1,
-    # "hurst_14": 1,
-    # "QAV_SURGE_49": 1,
-    # "lower_wick": 1,
-    # "vol_regime_14": 1,
-    # "wick_bias": 1,
-    # "trade_density_14": 1,
-    # "er_14": 1,
+    "VWAP_BIAS": -1,
+    "MACD_12_26_HIST_ACCEL": -1,
+    "vol_gk_14": 1,
+    "hurst_126": 1,
+    "atr_14": 1,
+    "vol_parkinson_14": 1,
+    "body": 1,
+    "body_pct": 1,
+    "doji_score": 1,
+    "body_mom": 1,
+    "imbalance_49": 1,
+    "max_range": 1,
+    "kurt_100": 1,
+    "MACD_12_26_HIST": 1,
+    "skew_100": 1,
+    "Vol_Trend": 1,
+    "poc_bias_14": 1,
+    "upper_wick_pct": 1,
+    "VOL_ratio_14": 1,
+    "kurt_20": 1,
+    "ATS": 1,
+    "DONCHIAN_BW_20": 1,
+    "QAV_SLOPE_49": 1,
+    "lower_wick_pct": 1,
+    "hurst_14": 1,
+    "QAV_SURGE_49": 1,
+    "lower_wick": 1,
+    "vol_regime_14": 1,
+    "wick_bias": 1,
+    "trade_density_14": 1,
+    "er_14": 1,
     "quote_asset_volume": 1,
-    # "MA_DAY_S_L": 1,
-    # "number_of_trades": 1,
-    # "taker_buy_quote_volume": 1,
-    # "MA_WEEK_M_L": -1,
-    # "VOL_MA_14": 1,
-    # "trade_density_49": 1,
-    # "upper_wick": 1,
-    # "volume": 1,
-    # "taker_buy_base_volume": 1,
+    "MA_DAY_S_L": 1,
+    "number_of_trades": 1,
+    "taker_buy_quote_volume": 1,
+    "MA_WEEK_M_L": -1,
+    "VOL_MA_14": 1,
+    "trade_density_49": 1,
+    "upper_wick": 1,
+    "volume": 1,
+    "taker_buy_base_volume": 1,
 }
 
-feature_direction_map = {
+feature_conf_list2 = [
     # ===== 价格 / 位置（强信息，避免全家桶） =====
-    "close": -1,
-    "close_pos": -1,
-    "dist_to_high_100": 1,
-    "dist_to_high_20": 1,
-    "DONCHIAN_POS_20": -1,
+    "close",
+    "close_pos",
+    "dist_to_high_100",
+    "dist_to_high_20",
+    "DONCHIAN_POS_20",
 
     # ===== 动量 / 反转（多尺度） =====
-    "RSI_14": -1,
-    "MOM_20": -1,
-    "MOM_60": -1,
-    "MACD_12_26_DIF_PCT": -1,
-    "MACD_12_26_HIST_PCT": -1,
+    "RSI_14",
+    "MOM_20",
+    "MOM_60",
+    "MACD_12_26_DIF_PCT",
+    "MACD_12_26_HIST_PCT",
 
     # ===== 通道 / 偏离 =====
-    "BOLL_BW_25": 1,
-    "BOLL_PB_25": -1,
-    "KELTNER_MIDDLE_14": -1,
-    "DONCHIAN_DIST_U_20": 1,
-    "DONCHIAN_DIST_L_20": -1,
+    "BOLL_BW_25",
+    "BOLL_PB_25",
+    "KELTNER_MIDDLE_14",
+    "DONCHIAN_DIST_U_20",
+    "DONCHIAN_DIST_L_20",
 
     # ===== 波动率 / regime =====
-    "vol_parkinson_100": 1,
-    "vol_gk_100": 1,
-    "skew_20": 1,
-    "er_126": 1,
+    "vol_parkinson_100",
+    "vol_gk_100",
+    "skew_20",
+    "er_126",
 
     # ===== 成交量 / 资金流 =====
-    "PVT": -1,
-    # "OBV": -1,
-    "CMF_25": 1,
+    "PVT",
+    # "OBV",
+    "CMF_25",
 
     # ===== 订单流 / 微观结构 =====
-    "poc_bias_49": -1,
-    "id_factor_20": -1,
-    "vpin_49": 1,
+    "poc_bias_49",
+    "id_factor_20",
+    "vpin_49",
 
     # ===== 补充（弱相关但非冗余） =====
-    "VWAP_7": -1,
+    "VWAP_7",
     # ======basement features=======
-    "quote_asset_volume": 1,
-}
+    "quote_asset_volume",
+]
 
 
-def main(logger: logging.Logger, feature_direction_map=feature_direction_map, train_cfg=TrainConfig(), pre_para=common.CommonDefine()):
-    if os.path.exists(common.TRAIN_OUT_DIR):
-        shutil.rmtree(common.TRAIN_OUT_DIR)
-    os.makedirs(common.TRAIN_OUT_DIR, exist_ok=True)
+def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDefine(), prep_output_dir = common.DATA_OUT_DIR, save_dir: str = common.TRAIN_OUT_DIR):
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 根据 feature_conf_list 从全局 feature_direction_map 补充完整方向信息
+    feature_direction_map_filtered = {}
+    for feature_name in train_cfg.feature_conf_list:
+        # 从全局 feature_direction_map 中查找方向，如果找不到则默认为 1（正向）
+        direction = feature_direction_map.get(feature_name, 1)
+        feature_direction_map_filtered[feature_name] = direction
+    
+    logger.info(f"📋 Using {len(feature_direction_map_filtered)} features from feature_conf_list")
 
     # 1. 数据配置
     d_cfg = DataConfig()
@@ -1294,9 +1575,9 @@ def main(logger: logging.Logger, feature_direction_map=feature_direction_map, tr
             # 0             1                   2                   3           4               5               6
     m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig(), TCNConfig(), MambaConfig()][2]
     # m_cfg.model_version = 1
-
+    
     logger.info(f"Training {m_cfg.model_type}...")
-    return run_training(feature_direction_map, logger, d_cfg, train_cfg, m_cfg, pre_para=pre_para)
+    return run_training(feature_direction_map_filtered, logger, d_cfg, train_cfg, m_cfg, pre_para,prep_output_dir,save_dir)
 # ==============================================================================
 # 5. 调用入口 (Main Entry)
 # ==============================================================================

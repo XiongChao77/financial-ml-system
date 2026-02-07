@@ -94,7 +94,7 @@ def get_smart_redundancy_filter(df: pd.DataFrame, target_col: str, threshold: fl
 # 2. 核心分析逻辑
 # ==============================================================================
 
-def single_run_analysis(pre_task: common.CommonDefine, train_cfg: train.TrainConfig, df: pd.DataFrame, output_dir: str):
+def single_run_analysis(pre_task: common.BaseDefine, train_cfg: train.TrainConfig, df: pd.DataFrame, output_dir: str):
     """单次分析流程：特征生成 -> 归一化 -> 针对 Label 和 Return_Rate 的双重相关性度量"""
     try:
         # 1. 基础准备
@@ -205,7 +205,7 @@ def main():
     output_dir = os.path.join(common.PERSISTENCE_DIR, 'correlation_result')
     os.makedirs(output_dir, exist_ok=True)
     
-    pre_task = common.CommonDefine()
+    pre_task = common.BaseDefine()
     pre_task.interval = '15m'
     train_cfg = train.TrainConfig()
     
