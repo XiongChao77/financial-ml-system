@@ -20,12 +20,11 @@ import multiprocessing as mp
 import os
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from queue import Empty
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-
+from typing import Any, Dict, Iterable, List, Optional, Tuple,Set
+from collections import defaultdict
 import numpy as np
-
 try:
     import psutil  # optional
 except ImportError:  # pragma: no cover
@@ -51,8 +50,8 @@ from data_process.utils import (
 TASKS_SPEC_FILE = "tasks_spec.json"
 REPORTS_FILE = "reports.jsonl"
 SELECTED_FILE = "selected_configs.jsonl"
-
-
+MAX_PREP = 1
+MAX_SIM = 4
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -142,7 +141,7 @@ def load_done_set(reports_path: str) -> set[str]:
                 d = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            h = (((d or {}).get("params") or {}).get("hash"))
+            h = (((d or {}).get("short").get("params") or {}).get("hash"))
             if isinstance(h, str) and h:
                 done.add(h)
     return done
@@ -200,10 +199,10 @@ def load_pending_tasks(exp_dir: str, done_set: set[str]) -> Tuple[Dict[str, Any]
     """
     Load tasks_spec.json then filter already-finished tasks based on reports.jsonl.
     """
-    tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
-    if not os.path.exists(tasks_spec_path):
-        raise FileNotFoundError(f"Tasks spec not found: {tasks_spec_path}")
-    with open(tasks_spec_path, "r", encoding="utf-8") as f:
+    fast_tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
+    if not os.path.exists(fast_tasks_spec_path):
+        raise FileNotFoundError(f"Tasks spec not found: {fast_tasks_spec_path}")
+    with open(fast_tasks_spec_path, "r", encoding="utf-8") as f:
         task_spec = json.load(f)
     total_counts = _count_spec_tasks(task_spec)
     pending = filter_pending_from_spec(task_spec, done_set)
@@ -236,11 +235,75 @@ def _worker_logger(log_file: str) -> logging.Logger:
     root.addHandler(fh)
     return root
 
+SWEEPABLE_TYPES = (int, float, str, bool, type(None))
+
+
+def collect_from_any(
+    obj: Any,
+    out: Dict[str, Set[Any]],
+    prefix: str = "",
+):
+    if isinstance(obj, SWEEPABLE_TYPES):
+        out[prefix].add(obj)
+        return
+
+    if is_dataclass(obj):
+        for f in fields(obj):
+            value = getattr(obj, f.name)
+            key = f"{prefix}.{f.name}" if prefix else f.name
+            collect_from_any(value, out, key)
+        return
+
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            key = f"{prefix}.{k}" if prefix else str(k)
+            collect_from_any(v, out, key)
+        return
+
+def collect_param_sweep(task_spec):
+    sweep = {
+        "pre": defaultdict(set),
+        "train": defaultdict(set),
+        "sim": defaultdict(set),
+    }
+
+    for pre_node in task_spec.values():
+        # pre params
+        collect_from_any(pre_node["params"], sweep["pre"])
+
+        for tr_node in pre_node["train"].values():
+            collect_from_any(tr_node["params"], sweep["train"])
+
+            for sim in tr_node.get("sim_tasks", []):
+                collect_from_any(sim["params"], sweep["sim"])
+
+    def finalize(d):
+        return {
+            k: sorted(v)
+            for k, v in d.items()
+            if len(v) > 1
+        }
+
+    return {
+        "pre": finalize(sweep["pre"]),
+        "train": finalize(sweep["train"]),
+        "sim": finalize(sweep["sim"]),
+    }
+
+def log_param_sweep(logger, sweep):
+    logger.info("📌 Experiment parameter sweep:")
+
+    for stage in ["pre", "train", "sim"]:
+        if not sweep[stage]:
+            continue
+        logger.info(f"  [{stage}]")
+        for k, v in sweep[stage].items():
+            logger.info(f"    {k}: {v}")
 
 # -----------------------------------------------------------------------------
 # Worker loops
 # -----------------------------------------------------------------------------
-def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Queue, task_spec: Dict[str, Any], temp_dir: str):
+def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Queue, temp_dir: str):
     logger = _worker_logger(worker_log_file)
     while True:
         try:
@@ -250,33 +313,31 @@ def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Que
         if msg is None:
             break
 
-        pre_h = msg
-        pre_node = task_spec.get(pre_h, {})
-        prep_dir = _prep_output_dir(temp_dir, pre_h)
+        task_spec = msg
+        for pre_h,pre_task in task_spec.items():
+            para = common.BaseDefine(**pre_task["params"])
+            t0 = time.time()
+            try:
+                prep_dir = _prep_output_dir(temp_dir, pre_h)
+                preparation.main(logger, para=para, prep_output_dir=prep_dir)
+            except Exception:
+                logger.exception(f"Prep failed: {pre_h}")
+                # still notify main so it can terminate early
+                train_queue.put(("prep_failed", pre_h, time.time() - t0, []))
+                continue
 
-        para = common.BaseDefine(**pre_node["params"])
-        t0 = time.time()
-        try:
-            preparation.main(logger, para=para, prep_output_dir=prep_dir)
-        except Exception:
-            logger.exception(f"Prep failed: {pre_h}")
-            # still notify main so it can terminate early
-            train_queue.put(("prep_failed", pre_h, time.time() - t0, []))
-            continue
+            elapsed = time.time() - t0
 
-        elapsed = time.time() - t0
+            # Build train items for this prep hash
+            train_items = []
+            for tr_h, tr_node in pre_task.get("train", {}).items():
+                t_cfg = _config_from_dict_train(tr_node["params"])
+                save_dir = _train_output_dir(temp_dir, pre_h, tr_h)
+                train_items.append((pre_h, tr_h, t_cfg, copy.deepcopy(para), prep_dir, save_dir))
 
-        # Build train items for this prep hash
-        train_items = []
-        for tr_h, tr_node in pre_node.get("train", {}).items():
-            t_cfg = _config_from_dict_train(tr_node["params"])
-            save_dir = _train_output_dir(temp_dir, pre_h, tr_h)
-            train_items.append((pre_h, tr_h, t_cfg, copy.deepcopy(para), prep_dir, save_dir))
+            train_queue.put(("prep_done", pre_h, elapsed, train_items))
 
-        train_queue.put(("prep_done", pre_h, elapsed, train_items))
-
-
-def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Queue, reports_path: str, task_spec: Dict[str, Any], temp_dir: str):
+def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Queue, reports_path: str, temp_dir: str):
     logger = _worker_logger(worker_log_file)
 
     from trade.bt import simulation
@@ -289,45 +350,27 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
         if msg is None:
             break
 
-        pre_h, tr_h, sim_h = msg
-        
-        # Lookup task details from spec
-        pre_node = task_spec.get(pre_h, {})
-        tr_node = pre_node.get("train", {}).get(tr_h, {})
-        
-        # Find sim task in the list
-        sim_task = None
-        for sim in tr_node.get("sim_tasks", []):
-            if sim["hash"] == sim_h:
-                sim_task = sim
-                break
-        
-        if sim_task is None:
-            logger.error(f"Sim task not found: {pre_h}/{tr_h}/{sim_h}")
-            continue
-        
-        # Reconstruct objects from params
-        pre_para = common.BaseDefine(**pre_node["params"])
-        t_cfg = _config_from_dict_train(tr_node["params"])
-        s_para = simulation.StrategyPara(**sim_task["params"])
+        pre_h,pre_para, tr_h, t_cfg, sim = msg
+        sim_h = sim['hash']
+        s_para = sim["params"]
+ 
         prep_output_dir = _prep_output_dir(temp_dir, pre_h)
         train_output_dir = _train_output_dir(temp_dir, pre_h, tr_h)
         
         t0 = time.time()
         try:
             report_stat = None
-            report = {'short':{}, 'long':{}}
+            report = {'short':{}, 'long':{}, 'pass':False}
             report['short'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_output_dir,
                                 train_output_dir=train_output_dir, device="cpu", period='short' )["statistics"][1]
             if report['short']["performance"]["cagr"] > 0.2 :
                 report['long'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_output_dir,
                                     train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
                 if report['long']["performance"]["cagr"] > 0.1 :
-                    report_stat = report
-                else:
-                    logger.info(f"Sim {pre_h}/{tr_h}/{sim_h} drop report due to long period performance cagr:{report['long']['performance']['cagr']}")
+                    report['pass'] = True    # add to full mode experiments
             else:
-                logger.info(f"Sim {pre_h}/{tr_h}/{sim_h} drop report due to long period performance cagr:{report['short']['performance']['cagr']}")
+                logger.info(f"Sim {pre_h}/{tr_h}/{sim_h} skip long test due to short period performance cagr:{report['short']['performance']['cagr']}")
+            report_stat = report
         except Exception:
             logger.exception(f"Sim failed: {pre_h}/{tr_h}/{sim_h}")
             report_stat = None
@@ -375,7 +418,6 @@ def _run_train_and_dispatch_sim(
     sim_task_queue: mp.Queue,
     stats: Dict[str, Any],
     n_train: int,
-    max_sim: int,
     sim_nones_sent: bool,
     logger: logging.Logger,
 ) -> bool:
@@ -394,11 +436,10 @@ def _run_train_and_dispatch_sim(
     logger.info(f"    Train {pre_h}/{tr_h} done in {el:.2f}s")
 
     for sim in tr_node.get("sim_tasks", []):
-            sim_h = sim["hash"]
-            sim_task_queue.put((pre_h, tr_h, sim_h))
+            sim_task_queue.put((pre_h,pre_para, tr_h, t_cfg, sim))
     # when all train tasks finished, we can stop sim workers once queue drained
     if stats["train"]["count"] >= n_train and not sim_nones_sent:
-        for _ in range(max_sim):
+        for _ in range(MAX_SIM):
             sim_task_queue.put(None)
         return True
 
@@ -489,7 +530,7 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
 # -----------------------------------------------------------------------------
 # ETA helper
 # -----------------------------------------------------------------------------
-def _make_eta_fn(n_prep: int, n_train: int, n_sim: int, stats: Dict[str, Any], max_prep: int, max_sim: int):
+def _make_eta_fn(n_prep: int, n_train: int, n_sim: int, stats: Dict[str, Any]):
     def phase_eta(total: int, count: int, elapsed: float, workers: int) -> Optional[float]:
         if total <= 0 or count >= total:
             return 0.0
@@ -506,9 +547,9 @@ def _make_eta_fn(n_prep: int, n_train: int, n_sim: int, stats: Dict[str, Any], m
         return f"{seconds:.0f}s" if hours < 0.1 else f"{hours:.2f}h"
 
     def eta_msg() -> str:
-        prep_eta = phase_eta(n_prep, stats["preparation"]["count"], stats["preparation"]["time"], max_prep)
+        prep_eta = phase_eta(n_prep, stats["preparation"]["count"], stats["preparation"]["time"], MAX_PREP)
         train_eta = phase_eta(n_train, stats["train"]["count"], stats["train"]["time"], 1)
-        sim_eta = phase_eta(n_sim, stats["simulation"]["count"], stats["simulation"]["time"], max_sim)
+        sim_eta = phase_eta(n_sim, stats["simulation"]["count"], stats["simulation"]["time"], MAX_SIM)
 
         parts = []
         if n_prep > 0:
@@ -569,12 +610,10 @@ def main():
     parser.add_argument("-p", "--prep", action="store_true", help="Execute data preparation stage")
     parser.add_argument("-t", "--train", action="store_true", help="Execute model training stage")
     parser.add_argument("-s", "--sim", action="store_true", help="Execute backtest simulation stage")
-    parser.add_argument("-a", "--all", action="store_true", default=True, help="Execute all stages")
+    parser.add_argument("-a", "--all", choices=["fast", "full", "all"], default="all",  help="Two-stage training: fast / full / all")
     parser.add_argument("-v", "--valid", action="store_true", default=False, help="Rerun selected_configs.jsonl then compare")
     parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
     parser.add_argument("-l", "--load", type=str, help="load condidate configs for verification,befor applying to market")
-    parser.add_argument("--max-prep", type=int, default=1, help="Max concurrent preparation tasks")
-    parser.add_argument("--max-sim", type=int, default=4, help="Max concurrent simulation tasks")
 
     args = parser.parse_args()
     run_all = args.all
@@ -610,9 +649,20 @@ def main():
             pre_para =common.BaseDefine(**params["params"]["common"])
             train_para=_config_from_dict_train(params["params"]["train"])
             
-            preparation.main(logger, para=pre_para)
-            train_para.use_cache = False
-            train.main(logger, train_cfg=train_para, pre_para=pre_para)
+            # preparation.main(logger, para=pre_para)
+            # train_para.use_cache = False
+            # train.main(logger, train_cfg=train_para, pre_para=pre_para)
+            sim_para.max_daily_loss_pct = 0.03
+            sim_para.trade_risk = 0.3
+            report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
+            report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
+            sim_para.trade_risk = 0.4
+            report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
+            report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
+            sim_para.trade_risk = 0.5
+            report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
+            report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
+            sim_para.trade_risk = 0.6
             report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
             report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
             report_list.append(report)
@@ -633,7 +683,6 @@ def main():
     common.get_git_info(logger)
 
     begin_time = time.time()
-    stats = {"preparation": {"time": 0.0, "count": 0}, "train": {"time": 0.0, "count": 0}, "simulation": {"time": 0.0, "count": 0}}
     reports_path = os.path.join(exp_dir, REPORTS_FILE)
 
     temp_dir = _batch_temp_dir(exp_dir)
@@ -657,20 +706,19 @@ def main():
         logger.info(f"📥 Loaded from {selected_configs}")
         logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim}")
 
-        tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
-        with open(tasks_spec_path, "w", encoding="utf-8") as f:
+        fast_tasks_spec_path = os.path.join(exp_dir, 'fast' ,TASKS_SPEC_FILE)
+        with open(fast_tasks_spec_path, "w", encoding="utf-8") as f:
             json.dump(task_spec, f, indent=2, ensure_ascii=False, default=str)
-        logger.info(f"📄 Tasks spec saved: {tasks_spec_path}")
-
+        logger.info(f"📄 Tasks spec saved: {fast_tasks_spec_path}")
     else:
         import model.train_2head as train
         from trade.bt import simulation
 
         preparation_task: List[Any] = []
         if args.prep or run_all:
-            for cn in [96,120]:
-                for pn in [20, 24, 36]:
-                    for vol_multiplier in [1.9]:
+            for cn in [96]:
+                for pn in [24]:
+                    for vol_multiplier in [1.9,2]:
                         item = common.BaseDefine()
                         item.candlestick_num = cn
                         item.predict_num = pn
@@ -680,12 +728,11 @@ def main():
         else:
             preparation_task.append(common.BaseDefine())
 
-        training_task: List[Any] = []
+        training_task: List[train.TrainConfig] = []
         if args.train or run_all:
-            for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
-                for miss_penalty in np.arange(0.5, 2.5, 0.1).round(1):
-                    t_cfg = train.TrainConfig()
-                    t_cfg.use_cache = False
+            for flip_penalty in np.arange(1.2, 2.5, 0.1).round(1):
+                for miss_penalty in np.arange(1.2, 2.5, 0.1).round(1):
+                    t_cfg = train.TrainConfig(use_cache = False)
                     t_cfg.flip_penalty = float(flip_penalty)
                     t_cfg.miss_penalty = float(miss_penalty)
                     training_task.append(t_cfg)
@@ -694,19 +741,21 @@ def main():
 
         simulation_task: List[Any] = []
         if args.sim or run_all:
-            for holdbar in [28, 32, 36]:
+            for holdbar in [16, 20, 24, 28, 32, 36, 40]:
                 s_cfg = simulation.StrategyPara()
                 s_cfg.holdbar = holdbar
                 simulation_task.append(s_cfg)
         else:
             simulation_task.append(simulation.StrategyPara())
-
         task_spec = build_task_spec(preparation_task, training_task, simulation_task)
+        # task_spec 已经 ready
+        sweep = collect_param_sweep(task_spec)
+        log_param_sweep(logger, sweep)
 
-        tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
-        with open(tasks_spec_path, "w", encoding="utf-8") as f:
+        fast_tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
+        with open(fast_tasks_spec_path, "w", encoding="utf-8") as f:
             json.dump(task_spec, f, indent=2, ensure_ascii=False, default=str)
-        logger.info(f"📄 Tasks spec saved: {tasks_spec_path}")
+        logger.info(f"📄 Tasks spec saved: {fast_tasks_spec_path}")
 
         n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
         logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim} (new run)")
@@ -715,43 +764,54 @@ def main():
         logger.info("✅ No pending tasks.")
         return
 
-    _create_output_dirs(task_spec, temp_dir)
-
-    max_prep = max(1, args.max_prep)
-    max_sim = max(1, args.max_sim)
-    logger.info(f"🚀 Pipeline: max_prep={max_prep}, train=1, max_sim={max_sim}")
+    logger.info(f"🚀 Pipeline: MAX_PREP={MAX_PREP}, train=1, MAX_SIM={MAX_SIM}")
 
     _start_method_fork_if_possible()
 
     # ---------------- queues & workers ----------------
     prep_task_queue: mp.Queue = mp.Queue()
-    train_done_queue: mp.Queue = mp.Queue()
+    train_task_queue: mp.Queue = mp.Queue()
     sim_task_queue: mp.Queue = mp.Queue()
     sim_result_queue: mp.Queue = mp.Queue()
 
     # start workers
     prep_workers = []
-    for i in range(max_prep):
+    for i in range(MAX_PREP):
         worker_log = os.path.join(exp_dir, f"prep_{i}.log")
-        p = mp.Process(target=_worker_prep, args=(worker_log, prep_task_queue, train_done_queue, task_spec, temp_dir))
+        p = mp.Process(target=_worker_prep, args=(worker_log, prep_task_queue, train_task_queue, temp_dir))
         p.start()
         prep_workers.append(p)
 
     sim_workers = []
-    for i in range(max_sim):
+    for i in range(MAX_SIM):
         worker_log = os.path.join(exp_dir, f"sim_{i}.log")
-        p = mp.Process(target=_worker_sim, args=(worker_log, sim_task_queue, sim_result_queue, reports_path, task_spec, temp_dir))
+        p = mp.Process(target=_worker_sim, args=(worker_log, sim_task_queue, sim_result_queue, reports_path, temp_dir))
         p.start()
         sim_workers.append(p)
+    run_task_spec(task_spec, temp_dir,prep_task_queue, train_task_queue, sim_task_queue, sim_result_queue, logger,
+                  prep_workers,sim_workers)
+    
+    
+    _send_none_to_workers(prep_task_queue, MAX_PREP)
+    _send_none_to_workers(sim_task_queue, MAX_SIM)
 
-    # enqueue prep tasks (only hash)
-    for pre_h in task_spec.keys():
-        prep_task_queue.put(pre_h)
-    _send_none_to_workers(prep_task_queue, max_prep)
+    if args.valid:
+        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
+        compare_old_new_reports(selected_configs, reports_path, exp_dir, logger)
+
+    logger.info("\n" + "=" * 40)
+    logger.info(f"✅ Completed in {time.time() - begin_time:.2f}s")
+    logger.info("=" * 40)
+
+def run_task_spec(task_spec, temp_dir,prep_task_queue, train_task_queue, sim_task_queue, sim_result_queue, logger,
+                  prep_workers,sim_workers):
+    stats = {"preparation": {"time": 0.0, "count": 0}, "train": {"time": 0.0, "count": 0}, "simulation": {"time": 0.0, "count": 0}}
+    _create_output_dirs(task_spec, temp_dir)
+    prep_task_queue.put(task_spec)
 
     # ETA printer
     n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
-    eta_msg = _make_eta_fn(n_prep, n_train, n_sim, stats, max_prep, max_sim)
+    eta_msg = _make_eta_fn(n_prep, n_train, n_sim, stats)
 
     # If no train stage exists, we should stop sim workers after we enqueue all sims.
     sim_nones_sent = (n_train == 0)
@@ -761,7 +821,7 @@ def main():
         while stats["preparation"]["count"] < n_prep or stats["train"]["count"] < n_train or stats["simulation"]["count"] < n_sim:
             # consume prep->train messages
             try:
-                msg = train_done_queue.get(timeout=0.2)
+                msg = train_task_queue.get(timeout=0.2)
             except Empty:
                 msg = None
 
@@ -780,32 +840,18 @@ def main():
                     tr_node = pre_node.get("train", {}).get(tr_h, {})
                     sim_nones_sent = _run_train_and_dispatch_sim(
                         pre_h, tr_h, t_cfg, pre_para, prep_output_dir, save_dir, tr_node,
-                        sim_task_queue, stats, n_train, max_sim, sim_nones_sent, logger
+                        sim_task_queue, stats, n_train, sim_nones_sent, logger
                     )
                     _drain_sim_results(sim_result_queue, stats, logger, eta_msg)
 
             # always drain sim results
             _drain_sim_results(sim_result_queue, stats, logger, eta_msg)
-
-        # if train existed but we didn't send sim stop signals yet (e.g. early break), send them
-        if not sim_nones_sent:
-            _send_none_to_workers(sim_task_queue, max_sim)
-
     finally:
         # best-effort shutdown
         for p in prep_workers + sim_workers:
             p.join(timeout=5)
             if p.is_alive():
                 p.terminate()
-
-    if args.valid:
-        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
-        compare_old_new_reports(selected_configs, reports_path, exp_dir, logger)
-
-    logger.info("\n" + "=" * 40)
-    logger.info(f"✅ Completed in {time.time() - begin_time:.2f}s")
-    logger.info("=" * 40)
-
 
 def _load_task_from_configs(path: str) -> Dict[str, Any]:
     """

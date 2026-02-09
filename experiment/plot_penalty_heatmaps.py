@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-读取 reports.jsonl，以 flip_penalty / miss_penalty 为坐标轴，
+读取 reports.jsonl，以 predict_num / candlestick_num 为坐标轴，
 cagr / calmar 为目标值，生成两幅热力图。
 """
 from pathlib import Path
@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # 默认输入路径（相对项目根或可传参）
-DEFAULT_REPORTS_PATH = r"/home/chao/work/quant_output/batch_experiments/2026-02-02/DOGEUSDT_15m/07_55_05/reports.jsonl"
+DEFAULT_REPORTS_PATH = r"/home/chao/work/quant_output/batch_experiments/2026-02-08/ETHUSDT_30m/18_26_11/reports.jsonl"
 
 
 def load_reports(path: Path) -> list[dict]:
@@ -32,20 +32,21 @@ def extract_penalty_metrics(records: list[dict]) -> pd.DataFrame:
     rows = []
     for r in records:
         try:
-            fp = r["params"]["strategy"]["holdbar"]
-            mp = r["params"]["common"]["predict_num"]
+            r = r['short']
+            fp = r["params"]["common"]["predict_num"]
+            mp = r["params"]["common"]["candlestick_num"]
             cagr = r["performance"]["cagr"]
             calmar = r["performance"]["calmar"]
-            rows.append({"flip_penalty": fp, "miss_penalty": mp, "cagr": cagr, "calmar": calmar})
+            rows.append({"predict_num": fp, "candlestick_num": mp, "cagr": cagr, "calmar": calmar})
         except (KeyError, TypeError):
             continue
     return pd.DataFrame(rows)
 
 
 def build_pivot(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
-    """同一 (flip_penalty, miss_penalty) 取均值."""
-    agg = df.groupby(["flip_penalty", "miss_penalty"], as_index=False)[value_col].mean()
-    pivot = agg.pivot(index="flip_penalty", columns="miss_penalty", values=value_col)
+    """同一 (predict_num, candlestick_num) 取均值."""
+    agg = df.groupby(["predict_num", "candlestick_num"], as_index=False)[value_col].mean()
+    pivot = agg.pivot(index="predict_num", columns="candlestick_num", values=value_col)
     return pivot
 
 
@@ -54,8 +55,8 @@ def plot_heatmap(
     title: str,
     out_path: Path,
     cmap: str = "RdYlGn",
-    xlabel: str = "miss_penalty",
-    ylabel: str = "flip_penalty",
+    xlabel: str = "candlestick_num",
+    ylabel: str = "predict_num",
 ) -> None:
     nrows, ncols = pivot.shape
     # 按格子数量放大画布，保证每个格子足够大
@@ -86,7 +87,7 @@ def plot_heatmap(
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Plot CAGR/Calmar heatmaps by flip_penalty & miss_penalty")
+    parser = argparse.ArgumentParser(description="Plot CAGR/Calmar heatmaps by predict_num & candlestick_num")
     parser.add_argument(
         "reports",
         nargs="?",
@@ -113,7 +114,7 @@ def main() -> None:
     records = load_reports(path)
     df = extract_penalty_metrics(records)
     if df.empty:
-        raise ValueError("No valid records with flip_penalty, miss_penalty, cagr, calmar")
+        raise ValueError("No valid records with predict_num, candlestick_num, cagr, calmar")
 
     pivot_cagr = build_pivot(df, "cagr")
     pivot_calmar = build_pivot(df, "calmar")
@@ -121,13 +122,13 @@ def main() -> None:
     # 热力图：CAGR 用 RdYlGn（绿好红差），Calmar 同理
     plot_heatmap(
         pivot_cagr,
-        "CAGR (flip_penalty × miss_penalty)",
+        "CAGR (predict_num × candlestick_num)",
         outdir / "heatmap_cagr.png",
         cmap="RdYlGn",
     )
     plot_heatmap(
         pivot_calmar,
-        "Calmar (flip_penalty × miss_penalty)",
+        "Calmar (predict_num × candlestick_num)",
         outdir / "heatmap_calmar.png",
         cmap="RdYlGn",
     )

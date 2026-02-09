@@ -7,11 +7,11 @@ class BybitEngine:
     Bybit V5 通用量化基座 (V8.1)
     集成 HTTP(配置/查询) + WS_Trade(交易) + 环境自愈逻辑
     """
-    def __init__(self, api_key_path, hmac_secret_path, rsa_key_path, rsa_pem_path, testnet=False):
-        self.api_key = self._load_key(api_key_path)
-        self.hmac_secret = self._load_key(hmac_secret_path)
-        self.rsa_key = self._load_key(rsa_key_path)
-        self.rsa_pem_path = self._load_key(rsa_pem_path)
+    def __init__(self, key_path, testnet=False):
+        self.api_key = self._load_key(os.path.join(key_path, "hmac_api_key"))
+        self.hmac_secret = self._load_key(os.path.join(key_path, "hmac_secret"))
+        self.rsa_key = self._load_key(os.path.join(key_path, "api_key"))
+        self.rsa_pem_path = self._load_key(os.path.join(key_path, "bybit_rsa.pem"))
         self.testnet = testnet
         self.category = "linear"
         

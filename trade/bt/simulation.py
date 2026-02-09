@@ -90,7 +90,7 @@ class StrategyPara:
     allow_short: bool = True
     allow_long: bool = True
     # execution
-    holdbar: int = -1          # 默认值，初始化时可覆盖
+    holdbar: int = BaseDefine.predict_num/2          # 默认值，初始化时可覆盖
     commission: float = 0.05   # 0.1 = 0.1%, can't be 0
     cash: float = 10000.0
     # signal
@@ -105,7 +105,7 @@ class StrategyPara:
     trade_risk: float = 0.4
     max_daily_loss_pct: float = 0.035
 
-def main(logger:logging.Logger, para = StrategyPara(holdbar=BaseDefine.predict_num), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
+def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
          device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'short'):
     if period == 'short':
         df = common.load_test_df_from_dir(prep_output_dir)
@@ -561,6 +561,11 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
             f"train": asdict(train_cfg),
             f"hash": params_hash,
             f"git_commit": common.get_git_info(logger),
+            "model_stats": {
+                "accuracy": model_stats["accuracy"],
+                "f1_macro": model_stats["f1_macro"],
+                "f1_weighted": model_stats["f1_weighted"],
+            },
         },
         f"time": {
             f"start": bt.num2date(strat.datas[0].datetime.array[0]),
@@ -613,6 +618,9 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     }
 
     report_additional = {
+        f"params": {
+            "model_stats": model_stats
+        },
         f"drawdown": {
             f"daily_loss_list": daily_returns_list,          # list）
         },

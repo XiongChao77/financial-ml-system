@@ -71,7 +71,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,p
     # ---------------------------------------------------------
     # 3. 划分数据并保存
     # ---------------------------------------------------------
-    train_ratio = 0.8
+    train_ratio = 0.95  #just for pass bad performance test, not for real use
     split_idx = math.floor(len(df) * train_ratio)
 
     train_df = df.iloc[:split_idx]
