@@ -4,9 +4,11 @@ from datetime import datetime
 from trade.strategy.base_executor import BaseExecutor
 from trade.strategy.strategy_ml import PositionDir
 
+MT5_SYMBOL_FTMO_MAP = {"DOGEUSDT": "DOGEUSD", "ETHUSDT": "ETHUSD", "BTCUSDT": "BTCUSD"}
+
 class MT5Executor(BaseExecutor):
     def __init__(self, path, symbol, magic, logger):
-        self.symbol = symbol
+        self.symbol = MT5_SYMBOL_FTMO_MAP[symbol]
         self.magic = magic
         self.logger = logger
         
@@ -79,7 +81,7 @@ class MT5Executor(BaseExecutor):
             "sl": sl_price,
             "magic": self.magic,
             "comment": "Turtle_Live",
-            "type_filling": mt5.ORDER_FILLING_IOC, # 如果还报错，尝试换成 ORDER_FILLING_FOK
+            # "type_filling": mt5.ORDER_FILLING_IOC, # 如果还报错，尝试换成 ORDER_FILLING_FOK/ORDER_FILLING_IOC/ORDER_FILLING_RETURN
         }
         
         res = mt5.order_send(request)
@@ -88,28 +90,6 @@ class MT5Executor(BaseExecutor):
             self.logger.error(f"❌ 下单失败: {err_msg} | 尝试手数: {lots}")
         else:
             self.logger.info(f"✅ 下单成功: {lots} Lots")
-
-    def user_order_target_percent(self, target_pct):
-        """实现按百分比调仓逻辑"""
-        equity = self.get_account_equity()
-        current_dir, _, current_vol = self.get_current_state()
-        
-        if target_pct == 0:
-            self.user_close()
-            return
-
-        # 若方向反转，先平后开 (满足单层仓位逻辑)
-        target_is_buy = target_pct > 0
-        if current_dir != PositionDir.FLAT:
-            if (target_is_buy and current_dir == PositionDir.NEGATIVE) or \
-               (not target_is_buy and current_dir == PositionDir.POSITIVE ):
-                self.user_close()
-
-        tick = mt5.symbol_info_tick(self.symbol)
-        target_value = abs(target_pct) * equity
-        size = target_value / tick.bid # 将金额转换为币数
-        
-        return self.user_order(size, target_is_buy)
 
     def user_close(self, **kwargs):
         """全平当前 Magic 订单"""
@@ -124,9 +104,5 @@ class MT5Executor(BaseExecutor):
                 "type": mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY,
                 "price": tick.bid if pos.type == 0 else tick.ask,
                 "magic": self.magic,
-                "type_filling": mt5.ORDER_FILLING_IOC,
+                # "type_filling": mt5.ORDER_FILLING_IOC,
             })
-
-    def close_all(self):
-        """别名方法适配 test_execution"""
-        self.user_close()

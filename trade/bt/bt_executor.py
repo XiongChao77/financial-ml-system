@@ -21,68 +21,6 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         self.live_trades = []
         self.closed_pnl = []
 
-    def user_order_target_percent(self, target_pct:float, stop_loss: float = None, take_profit = None):
-        """
-        全能下单函数 (带订单追踪版):
-        1. 自动计算股数
-        2. 反手：全平 + 清空记录 -> 开新仓
-        3. 加仓：开带止损的新单 -> 记录到 live_trades
-        4. 减仓：FIFO (先进先出) 逻辑 -> 取消旧单止损 -> 平仓
-        """
-        # 1. 获取基础数据
-        total_value = self.broker.get_value()
-        current_price = self.data.close[0]
-        current_size = self.position.size 
-        
-        # 2. 计算目标股数
-        target_value = total_value * target_pct
-        target_size = target_value / current_price
-        
-        if target_size == current_size:
-            return
-
-        # 3. 计算差额
-        gap_size = target_size - current_size
-
-        # 4. 判断操作类型
-        
-        # === A: 反手 (Reverse) ===
-        is_reversing = (current_size > 0 and target_size < 0) or \
-                       (current_size < 0 and target_size > 0)
-        
-        if is_reversing:
-            self.logger.debug(f'反手从 {current_size} 到 {target_size}')
-            
-            # 1. 彻底清空旧状态
-            self.close() # 全平仓位
-            self._cancel_all_live_orders() # 辅助函数：取消所有挂单
-            self.live_trades.clear()       # 清空记录队列
-            
-            # 2. 开新仓 (反手后 gap_size 实际上就是 target_size，因为旧的已经视为0了)
-            # 但为了逻辑统一，这里直接按 target_size 开仓
-            action_size = abs(target_size)
-            if target_size > 0: 
-                self._open_bracket(action_size, is_buy=True, stop_loss=stop_loss, take_profit=take_profit)
-            else:
-                self._open_bracket(action_size, is_buy=False, stop_loss=stop_loss, take_profit=take_profit)
-            return
-
-        # === B: 同向加仓 (Increase) ===
-        if abs(target_size) > abs(current_size):
-            action_size = abs(gap_size)
-            is_buy = target_size > 0
-            
-            self.logger.debug(f'【加仓】方向:{"多" if is_buy else "空"} 数量:{action_size}, current_size:{current_size}')
-            self._open_bracket(action_size, is_buy=is_buy, stop_loss=stop_loss)
-
-        # === C: 同向减仓 (Reduce - FIFO模式) ===
-        elif abs(target_size) < abs(current_size):
-            reduce_amount = abs(gap_size)
-            self.logger.debug(f'【减仓】需要减持: {reduce_amount}')
-            
-            # 调用专门的减仓处理函数
-            self._reduce_position_fifo(reduce_amount, is_buy_close=(current_size > 0))
-
     def user_order(self, size, is_buy, stop_loss=None, take_profit=None):
         self._open_bracket(abs(size), is_buy=is_buy, stop_loss=stop_loss, take_profit= take_profit)
 

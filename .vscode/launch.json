@@ -11,7 +11,7 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "args": ["-l","batch_experiments/selected_configs_candidate/candidate.jsonl"],
+            // "args": ["-r","batch_experiments/2026-02-07/ETHUSDT_15m/10_45_43/reports.jsonl"],
             "justMyCode": false,
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"

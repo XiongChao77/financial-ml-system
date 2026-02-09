@@ -40,7 +40,7 @@ os.makedirs(DATA_OUT_DIR, exist_ok=True)
 @dataclass
 class BaseDefine:
     # model / data
-    candlestick_num: int = 96     # 160 best for LSTM
+    candlestick_num: int = 120     # 160 best for LSTM
     predict_num: int = 24
     # risk / vol
     vol_multiplier_long: float = 1.9
@@ -51,7 +51,7 @@ class BaseDefine:
     model_train_rate: float = 0.8
     # market
     symbol: str = "ETHUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
-    interval: str = "15m"
+    interval: str = "1h"
     version:int = 0
 
 log_level = logging.INFO
@@ -588,7 +588,7 @@ def load_interval_ms(config_path = data_config_path):
 def setup_session_logger(sub_folder: str = None, log_file_path=None, symbol: str = BaseDefine.symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
     if log_file_path ==None:
         assert sub_folder!=None
-        log_dir = os.path.join(PERSISTENCE_DIR, sub_folder)
+        log_dir = os.path.join(PERSISTENCE_DIR,'log', sub_folder)
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         sym_str = f"_{symbol}" if symbol else ""

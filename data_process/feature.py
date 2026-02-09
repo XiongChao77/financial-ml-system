@@ -293,7 +293,7 @@ class FeatureBase(ABC):
     @abstractmethod
     def _min_history_request(self, kline_interval_ms:int = None) -> int: pass
     def min_history_request(self, kline_interval_ms:int = None) -> int:
-        min_request= self._min_history_request()
+        min_request= self._min_history_request(kline_interval_ms)
         _logger.debug(f"{self.__class__.__name__} min_history_request {min_request}")
         return min_request
 """
@@ -517,7 +517,7 @@ class FeatureMAStructure(FeatureBase):
     # 最小历史需求
     # ------------------------------------------------------------------
     def _min_history_request(self, kline_interval_ms: int) -> int:
-        kpd, kpw = self._calc_klines_per_day_week(kline_interval_ms)
+        kpd, kpw = self._calc_klines_per_day_week(self.kline_interval_ms)
 
         max_bar  = max(self.bar_windows)
         max_day  = max(self.day_windows) * kpd
@@ -918,7 +918,7 @@ class FeatureQavMa(FeatureBase):
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         # 需要最大窗口 + 斜率步长作为预热
-        max_w = max(self.vol_ma_windows) if self.vol_ma_windows else 0
+        max_w = max(self.windows) if self.windows else 0
         return int((max_w + self.slope_step) * 1.5)
 # ==== 4. OBV ====
 class FeatureOBV(FeatureBase):
@@ -2043,7 +2043,7 @@ FEATURE_GROUP_LIST = [
 ]
 
 class FeatureFactory:
-    def __init__(self,kline_interval_ms:int,feature_group_list:list[FeatureContainer]= FEATURE_GROUP_LIST):
+    def __init__(self,kline_interval_ms:int,feature_group_list:list[FeatureContainer]= FEATURE_GROUP_LIST,feature_conf_list= []):
         self.all_feature_list = []  #feature names
         self.selected_feature_list = []  #feature names
         self.price_features = {}
@@ -2057,6 +2057,14 @@ class FeatureFactory:
             instance =container.feature(factory = self,kline_interval_ms=kline_interval_ms, **container.parameters)
             self.feature_group_list.append(instance)
             self.all_feature_list.extend(instance.features)
+        if feature_conf_list:
+            filtered_groups = []
+            for group in self.feature_group_list:
+                for f in feature_conf_list:
+                    if f in group.features:
+                        filtered_groups.append(group)
+                        break
+            self.feature_group_list = filtered_groups
 
     def generate(self,df):
         for f in self.feature_group_list:     f.generate(df, self._kline_interval_ms)

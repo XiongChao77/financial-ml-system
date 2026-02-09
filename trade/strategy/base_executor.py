@@ -2,9 +2,17 @@ from abc import ABC, abstractmethod
 
 class BaseExecutor:
     @abstractmethod
-    def user_order_target_percent(self, target_pct: float, stop_loss: float = None):
+    def get_account_equity(self):
         pass
+    @abstractmethod
+    def get_current_state(self):
+        pass
+    @abstractmethod
+    def get_server_time(self):
+        pass
+    @abstractmethod
     def user_close(self, size=None, **kwargs):
         pass
+    @abstractmethod
     def user_order(self, size, is_buy, stop_loss=None, take_profit=None):
         pass
