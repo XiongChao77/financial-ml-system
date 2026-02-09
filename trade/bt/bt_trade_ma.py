@@ -49,10 +49,3 @@ class MaCrossoverStrategy(BtExecutor):
     def execute_action(self, action):
         if action.action == ActionType.HOLD:
             return
-        
-        # 使用你设计的 user_order_target_percent，透传止损比例
-        if action.action in (ActionType.OPEN, ActionType.REVERSE):
-            self.user_order_target_percent(
-                target_pct=action.target_pct, 
-                stop_loss=self.params.stop_loss
-            )

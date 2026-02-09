@@ -12,7 +12,7 @@ import json
 import numpy as np
 import os
 
-DEFAULT_DIR = "/home/chao/work/quant_output/batch_experiments/2026-02-03/DOGEUSDT_15m/"
+DEFAULT_DIR = "/home/chao/work/quant_output/batch_experiments/2026-02-07/ETHUSDT_15m"
 
 
 def load_reports(path):
@@ -43,7 +43,7 @@ def extract_cagr_calmar(reports):
     """从 report 列表中提取 (cagr, calmar)，过滤掉缺失的。"""
     pairs = []
     for r in reports:
-        perf = r.get("performance") or {}
+        perf = r['short'].get("performance") or {}
         cagr = perf.get("cagr")
         calmar = perf.get("calmar")
         if cagr is not None and calmar is not None:

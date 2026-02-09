@@ -8,7 +8,8 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process.common import *
 from data_process import common 
 
-exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs'))
+# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-08','ETHUSDT_30m'))
+exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-07','ETHUSDT_15m'))
 short_reports_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_short.jsonl'))
 long_reports_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_long.jsonl'))
 
@@ -17,11 +18,11 @@ SKIP_PERCENT = 0  # 跳过前百分之多少，0表示不跳过，从最前面�
 
 def merge_selected(selected, report, rule_name, src_path):
     """
-    selected: dict[params_hash] -> full_report
+    selected: dict[hash] -> full_report
     report: 原始 report（json 读出来的 dict）
     row: extract_row 的结果（用于取 cagr / calmar）
     """
-    h = report['params']['hash']
+    h = report['hash']
     if h is None:
         return
 
@@ -63,19 +64,27 @@ def extract_row(report, src_path):
     """
     从单条 report 中抽取关键信息
     """
-    perf = report.get("performance", {})
-    params = report.get("params", {})
+    short_report = report.get("short", report)  # 兼容 short/long 分开存储和合并存储两种格式
+    long_report = report.get("long", report)
+    perf = short_report.get("performance", {})
+    params = short_report.get("params", {})
     common = params.get("common", {})
-
+    long_perf = long_report.get("performance", {})
+    long_params = long_report.get("params", {})
+    long_common = long_params.get("common", {})
     return {
         "cagr": perf.get("cagr"),
         "calmar": perf.get("calmar"),
+        "daily_freq" : short_report.get("trades", {}).get("daily_freq"),
+        "long_cagr": long_perf.get("cagr"),
+        "long_calmar": long_perf.get("calmar"),
+        "long_daily_freq" : long_report.get("trades", {}).get("daily_freq"),
         "symbol": common.get("symbol"),
         "interval": common.get("interval"),
-        "candlestick_num": common.get("candlestick_num"),
-        "params_hash": report.get("params",{}).get('hash',0),
+        "hash": params.get('hash',0),
         "path": src_path,
-        "report" : report,
+        "short_report" : short_report,
+        "long_report": long_report
     }
 
 
@@ -85,6 +94,8 @@ def main():
     for jsonl_path in iter_reports_jsonl(exp_dir):
         reports = load_reports(jsonl_path)
         for r in reports:
+            if 'long' not in r and 'short' not in r:
+                continue
             row = extract_row(r, jsonl_path)
             if row["cagr"] is not None and row["calmar"] is not None:
                 rows.append(row)
@@ -93,55 +104,23 @@ def main():
     # para_evaluation(rows)
     # ===== 按 CAGR 排序 =====
     sorted_cagr = sorted(rows, key=lambda x: x["cagr"], reverse=True)
-    skip_count = int(len(sorted_cagr) * SKIP_PERCENT / 100)
-    top_cagr = sorted_cagr[skip_count:skip_count + TOP_K]
 
-    print("\n" + "=" * 80)
-    if SKIP_PERCENT > 0:
-        print(f"Top {TOP_K} by CAGR (skipped top {SKIP_PERCENT}%, starting from rank {skip_count + 1})")
-    else:
-        print(f"Top {TOP_K} by CAGR")
-    print("=" * 80)
-
-    for i, r in enumerate(top_cagr, 1):
-        actual_rank = skip_count + i
-        print(
-            f"[{actual_rank:02d}] CAGR={r['cagr']:.2%} | Calmar={r['calmar']:.2f} | "
-            f"{r['symbol']} {r['interval']} | win={r['candlestick_num']} | "
-            f"hash={r['params_hash']} | {r['path']}"
-        )
-
-    # ===== 按 Calmar 排序 =====
-    sorted_calmar = sorted(rows, key=lambda x: x["calmar"], reverse=True)
-    skip_count = int(len(sorted_calmar) * SKIP_PERCENT / 100)
-    top_calmar = sorted_calmar[skip_count:skip_count + TOP_K]
-
-    print("\n" + "=" * 80)
-    if SKIP_PERCENT > 0:
-        print(f"Top {TOP_K} by Calmar (skipped top {SKIP_PERCENT}%, starting from rank {skip_count + 1})")
-    else:
-        print(f"Top {TOP_K} by Calmar")
-    print("=" * 80)
-
-    for i, r in enumerate(top_calmar, 1):
-        actual_rank = skip_count + i
-        print(
-            f"[{actual_rank:02d}] Calmar={r['calmar']:.2f} | CAGR={r['cagr']:.2%} | "
-            f"{r['symbol']} {r['interval']} | win={r['candlestick_num']} | "
-            f"hash={r['params_hash']} | {r['path']}"
-        )
     selected = {}
-    for row in top_cagr:
-        merge_selected(selected, row["report"], "top_cagr", row["path"])
-    for row in top_calmar:
-        merge_selected(selected, row["report"], "top_calmar", row["path"])
+    for row in sorted_cagr:
+        merge_selected(selected, row, "top_cagr", row["path"])
     print(f"Total reports: {len(selected)}")
-    selected = filter_by_performance(selected.values(), min_cagr=0.2, min_calmar=1.2)
-    print(f"After performance filter: {len(selected)} reports")
+    selected = filter_by_performance(selected.values(), period ='short_report'  ,min_cagr=0.2, min_calmar=1)
+    
+    print(f"After short_report performance filter: {len(selected)} reports")
+    selected = filter_by_performance(selected, period ='long_report', min_cagr=0.2, min_calmar=0.8)
+    print(f"After long_report performance filter: {len(selected)} reports")
+    analyze_candlestick_num(selected)
+    selected = filter_by_trades(selected, period ='short_report', min_daily_freq = 0.2)
+    print(f"After short_report trades filter: {len(selected)} reports")
+    selected = filter_by_trades(selected, period ='long_report', min_daily_freq = 0.2)
+    print(f"After long_report trades filter: {len(selected)} reports")
     selected = filter_by_rc_summary(selected)
     print(f"After rc_summary filter: {len(selected)} reports")
-    selected = filter_by_trades(selected, min_total_trades=100, min_win_rate=35)
-    print(f"After trades filter: {len(selected)} reports")
     out_path = os.path.join(exp_dir,"selected_configs" ,"selected_configs.jsonl")
     os.makedirs(os.path.join(exp_dir,"selected_configs"), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -224,12 +203,12 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         print("❌ 错误: 未能分类出有效数据，请检查输入 rows 的参数。")
     exit()
 
-def filter_by_performance(reports, min_cagr=None, min_calmar=None, min_sharpe=None):
+def filter_by_performance(reports, period= 'short_report', min_cagr=None, min_calmar=None, min_sharpe=None):
     """
     Filter reports based on performance metrics.
     """
     def meets_criteria(report):
-        perf = report.get("performance", {})
+        perf = report.get(period).get("performance", {})
         if min_cagr is not None and perf.get("cagr", 0) < min_cagr:
             return False
         if min_calmar is not None and perf.get("calmar", 0) < min_calmar:
@@ -309,12 +288,12 @@ def filter_by_rc_summary(
 
     return [r for r in reports if ok(r)]
 
-def filter_by_trades(reports, min_total_trades=100, min_win_rate=35, min_daily_freq = None):
+def filter_by_trades(reports, period= 'short_report', min_total_trades=100, min_win_rate=35, min_daily_freq = None):
     """
     Filter reports based on trade statistics.
     """
     def meets_criteria(report):
-        trades = report.get("trades", {})
+        trades = report.get(period).get("trades", {})
         if min_total_trades is not None and trades.get("total", 0) < min_total_trades:
             return False
         if min_win_rate is not None and trades.get("win_rate", 0) < min_win_rate:
@@ -324,6 +303,154 @@ def filter_by_trades(reports, min_total_trades=100, min_win_rate=35, min_daily_f
         return True
 
     return [r for r in reports if meets_criteria(r)]
+
+def find_key_path(obj, target_key, path=None):
+    """
+    递归查找 target_key 在嵌套对象中的路径。
+    返回一个路径列表，可以用来直接索引该值。
+    
+    例如: find_key_path(report, "candlestick_num") 返回 ["params", "common", "candlestick_num"]
+    """
+    if path is None:
+        path = []
+    
+    if isinstance(obj, dict):
+        if target_key in obj:
+            return path + [target_key]
+        for key, value in obj.items():
+            result = find_key_path(value, target_key, path + [key])
+            if result is not None:
+                return result
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            result = find_key_path(item, target_key, path + [i])
+            if result is not None:
+                return result
+    
+    return None
+
+
+def get_value_by_path(obj, path):
+    """
+    使用路径列表直接获取对象中的值。
+    
+    例如: get_value_by_path(report, ["params", "common", "candlestick_num"])
+    """
+    current = obj
+    try:
+        for key in path:
+            current = current[key]
+        return current
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def analyze_candlestick_num(selected, target_key="candlestick_num", metric_key="cagr"):
+    """
+    从 selected 中递归查找 target_key，统计数量并分析性能指标，比较最优值。
+    第一次遍历会自动定位 target_key 的位置，之后直接用路径索引，提高效率。
+    
+    Args:
+        selected: 选中的报告列表
+        target_key: 要查找的键名（默认 "candlestick_num"）
+        metric_key: 性能指标的键名（默认 "cagr"）
+    """
+    from collections import defaultdict
+    import numpy as np
+    
+    if not selected:
+        print("❌ 报告列表为空")
+        return
+    
+    # 第一次遍历：找到 target_key 的路径
+    key_path = find_key_path(selected[0], target_key)
+    
+    if key_path is None:
+        print(f"❌ 未找到任何 {target_key}")
+        return
+    
+    print(f"✓ 定位 {target_key} 的路径: {' -> '.join(map(str, key_path))}")
+    
+    # 按 target_key 分组
+    groups = defaultdict(list)
+    
+    for report in selected:
+        value = get_value_by_path(report, key_path)
+        if value is not None:
+            groups[value].append(report)
+    
+    if not groups:
+        print(f"❌ 未找到任何有效的 {target_key}")
+        return
+    
+    # 统计每个值的性能
+    analysis_results = []
+    total_count = sum(len(v) for v in groups.values())
+    
+    for value in sorted(groups.keys()):
+        reports = groups[value]
+        count = len(reports)
+        
+        # 提取性能指标 (short_report)
+        metric_list = []
+        calmar_list = []
+        
+        for report in reports:
+            short_report = report.get("short_report", report)
+            perf = short_report.get("performance", {})
+            metric = perf.get(metric_key)
+            calmar = perf.get("calmar")
+            
+            if metric is not None:
+                metric_list.append(metric)
+            if calmar is not None:
+                calmar_list.append(calmar)
+        
+        analysis_results.append({
+            target_key: value,
+            "count": count,
+            "percentage": (count / total_count) * 100,
+            f"avg_{metric_key}": np.mean(metric_list) if metric_list else None,
+            "avg_calmar": np.mean(calmar_list) if calmar_list else None,
+            f"max_{metric_key}": np.max(metric_list) if metric_list else None,
+            f"std_{metric_key}": np.std(metric_list) if len(metric_list) > 1 else 0,
+        })
+    
+    # 打印结果
+    print("\n" + "="*100)
+    print(f"📊 {target_key} 分析结果 (总共 {total_count} 个报告)")
+    print("="*100)
+    print(f"{target_key:<15} {'Count':<8} {'%':<8} {f'平均{metric_key.upper()}':<12} {f'Max {metric_key.upper()}':<12} {f'Std {metric_key.upper()}':<12} {'平均Calmar':<12}")
+    print("-"*100)
+    
+    for result in analysis_results:
+        value = result[target_key]
+        count = result["count"]
+        pct = result["percentage"]
+        avg_metric = result[f"avg_{metric_key}"]
+        max_metric = result[f"max_{metric_key}"]
+        std_metric = result[f"std_{metric_key}"]
+        avg_calmar = result["avg_calmar"]
+        
+        metric_str = f"{avg_metric:.2%}" if avg_metric is not None else "N/A"
+        max_metric_str = f"{max_metric:.2%}" if max_metric is not None else "N/A"
+        std_metric_str = f"{std_metric:.4f}" if std_metric is not None else "N/A"
+        calmar_str = f"{avg_calmar:.2f}" if avg_calmar is not None else "N/A"
+        
+        print(f"{value:<15} {count:<8} {pct:<7.1f}% {metric_str:<12} {max_metric_str:<12} {std_metric_str:<12} {calmar_str:<12}")
+    
+    print("="*100)
+    
+    # 找出最优值
+    valid_results = [r for r in analysis_results if r[f"avg_{metric_key}"] is not None]
+    if valid_results:
+        best_metric = max(valid_results, key=lambda x: x[f"avg_{metric_key}"])
+        best_calmar = max(valid_results, key=lambda x: x["avg_calmar"] if x["avg_calmar"] is not None else -float('inf'))
+        
+        print(f"\n🏆 最优值对比:")
+        print(f"  平均{metric_key.upper()}最优: {target_key}={best_metric[target_key]} ({best_metric[f'avg_{metric_key}']:.2%})")
+        print(f"  平均Calmar最优: {target_key}={best_calmar[target_key]} ({best_calmar['avg_calmar']:.2f})")
+        print("="*100)
 
 def filter_by_short_long_reports():
     """
@@ -361,5 +488,5 @@ def filter_by_short_long_reports():
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 if __name__ == "__main__":
-    # main()
-    filter_by_short_long_reports()
+    main()
+    # filter_by_short_long_reports()
