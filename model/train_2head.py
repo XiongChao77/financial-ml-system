@@ -1,11 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os,shutil
+import os,shutil,time
 import sys
 import json
 import logging
 import torch
+# 路径设置
+current_work_dir = os.path.dirname(__file__)
+sys.path.append(os.path.join(current_work_dir, ".."))
+from data_process import common
+# 1. 强制开启持久化图缓存
+torch._inductor.config.fx_graph_cache = True
+
+# 2. 指定统一的缓存路径 (建议放在项目目录下)
+# 这样即便进程重启，或者并行运行，都能避开重复编译
+cache_dir = os.path.join(common.TRAIN_OUT_DIR, ".inductor_cache")
+os.makedirs(cache_dir, exist_ok=True)
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
+
+# 3. 针对 5090 的优化建议：如果输入维度变化频率不高，可以关闭动态形状以换取极限性能
+# torch._inductor.config.dynamic_shapes = False
+
 import torch.nn as nn
 import numpy as np
 import pandas as pd
@@ -18,11 +34,6 @@ from torch.utils.data import WeightedRandomSampler, Dataset, DataLoader
 import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from sklearn.utils.class_weight import compute_class_weight
-
-# 路径设置
-current_work_dir = os.path.dirname(__file__)
-sys.path.append(os.path.join(current_work_dir, ".."))
-from data_process import common
 from model.data_loader import TimeSeriesWindowDataset
 from model.model_factory import ModelFactory
 
@@ -31,6 +42,10 @@ from model.model_factory import ModelFactory
 # ==============================================================================
 
 feature_conf_list = [
+
+    # =========================
+    # 原始市场基础信息（Raw Market State）
+    # =========================
     "open",
     "high",
     "low",
@@ -40,36 +55,52 @@ feature_conf_list = [
     "quote_asset_volume",
     "taker_buy_base_volume",
     "taker_buy_quote_volume",
-    "MACD_12_26_DIF",
-    "MACD_12_26_DEA",
-    "MACD_12_26_HIST",
-    "MACD_12_26_DIF_PCT",
-    "MACD_12_26_HIST_PCT",
-    "MACD_12_26_HIST_ACCEL",
-    "MACD_12_26_SIG_DIST",
-    "KDJ_K",
-    "KDJ_D",
-    "KDJ_J",
-    "KELTNER_UPPER_14",
-    "KELTNER_LOWER_14",
-    "KELTNER_MIDDLE_14",
-    "QAV_SURGE_49",
-    "QAV_SLOPE_49",
-    "VWAP_BIAS",
-    "PVT",
-    "CMF_25",
-    "body",
-    "upper_wick",
-    "lower_wick",
-    "max_range",
-    "body_mom",
-    "body_pct",
+    # =========================
+    # 一、趋势 / 方向持续（Trend） 描述：价格是否存在延续性
+    # =========================
+    "MA_WEEK_M_L",        # 长期结构方向（Regime核心）
+    "PVT",                    # 量价增强型动量
+    "dist_to_high_100",       # 突破型趋势结构
+    "id_factor_100",
+    "id_factor_20",
+    "MFI_999",              # 资金流向极端
+    "MFI_99",
+    # =========================
+    # 二、波动结构（Volatility Regime） 描述：振幅与风险环境
+    # =========================
+    "vol_gk_100",             # 长期波动
+    "vol_gk_14",              # 短期波动
+    "skew_100",
+    "kurt_100",               # 尾部结构（极端风险）
+    # "BOLL_BW_25",           # 需要增益测试后决定
+    "RSI_14",                    # 相对强弱指数（动量与过热信号，间接反映波动环境）
+    # =========================
+    # 三、路径效率 / 市场结构（Efficiency / Regime） 描述：趋势 vs 震荡
+    # =========================
+    "er_126",                 # 趋势效率比（高质量结构因子）
+    # =========================
+    # 四、参与强度（Participation / Liquidity） 描述：市场活跃度
+    # =========================
+    "trade_density_14",       # 连续参与强度
+    "vol_event_flag_500",     # 极端成交事件（Regime触发器）
+    # =========================
+    # 五、订单流 / 失衡（Order Flow） 描述：买卖主导结构
+    # =========================
+    "vpin_49",                # 中期订单流失衡
+    "vpin_14",              # 需要增益测试
+    # =========================
+    # 六、空间位置结构（Spatial / Price Position） 描述：价格在区间或成本中的位置
+    # =========================
+    "poc_bias_600",           # 成交密集区偏离（强结构锚点）
+    "poc_bias_99",
+    "close_pos",              # 区间相对位置
+    # =========================
+    # 七、K线形态 / 微观博弈（Path Microstructure）
+    # =========================
     "upper_wick_pct",
     "lower_wick_pct",
-    "close_pos",
-    "doji_score",
-    "wick_bias",
-]    
+]
+
 
 @dataclass
 class DataConfig:
@@ -119,7 +150,7 @@ class TransformerConfig:
 @dataclass
 class ConvLSTMConfig:
     model_type: str = "conv_lstm"
-    model_version: int = 2
+    model_version: int = 3
     d_model: int = 64
     hidden_size = 64
     conv_layers: int = 5
@@ -137,7 +168,7 @@ class ConvLSTMConfig:
     logit_clip: Optional[float] = None
     p_drop: Optional[float] = None
     task_proj_dim: int = 64
-    use_feature_selector: bool = False
+    use_feature_weighting: bool = False
 
 @dataclass
 class TCNConfig:
@@ -184,23 +215,24 @@ class TrainConfig:
     model_cfg: ConvLSTMConfig = field(default_factory=ConvLSTMConfig)
     data_cfg: DataConfig = field(default_factory=DataConfig)
     feature_conf_list: List[str] = field(default_factory=lambda: feature_conf_list)
-    epochs: int = 50
+    epochs: int = 100
     batch_size: int = 256
     lr: float = 3e-4
-    gate_lr: float = 1e-2
+    gate_lr: float = 3e-4
     weight_decay: float = 5e-4
-    patience: int = 8
+    patience: int = 15
     seed: int = 42
     stride: int = 2
-    use_cache: bool = False
+    use_cache: bool = True
     lambda_trig: float = 0.5
     lambda_dir: float = 0.7
     lambda_gate: float = 1e-3
     mag_alpha: float = 0
     mag_limit: float = 4.0
     flip_penalty: float = 1.6
-    miss_penalty: float = 1.8
+    miss_penalty: float = 1.2
     mag_warmup_epochs:int = 8
+    temperature:float = 2.0
 # ==============================================================================
 # 3. 核心逻辑 (Core Logic)
 # ==============================================================================
@@ -259,11 +291,14 @@ def apply_feature_direction(X: torch.Tensor, feature_names: List[str], direction
     return X
 
 
-def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg, pre_para: common.BaseDefine,prep_output_dir:str, save_dir):
+def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg, pre_para: common.BaseDefine,prep_output_dir:str, save_dir,experiment:bool):
     # 0. 初始化环境
     set_seed(train_cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device} | Model: {model_cfg.model_type} version: {model_cfg.model_version}")
+    if device.type == 'cuda':
+        # 启用 TensorFloat32 (TF32)，5090 的算力吞吐量会大幅提升
+        torch.set_float32_matmul_precision('high')
 
     df = common.load_train_df_from_dir(prep_output_dir)
     kline_interval_ms = common.load_interval_ms_from_dir(prep_output_dir)
@@ -276,15 +311,21 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
     )
     logger.warning(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):"
                    f"{full_ds.feature_names}")
-    
+    x_mem = full_ds.X.element_size() * full_ds.X.nelement() / (1024**2)
+    y_mem = full_ds.y.element_size() * full_ds.y.nelement() / (1024**2)
+    r_mem = full_ds.returns.element_size() * full_ds.returns.nelement() / (1024**2)
+
+    total_gpu_mem_per_process = x_mem + y_mem + r_mem
+    logger.info(f"🚀 Estimated GPU VRAM per process: {total_gpu_mem_per_process:.2f} MB")
     # 对 ic_direction=-1 的特征进行反向（乘以 -1），使其与收益正相关
     if feature_direction_map:
         full_ds.X = apply_feature_direction(full_ds.X, full_ds.feature_names, feature_direction_map, logger)
 
     # 显存预加载优化
     logger.info(f"Pre-loading entire dataset to {device}...")
-    # full_ds.X = full_ds.X.to(device) # 根据显存情况开启
-    # full_ds.y = full_ds.y.to(device)
+    full_ds.X = full_ds.X.to(device)
+    full_ds.y = full_ds.y.to(device)
+    full_ds.returns = full_ds.returns.to(device) # 之前建议的是 .r，请统一为 .returns
     logger.info("Data loaded to VRAM.")
 
     M = len(full_ds)
@@ -293,12 +334,12 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
     # 2. 切分数据
     tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
     
-    ds_tr = SeqDataset(full_ds.X[tr_rng[0]:tr_rng[1]].numpy(), full_ds.y[tr_rng[0]:tr_rng[1]].numpy(),full_ds.returns[tr_rng[0]:tr_rng[1]].numpy())
-    ds_va = SeqDataset(full_ds.X[va_rng[0]:va_rng[1]].numpy(), full_ds.y[va_rng[0]:va_rng[1]].numpy(),full_ds.returns[va_rng[0]:va_rng[1]].numpy())
-    ds_te = SeqDataset(full_ds.X[te_rng[0]:te_rng[1]].numpy(), full_ds.y[te_rng[0]:te_rng[1]].numpy(),full_ds.returns[te_rng[0]:te_rng[1]].numpy())
-
+    ds_tr = SeqDataset(full_ds.X[tr_rng[0]:tr_rng[1]], full_ds.y[tr_rng[0]:tr_rng[1]], full_ds.returns[tr_rng[0]:tr_rng[1]])
+    # More efficient alternative: just pass the sliced tensors
+    ds_va = SeqDataset(full_ds.X[va_rng[0]:va_rng[1]], full_ds.y[va_rng[0]:va_rng[1]], full_ds.returns[va_rng[0]:va_rng[1]])
+    ds_te = SeqDataset(full_ds.X[te_rng[0]:te_rng[1]], full_ds.y[te_rng[0]:te_rng[1]], full_ds.returns[te_rng[0]:te_rng[1]])
     # 3. 计算权重
-    y_tr_np = full_ds.y[tr_rng[0]:tr_rng[1]].numpy()
+    y_tr_np = full_ds.y[tr_rng[0]:tr_rng[1]].cpu().numpy()
     classes = np.unique(y_tr_np)
     #  注入平衡采样逻辑
     # 使用你代码中定义的 get_balanced_sampler (Neutral 50%, Short 25%, Long 25%)
@@ -314,11 +355,9 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
         batch_size=train_cfg.batch_size, 
         sampler=sampler_tr,      # 使用采样器替代 shuffle
         shuffle=False,           # 使用 sampler 时必须设为 False
-        num_workers=4,           # 5090 算力强，建议开启多线程读取
-        pin_memory=(device.type=="cuda")
-    )
-    dl_va = DataLoader(ds_va, batch_size=train_cfg.batch_size, shuffle=False, pin_memory=(device.type=="cuda"))
-    dl_te = DataLoader(ds_te, batch_size=train_cfg.batch_size, shuffle=False, pin_memory=(device.type=="cuda"))
+        num_workers=0)
+    dl_va = DataLoader(ds_va, batch_size=train_cfg.batch_size, shuffle=False)
+    dl_te = DataLoader(ds_te, batch_size=train_cfg.batch_size, shuffle=False)
 
     # 5. 构建模型 (参数解包)
     logger.info(f"Initializing model: type={model_cfg.model_type}, version={model_cfg.model_version}")
@@ -346,68 +385,48 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
             input_size=full_ds.feature_count, n_classes=len(classes),
             **params
         )
-        #  针对 Mamba 的优化器特殊设置
-        if m_type == "mamba":
-            # 将参数分类：dt_proj 需要更高的学习率，A_log 需要较低的学习率
-            dt_params = []
-            other_params = []
-            for name, param in model.named_parameters():
-                if "dt_proj" in name:
-                    dt_params.append(param)
-                else:
-                    other_params.append(param)
-            
-            optimizer = torch.optim.AdamW([
-                {"params": dt_params, "lr": train_cfg.lr * 10}, # 步长参数学习率放大
-                {"params": other_params, "lr": train_cfg.lr}
-            ], weight_decay=train_cfg.weight_decay)
-        else:
-            use_gate = bool(train_cfg.model_cfg.use_feature_selector and hasattr(model, "feature_selector"))
+        model = torch.compile(model)
+        # --- 核心修改：实现 gate_lr 差异化学习率 ---
+        # 1. 提取参数
+        gate_params = []
+        backbone_params = []
 
-            if use_gate:
-                # Differential Learning Rates: Gate usually needs to be more aggressive
-                gate_params = [model.feature_selector.importance_logits]
-                base_params = [p for n, p in model.named_parameters() if "feature_selector" not in n]
-                
-                optimizer = torch.optim.AdamW([
-                    {"params": base_params, "lr": train_cfg.lr, "weight_decay": train_cfg.weight_decay},
-                    {"params": gate_params, "lr": train_cfg.gate_lr, "weight_decay": 0.0} # No decay for logits
-                ])
+        for name, param in model.named_parameters():
+            if "feature_weighter" in name:
+                gate_params.append(param)
             else:
-                optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
-            
+                backbone_params.append(param)
+
+        # 2. 构造参数组
+        # 主网络使用 train_cfg.lr (如 3e-4)
+        # 加权层使用 train_cfg.gate_lr (如 1e-2)
+        param_groups = [
+            {"params": backbone_params, "lr": train_cfg.lr},
+        ]
+        
+        if gate_params:
+            logger.info(f"⚡ [Differential LR] Setting gate_lr: {train_cfg.gate_lr} for feature_weighter")
+            param_groups.append({"params": gate_params, "lr": train_cfg.gate_lr})
+
+        # 3. 重新定义优化器
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=train_cfg.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=6)
 
     # 7. 调用封装好的训练引擎
     logger.info("🚀 Starting training engine...")
     mtl = MTLManager(device, train_cfg)
-    if m_type == 'xgboost':
-        # 调用新增加的 XGBoost 引擎
-        results = train_xgboost_engine(
-            model=model,
-            dl_tr=dl_tr,
-            dl_va=dl_va,
-            logger=logger,
-            mtl_manager=mtl
-        )
-        optimizer = None
-        scheduler = None
-    else:
-        # 6. 训练准备
-        optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=6)
-        # 现有的 PyTorch 训练引擎
-        results = train_engine(
-            model=model,
-            dl_tr=dl_tr,
-            dl_va=dl_va,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            device=device,
-            logger=logger,
-            train_cfg=train_cfg,
-            mtl_manager=mtl
-        )
+    # 现有的 PyTorch 训练引擎
+    results = train_engine(
+        model=model,
+        dl_tr=dl_tr,
+        dl_va=dl_va,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        device=device,
+        logger=logger,
+        train_cfg=train_cfg,
+        mtl_manager=mtl
+    )
     # 8. 评估与保存 (调用新封装的评估函数)
     final_metrics = evaluate_and_save_results(
         results=results,
@@ -424,7 +443,8 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
         pre_para=pre_para,
         save_dir = save_dir,
     )
-    diagnose_confidence(results, model=model,dl_te=dl_te, device=device,logger=logger,save_dir = save_dir)
+    if experiment==False:
+        diagnose_confidence(results, model=model,dl_te=dl_te, device=device,logger=logger,save_dir = save_dir)
     # find_best_threshold(results, model=model,dl_te=dl_te, device=device,logger=logger)
     return final_metrics
 # ==============================================================================
@@ -441,11 +461,11 @@ def chrono_split_by_window_ends(M, tr_r, va_r):
     return (0, n_tr), (n_tr, n_tr + n_va), (n_tr + n_va, M)
 
 class SeqDataset(Dataset):
-    def __init__(self, X, y, returns): #  增加 returns 参数
-        self.X = torch.from_numpy(X).float()
-        self.y = torch.from_numpy(y).long()
-        self.r = torch.from_numpy(returns).float() #  存储回报率
-        self.labels = self.y.long().numpy() 
+    def __init__(self, X, y, returns):
+        self.X = X if torch.is_tensor(X) else torch.from_numpy(X).float()
+        self.y = y if torch.is_tensor(y) else torch.from_numpy(y).long()
+        self.r = returns if torch.is_tensor(returns) else torch.from_numpy(returns).float()
+        self.labels = self.y.cpu().numpy() # 采样器统计仍需在 CPU
 
     def __len__(self): 
         return self.X.shape[0]
@@ -539,19 +559,11 @@ class MTLManager:
             # 增加此惩罚，防止模型逃向震荡类，迫使其在趋势中寻找微弱信号
             miss_mask = trend_mask & (preds == 1)
             penalty[miss_mask] = self.cfg.miss_penalty
-            
-            # --- 🌟 逻辑 B: 惩罚能量归一化 ---
-            # 核心：确保 penalty 均值为 1.0。
-            # 这样放大错误权重的同事，会相对缩小正确预测的权重，
-            # 且保证 Main Loss 总量稳定，不会淹没 lambda_trig/dir 的梯度。
+
             penalty = penalty / (penalty.mean() + 1e-8)
 
-        # 应用归一化惩罚
         loss_main = (sample_main_loss * penalty).mean()
 
-        # --- 🌟 逻辑 C: 方向对称性约束 (Bias Constraint) ---
-        # 计算当前 Batch 预测多头和空头的平均概率差
-        # 用于强制拉平模型在不同训练轮次中产生的随机“多/空偏心”
         avg_p_short = fused_probs[:, 0].mean()
         avg_p_long = fused_probs[:, 2].mean()
         bias_loss = torch.zeros((), device=logits_dir.device)
@@ -562,11 +574,7 @@ class MTLManager:
                 p_dir[act, 0].mean() - p_dir[act, 1].mean()
             )
 
-        
-        # 获取 bias_lambda 配置，默认设为 0.5
         bias_lambda = getattr(self.cfg, 'bias_lambda', 0.5)
-
-        # 4. 最终多任务组合
         total_loss = loss_main + \
                     (self.cfg.lambda_trig * loss_trig) + \
                     (self.cfg.lambda_dir * loss_dir) + \
@@ -575,28 +583,17 @@ class MTLManager:
         return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
         
     def compute_combined_loss_v2(self, logits_trig, logits_dir, yb, rb, epoch: int = 0):
-        """
-        平滑优化版：Soft Magnitude-Aware MTL Loss
-        解决硬阶跃、权重爆炸和梯度饥饿问题。
-        """
-        # --- 0. 准备基础目标 ---
         t_trig, t_dir, act_mask = self.get_targets(yb)
-        
-        # --- 1. 幅度权重平滑化 (Log Compression) ---
-        # 使用 log(1+x) 压缩大波动的权重，防止 alpha^2 级别的爆炸
-        mag_weights = 1.0 + torch.log1p(self.cfg.mag_alpha * torch.abs(rb))
-        mag_weights = torch.clamp(mag_weights, max=self.cfg.mag_limit)
 
         # --- 2. 软化子任务 Loss (Sub-task Soft Loss) ---
-        # 使用归一化的幅度权重计算基础子任务
+        # 计算基础子任务
         loss_trig_raw = F.cross_entropy(logits_trig, t_trig, weight=self.weights['trig'], reduction='none')
-        loss_trig = (loss_trig_raw * (mag_weights / mag_weights.mean())).mean()
+        loss_trig = loss_trig_raw.mean()
 
         loss_dir = torch.tensor(0.0, device=self.device)
         if act_mask.any():
             loss_dir_raw = F.cross_entropy(logits_dir[act_mask], t_dir[act_mask], weight=self.weights['dir'], reduction='none')
-            mw_act = mag_weights[act_mask]
-            loss_dir = (loss_dir_raw * (mw_act / mw_act.mean())).mean()
+            loss_dir = loss_dir_raw.mean()
 
         # --- 3. 融合 3-Class 概率 ---
         p_trig = torch.softmax(logits_trig, dim=1)
@@ -635,8 +632,8 @@ class MTLManager:
         coupling_weight = soft_flip_prob * torch.abs(rb) * self.cfg.mag_alpha
 
         # --- 6. 最终复合权重归一化 ---
-        # 复合权重 = 幅度加权 + 错误倾向惩罚 + 回报耦合
-        combined_weights = mag_weights + soft_penalty + coupling_weight # 改为加法结构更稳定
+        # 复合权重 = 错误倾向惩罚 + 回报耦合
+        combined_weights = soft_penalty + coupling_weight # 加法结构
         combined_weights = combined_weights / (combined_weights.mean() + 1e-8) # 维持梯度预算
 
         sample_main_loss = F.nll_loss(torch.log(fused_probs + 1e-10), yb, weight=self.weights['main'], reduction='none')
@@ -862,35 +859,6 @@ class MTLLossTracker:
                f"Loss: Tot({self.history['total'][-1]:.4f}) M({self.history['main'][-1]:.4f})")
         logger.info(msg)
 
-def train_xgboost_engine(model, dl_tr, dl_va, logger, mtl_manager):
-    logger.info("🌲 Training XGBoost Dual-Head Model...")
-    
-    # 1. 提取全量数据
-    x_train, y_train = dl_tr.dataset.X, dl_tr.dataset.y
-    x_val, y_val = dl_va.dataset.X, dl_va.dataset.y
-    
-    #  关键修正：确保 mtl_manager 已经针对当前数据初始化了 criteria
-    # prepare_all 内部会设置 self.criteria['trig'] 等
-    y_raw_train = y_train.cpu().numpy() if torch.is_tensor(y_train) else y_train
-    mtl_manager.prepare_all(y_raw_train) 
-    
-    # 2. 执行 2+2 分层训练
-    model.fit(x_train, y_train, x_val, y_val)
-    
-    # 3. 验证阶段
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    va_loss, yv_true, yv_pred, yt_ret = eval_epoch(model, dl_va, device, mtl_manager)
-    va_f1 = f1_score(yv_true, yv_pred, average="macro")
-    
-    logger.info(f"✅ XGBoost Train Done. Val F1: {va_f1:.4f}")
-    
-    return {
-        "best_f1_state": model.state_dict(),
-        "best_loss_state": model.state_dict(),
-        "f1_score": va_f1,
-        "loss_score": va_loss
-    }
-
 def train_engine(
     model: nn.Module,
     dl_tr: DataLoader,
@@ -907,7 +875,7 @@ def train_engine(
     Loss = Loss_Main(3-class) + λ_trig * Loss_Trig + λ_dir * Loss_Dir
     """
     # --- 1. 准备类别权重 ---
-    y_raw = dl_tr.dataset.y.numpy() if torch.is_tensor(dl_tr.dataset.y) else dl_tr.dataset.y
+    y_raw = dl_tr.dataset.y.cpu().numpy() if torch.is_tensor(dl_tr.dataset.y) else dl_tr.dataset.y
     cw = mtl_manager.prepare_all(y_raw)
     logger.info(f"⚖️ [MTL Weights Prepared] Main: {cw[0]} | Trig: {cw[1]} | Dir: {cw[2]}")
 
@@ -927,7 +895,9 @@ def train_engine(
         #  1. 使用 with 语句接管 pbar，这样可以更精准地控制后缀
         with tqdm(dl_tr, desc=f"Epoch {epoch}/{train_cfg.epochs}", ncols=120, leave=False) as pbar:
             for i, (xb, yb, rb) in enumerate(pbar):
-                xb, yb, rb = xb.to(device), yb.to(device), rb.to(device)
+                xb = xb.to(device, non_blocking=True)
+                yb = yb.to(device, non_blocking=True)
+                rb = rb.to(device, non_blocking=True)
                 # yb: [B]
                 cnt_total = yb.numel()
                 cnt_action = (yb != 1).sum().item()
@@ -1046,17 +1016,7 @@ def evaluate_and_save_results(
         if state is None: continue
             
         model.load_state_dict(state)
-        if train_cfg.model_cfg.use_feature_selector:
-            print_feature_importance(model, full_ds.feature_names, logger, suffix)
         test_loss, yt_true, yt_pred, yt_ret = eval_epoch(model, dl_te, device, mtl_manager)
-
-        # 2. 调用存粹版评估（同时运行两种评估：原始逻辑 + 冷却期逻辑）
-        avg_ret, trade_count, win_rate, trades_pnl = calculate_pure_trading_metrics(yt_true, yt_pred, yt_ret, logger, pre_para,pre_para.predict_num)
-
-        # 3. 将结果存入 final_metrics，方便以后对比不同模型
-        final_metrics["pure_avg_ret"] = avg_ret
-        final_metrics["trade_count"] = trade_count
-        final_metrics["win_rate"] = win_rate
 
         # --- 以下逻辑 100% 保留，因为它们基于已经“还原”的三分类标签 ---
         report_dict = classification_report(yt_true, yt_pred, output_dict=True, zero_division=0)
@@ -1067,9 +1027,7 @@ def evaluate_and_save_results(
         # 使用你原本的格式化打印函数
         logger.info(format_custom_report(report_dict))
         # --- 新增指标计算 ---
-        logger.info(f"| avg_ret: {avg_ret} | trade_count: {trade_count}| win_rate: {win_rate}")
         logger.info(f"Test macro-F1: {test_f1:.4f}")
-
 
         # 统计标签比例 (保留)
         counts = Counter(yt_true)
@@ -1084,8 +1042,9 @@ def evaluate_and_save_results(
 
         # 保存 .pt 和 Meta (保留)
         pt_path = os.path.join(save_dir, f"model_{suffix.lower()}_info.pt")
+        save_state = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") else model.state_dict()
         torch.save({
-            "state_dict": state,
+            "state_dict": save_state,
             "feature_list" : feature_list,
             "classes": classes.tolist(),
             "channel": full_ds.feature_count,
@@ -1119,6 +1078,46 @@ def evaluate_and_save_results(
                 "overfit_gap": abs(val_score - test_f1)
             })
             
+        if train_cfg.model_cfg.use_feature_weighting:
+            logger.info(f"🎨 Generating Interpretability Analysis for {suffix}...")
+            
+            # 从测试迭代器中取出一个样本 Batch 进行深入分析
+            test_xb, test_yb, test_rb = next(iter(dl_te))
+            
+            # A. 全局特征重要性映射 ( latent weights -> original features )
+            importance_df = analyze_feature_importance(
+                model=model, 
+                batch_x=test_xb, 
+                feature_names=full_ds.feature_names, 
+                device=device
+            )
+            # 带有后缀保存，区分 F1 和 Loss 模型
+            importance_df.to_csv(os.path.join(save_dir, f"feat_importance_{suffix.lower()}.csv"), index=False)
+
+            # B. 样本级贡献排序分析 ( 识别明星样本 )
+            # 建议在评估时传入一个足够大的 Batch，确保 0/2 类别都有样本
+            test_xb, test_yb, test_rb = next(iter(dl_te))
+
+            analyze_sample_contribution_by_class(
+                model=model,
+                batch_x=test_xb,
+                batch_y=test_yb,
+                batch_r=test_rb,
+                feature_names=full_ds.feature_names,
+                device=device,
+                top_k_per_class=3, # 每个类别看 3 张
+                save_dir=save_dir,
+                suffix=suffix
+            )
+            
+            # # C. 不同行情下的特征偏好分析
+            # plot_regime_importance(
+            #     model=model,
+            #     batch_x=test_xb,
+            #     labels=test_yb,
+            #     feature_names=full_ds.feature_names,
+            #     device=device
+            # )
     #  生成 Task Description (Single Mode)
     primary_suffix = "Best_F1" if results.get("best_f1_state") is not None else "Best_Loss"
     
@@ -1140,93 +1139,6 @@ def evaluate_and_save_results(
         
     logger.info(f"🎉 Task description saved to: {task_path}")
     return final_metrics
-
-def calculate_pure_trading_metrics(y_true, y_pred, returns, logger, pre_para, cooldown_period):
-    """
-    更存粹的评估方法，同时运行两种评估：
-    
-    评估1（原始逻辑）：
-    1. 只要预测为 Long 或 Short 就视为入场。
-    2. PnL = 信号方向 * 实际收益率 (即：Long正确得正，Long错误得负)。
-    
-    评估2（冷却期逻辑）：
-    1. 在一次交易发生后，cooldown_period 之内不会再发生交易。
-    2. 默认 cooldown_period = pre_para.predict_num（若未指定）。
-    """
-    
-    # 信号映射: 0(Short)->-1, 1(Neutral)->0, 2(Long)->1
-    signals = np.zeros_like(y_pred)
-    signals[y_pred == 2] = 1
-    signals[y_pred == 0] = -1
-    
-    # ========== 评估1：原始逻辑（每次信号都交易） ==========
-    pnl_per_sample = signals * returns
-    trade_mask = (signals != 0)
-    trades_pnl_1 = pnl_per_sample[trade_mask]
-    num_trades_1 = len(trades_pnl_1)
-    
-    if num_trades_1 == 0:
-        logger.warning("⚠️ 本轮评估未产生任何交易信号 (Long/Short)")
-        avg_ret_1, win_rate_1 = 0.0, 0.0
-    else:
-        avg_ret_1 = np.mean(trades_pnl_1)
-        win_rate_1 = (trades_pnl_1 > 0).sum() / num_trades_1
-    
-    # ========== 评估2：冷却期逻辑（交易后 cooldown_period 内不交易） ==========
-    filtered_signals = np.zeros_like(signals)
-    last_trade_idx = -cooldown_period - 1  # 初始化为足够早的位置
-    
-    for i in range(len(signals)):
-        if signals[i] != 0:  # 有交易信号
-            if i - last_trade_idx > cooldown_period:  # 距离上次交易超过冷却期
-                filtered_signals[i] = signals[i]
-                last_trade_idx = i
-    
-    pnl_per_sample_2 = filtered_signals * returns
-    trade_mask_2 = (filtered_signals != 0)
-    trades_pnl_2 = pnl_per_sample_2[trade_mask_2]
-    num_trades_2 = len(trades_pnl_2)
-    
-    if num_trades_2 == 0:
-        avg_ret_2, win_rate_2 = 0.0, 0.0
-    else:
-        avg_ret_2 = np.mean(trades_pnl_2)
-        win_rate_2 = (trades_pnl_2 > 0).sum() / num_trades_2
-    
-    # 输出两种评估结果
-    logger.info(f"\n{'='*20} Trading Metrics Comparison {'='*20}")
-    logger.info(f"评估1（原始）: avg_ret={avg_ret_1:.6f}, trades={num_trades_1}, win_rate={win_rate_1:.4f}")
-    logger.info(f"评估2（冷却期={cooldown_period}）: avg_ret={avg_ret_2:.6f}, trades={num_trades_2}, win_rate={win_rate_2:.4f}")
-    logger.info(f"{'='*60}\n")
-    
-    # 返回评估1的结果（保持向后兼容）
-    return avg_ret_1, num_trades_1, win_rate_1, trades_pnl_1
-
-def print_feature_importance(model, feature_names, logger, subtask_name, tag=""):
-    """
-    Extracts and prints weights from the FeatureSelector module.
-    """
-    if hasattr(model, 'feature_selector') and hasattr(model.feature_selector, 'importance_logits'):
-        logger.info(f"🔍 [Feature Importance] Analysis for {subtask_name.upper()}{(' ' + tag) if tag else ''}")
-
-        with torch.no_grad():
-            # keep consistent with FeatureSelector forward: sigmoid(logits / 0.1)
-            weights = torch.sigmoid(model.feature_selector.importance_logits / 0.1).cpu().numpy()
-
-        importance_map = sorted(zip(feature_names, weights), key=lambda x: x[1], reverse=True)
-
-        logger.info(f"{'Feature Name':<25} | {'Weight (Sigmoid)':<15}")
-        logger.info("-" * 45)
-        for name, weight in importance_map[:10]:
-            logger.info(f"{name:<25} | {weight:<15.4f}")
-
-        if len(importance_map) > 15:
-            logger.info("...")
-            for name, weight in importance_map[-5:]:
-                logger.info(f"{name:<25} | {weight:<15.4f}")
-        logger.info("-" * 45 + "\n")
-    else:
-        logger.info(f"ℹ️ Feature Selector is disabled for {subtask_name.upper()}.")
 
 def format_custom_report(report_dict):
     """
@@ -1290,7 +1202,7 @@ def diagnose_confidence(results, model, dl_te, device, logger, save_dir):
                 
                 all_probs.append(fused_probs.cpu().numpy())
                 all_preds.append(fused_preds.cpu().numpy())
-                all_trues.append(yb.numpy())
+                all_trues.append(yb.cpu().numpy())
 
         probs_np = np.concatenate(all_probs) # [N, 3]
         preds_np = np.concatenate(all_preds)
@@ -1319,6 +1231,157 @@ def diagnose_confidence(results, model, dl_te, device, logger, save_dir):
     plt.savefig(plot_path)
     logger.info(f"📊 Confidence diagnosis plot saved to: {plot_path}")
     plt.close()
+
+def analyze_feature_importance(model, batch_x, feature_names, device='cuda', top_n=20):
+    """
+    提取样本级权重并映射回原始特征空间进行可视化
+    
+    参数:
+    - model: 训练好的 ConvLSTM1D_V2 模型
+    - batch_x: 输入数据 [B, T, F]
+    - feature_names: 原始特征名称列表 (长度应等于 F)
+    - device: 运行设备
+    - top_n: 绘制前 N 个最重要的特征
+    """
+    model.eval()
+    batch_x = batch_x.to(device)
+    
+    with torch.no_grad():
+        # 1. 运行前向传播获取隐藏空间权重 [B, D]
+        # 注意：此处假设你已按照之前的建议修改了 forward 返回 weights
+        _, _, latent_weights = model(batch_x, return_weights=True)
+        
+        # 2. 获取 Projection 层的权重矩阵 [D, F]
+        # model.proj.weight 形状是 [out_features, in_features]
+        proj_weights = model.proj.weight.abs() 
+        
+    # 3. 映射回原始特征空间
+    # 将 Batch 内的权重取平均，得到该批次的平均注意力分布
+    avg_latent_weights = latent_weights.mean(dim=0) # [D]
+    
+    # 矩阵乘法映射重要性: [D] * [D, F] -> [F]
+    feature_importance = torch.matmul(avg_latent_weights, proj_weights)
+    feature_importance = feature_importance.cpu().numpy()
+    
+    # 4. 组装数据
+    importance_df = pd.DataFrame({
+        'Feature': feature_names,
+        'Importance': feature_importance
+    }).sort_values(by='Importance', ascending=False)
+
+    # 5. 可视化
+    plt.figure(figsize=(10, 8))
+    sns.barplot(
+        x='Importance', 
+        y='Feature', 
+        data=importance_df.head(top_n),
+        hue='Feature',      # 指定 hue 消除警告
+        palette='viridis',
+        legend=False        # 配合使用 legend=False
+    )
+    plt.title(f'Top {top_n} Feature Importance (Mapped from Latent Weights)')
+    plt.xlabel('Aggregated Attribution Score')
+    plt.ylabel('Original Features')
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+    
+    return importance_df
+
+def plot_regime_importance(model, batch_x, labels, feature_names, device='cuda'):
+    """
+    根据模型预测的标签分类，分析不同行情下的特征偏好
+    """
+    model.eval()
+    batch_x = batch_x.to(device)
+    
+    with torch.no_grad():
+        # 获取预测和权重
+        preds, probs, weights = model(batch_x, return_fused=True, return_weights=True)
+        # 核心修正 1：确保所有用于索引和计算的张量都在 CPU 上
+        proj_weights = model.proj.weight.abs().cpu()
+        weights = weights.cpu()
+        preds = preds.cpu() # <--- 添加这一行，修复 RuntimeError
+
+    regimes = {0: 'Short', 1: 'Neutral', 2: 'Long'}
+    plt.figure(figsize=(15, 6))
+
+    for label, name in regimes.items():
+        # 筛选出属于该类别的样本权重
+        mask = (preds == label)
+        if mask.any():
+            regime_weights = weights[mask].mean(dim=0)
+            importance = torch.matmul(regime_weights, proj_weights).numpy()
+            
+            # 这里的打印信息能帮你快速检查因子有效性
+            print(f"[{name}] Top feature: {feature_names[np.argmax(importance)]}")
+
+def analyze_sample_contribution_by_class(model, batch_x, batch_y, batch_r, feature_names, device='cuda', top_k_per_class=3, save_dir=None, suffix=""):
+    """
+    分别针对 0/1/2 三类标签，找出模型最关注的 Top 样本并保存
+    """
+    model.eval()
+    batch_x = batch_x.to(device)
+    
+    with torch.no_grad():
+        # 获取预测标签和特征权重
+        preds, _, latent_weights = model(batch_x, return_fused=True, return_weights=True)
+        proj_weights = model.proj.weight.abs() 
+        sample_feature_attribution = torch.matmul(latent_weights, proj_weights).cpu().numpy()
+
+    preds_np = preds.cpu().numpy()
+    sample_total_energy = sample_feature_attribution.sum(axis=1)
+    
+    results_df = pd.DataFrame({
+        'sample_idx': np.arange(len(batch_r)),
+        'pred_label': preds_np,
+        'true_label': batch_y.cpu().numpy(),
+        'return': batch_r.cpu().numpy(),
+        'total_attention': sample_total_energy
+    })
+
+    classes = {0: 'Short', 1: 'Neutral', 2: 'Long'}
+    
+    # 为每个类别创建一张大图
+    for cls_val, cls_name in classes.items():
+        cls_samples = results_df[results_df['pred_label'] == cls_val]
+        
+        if cls_samples.empty:
+            print(f"⚠️ No samples predicted as {cls_name} in this batch.")
+            continue
+            
+        # 挑选该类别下注意力最高的样本
+        top_cls_samples = cls_samples.sort_values(by='total_attention', ascending=False).head(top_k_per_class)
+        actual_k = len(top_cls_samples)
+        file_name = f"top_samples_{cls_name.lower()}_{suffix.lower()}.png"
+        fig, axes = plt.subplots(1, actual_k, figsize=(5 * actual_k, 6), sharey=True)
+        if actual_k == 1: axes = [axes]
+        
+        plt.suptitle(f"File: {file_name}\nTarget Class: {cls_name} | Model: {suffix}", 
+                        fontsize=16, fontweight='bold', y=0.98)
+        for i, (idx, row) in enumerate(top_cls_samples.iterrows()):
+            attr_scores = sample_feature_attribution[int(idx)]
+            top_feat_indices = np.argsort(attr_scores)#[-10:] 
+            y_data = [feature_names[j] for j in top_feat_indices]
+
+            sns.barplot(
+                x=attr_scores[top_feat_indices],
+                y=y_data,
+                ax=axes[i],
+                hue=y_data,
+                palette='magma' if cls_val != 1 else 'viridis',
+                legend=False
+            )
+            axes[i].set_title(f"[{cls_name}] Sample #{int(idx)}\nRet: {row['return']:.2%}, True: {int(row['true_label'])}")
+            axes[i].set_xlabel("Attribution Score")
+
+        plt.tight_layout()
+        
+        if save_dir:
+            save_path = os.path.join(save_dir, file_name)
+            plt.savefig(save_path)
+            print(f"💾 Saved {cls_name} analysis to: {save_path}")
+        plt.close()
 
 def find_best_threshold(results, model, dl_te, device, logger):
     """
@@ -1557,7 +1620,7 @@ feature_conf_list2 = [
 ]
 
 
-def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDefine(), prep_output_dir = common.DATA_OUT_DIR, save_dir: str = common.TRAIN_OUT_DIR):
+def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDefine(), prep_output_dir = common.DATA_OUT_DIR, save_dir: str = common.TRAIN_OUT_DIR,experiment:bool = False):
     os.makedirs(save_dir, exist_ok=True)
 
     # 根据 feature_conf_list 从全局 feature_direction_map 补充完整方向信息
@@ -1577,11 +1640,14 @@ def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDe
     # m_cfg.model_version = 1
     
     logger.info(f"Training {m_cfg.model_type}...")
-    return run_training(feature_direction_map_filtered, logger, d_cfg, train_cfg, m_cfg, pre_para,prep_output_dir,save_dir)
+    return run_training(feature_direction_map_filtered, logger, d_cfg, train_cfg, m_cfg, pre_para,prep_output_dir,save_dir,experiment)
 # ==============================================================================
 # 5. 调用入口 (Main Entry)
 # ==============================================================================
 
 if __name__ == "__main__":
     logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
+    begin_time = time.time()
     main(logger)
+    end_time = time.time()
+    logger.info(f"Total training time: {(end_time - begin_time)} seconds")

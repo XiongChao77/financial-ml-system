@@ -14,6 +14,7 @@ from model.models.lstm_v3 import LSTM1D_V3      # V3  > V1 > V2
 from model.models.lstm_v4 import LSTM1D_V4      #
 from model.models.conv_lstm_v1 import ConvLSTM1D_V1
 from model.models.conv_lstm_v2 import ConvLSTM1D_V2
+from model.models.conv_lstm_v3 import ConvLSTM1D_V3
 from model.models.cnn import CNN1D_V1
 from model.models.transformer_v1 import Transformer1D_V1
 from model.models.transformer_v2 import Transformer1D_V2
@@ -40,6 +41,7 @@ class ModelFactory:
         LSTM1D_V4,  #good
         ConvLSTM1D_V1,
         ConvLSTM1D_V2,
+        ConvLSTM1D_V3,
         # FusionWrapper,
         CNN1D_V1,
         Transformer1D_V1,

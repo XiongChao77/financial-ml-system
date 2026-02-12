@@ -571,7 +571,7 @@ def main():
     
     df = pd.read_csv(csv_path)
     df = common.clean_data_quality_auto(df, logger)
-    common.attach_attr(df, common.FEATURE_GROUP_LIST, para=pre_task)
+    df = common.attach_attr(df, common.FEATURE_GROUP_LIST, para=pre_task)
     common.attach_label(df, pre_task)
     # 确保 return_rate 存在
     if 'return_rate' not in df.columns:
