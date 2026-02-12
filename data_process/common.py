@@ -43,15 +43,15 @@ class BaseDefine:
     candlestick_num: int = 120     # 160 best for LSTM
     predict_num: int = 24
     # risk / vol
-    vol_multiplier_long: float = 1.9
+    vol_multiplier_long: float = 2
     stop_multiplier_rate_long: float = 0.2
-    vol_multiplier_short: float = 1.9
+    vol_multiplier_short: float = 2
     stop_multiplier_rate_short: float = 0.2
     # training
     model_train_rate: float = 0.8
     # market
-    symbol: str = "ETHUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
-    interval: str = "1h"
+    symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
+    interval: str = "15m"
     version:int = 0
 
 log_level = logging.INFO
@@ -154,13 +154,13 @@ def load_interval_ms_from_dir(base_dir):
         raise RuntimeError(f"⚠️ 配置文件中缺失 'interval_ms' 字段！")
     return interval_ms
 
-def attach_attr(df, feature_group_list, para = BaseDefine):
+def attach_attr(df, feature_group_list, feature_conf_list = [], para = BaseDefine):
     # 1. 基础处理
     # df.drop('ignore', axis=1, inplace=True)
     # --- 2. 指标计算 (生成所有原始、未缩放的特征列) ---
     # df = add_relative_features(df)
     kline_interval_ms = get_interval_ms(para.interval)
-    FeatureFactory(kline_interval_ms,feature_group_list).generate(df)
+    return FeatureFactory(kline_interval_ms,feature_group_list, feature_conf_list).generate(df)
 
 def attach_label(df, para = BaseDefine):
     """

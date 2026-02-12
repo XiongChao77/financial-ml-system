@@ -7,7 +7,7 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 
-def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,para = common.BaseDefine, prep_output_dir =common.DATA_OUT_DIR ):
+def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine, prep_output_dir =common.DATA_OUT_DIR ):
     file = os.path.join(common.PROJECT_DATA_DIR, f"{para.symbol}_{para.interval}.csv")
     # 1. 获取周期字符串并转为毫秒
     interval_ms = common.get_interval_ms(para.interval)
@@ -32,7 +32,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,p
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
     if True:
-        common.attach_attr(df, feature_group_list , para)
+        df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
         common.attach_label(df, para=para)
         # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)

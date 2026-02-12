@@ -166,7 +166,7 @@ class LiveBot:
         
         # 2. 特征工程 & 模型预测
         try:
-            self.factory.generate(df)
+            df = self.factory.generate(df)
 
             # C. 模型推理
             # ModelHandler 内部会进行 TimeSeriesWindowDataset 处理和归一化

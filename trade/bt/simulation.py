@@ -87,8 +87,8 @@ def dump_params_json(obj, logger):
 @dataclass
 class StrategyPara:
     # switches
-    allow_short: bool = True
     allow_long: bool = True
+    allow_short: bool = True
     # execution
     holdbar: int = BaseDefine.predict_num/2          # 默认值，初始化时可覆盖
     commission: float = 0.05   # 0.1 = 0.1%, can't be 0

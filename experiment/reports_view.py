@@ -9,7 +9,8 @@ from data_process.common import *
 from data_process import common 
 
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-08','ETHUSDT_30m'))
-exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-07','ETHUSDT_15m'))
+exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-12','DOGEUSDT_15m'))
+output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments')
 short_reports_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_short.jsonl'))
 long_reports_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_long.jsonl'))
 
@@ -112,17 +113,21 @@ def main():
     selected = filter_by_performance(selected.values(), period ='short_report'  ,min_cagr=0.2, min_calmar=1)
     
     print(f"After short_report performance filter: {len(selected)} reports")
-    selected = filter_by_performance(selected, period ='long_report', min_cagr=0.2, min_calmar=0.8)
+    selected = filter_by_performance(selected, period ='long_report', min_cagr=0.1, min_calmar=0.5)
     print(f"After long_report performance filter: {len(selected)} reports")
     analyze_candlestick_num(selected)
     selected = filter_by_trades(selected, period ='short_report', min_daily_freq = 0.2)
     print(f"After short_report trades filter: {len(selected)} reports")
     selected = filter_by_trades(selected, period ='long_report', min_daily_freq = 0.2)
     print(f"After long_report trades filter: {len(selected)} reports")
-    selected = filter_by_rc_summary(selected)
-    print(f"After rc_summary filter: {len(selected)} reports")
-    out_path = os.path.join(exp_dir,"selected_configs" ,"selected_configs.jsonl")
-    os.makedirs(os.path.join(exp_dir,"selected_configs"), exist_ok=True)
+    selected = filter_by_rc_summary(selected,'short_report')
+    print(f"After short_report rc_summary filter: {len(selected)} reports")
+    selected = filter_by_rc_summary(selected,'long_report')
+    print(f"After long_report rc_summary filter: {len(selected)} reports")
+    for config in selected:
+        print(f"candlestick_num: {common.recursive_get(config,'candlestick_num')} | predict_num: {common.recursive_get(config,'predict_num')} | holdbar: {common.recursive_get(config,'holdbar')}")
+    out_path = os.path.join(output_dir,"selected_configs" ,"selected_configs.jsonl")
+    os.makedirs(os.path.join(output_dir,"selected_configs"), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         for r in selected:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -221,6 +226,7 @@ def filter_by_performance(reports, period= 'short_report', min_cagr=None, min_ca
 
 def filter_by_rc_summary(
     reports,
+    period= 'short_report',
     # —— 生存性 / 尾部 ——
     min_rc_es_05= None,          # 例如 > -0.8
     min_rc_q05= None,            # 例如 > -0.5
@@ -243,7 +249,7 @@ def filter_by_rc_summary(
     """
 
     def ok(report):
-        rc = report.get("performance", {}).get("rc_summary", {})
+        rc = report.get(period).get("performance", {}).get("rc_summary", {})
         if not rc:
             return False
 
@@ -288,14 +294,12 @@ def filter_by_rc_summary(
 
     return [r for r in reports if ok(r)]
 
-def filter_by_trades(reports, period= 'short_report', min_total_trades=100, min_win_rate=35, min_daily_freq = None):
+def filter_by_trades(reports, period= 'short_report', min_win_rate=35, min_daily_freq = None):
     """
     Filter reports based on trade statistics.
     """
     def meets_criteria(report):
         trades = report.get(period).get("trades", {})
-        if min_total_trades is not None and trades.get("total", 0) < min_total_trades:
-            return False
         if min_win_rate is not None and trades.get("win_rate", 0) < min_win_rate:
             return False
         if min_daily_freq is not None and trades.get("daily_freq", 0) < min_daily_freq:

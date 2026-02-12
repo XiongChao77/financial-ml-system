@@ -72,4 +72,24 @@ def load_selected_configs(path):
                 continue
     return records
 
+def recursive_get(data, target_key):
+    # 1. 如果直接就是字典，先看当前层有没有
+    if isinstance(data, dict):
+        if target_key in data:
+            return data[target_key]
+        
+        # 2. 当前层没有，则“展开”字典，递归进入每一个 Value 查找
+        for k, v in data.items():
+            res = recursive_get(v, target_key)
+            if res is not None:
+                return res
+                
+    # 3. 如果遇到列表（量化回测中常见的参数组合列表），也“展开”它
+    elif isinstance(data, list):
+        for item in data:
+            res = recursive_get(item, target_key)
+            if res is not None:
+                return res
+                
+    return None
 

@@ -38,3 +38,10 @@ ETHUSDT_15m
 
 ETH 30m:
     candlestick_num 120 优于96
+
+DOGE_15m:
+    vol_multiplier_long 2.0 better than 1.9
+    batch_experiments/2026-02-12/DOGEUSDT_15m/10_29_58/reports.jsonl 
+        candlestick_num 96 和120 最优[80, 96, 120, 144, 168]。120的cagr/calmar MAX表现更好，96 mean表现更好
+        predict_num: [16, 24, 28, 32] holdbar: [12, 16, 20, 24, 28, 32]
+            最优的是 predict_num 16 + holdbar 32，需要进一步测试

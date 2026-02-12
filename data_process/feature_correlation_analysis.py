@@ -26,8 +26,7 @@ except ImportError:
 import model.train_2head as train
 
 # --- 全局配置 ---
-HIGH_CORR_THRESHOLD = 0.90  
-LEAKAGE_THRESHOLD = 0.99    
+HIGH_CORR_THRESHOLD = 0.80     
 
 # --- 绘图字体与清晰度设置 ---
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif']
@@ -98,7 +97,7 @@ def single_run_analysis(pre_task: common.BaseDefine, train_cfg: train.TrainConfi
     """单次分析流程：特征生成 -> 归一化 -> 针对 Label 和 Return_Rate 的双重相关性度量"""
     try:
         # 1. 基础准备
-        common.attach_label(df, pre_task)
+        df =common.attach_label(df, pre_task)
         # 确保 return_rate 存在
         if 'return_rate' not in df.columns:
             logging.warning("df 中未找到 return_rate，将尝试计算。")
@@ -151,7 +150,7 @@ def single_run_analysis(pre_task: common.BaseDefine, train_cfg: train.TrainConfi
 
         # 5. 绘图（保持原有逻辑）
         plot_visualizations(df_final[feature_names + ['label']], 'label', output_dir, f"{pre_task.interval}_dual")
-
+    
         return {
             'period': pre_task.interval,
             'corr_res': res_corr,
@@ -215,7 +214,7 @@ def main():
     
     df_raw = pd.read_csv(csv_path)
     df_raw = common.clean_data_quality_auto(df_raw, logger)
-    common.attach_attr(df_raw, common.FEATURE_GROUP_LIST, para=pre_task)
+    df_raw = common.attach_attr(df_raw, common.FEATURE_GROUP_LIST, para=pre_task)
     
     # 构造任务元组
     tasks = [(pre_task, train_cfg, df_raw.copy(), output_dir)]
