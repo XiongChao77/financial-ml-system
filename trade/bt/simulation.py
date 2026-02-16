@@ -105,14 +105,24 @@ class StrategyPara:
     trade_risk: float = 0.4
     max_daily_loss_pct: float = 0.035
 
+#period: short/forward/long
 def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
          device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'short'):
-    if period == 'short':
+    if period == 'short' or period == 'forward':
         df = common.load_test_df_from_dir(prep_output_dir)
-        logger.info(f"Using short period for backtest.Backtest settings: Short={para.allow_short}, Long={para.allow_long}")
+        recent_month = 2
+        split_ts = pd.to_datetime(df['open_time_date_utc'].iloc[-1]) - pd.DateOffset(months=recent_month)
+        if period == 'forward':
+            # 盘前测试：取最近 2 个月
+            df = df[df['open_time_date_utc'] >= str(split_ts)]
+            logger.info(f"🚀 Using forward period (Recent {recent_month} months) from {str(split_ts)[:10]}")
+        elif period == 'short':
+            # Short 测试：排除最近 2 个月
+            df = df[df['open_time_date_utc'] < str(split_ts)]
+            logger.info(f"📊 Using short period (Prior to {str(split_ts)[:10]})")
     else:
         df = common.load_train_df_from_dir(prep_output_dir)
-        logger.info(f"Using long period for backtest.Backtest settings: Short={para.allow_short}, Long={para.allow_long}")
+    logger.info(f"Using period {period} for backtest.Backtest settings: Short={para.allow_short}, Long={para.allow_long}")
     _interval_ms = common.get_interval_ms(pre_para.interval)
     df["open_time_date_utc"] = pd.to_datetime(df["open_time_date_utc"], utc=True)
 
@@ -615,19 +625,16 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
             f"short_pnl": short_pnl_total,
             f"short_win_rate": short_win_rate,
         },
+        f"model_metrics": model_stats,
     }
 
     report_additional = {
-        f"params": {
-            "model_stats": model_stats
-        },
         f"drawdown": {
             f"daily_loss_list": daily_returns_list,          # list）
         },
         f"raw_analyzer":{
             f"customize":perf,
         },
-        f"model_metrics": model_stats,
     }
 
     dump_params_json(train_cfg,logger)
