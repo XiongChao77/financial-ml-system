@@ -45,3 +45,14 @@ DOGE_15m:
         candlestick_num 96 和120 最优[80, 96, 120, 144, 168]。120的cagr/calmar MAX表现更好，96 mean表现更好
         predict_num: [16, 24, 28, 32] holdbar: [12, 16, 20, 24, 28, 32]
             最优的是 predict_num 16 + holdbar 32，需要进一步测试
+            [12,16,24,28]
+    batch_experiments\2026-02-13\DOGEUSDT_15m\11_55_18
+        predict_num 测试范围 [12,16,24,28] holdbar in [12, 16, 20, 24 ,28, 32,36,40]
+            最优的是 predict_num 12 16 + holdbar [20 - 36] 需要进一步测试
+    batch_experiments\2026-02-13\DOGEUSDT_15m\21_21_46
+        batch_size: int = 2048 模型的成交频率下降到0.2以下！ 探索合理区间 256 - 2048
+DOGE_5m:
+    batch_experiments\2026-02-14\DOGEUSDT_5m\07_54_32 未完成
+        通过观察交易频率并未有明显提升，cagr/calmar 相比15m下降严重。除非重新模型/策略目标之前，否则无法适用
+
+        

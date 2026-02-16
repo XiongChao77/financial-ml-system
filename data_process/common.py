@@ -732,7 +732,7 @@ def create_experiment_dir(base_dir, symbol, interval, now=None):
     time_dir = now.strftime("%H_%M_%S")
     sym_interval_dir = f"{symbol}_{interval}"
 
-    exp_dir = os.path.join(base_dir, date_dir, sym_interval_dir, time_dir)
+    exp_dir = os.path.join(base_dir, sym_interval_dir,date_dir, time_dir)
     os.makedirs(exp_dir, exist_ok=True)
 
     return exp_dir

@@ -13,6 +13,14 @@ from scipy.ndimage import uniform_filter
 # --- 配置 ---
 EPS = 1e-9
 
+def smart_format(x):
+    if abs(x) >= 100000:
+        return f"{x/1000:.1f}k"
+    elif abs(x) >= 1000:
+        return f"{x:.0f}"
+    else:
+        return f"{x:.3f}"
+
 def recursive_get(data, target_key):
     # 1. 如果直接就是字典，先看当前层有没有
     if isinstance(data, dict):
@@ -65,7 +73,8 @@ def load_and_process(path: Path, period: str = 'short') -> pd.DataFrame:
                 if p is None: return None
                 
                 res = {
-                    "predict_num": recursive_get(p, "predict_num"),
+                    "flip_penalty": recursive_get(p, "flip_penalty"),
+                    "miss_penalty": recursive_get(p, "miss_penalty"),
                     "holdbar": recursive_get(p, "holdbar"),
                     "cagr": recursive_get(p, "cagr"),
                     "calmar": recursive_get(p, "calmar"),
@@ -82,15 +91,17 @@ def load_and_process(path: Path, period: str = 'short') -> pd.DataFrame:
         # 4. 转换并过滤
         processed_list = [item for item in df_raw.apply(extract_data, axis=1) if item]
         df_final = pd.DataFrame(processed_list)
+        df_final = df_final[df_final["holdbar"] == 24]#[20, 24 ,28, 32,36]
+
 
         # 5. 调试：检查最终 DataFrame 内容
         if not df_final.empty:
             print(f"✅ Success: Loaded {len(df_final)} rows for {period}")
             # 检查关键字段是否有全是 NaN 的情况
-            nan_counts = df_final[['predict_num', 'holdbar', 'cagr']].isna().sum()
+            nan_counts = df_final[['flip_penalty', 'miss_penalty', 'cagr']].isna().sum()
             if nan_counts.any():
                 print(f"⚠️ Warning: Missing values found:\n{nan_counts}")
-            print(f"Data Preview:\n{df_final[['predict_num', 'holdbar', 'cagr']].head(3)}")
+            print(f"Data Preview:\n{df_final[['flip_penalty', 'miss_penalty', 'cagr']].head(3)}")
         else:
             print(f"❌ Error: DataFrame is empty after extraction. Check your key paths in recursive_get.")
 
@@ -123,39 +134,55 @@ def calculate_robustness(pivot_df: pd.DataFrame):
 def plot_enhanced_heatmaps(df: pd.DataFrame, metric: str, outdir: Path, period: str = 'short'):
     """
     为每个指标生成三个维度的热力图：Mean, Max, Robustness
-    
-    Args:
-        df: 数据 DataFrame
-        metric: 指标名称 ('cagr', 'calmar', 'long_pnl', 'long_win_rate', 'short_pnl', 'short_win_rate')
-        outdir: 输出目录
-        period: 'short' 或 'long'
     """
     # 准备三种聚合数据
-    p_mean = df.groupby(["predict_num", "holdbar"])[metric].mean().unstack()
-    p_max  = df.groupby(["predict_num", "holdbar"])[metric].max().unstack()
+    p_mean = df.groupby(["flip_penalty", "miss_penalty"])[metric].mean().unstack()
+    p_max  = df.groupby(["flip_penalty", "miss_penalty"])[metric].max().unstack()
+    
+    # 如果数据全是 NaN，直接跳过绘制，避免报错
+    if p_mean.isna().all().all():
+        print(f"⚠️ Skipping {metric} for {period}: All values are NaN.")
+        return
+
     p_rob  = calculate_robustness(p_mean)
 
     titles = {
-        "mean": f"{metric.upper()} - Mean (Average Performance)",
-        "max": f"{metric.upper()} - Max (Best Case Scenario)",
-        "robust": f"{metric.upper()} - Robustness (Neighborhood Mean)"
+        "mean": f"{metric.upper()} - Mean",
+        "max": f"{metric.upper()} - Max",
+        "robust": f"{metric.upper()} - Robustness"
     }
     
-    # 创建三栏大图
-    fig, axes = plt.subplots(1, 3, figsize=(24, 7))
-    
+    n_rows, n_cols = p_mean.shape   # 任意一个数据即可
+
+    cell_size = 0.8  # 👈 每个格子的大小（英寸）
+
+    fig_width  = n_cols * cell_size * 3   # 因为有3张图
+    fig_height = n_rows * cell_size
+
+    fig, axes = plt.subplots(1, 3, figsize=(fig_width, fig_height))
+
     datasets = [p_mean, p_max, p_rob]
     sub_types = ["mean", "max", "robust"]
 
     for ax, data, stype in zip(axes, datasets, sub_types):
-        sns.heatmap(data, cmap="RdYlGn", annot=True, fmt=".2f", ax=ax, 
-                    linewidths=0.5, cbar_kws={'shrink': 0.8})
+        # 再次检查子集是否全为空
+        if data.isna().all().all():
+            ax.set_title(f"{titles[stype]} (No Data)")
+            continue
+
+        annot_data = data.map(smart_format)
+        sns.heatmap(data, cmap="RdYlGn", annot=annot_data, fmt="", ax=ax, 
+                    linewidths=0.5, cbar_kws={'shrink': 0.8},center=0,)
         ax.set_title(titles[stype], fontsize=14, fontweight='bold')
         
-        # 标注该图中的最大值位置
-        max_idx = np.unravel_index(np.nanargmax(data.values), data.shape)
-        ax.add_patch(plt.Rectangle((max_idx[1], max_idx[0]), 1, 1, 
-                                   fill=False, edgecolor='blue', lw=3, ls='--'))
+        # --- 核心修复：只有在不是全 NaN 的情况下才计算 argmax ---
+        try:
+            if not np.isnan(data.values).all():
+                max_idx = np.unravel_index(np.nanargmax(data.values), data.shape)
+                ax.add_patch(plt.Rectangle((max_idx[1], max_idx[0]), 1, 1, 
+                                           fill=False, edgecolor='blue', lw=3, ls='--'))
+        except ValueError:
+            pass 
 
     plt.suptitle(f"Detailed Sensitivity Analysis ({period.upper()}): {metric.upper()}", fontsize=20, y=1.05)
     plt.tight_layout()
@@ -171,7 +198,7 @@ def save_detailed_stats(df: pd.DataFrame, outdir: Path, period: str = 'short'):
         period: 'short' 或 'long'
     """
     for metric in ["cagr", "calmar"]:
-        pivot = df.groupby(["predict_num", "holdbar"])[metric].mean().unstack()
+        pivot = df.groupby(["flip_penalty", "miss_penalty"])[metric].mean().unstack()
         
         stats = pd.DataFrame(index=pivot.index)
         stats["mean"] = pivot.mean(axis=1)
@@ -188,7 +215,7 @@ def save_detailed_stats(df: pd.DataFrame, outdir: Path, period: str = 'short'):
         stats.sort_values("mean", ascending=False).to_csv(os.path.join(outdir, f"comprehensive_stats_{period}_{metric}.csv"))
 
 def main():
-    report_path = r"/home/chao/work/quant_output/batch_experiments/2026-02-12/DOGEUSDT_15m/10_29_58/reports.jsonl"
+    report_path = r"/home/chao/work/quant_output/batch_experiments/2026-02-14/DOGEUSDT_15m/00_29_07/reports.jsonl"
 
     path = Path(report_path).resolve()
     outdir = os.path.join(path.parent, 'heatmaps')

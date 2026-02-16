@@ -54,6 +54,11 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
         analyzer.plot_long_ratio_vs_vol_multiplier()
         exit()
     # ---------------- 统计输出 ----------------
+
+    start_time = df['open_time_date_utc'].iloc[0]
+    end_time = df['open_time_date_utc'].iloc[-1]
+    duration = pd.to_datetime(end_time) - pd.to_datetime(start_time)
+    logger.info(f"时间跨度: {start_time} 至 {end_time} (共计 {duration})")
     counts = df['label'].value_counts().sort_index()
     proportions = df['label'].value_counts(normalize=True).sort_index()
     
@@ -71,11 +76,8 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     # ---------------------------------------------------------
     # 3. 划分数据并保存
     # ---------------------------------------------------------
-    train_ratio = 0.95  #just for pass bad performance test, not for real use
-    split_idx = math.floor(len(df) * train_ratio)
-
-    train_df = df.iloc[:split_idx]
-    test_df  = df.iloc[split_idx:]
+    split_ts = pd.to_datetime(df['open_time_date_utc'].iloc[-1]) - pd.DateOffset(months=6)
+    train_df, test_df = df[df['open_time_date_utc'] < str(split_ts)], df[df['open_time_date_utc'] >= str(split_ts)]
 
     # 统一写入 para.prep_output_dir（默认 common.DATA_OUT_DIR，batch 多进程时为独立目录）
     out_dir = prep_output_dir

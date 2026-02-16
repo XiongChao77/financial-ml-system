@@ -405,14 +405,16 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
         t0 = time.time()
         try:
             report_stat = None
-            report = {'short':{}, 'long':{}, 'pass':False}
+            report = {'short':{}, 'long':{}, 'forward': {}, 'pass':False}
             report['short'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                 train_output_dir=train_output_dir, device="cpu", period='short' )["statistics"][1]
-            if report['short']["performance"]["cagr"] > 0.2 :
+            if report['short']["performance"]["cagr"] > 0.3 :
                 report['long'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                     train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
                 if report['long']["performance"]["cagr"] > 0.1 :
-                    report['pass'] = True    # add to full mode experiments
+                    report['pass'] = True
+                    report['forward'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
+                                        train_output_dir=train_output_dir, device="cpu", period='forward' )["statistics"][1]
             else:
                 logger.info(f"Sim {pre_h}/{tr_h}/{sim_h} skip long test due to short period performance cagr:{report['short']['performance']['cagr']}")
             report_stat = report
@@ -747,8 +749,8 @@ def main():
 
         preparation_task: List[Any] = []
         if args.prep or run_all:
-            for cn in [96,120]:
-                for pn in [12,16,24,28]:
+            for cn in [120]: #[96,120]
+                for pn in [16]: #[10,12,14,16,18]
                     for vol_multiplier in [2]:
                         item = common.BaseDefine()
                         item.candlestick_num = cn
@@ -763,18 +765,18 @@ def main():
         if args.train or run_all:
             # for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
             #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
-            for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
-                # for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
+            for flip_penalty in np.arange(0.2, 2.1, 0.1).round(1):
+                for miss_penalty in np.arange(0.2, 2, 0.1).round(1):
                     t_cfg = train.TrainConfig(use_cache = False)
                     t_cfg.flip_penalty = float(flip_penalty)
-                    t_cfg.miss_penalty = float(flip_penalty/2)
+                    t_cfg.miss_penalty = float(miss_penalty)
                     training_task.append(t_cfg)
         else:
             training_task.append(train.TrainConfig())
 
         simulation_task: List[Any] = []
         if args.sim or run_all:
-            for holdbar in [12, 16, 20, 24 ,28, 32,36,40]:
+            for holdbar in [20, 24 ,28, 32,36]:
                 s_cfg = simulation.StrategyPara()
                 s_cfg.holdbar = holdbar
                 s_cfg.atr_sl_mult_long = 100    #for model test
@@ -795,7 +797,7 @@ def main():
         logger.info("✅ No pending tasks.")
         return
 
-    logger.info(f"🚀 Pipeline: MAX_PREP={MAX_PREP}, train=1, MAX_SIM={MAX_SIM}")
+    logger.info(f"🚀 Pipeline: MAX_PREP={MAX_PREP}, train={MAX_TRAIN}, MAX_SIM={MAX_SIM}")
 
     # ---------------- queues & workers ----------------
     prep_task_queue: mp.Queue = mp.Queue()
@@ -841,7 +843,13 @@ def main():
         compare_old_new_reports(selected_configs, reports_path, exp_dir, logger)
 
     logger.info("\n" + "=" * 40)
-    logger.info(f"✅ Completed in {time.time() - begin_time:.2f}s")
+    elapsed = time.time() - begin_time
+
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    logger.info(f"✅ Completed in {int(hours)}h {int(minutes)}m {seconds:.2f}s")
+
     logger.info("=" * 40)
 
 def run_task_spec(

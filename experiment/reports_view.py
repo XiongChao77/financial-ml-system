@@ -7,15 +7,84 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 # 引入自定义模块
 from data_process.common import *
 from data_process import common 
-
-# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-08','ETHUSDT_30m'))
-exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-12','DOGEUSDT_15m'))
+# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_30m','09_07_11'))
+# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_15m','01_02_36'))
+# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-14','DOGEUSDT_5m','07_54_32'))
+exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','DOGEUSDT_30m','20_10_51'))
 output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments')
 short_reports_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_short.jsonl'))
 long_reports_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_long.jsonl'))
 
 TOP_K = 50
 SKIP_PERCENT = 0  # 跳过前百分之多少，0表示不跳过，从最前面开始选择
+
+def analyze_short_long_correlation(selected):
+    """
+    分析 short 与 long 的线性相关性
+    """
+
+    import numpy as np
+    from scipy.stats import pearsonr, spearmanr
+
+    short_cagr = []
+    long_cagr = []
+
+    short_calmar = []
+    long_calmar = []
+
+    for r in selected:
+        sc = r.get("cagr")
+        lc = r.get("long_cagr")
+        s_cal = r.get("calmar")
+        l_cal = r.get("long_calmar")
+
+        if sc is not None and lc is not None:
+            short_cagr.append(sc)
+            long_cagr.append(lc)
+
+        if s_cal is not None and l_cal is not None:
+            short_calmar.append(s_cal)
+            long_calmar.append(l_cal)
+
+    if len(short_cagr) < 5:
+        print("❌ 样本太少，无法计算相关性")
+        return
+
+    print("\n" + "="*100)
+    print("📈 Short vs Long 相关性分析")
+    print("="*100)
+
+    # CAGR
+    pearson_cagr = pearsonr(short_cagr, long_cagr)
+    spearman_cagr = spearmanr(short_cagr, long_cagr)
+
+    print(f"CAGR Pearson:  r = {pearson_cagr.statistic:.4f} | p = {pearson_cagr.pvalue:.4e}")
+    print(f"CAGR Spearman: r = {spearman_cagr.statistic:.4f} | p = {spearman_cagr.pvalue:.4e}")
+
+    # Calmar
+    if len(short_calmar) > 5:
+        pearson_calmar = pearsonr(short_calmar, long_calmar)
+        spearman_calmar = spearmanr(short_calmar, long_calmar)
+
+        print(f"\nCalmar Pearson:  r = {pearson_calmar.statistic:.4f} | p = {pearson_calmar.pvalue:.4e}")
+        print(f"Calmar Spearman: r = {spearman_calmar.statistic:.4f} | p = {spearman_calmar.pvalue:.4e}")
+
+    print("="*100)
+
+    # 分位数单调性测试
+    print("\n🔎 分位数单调性检验（按 short CAGR 分桶）")
+
+    pairs = list(zip(short_cagr, long_cagr))
+    pairs.sort(key=lambda x: x[0])
+
+    buckets = np.array_split(pairs, 5)
+
+    for i, b in enumerate(buckets):
+        long_vals = [x[1] for x in b]
+        print(f"Bucket {i+1}: avg long CAGR = {np.mean(long_vals):.4f}")
+
+    print("="*100)
+
 
 def merge_selected(selected, report, rule_name, src_path):
     """
@@ -111,21 +180,22 @@ def main():
         merge_selected(selected, row, "top_cagr", row["path"])
     print(f"Total reports: {len(selected)}")
     selected = filter_by_performance(selected.values(), period ='short_report'  ,min_cagr=0.2, min_calmar=1)
-    
     print(f"After short_report performance filter: {len(selected)} reports")
-    selected = filter_by_performance(selected, period ='long_report', min_cagr=0.1, min_calmar=0.5)
+    
+    selected = filter_by_performance(selected, period ='long_report', min_cagr=0.2, min_calmar=0.5)
     print(f"After long_report performance filter: {len(selected)} reports")
-    analyze_candlestick_num(selected)
-    selected = filter_by_trades(selected, period ='short_report', min_daily_freq = 0.2)
+    selected = filter_by_trades(selected, period ='short_report', min_daily_freq = 0.3)
     print(f"After short_report trades filter: {len(selected)} reports")
-    selected = filter_by_trades(selected, period ='long_report', min_daily_freq = 0.2)
+    selected = filter_by_trades(selected, period ='long_report', min_daily_freq = 0.3)
+    analyze_holdbar(selected) 
     print(f"After long_report trades filter: {len(selected)} reports")
-    selected = filter_by_rc_summary(selected,'short_report')
-    print(f"After short_report rc_summary filter: {len(selected)} reports")
-    selected = filter_by_rc_summary(selected,'long_report')
-    print(f"After long_report rc_summary filter: {len(selected)} reports")
-    for config in selected:
-        print(f"candlestick_num: {common.recursive_get(config,'candlestick_num')} | predict_num: {common.recursive_get(config,'predict_num')} | holdbar: {common.recursive_get(config,'holdbar')}")
+    analyze_short_long_correlation(selected)
+    # selected = filter_by_rc_summary(selected,'short_report')
+    # print(f"After short_report rc_summary filter: {len(selected)} reports")
+    # selected = filter_by_rc_summary(selected,'long_report')
+    # print(f"After long_report rc_summary filter: {len(selected)} reports")
+    # for config in selected:
+    #     print(f"holdbar: {common.recursive_get(config,'holdbar')} | holdbar: {common.recursive_get(config,'holdbar')} | holdbar: {common.recursive_get(config,'holdbar')}")
     out_path = os.path.join(output_dir,"selected_configs" ,"selected_configs.jsonl")
     os.makedirs(os.path.join(output_dir,"selected_configs"), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -150,11 +220,11 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         #     group_1_data.append(row)
         # elif vol == 1.7:
         #     group_2_data.append(row)
-        predict_num = row["report"]["params"]["common"]["predict_num"]
+        holdbar = row["report"]["params"]["common"]["holdbar"]
         holdbar = row["report"]["params"]["strategy"]["holdbar"]
-        if predict_num == 20 and holdbar ==20:
+        if holdbar == 20 and holdbar ==20:
             group_1_data.append(row)
-        elif predict_num == 20 and holdbar ==16:
+        elif holdbar == 20 and holdbar ==16:
             group_2_data.append(row)
 
     # 2. 内部指标提取器
@@ -313,7 +383,7 @@ def find_key_path(obj, target_key, path=None):
     递归查找 target_key 在嵌套对象中的路径。
     返回一个路径列表，可以用来直接索引该值。
     
-    例如: find_key_path(report, "candlestick_num") 返回 ["params", "common", "candlestick_num"]
+    例如: find_key_path(report, "holdbar") 返回 ["params", "common", "holdbar"]
     """
     if path is None:
         path = []
@@ -338,7 +408,7 @@ def get_value_by_path(obj, path):
     """
     使用路径列表直接获取对象中的值。
     
-    例如: get_value_by_path(report, ["params", "common", "candlestick_num"])
+    例如: get_value_by_path(report, ["params", "common", "holdbar"])
     """
     current = obj
     try:
@@ -349,14 +419,14 @@ def get_value_by_path(obj, path):
         return None
 
 
-def analyze_candlestick_num(selected, target_key="candlestick_num", metric_key="cagr"):
+def analyze_holdbar(selected, target_key="holdbar", metric_key="cagr"):
     """
     从 selected 中递归查找 target_key，统计数量并分析性能指标，比较最优值。
     第一次遍历会自动定位 target_key 的位置，之后直接用路径索引，提高效率。
     
     Args:
         selected: 选中的报告列表
-        target_key: 要查找的键名（默认 "candlestick_num"）
+        target_key: 要查找的键名（默认 "holdbar"）
         metric_key: 性能指标的键名（默认 "cagr"）
     """
     from collections import defaultdict

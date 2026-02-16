@@ -200,7 +200,7 @@ if __name__ == "__main__":
     parser.add_argument("--symbols", nargs='+', default=["DOGEUSDT"], 
                         help="List of symbols: BTCUSDT ETHUSDT ...")    #BTCUSDT  ETHUSDT  DOGEUSDT SOLUSDT BNBUSDT TRXUSDT XRPUSDT  SUIUSDT ADAUSDT
     # 支持多个时间间隔，用空格隔开
-    parser.add_argument("--intervals", nargs='+', default=["1m"], 
+    parser.add_argument("--intervals", nargs='+', default=["15m"], 
                         help="List of intervals: 1m 1h 1d ...")
     parser.add_argument("--dir", default=PROJECT_DATA_DIR)
     parser.add_argument("--update", action="store_true", default=True)
