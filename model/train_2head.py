@@ -216,14 +216,14 @@ class TrainConfig:
     data_cfg: DataConfig = field(default_factory=DataConfig)
     feature_conf_list: List[str] = field(default_factory=lambda: feature_conf_list)
     epochs: int = 100
-    batch_size: int = 256
+    batch_size: int = 256#256
     lr: float = 3e-4
     gate_lr: float = 3e-4
     weight_decay: float = 5e-4
     patience: int = 15
     seed: int = 42
     stride: int = 2
-    use_cache: bool = True
+    use_cache: bool = False
     lambda_trig: float = 0.5
     lambda_dir: float = 0.7
     lambda_gate: float = 1e-3
@@ -307,7 +307,7 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
     feature_list = list(feature_direction_map.keys())
     full_ds = TimeSeriesWindowDataset(
         df=df, kline_interval_ms=kline_interval_ms, feature_cols=feature_list, label_col=data_cfg.label_col, window=data_cfg.window,
-        cache_path=os.path.join(common.TEMPORARY_DIR,"train_cache.pt"), stride =train_cfg.stride, use_cache = train_cfg.use_cache, show_feature_distribution=True
+        cache_path=os.path.join(save_dir,"train_cache.pt"), stride =train_cfg.stride, use_cache = train_cfg.use_cache, show_feature_distribution=True
     )
     logger.warning(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):"
                    f"{full_ds.feature_names}")
@@ -653,162 +653,127 @@ class MTLManager:
         return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
 
     def compute_combined_loss_v3(self, logits_trig, logits_dir, yb, rb, epoch: int = 0):
-        """
-        v3: Stable Risk-Sensitive MTL Loss (2-head -> fused 3-class)
-        - Soft penalty: probabilistic & smooth (square risk)
-        - RCC: reward-for-correct-confidence (reward, not penalty) with gate
-        - Magnitude annealing: warm up mag_alpha over epochs
-        - Coupling: move to reward shaping (decouple from sample weights)
-        - Bias regularization: confidence-aware
-        """
-        eps = 1e-8
+            """
+            v4: Financial PnL-Aware Robust Loss
+            - Core: Cross Entropy (Classification) + Expected PnL (Regression-like)
+            - Robustness: Log-compressed returns for sample weighting
+            - Semantics: Explicit penalty for "Wrong Direction" vs "Missing Out"
+            """
+            eps = 1e-8
+            device = self.device
 
-        # ---- 0) targets ----
-        t_trig, t_dir, act_mask = self.get_targets(yb)
+            # ---- 0) Data Prep ----
+            # t_trig: 0=Neutral, 1=Action
+            # t_dir:  0=Short,   1=Long
+            t_trig, t_dir, act_mask = self.get_targets(yb)
+            
+            # Isolate Long/Short/Neutral masks for easier logic later
+            is_short   = (yb == 0)
+            is_neutral = (yb == 1) # Assuming 1 is Neutral in your idx map? Check your map!
+                                # Based on your v3 code: fused[0]=Short, [1]=Neutral, [2]=Long
+                                # usually implies yb=0->Short, yb=1->Neutral, yb=2->Long
+            is_long    = (yb == 2)
 
-        # ---- 1) magnitude weights (annealed) ----
-        mag_alpha = self.cfg.mag_alpha
-        mag_limit = self.cfg.mag_limit
+            # ---- 1) Probabilities (The View) ----
+            p_trig = torch.softmax(logits_trig, dim=1) # [B, 2]
+            p_dir  = torch.softmax(logits_dir,  dim=1) # [B, 2]
 
-        warmup_epochs = self.cfg.mag_warmup_epochs
-        if warmup_epochs > 0:
-            alpha_eff = mag_alpha * min(1.0, max(0.0, epoch / warmup_epochs))
-        else:
-            alpha_eff = mag_alpha
+            # Fused Probabilities: [P_Short, P_Neutral, P_Long]
+            # P(Short)   = P(Action) * P(Short|Action)
+            # P(Neutral) = P(No_Action)
+            # P(Long)    = P(Action) * P(Long|Action)
+            p_short   = p_trig[:, 1] * p_dir[:, 0]
+            p_neutral = p_trig[:, 0]
+            p_long    = p_trig[:, 1] * p_dir[:, 1]
+            
+            fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
 
-        # log compression
-        mag_weights = 1.0 + torch.log1p(alpha_eff * torch.abs(rb))
-        mag_weights = torch.clamp(mag_weights, max=mag_limit)
+            # ---- 2) Sample Weighting (Magnitude Only) ----
+            # 只保留幅度作为基础权重，不再混入复杂的 penalty，保证梯度稳定
+            # Log-compression ensures robustness against extreme volatility ticks
+            mag_weights = torch.log1p(torch.abs(rb) * 10.0) + 1.0 
+            # Normalize weights in batch to keep learning rate scale stable
+            batch_weights = mag_weights / (mag_weights.mean() + eps)
 
-        # ---- 2) sub-task losses (magnitude-soft) ----
-        # trig
-        loss_trig_raw = F.cross_entropy(
-            logits_trig, t_trig, weight=self.weights["trig"], reduction="none"
-        )
-        mw = mag_weights / (mag_weights.mean() + eps)
-        loss_trig = (loss_trig_raw * mw).mean()
-
-        # dir (only on action samples)
-        loss_dir = torch.tensor(0.0, device=self.device)
-        if act_mask.any():
-            loss_dir_raw = F.cross_entropy(
-                logits_dir[act_mask], t_dir[act_mask], weight=self.weights["dir"], reduction="none"
+            # ---- 3) Base Classification Loss (NLL) ----
+            # Standard CrossEntropy, weighted by market volatility (magnitude)
+            nll_loss = F.nll_loss(
+                torch.log(fused_probs + eps), 
+                yb, 
+                reduction='none'
             )
-            mw_act = mag_weights[act_mask]
-            mw_act = mw_act / (mw_act.mean() + eps)
-            loss_dir = (loss_dir_raw * mw_act).mean()
+            loss_cls = (nll_loss * batch_weights).mean()
 
-        # ---- 3) fused probs ----
-        p_trig = torch.softmax(logits_trig, dim=1)  # [B,2]
-        p_dir  = torch.softmax(logits_dir, dim=1)   # [B,2]
+            # ---- 4) Financial Semantic Loss (The "Soul") ----
+            
+            # A. Expected PnL Proxy (Diff. Sharpe-like)
+            # 我们希望：如果是 Long，P_long 越大越好；如果是 Short，P_short 越大越好
+            # 这是一个直接的收益最大化项。
+            # define semantic sign: Short=-1, Neutral=0, Long=1
+            pred_signal = p_long - p_short  # range [-1, 1]
+            true_signal = torch.zeros_like(rb)
+            true_signal[is_long]  = 1.0
+            true_signal[is_short] = -1.0
+            
+            # PnL Capture: maximize (pred_signal * raw_return)
+            # Minimize: - (pred_signal * sign(rb) * |rb|_compressed)
+            # We use sign(rb) because yb labels might differ from raw rb sign (due to thresholds)
+            # but generally yb aligns with rb. Let's align with LABEL (yb).
+            
+            pnl_proxy = torch.zeros_like(rb)
+            pnl_proxy[is_long]  = -1.0 * p_long[is_long]  * batch_weights[is_long]
+            pnl_proxy[is_short] = -1.0 * p_short[is_short] * batch_weights[is_short]
+            # Neutral: we want to minimize exposure (abs(pred_signal))
+            pnl_proxy[is_neutral] = torch.abs(pred_signal[is_neutral]) * 0.5 * batch_weights[is_neutral]
+            
+            loss_pnl = pnl_proxy.mean()
 
-        fused_probs = torch.stack([
-            p_trig[:, 1] * p_dir[:, 0],  # Short
-            p_trig[:, 0],                # Neutral
-            p_trig[:, 1] * p_dir[:, 1],  # Long
-        ], dim=1)
+            # B. Risk Penalty (Flip & Miss) - Additive!
+            # Instead of weighting NLL, we add a specific cost for specific errors.
+            risk_cost = torch.zeros_like(nll_loss)
+            
+            flip_penalty = self.cfg.flip_penalty # e.g., 2.0
+            miss_penalty = self.cfg.miss_penalty # e.g., 1.0
 
-        p_short   = fused_probs[:, 0]
-        p_neutral = fused_probs[:, 1]
-        p_long    = fused_probs[:, 2]
+            # Case 1: True is Long (2)
+            if is_long.any():
+                # Error: Predicting Short (Flip) -> Fatal
+                risk_cost[is_long] += flip_penalty * (p_short[is_long] ** 2)
+                # Error: Predicting Neutral (Miss) -> Regret
+                risk_cost[is_long] += miss_penalty * (p_neutral[is_long] ** 2)
 
-        is_long  = (yb == 2)
-        is_short = (yb == 0)
+            # Case 2: True is Short (0)
+            if is_short.any():
+                # Error: Predicting Long (Flip) -> Fatal
+                risk_cost[is_short] += flip_penalty * (p_long[is_short] ** 2)
+                # Error: Predicting Neutral (Miss) -> Regret
+                risk_cost[is_short] += miss_penalty * (p_neutral[is_short] ** 2)
+                
+            # Case 3: True is Neutral (1)
+            if is_neutral.any():
+                # Error: Predicting Action -> False Alarm (Commission loss)
+                # Usually less severe than Flip, similar to Miss
+                risk_cost[is_neutral] += miss_penalty * (p_long[is_neutral]**2 + p_short[is_neutral]**2)
 
-        # ---- 4) main NLL (per-sample) ----
-        sample_main_loss = F.nll_loss(
-            torch.log(fused_probs + 1e-10),
-            yb,
-            weight=self.weights["main"],
-            reduction="none"
-        )
+            loss_risk = (risk_cost * batch_weights).mean()
 
-        # ---- 5) soft structural penalty (smooth risk) ----
-        flip_penalty = float(getattr(self.cfg, "flip_penalty", 1.6))
-        miss_penalty = float(getattr(self.cfg, "miss_penalty", 1.8))
+            # ---- 5) Bias Regularization (Optional) ----
+            # Keep your original logic, it was good.
+            bias_loss = torch.tensor(0.0, device=device)
+            if self.cfg.bias_lambda > 0:
+                conf = p_trig[:, 1]
+                w_conf = conf / (conf.mean() + eps)
+                bias_loss = torch.abs((w_conf * p_dir[:, 0]).mean() - (w_conf * p_dir[:, 1]).mean())
 
-        def sq_risk(p, scale: float):
-            return scale * (p ** 2)
+            # ---- 6) Total Loss Combination ----
+            # alpha, beta, gamma to control the mix
+            w_cls  = 1.0
+            w_pnl  = getattr(self.cfg, "lambda_pnl", 0.5)  # Try 0.1 ~ 1.0
+            w_risk = getattr(self.cfg, "lambda_risk", 1.0) # Try 0.5 ~ 2.0
 
-        soft_penalty = torch.ones_like(sample_main_loss)
+            total_loss = (w_cls * loss_cls) + (w_pnl * loss_pnl) + (w_risk * loss_risk) + (self.cfg.bias_lambda * bias_loss)
 
-        if is_long.any():
-            soft_penalty[is_long] += (
-                sq_risk(p_short[is_long], flip_penalty) +
-                sq_risk(p_neutral[is_long], miss_penalty)
-            )
-        if is_short.any():
-            soft_penalty[is_short] += (
-                sq_risk(p_long[is_short], flip_penalty) +
-                sq_risk(p_neutral[is_short], miss_penalty)
-            )
-
-        # ---- 6) RCC: reward-for-correct-confidence (reward, gated) ----
-        rcc_gamma = float(getattr(self.cfg, "rcc_gamma", 0.3))      # 0.1~0.6 常见
-        rcc_gate  = float(getattr(self.cfg, "rcc_gate", 0.55))      # 0.5~0.7 常见
-
-        reward = torch.zeros_like(soft_penalty)
-
-        # “方向正确”判定：Long 要 p_long>p_short，Short 要 p_short>p_long
-        correct_long  = is_long  & (p_long  > p_short) & (p_long  > rcc_gate)
-        correct_short = is_short & (p_short > p_long)  & (p_short > rcc_gate)
-
-        if correct_long.any():
-            reward[correct_long] = rcc_gamma * p_long[correct_long]
-        if correct_short.any():
-            reward[correct_short] = rcc_gamma * p_short[correct_short]
-
-        soft_penalty = soft_penalty - reward
-        soft_penalty = torch.clamp(soft_penalty, min=0.1)  # 防止翻号/负权
-
-        # ---- 7) main weights: decoupled & normalized ----
-        # 主权重只吃：结构惩罚 + 幅度信息（若你想更“纯分类”，可把 mag_weights 去掉）
-        w_struct = soft_penalty / (soft_penalty.mean() + eps)
-        w_mag    = mag_weights / (mag_weights.mean() + eps)
-
-        # 混合系数（可控）
-        w_struct_k = float(getattr(self.cfg, "w_struct_k", 1.0))   # 结构权重强度
-        w_mag_k    = float(getattr(self.cfg, "w_mag_k", 1.0))      # 幅度权重强度
-
-        main_weights = (w_struct_k * w_struct) + (w_mag_k * w_mag)
-        main_weights = main_weights / (main_weights.mean() + eps)
-
-        loss_main = (sample_main_loss * main_weights).mean()
-
-        # ---- 8) coupling: reward shaping (NOT in sample weights) ----
-        # 只在“错方向概率高”且“收益幅度大”时，加额外 shaping，让模型更关注致命错
-        beta_couple = float(getattr(self.cfg, "beta_couple", 0.0))  # 建议 0~0.3，先从 0.05 试
-        if beta_couple > 0:
-            # flip probability: long->short or short->long
-            soft_flip_prob = torch.zeros_like(p_neutral)
-            soft_flip_prob = torch.where(is_long,  p_short, soft_flip_prob)
-            soft_flip_prob = torch.where(is_short, p_long,  soft_flip_prob)
-
-            # 使用 detach，避免 shaping 直接“改写”主分类梯度方向（更稳）
-            shaping = (sample_main_loss.detach() * soft_flip_prob * torch.abs(rb)).mean()
-            loss_main = loss_main + beta_couple * shaping
-
-        # ---- 9) bias regularization: confidence-aware ----
-        bias_lambda = float(getattr(self.cfg, "bias_lambda", 0.5))
-        bias_loss = torch.zeros((), device=logits_trig.device)
-        if bias_lambda > 0:
-            # action confidence
-            conf = p_trig[:, 1]  # 越大越像 action
-            # 只在 conf 较高时生效（软门控）
-            w_conf = conf / (conf.mean() + eps)
-            bias_loss = torch.abs(
-                (w_conf * p_dir[:, 0]).mean() - (w_conf * p_dir[:, 1]).mean()
-            )
-
-        # ---- 10) total ----
-        total_loss = (
-            loss_main
-            + (self.cfg.lambda_trig * loss_trig)
-            + (self.cfg.lambda_dir  * loss_dir)
-            + (bias_lambda * bias_loss)
-        )
-
-        return total_loss, loss_main, loss_trig, loss_dir, self.cfg.lambda_dir
+            return total_loss, loss_cls, loss_pnl, loss_risk, bias_loss
 
 
 class MTLLossTracker:

@@ -6,13 +6,13 @@ from datetime import datetime, timezone
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", '..', '..'))
 
-from bybit_engine import BybitEngine
+from trade.market.bybit.bybit_engine import BybitEngine
 from trade.strategy.strategy_ml import PositionDir, ActionType
 from trade.strategy.base_executor import BaseExecutor
 
 class BybitExecutor(BaseExecutor):
-    def __init__(self, key_path, symbol: str):
-        self.engine = BybitEngine(key_path)
+    def __init__(self, key_path,rsa_pem_path, symbol: str):
+        self.engine = BybitEngine(key_path,rsa_pem_path)
         self.symbol = symbol
         self.logger = logging.getLogger("BybitExecutor")
         
