@@ -56,7 +56,7 @@ class BaseDefine:
 
 log_level = logging.INFO
 
-PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency')
+PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency','binance_public_data')
 origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{BaseDefine.symbol}_{BaseDefine.interval}.csv")
 train_data_path = os.path.join(DATA_OUT_DIR, "train_data.csv")
 test_data_path  = os.path.join(DATA_OUT_DIR, "test_data.csv")

@@ -51,7 +51,7 @@ TASKS_SPEC_FILE = "tasks_spec.json"
 REPORTS_FILE = "reports.jsonl"
 SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
-MAX_TRAIN = 2  # max concurrent train processes (each train runs in its own process)
+MAX_TRAIN = 3  # max concurrent train processes (each train runs in its own process)
 MAX_SIM = 4
 # -----------------------------------------------------------------------------
 # Path layout helpers
