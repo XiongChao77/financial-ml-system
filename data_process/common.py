@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import os, colorlog , logging, json,platform
 from dataclasses import asdict, is_dataclass,fields
+from typing import Optional
 from datetime import datetime
 from data_process.utils import *
 from data_process.feature import *
@@ -43,15 +44,14 @@ class BaseDefine:
     candlestick_num: int = 120     # 160 best for LSTM
     predict_num: int = 24
     # risk / vol
-    vol_multiplier_long: float = 2
-    stop_multiplier_rate_long: float = 0.2
-    vol_multiplier_short: float = 2
-    stop_multiplier_rate_short: float = 0.2
-    # training
-    model_train_rate: float = 0.8
+    vol_multiplier_long: float = 1.9
+    stop_multiplier_rate_long: Optional[float] = 0.2
+    vol_multiplier_short: float = 1.9
+    stop_multiplier_rate_short: Optional[float] = 0.2
     # market
     symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
     interval: str = "15m"
+    trading_type:str ="um"             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures)   
     version:int = 0
 
 log_level = logging.INFO
@@ -162,7 +162,7 @@ def attach_attr(df, feature_group_list, feature_conf_list = [], para = BaseDefin
     kline_interval_ms = get_interval_ms(para.interval)
     return FeatureFactory(kline_interval_ms,feature_group_list, feature_conf_list).generate(df)
 
-def attach_label(df, para = BaseDefine):
+def attach_label(df, para = BaseDefine, label_col = 'label'):
     """
     基于路径依赖的非对称打标签逻辑
     """
@@ -208,7 +208,7 @@ def attach_label(df, para = BaseDefine):
     # 5. 生成结果
     conditions = [~final_valid_mask, cond_short, cond_long]
     choices = [Signal.INVALID, Signal.NEGATIVE, Signal.POSITIVE ]
-    df['label'] = np.select(conditions, choices, default=Signal.NEUTRAL).astype(int)
+    df[label_col] = np.select(conditions, choices, default=Signal.NEUTRAL).astype(int)
     
     df['return_rate'] = pct_final 
     return df
@@ -270,30 +270,35 @@ def attach_triple_barrier_label(df,
     df.loc[~final_valid_mask, 'label'] = Signal.INVALID
     return df
 
-def calculate_thresholds(df, 
-                         para = BaseDefine,
-                         **kwargs): 
+def calculate_thresholds(df, para = BaseDefine, **kwargs): 
     """
-    计算非对称动态止盈和止损阈值
+    计算非对称动态止盈和止损阈值（支持禁用止损）
     """
     assert 'close' in df.columns, "缺少 Close 数据"
     
-    # 1. 计算波动率基准 (Rolling Standard Deviation)
+    # 1. 计算波动率基准
     vol_window = para.candlestick_num
     returns = df['close'].pct_change()
     rolling_std = returns.rolling(window=vol_window).std()
     
-    # 2. 时间扩充波动率 (sigma * sqrt(T))
+    # 2. 时间扩充波动率
     expected_vol = rolling_std * np.sqrt(para.predict_num)
     
-    # 3.  生成非对称阈值
-    # 多头 (Long) 阈值
+    # 3. 生成非对称阈值
+    # 多头 (Long)
     df['threshold_long'] = (expected_vol * para.vol_multiplier_long)
-    df['stop_threshold_long'] = df['threshold_long'] * para.stop_multiplier_rate_long
+    # 如果 multiplier 为 None，则止损设为无穷大，即逻辑上关闭止损检查
+    if para.stop_multiplier_rate_long is not None:
+        df['stop_threshold_long'] = df['threshold_long'] * para.stop_multiplier_rate_long
+    else:
+        df['stop_threshold_long'] = np.inf
     
-    # 空头 (Short) 阈值
+    # 空头 (Short)
     df['threshold_short'] = (expected_vol * para.vol_multiplier_short)
-    df['stop_threshold_short'] = df['threshold_short'] * para.stop_multiplier_rate_short
+    if para.stop_multiplier_rate_short is not None:
+        df['stop_threshold_short'] = df['threshold_short'] * para.stop_multiplier_rate_short
+    else:
+        df['stop_threshold_short'] = np.inf
     
     return df
 
