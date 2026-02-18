@@ -411,10 +411,10 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
             if report['short']["performance"]["cagr"] > 0.3 :
                 report['long'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                     train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
-                if report['long']["performance"]["cagr"] > 0.1 :
+                if report['long']["performance"]["cagr"] > -0.1 :
                     report['pass'] = True
-                    report['forward'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
-                                        train_output_dir=train_output_dir, device="cpu", period='forward' )["statistics"][1]
+                report['forward'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
+                                    train_output_dir=train_output_dir, device="cpu", period='forward' )["statistics"][1]
             else:
                 logger.info(f"Sim {pre_h}/{tr_h}/{sim_h} skip long test due to short period performance cagr:{report['short']['performance']['cagr']}")
             report_stat = report
@@ -452,45 +452,6 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
         em = eta_msg()
         if em:
             logger.info(f"    {em}")
-
-
-def _run_train_and_dispatch_sim(
-    pre_h: str,
-    tr_h: str,
-    t_cfg: Any,
-    pre_para: Any,
-    prep_output_dir: str,
-    save_dir: str,
-    tr_node: Dict[str, Any],
-    sim_task_queue: mp.Queue,
-    stats: Dict[str, Any],
-    n_train: int,
-    sim_nones_sent: bool,
-    logger: logging.Logger,
-) -> bool:
-    """
-    Run a train task in main process, then enqueue sim tasks for workers.
-    """
-    from trade.bt import simulation
-    import model.train_2head as train
-
-    t0 = time.time()
-    train.main(logger, train_cfg=t_cfg, pre_para=pre_para, prep_output_dir=prep_output_dir, save_dir=save_dir,experiment=True)
-    el = time.time() - t0
-
-    stats["train"]["time"] += el
-    stats["train"]["count"] += 1
-    logger.info(f"  {pre_h}/{tr_h}  Train done in {el:.2f}s")
-
-    for sim in tr_node.get("sim_tasks", []):
-            sim_task_queue.put((pre_h,pre_para, tr_h, t_cfg, sim))
-    # when all train tasks finished, we can stop sim workers once queue drained
-    if stats["train"]["count"] >= n_train and not sim_nones_sent:
-        for _ in range(MAX_SIM):
-            sim_task_queue.put(None)
-        return True
-
-    return sim_nones_sent
 
 
 def _send_none_to_workers(q: mp.Queue, n: int) -> None:
@@ -687,22 +648,28 @@ def main():
             pre_para =common.BaseDefine(**params["params"]["common"])
             train_para=_config_from_dict_train(params["params"]["train"])
             
-            # preparation.main(logger, para=pre_para)
-            # train_para.use_cache = False
-            # train.main(logger, train_cfg=train_para, pre_para=pre_para,experiment=True)
-            sim_para.max_daily_loss_pct = 0.03
+            preparation.main(logger, para=pre_para)
+            train_para.use_cache = False
+            train.main(logger, train_cfg=train_para, pre_para=pre_para,experiment=True)
+            # sim_para.max_daily_loss_pct = 0.035
+            # sim_para.atr_sl_mult_long = 8
+            # sim_para.atr_sl_mult_short = 5
             sim_para.trade_risk = 0.3
             report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
             report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
+            report['forward'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='forward')["statistics"][1]
             sim_para.trade_risk = 0.4
             report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
             report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
+            report['forward'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='forward')["statistics"][1]
             sim_para.trade_risk = 0.5
             report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
             report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
+            report['forward'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='forward')["statistics"][1]
             sim_para.trade_risk = 0.6
             report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
             report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
+            report['forward'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='forward')["statistics"][1]
             report_list.append(report)
         output_path = os.path.join(exp_dir, "loaded_reports.jsonl")
         with open(output_path, "w", encoding="utf-8") as f:
@@ -749,14 +716,21 @@ def main():
 
         preparation_task: List[Any] = []
         if args.prep or run_all:
-            for cn in [120]: #[96,120]
-                for pn in [16]: #[10,12,14,16,18]
-                    for vol_multiplier in [2]:
-                        item = common.BaseDefine()
-                        item.candlestick_num = cn
-                        item.predict_num = pn
-                        item.vol_multiplier_long = vol_multiplier
-                        item.vol_multiplier_short = vol_multiplier
+            for cn in [96,120]: #[96,120]
+                for pn in [14,16,18]: #[10,12,14,16,18]
+                    for vol_multiplier in [1.9,2]:
+                        item = common.BaseDefine(
+                                candlestick_num=cn,
+                                predict_num=pn,
+                                vol_multiplier_long=vol_multiplier,
+                                stop_multiplier_rate_long=0.2,
+                                vol_multiplier_short=vol_multiplier,
+                                stop_multiplier_rate_short=0.2,
+                                symbol="DOGEUSDT",
+                                interval="15m",
+                                trading_type="um",
+                                version=0
+                            )
                         preparation_task.append(item)
         else:
             preparation_task.append(common.BaseDefine())
@@ -766,22 +740,19 @@ def main():
             # for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
             #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
             for flip_penalty in np.arange(0.2, 2.1, 0.1).round(1):
-                for miss_penalty in np.arange(0.2, 2, 0.1).round(1):
-                    t_cfg = train.TrainConfig(use_cache = False)
-                    t_cfg.flip_penalty = float(flip_penalty)
-                    t_cfg.miss_penalty = float(miss_penalty)
+                # for miss_penalty in np.arange(0.2, 2, 0.1).round(1):
+                    t_cfg = train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,flip_penalty = float(flip_penalty),miss_penalty = float(flip_penalty/2),
+                                              stride = 2, patience = 8)
                     training_task.append(t_cfg)
         else:
             training_task.append(train.TrainConfig())
 
         simulation_task: List[Any] = []
         if args.sim or run_all:
-            for holdbar in [20, 24 ,28, 32,36]:
-                s_cfg = simulation.StrategyPara()
+            for holdbar in [16, 20, 24 ,28, 32,36]:
+                s_cfg = simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
+                                                stop_loss_short=0.015,atr_sl_mult_long=8.0,atr_sl_mult_short=5.0,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04)
                 s_cfg.holdbar = holdbar
-                s_cfg.atr_sl_mult_long = 100    #for model test
-                s_cfg.atr_sl_mult_short = 100
-                s_cfg.max_daily_loss_pct = 0.9
                 simulation_task.append(s_cfg)
         else:
             simulation_task.append(simulation.StrategyPara())

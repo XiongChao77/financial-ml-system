@@ -33,6 +33,8 @@ from collections import Counter
 from torch.utils.data import WeightedRandomSampler, Dataset, DataLoader
 import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 from model.data_loader import TimeSeriesWindowDataset
 from model.model_factory import ModelFactory
@@ -55,50 +57,6 @@ feature_conf_list = [
     "quote_asset_volume",
     "taker_buy_base_volume",
     "taker_buy_quote_volume",
-    # =========================
-    # 一、趋势 / 方向持续（Trend） 描述：价格是否存在延续性
-    # =========================
-    "MA_WEEK_M_L",        # 长期结构方向（Regime核心）
-    "PVT",                    # 量价增强型动量
-    "dist_to_high_100",       # 突破型趋势结构
-    "id_factor_100",
-    "id_factor_20",
-    "MFI_999",              # 资金流向极端
-    "MFI_99",
-    # =========================
-    # 二、波动结构（Volatility Regime） 描述：振幅与风险环境
-    # =========================
-    "vol_gk_100",             # 长期波动
-    "vol_gk_14",              # 短期波动
-    "skew_100",
-    "kurt_100",               # 尾部结构（极端风险）
-    # "BOLL_BW_25",           # 需要增益测试后决定
-    "RSI_14",                    # 相对强弱指数（动量与过热信号，间接反映波动环境）
-    # =========================
-    # 三、路径效率 / 市场结构（Efficiency / Regime） 描述：趋势 vs 震荡
-    # =========================
-    "er_126",                 # 趋势效率比（高质量结构因子）
-    # =========================
-    # 四、参与强度（Participation / Liquidity） 描述：市场活跃度
-    # =========================
-    "trade_density_14",       # 连续参与强度
-    "vol_event_flag_500",     # 极端成交事件（Regime触发器）
-    # =========================
-    # 五、订单流 / 失衡（Order Flow） 描述：买卖主导结构
-    # =========================
-    "vpin_49",                # 中期订单流失衡
-    "vpin_14",              # 需要增益测试
-    # =========================
-    # 六、空间位置结构（Spatial / Price Position） 描述：价格在区间或成本中的位置
-    # =========================
-    "poc_bias_600",           # 成交密集区偏离（强结构锚点）
-    "poc_bias_99",
-    "close_pos",              # 区间相对位置
-    # =========================
-    # 七、K线形态 / 微观博弈（Path Microstructure）
-    # =========================
-    "upper_wick_pct",
-    "lower_wick_pct",
 ]
 
 
@@ -220,7 +178,7 @@ class TrainConfig:
     lr: float = 3e-4
     gate_lr: float = 3e-4
     weight_decay: float = 5e-4
-    patience: int = 8
+    patience: int = 15
     seed: int = 42
     stride: int = 2
     use_cache: bool = False
@@ -290,6 +248,64 @@ def apply_feature_direction(X: torch.Tensor, feature_names: List[str], direction
     
     return X
 
+def run_logistic_regression_probe(full_ds, tr_rng, te_rng, logger):
+    """
+    Dissertation Step 4: Simple probe to explore information variation.
+    Strictly controls class balance via random subsampling.
+    """
+    logger.info("🧪 Starting Logistic Regression Probe (Step 4)...")
+
+    # 1. Prepare Data (Flatten Time Series: [N, T, F] -> [N, T*F])
+    X_tr = full_ds.X[tr_rng[0]:tr_rng[1]].cpu().numpy().reshape(tr_rng[1]-tr_rng[0], -1)
+    y_tr = full_ds.y[tr_rng[0]:tr_rng[1]].cpu().numpy()
+    
+    X_te = full_ds.X[te_rng[0]:te_rng[1]].cpu().numpy().reshape(te_rng[1]-te_rng[0], -1)
+    y_te = full_ds.y[te_rng[0]:te_rng[1]].cpu().numpy()
+
+    # 2. Strict Class Balancing (Subsampling to the lowest proportion)
+    counts = Counter(y_tr)
+    min_samples = min(counts.values())
+    logger.info(f"⚖️ Strict Balancing: Subsampling all classes to N={min_samples}")
+
+    balanced_idx = []
+    for label in counts.keys():
+        idx = np.where(y_tr == label)[0]
+        selected = np.random.choice(idx, min_samples, replace=False)
+        balanced_idx.extend(selected)
+    
+    X_tr_bal = X_tr[balanced_idx]
+    y_tr_bal = y_tr[balanced_idx]
+
+    # 3. Scaling
+    scaler = StandardScaler()
+    X_tr_bal = scaler.fit_transform(X_tr_bal)
+    X_te = scaler.transform(X_te)
+
+    # 4. Training
+    # Using 'multinomial' for 3-class, L2 penalty for stability
+    lr_model = LogisticRegression(solver='lbfgs', max_iter=1000, C=1.0)
+    lr_model.fit(X_tr_bal, y_tr_bal)
+
+    # 5. Evaluation
+    y_pred = lr_model.predict(X_te)
+    report = classification_report(y_te, y_pred, zero_division=0)
+    macro_f1 = f1_score(y_te, y_pred, average='macro')
+
+    logger.info(f"\n--- LR Probe Report (Macro-F1: {macro_f1:.4f}) ---\n{report}")
+    
+    # 6. Interpretability (Feature Importance)
+    # Get average coefficient magnitude across classes for the 'original' features
+    # shape: [n_classes, window * features] -> [features]
+    coef_abs = np.abs(lr_model.coef_).mean(axis=0).reshape(full_ds.window, -1).mean(axis=0)
+    importance_df = pd.DataFrame({
+        'Feature': full_ds.feature_names,
+        'Importance': coef_abs
+    }).sort_values(by='Importance', ascending=False)
+    
+    logger.info(f"🔝 Top 5 LR Probe Features: \n{importance_df.head(5).to_string(index=False)}")
+    
+    return macro_f1, importance_df
+    
 
 def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg, pre_para: common.BaseDefine,prep_output_dir:str, save_dir,experiment:bool):
     # 0. 初始化环境
@@ -334,6 +350,11 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
     # 2. 切分数据
     tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
     
+    lr_f1, lr_importance = run_logistic_regression_probe(full_ds, tr_rng, te_rng, logger)
+    # Save importance for Conclusion A/C comparison
+    lr_importance.to_csv(os.path.join(save_dir, "lr_probe_importance.csv"), index=False)
+    return
+
     ds_tr = SeqDataset(full_ds.X[tr_rng[0]:tr_rng[1]], full_ds.y[tr_rng[0]:tr_rng[1]], full_ds.returns[tr_rng[0]:tr_rng[1]])
     # More efficient alternative: just pass the sliced tensors
     ds_va = SeqDataset(full_ds.X[va_rng[0]:va_rng[1]], full_ds.y[va_rng[0]:va_rng[1]], full_ds.returns[va_rng[0]:va_rng[1]])

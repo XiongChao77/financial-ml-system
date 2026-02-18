@@ -601,50 +601,6 @@ feature_conf_list = [
     "wick_bias",
 ]
 
-feature_conf_list2 = [
-    # ===== 价格 / 位置（强信息，避免全家桶） =====
-    "close",
-    "close_pos",
-    "dist_to_high_100",
-    "dist_to_high_20",
-    "DONCHIAN_POS_20",
-
-    # ===== 动量 / 反转（多尺度） =====
-    "RSI_14",
-    "MOM_20",
-    "MOM_60",
-    "MACD_12_26_DIF_PCT",
-    "MACD_12_26_HIST_PCT",
-
-    # ===== 通道 / 偏离 =====
-    "BOLL_BW_25",
-    "BOLL_PB_25",
-    "KELTNER_MIDDLE_14",
-    "DONCHIAN_DIST_U_20",
-    "DONCHIAN_DIST_L_20",
-
-    # ===== 波动率 / regime =====
-    "vol_parkinson_100",
-    "vol_gk_100",
-    "skew_20",
-    "er_126",
-
-    # ===== 成交量 / 资金流 =====
-    "PVT",
-    # "OBV",
-    "CMF_25",
-
-    # ===== 订单流 / 微观结构 =====
-    "poc_bias_49",
-    "id_factor_20",
-    "vpin_49",
-
-    # ===== 补充（弱相关但非冗余） =====
-    "VWAP_7",
-    # ======basement features=======
-    "quote_asset_volume",
-]
-
 def main(logger: logging.Logger, feature_conf_list=feature_conf_list, train_cfg=TrainConfig(), pre_para=common.BaseDefine()):
     os.makedirs(train_cfg.save_dir, exist_ok=True)
 
