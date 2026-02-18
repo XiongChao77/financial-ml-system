@@ -10,10 +10,10 @@ from data_process import common
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_30m','09_07_11'))
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_15m','01_02_36'))
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-14','DOGEUSDT_5m','07_54_32'))
-exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','DOGEUSDT_30m','20_10_51'))
+exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-18','16_48_58'))
 output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments')
-short_reports_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_short.jsonl'))
-long_reports_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_long.jsonl'))
+shorts_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_short.jsonl'))
+longs_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_long.jsonl'))
 
 TOP_K = 50
 SKIP_PERCENT = 0  # 跳过前百分之多少，0表示不跳过，从最前面开始选择
@@ -134,27 +134,28 @@ def extract_row(report, src_path):
     """
     从单条 report 中抽取关键信息
     """
-    short_report = report.get("short", report)  # 兼容 short/long 分开存储和合并存储两种格式
-    long_report = report.get("long", report)
-    perf = short_report.get("performance", {})
-    params = short_report.get("params", {})
+    short = report.get("short", report)  # 兼容 short/long 分开存储和合并存储两种格式
+    long = report.get("long", report)
+    perf = short.get("performance", {})
+    params = short.get("params", {})
     common = params.get("common", {})
-    long_perf = long_report.get("performance", {})
-    long_params = long_report.get("params", {})
+    long_perf = long.get("performance", {})
+    long_params = long.get("params", {})
     long_common = long_params.get("common", {})
     return {
         "cagr": perf.get("cagr"),
         "calmar": perf.get("calmar"),
-        "daily_freq" : short_report.get("trades", {}).get("daily_freq"),
+        "daily_freq" : short.get("trades", {}).get("daily_freq"),
         "long_cagr": long_perf.get("cagr"),
         "long_calmar": long_perf.get("calmar"),
-        "long_daily_freq" : long_report.get("trades", {}).get("daily_freq"),
+        "long_daily_freq" : long.get("trades", {}).get("daily_freq"),
         "symbol": common.get("symbol"),
         "interval": common.get("interval"),
         "hash": params.get('hash',0),
         "path": src_path,
-        "short_report" : short_report,
-        "long_report": long_report
+        "short" : short,
+        "long": long,
+        "forward": report.get("forward", report)
     }
 
 
@@ -179,21 +180,23 @@ def main():
     for row in sorted_cagr:
         merge_selected(selected, row, "top_cagr", row["path"])
     print(f"Total reports: {len(selected)}")
-    selected = filter_by_performance(selected.values(), period ='short_report'  ,min_cagr=0.2, min_calmar=1)
-    print(f"After short_report performance filter: {len(selected)} reports")
+    selected = filter_by_performance(selected.values(), period ='short'  ,min_cagr=0.2, min_calmar=1)
+    print(f"After short performance filter: {len(selected)} reports")
     
-    selected = filter_by_performance(selected, period ='long_report', min_cagr=0.2, min_calmar=0.5)
-    print(f"After long_report performance filter: {len(selected)} reports")
-    selected = filter_by_trades(selected, period ='short_report', min_daily_freq = 0.3)
-    print(f"After short_report trades filter: {len(selected)} reports")
-    selected = filter_by_trades(selected, period ='long_report', min_daily_freq = 0.3)
-    analyze_holdbar(selected) 
-    print(f"After long_report trades filter: {len(selected)} reports")
+    selected = filter_by_performance(selected, period ='long', min_cagr=0.2, min_calmar=0.5)
+    print(f"After long performance filter: {len(selected)} reports")
+    selected = filter_by_performance(selected, period ='forward', min_cagr=0.1, min_calmar=0.5)
+    print(f"After forward performance filter: {len(selected)} reports")
+    selected = filter_by_trades(selected, period ='short', min_daily_freq = 0.3)
+    print(f"After short trades filter: {len(selected)} reports")
+    selected = filter_by_trades(selected, period ='long', min_daily_freq = 0.3)
+    analyze_holdbar(selected)
+    print(f"After long trades filter: {len(selected)} reports")
     analyze_short_long_correlation(selected)
-    # selected = filter_by_rc_summary(selected,'short_report')
-    # print(f"After short_report rc_summary filter: {len(selected)} reports")
-    # selected = filter_by_rc_summary(selected,'long_report')
-    # print(f"After long_report rc_summary filter: {len(selected)} reports")
+    # selected = filter_by_rc_summary(selected,'short')
+    # print(f"After short rc_summary filter: {len(selected)} reports")
+    # selected = filter_by_rc_summary(selected,'long')
+    # print(f"After long rc_summary filter: {len(selected)} reports")
     # for config in selected:
     #     print(f"holdbar: {common.recursive_get(config,'holdbar')} | holdbar: {common.recursive_get(config,'holdbar')} | holdbar: {common.recursive_get(config,'holdbar')}")
     out_path = os.path.join(output_dir,"selected_configs" ,"selected_configs.jsonl")
@@ -278,7 +281,7 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         print("❌ 错误: 未能分类出有效数据，请检查输入 rows 的参数。")
     exit()
 
-def filter_by_performance(reports, period= 'short_report', min_cagr=None, min_calmar=None, min_sharpe=None):
+def filter_by_performance(reports, period= 'short', min_cagr=None, min_calmar=None, min_sharpe=None):
     """
     Filter reports based on performance metrics.
     """
@@ -296,7 +299,7 @@ def filter_by_performance(reports, period= 'short_report', min_cagr=None, min_ca
 
 def filter_by_rc_summary(
     reports,
-    period= 'short_report',
+    period= 'short',
     # —— 生存性 / 尾部 ——
     min_rc_es_05= None,          # 例如 > -0.8
     min_rc_q05= None,            # 例如 > -0.5
@@ -364,7 +367,7 @@ def filter_by_rc_summary(
 
     return [r for r in reports if ok(r)]
 
-def filter_by_trades(reports, period= 'short_report', min_win_rate=35, min_daily_freq = None):
+def filter_by_trades(reports, period= 'short', min_win_rate=35, min_daily_freq = None):
     """
     Filter reports based on trade statistics.
     """
@@ -465,13 +468,13 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="cagr"):
         reports = groups[value]
         count = len(reports)
         
-        # 提取性能指标 (short_report)
+        # 提取性能指标 (short)
         metric_list = []
         calmar_list = []
         
         for report in reports:
-            short_report = report.get("short_report", report)
-            perf = short_report.get("performance", {})
+            short = report.get("short", report)
+            perf = short.get("performance", {})
             metric = perf.get(metric_key)
             calmar = perf.get("calmar")
             
@@ -526,34 +529,34 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="cagr"):
         print(f"  平均Calmar最优: {target_key}={best_calmar[target_key]} ({best_calmar['avg_calmar']:.2f})")
         print("="*100)
 
-def filter_by_short_long_reports():
+def filter_by_short_longs():
     """
     Filter reports based on short/long trade ratio.
     """
-    short_reports = load_reports(short_reports_file)
-    long_reports = load_reports(long_reports_file)
+    shorts = load_reports(shorts_file)
+    longs = load_reports(longs_file)
 
-    print(f"Short total reports: {len(short_reports)}")
-    short_selected = filter_by_performance(short_reports, min_cagr=0.2, min_calmar=1.2)
+    print(f"Short total reports: {len(shorts)}")
+    short_selected = filter_by_performance(shorts, min_cagr=0.2, min_calmar=1.2)
     print(f"Short after performance filter: {len(short_selected)} reports")
     # selected = filter_by_rc_summary(selected, min_rc_es_05 = None, min_rc_q05 = None, max_rc_longest_neg_run = None, max_rc_neg_ratio = None, min_rc_median = None, min_rc_q25 = None)
     print(f"Short after rc_summary filter: {len(short_selected)} reports")
     short_selected = filter_by_trades(short_selected, min_total_trades=100)#, min_win_rate=38, min_daily_freq = 0.3)
     print(f"Short after trades filter: {len(short_selected)} reports")
 
-    long_reports = sorted(long_reports, key=lambda x: x['performance']["cagr"], reverse=True)
-    print(f"Long total reports: {len(long_reports)}")
-    long_selected = filter_by_performance(long_reports, min_cagr=0.2, min_calmar=1)
+    longs = sorted(longs, key=lambda x: x['performance']["cagr"], reverse=True)
+    print(f"Long total reports: {len(longs)}")
+    long_selected = filter_by_performance(longs, min_cagr=0.2, min_calmar=1)
     print(f"Long after performance filter: {len(long_selected)} reports")
     # long_selected = filter_by_rc_summary(long_selected, min_rc_es_05 = -2, min_rc_q05 = None, max_rc_longest_neg_run = None, max_rc_neg_ratio = None, min_rc_median = None, min_rc_q25 = None)
     print(f"Long after rc_summary filter: {len(long_selected)} reports")
     long_selected = filter_by_trades(long_selected, min_total_trades=100)#, min_win_rate=38)
     print(f"Long after trades filter: {len(long_selected)} reports")
 
-    short_reports_dict = {r["params"]["hash"]: r for r in short_selected}
-    long_reports_dict = {r["params"]["hash"]: r for r in long_selected}
-    common_keys = set(short_reports_dict.keys()) & set(long_reports_dict.keys())
-    merged = {k: {"short": short_reports_dict[k], "long": long_reports_dict[k]} for k in common_keys}
+    shorts_dict = {r["params"]["hash"]: r for r in short_selected}
+    longs_dict = {r["params"]["hash"]: r for r in long_selected}
+    common_keys = set(shorts_dict.keys()) & set(longs_dict.keys())
+    merged = {k: {"short": shorts_dict[k], "long": longs_dict[k]} for k in common_keys}
     
     out_path = os.path.join(exp_dir,"selected_configs" ,"candidate.jsonl")
     os.makedirs(os.path.join(exp_dir,"selected_configs"), exist_ok=True)
@@ -563,4 +566,4 @@ def filter_by_short_long_reports():
 
 if __name__ == "__main__":
     main()
-    # filter_by_short_long_reports()
+    # filter_by_short_longs()
