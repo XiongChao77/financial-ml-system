@@ -247,6 +247,52 @@ class ModelHandler:
         self.logger.info(f"Inference complete. Valid signals: {len(final_pred)}")
         return df_out, stats
     
+    def predict_live_ds(self, ds, df, batch_size=2048, diff_thresh=None, min_thresh=0.3):
+        """
+        实盘专用推理函数：接收已初始化的 ds 参数。
+        """
+        # 1. 执行推理循环
+        dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
+        probs_list = []
+        with torch.no_grad():
+            for xb, _, _ in dl:
+                xb = xb.to(self.device)
+                _, fused_probs = self.model(xb, return_fused=True) 
+                probs_list.append(fused_probs.cpu().numpy())
+
+        # 2. 计算概率与评分
+        probs_all = np.concatenate(probs_list)
+        p_short, p_neutral, p_long = probs_all[:, 0], probs_all[:, 1], probs_all[:, 2]
+        net_score = p_long - p_short
+
+        # 3. 信号生成逻辑 (保持原样)
+        if diff_thresh is not None:
+            final_pred = np.full(len(probs_all), int(Signal.NEUTRAL))
+            final_conf = np.zeros(len(probs_all))
+            
+            mask_long = (net_score > diff_thresh) & (p_long > min_thresh)
+            final_pred[mask_long], final_conf[mask_long] = int(Signal.POSITIVE), net_score[mask_long]
+            
+            mask_short = (net_score < -diff_thresh) & (p_short > min_thresh)
+            final_pred[mask_short], final_conf[mask_short] = int(Signal.NEGATIVE), -net_score[mask_short]
+        else:
+            final_pred, final_conf = probs_all.argmax(axis=1), probs_all.max(axis=1)
+
+        # 4. 实盘对齐：仅更新最新的一根 K 线
+        df_out = df.copy()
+        for c in ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']:
+            df_out[c] = np.nan
+
+        last_idx = df.index[-1]
+        df_out.at[last_idx, 'pred'] = final_pred[-1]
+        df_out.at[last_idx, 'pred_prob'] = final_conf[-1]
+        df_out.at[last_idx, 'prob_short'] = p_short[-1]
+        df_out.at[last_idx, 'prob_neutral'] = p_neutral[-1]
+        df_out.at[last_idx, 'prob_long'] = p_long[-1]
+        df_out.at[last_idx, 'net_score'] = net_score[-1]
+
+        return df_out, {'feature_cols': self.feature_cols}
+    
     def scan_thresholds(self, df, kline_interval_ms, thresholds=[0.05, 0.1, 0.15, 0.2, 0.25, 0.3], batch_size=1024):
         """
         一次性扫描多个阈值，对比模型性能。

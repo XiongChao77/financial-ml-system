@@ -10,11 +10,10 @@ from data_process import common
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_30m','09_07_11'))
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_15m','01_02_36'))
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-14','DOGEUSDT_5m','07_54_32'))
-exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-18','16_48_58'))
+exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','09_09_43'))
 output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments')
 shorts_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_short.jsonl'))
 longs_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_long.jsonl'))
-
 TOP_K = 50
 SKIP_PERCENT = 0  # 跳过前百分之多少，0表示不跳过，从最前面开始选择
 
@@ -27,24 +26,24 @@ def analyze_short_long_correlation(selected):
     from scipy.stats import pearsonr, spearmanr
 
     short_cagr = []
-    long_cagr = []
+    l_cagr = []
 
     short_calmar = []
-    long_calmar = []
+    l_calmar = []
 
     for r in selected:
         sc = r.get("cagr")
-        lc = r.get("long_cagr")
+        lc = r.get("l_cagr")
         s_cal = r.get("calmar")
-        l_cal = r.get("long_calmar")
+        l_cal = r.get("l_calmar")
 
         if sc is not None and lc is not None:
             short_cagr.append(sc)
-            long_cagr.append(lc)
+            l_cagr.append(lc)
 
         if s_cal is not None and l_cal is not None:
             short_calmar.append(s_cal)
-            long_calmar.append(l_cal)
+            l_calmar.append(l_cal)
 
     if len(short_cagr) < 5:
         print("❌ 样本太少，无法计算相关性")
@@ -55,16 +54,16 @@ def analyze_short_long_correlation(selected):
     print("="*100)
 
     # CAGR
-    pearson_cagr = pearsonr(short_cagr, long_cagr)
-    spearman_cagr = spearmanr(short_cagr, long_cagr)
+    pearson_cagr = pearsonr(short_cagr, l_cagr)
+    spearman_cagr = spearmanr(short_cagr, l_cagr)
 
     print(f"CAGR Pearson:  r = {pearson_cagr.statistic:.4f} | p = {pearson_cagr.pvalue:.4e}")
     print(f"CAGR Spearman: r = {spearman_cagr.statistic:.4f} | p = {spearman_cagr.pvalue:.4e}")
 
     # Calmar
     if len(short_calmar) > 5:
-        pearson_calmar = pearsonr(short_calmar, long_calmar)
-        spearman_calmar = spearmanr(short_calmar, long_calmar)
+        pearson_calmar = pearsonr(short_calmar, l_calmar)
+        spearman_calmar = spearmanr(short_calmar, l_calmar)
 
         print(f"\nCalmar Pearson:  r = {pearson_calmar.statistic:.4f} | p = {pearson_calmar.pvalue:.4e}")
         print(f"Calmar Spearman: r = {spearman_calmar.statistic:.4f} | p = {spearman_calmar.pvalue:.4e}")
@@ -74,7 +73,7 @@ def analyze_short_long_correlation(selected):
     # 分位数单调性测试
     print("\n🔎 分位数单调性检验（按 short CAGR 分桶）")
 
-    pairs = list(zip(short_cagr, long_cagr))
+    pairs = list(zip(short_cagr, l_cagr))
     pairs.sort(key=lambda x: x[0])
 
     buckets = np.array_split(pairs, 5)
@@ -136,19 +135,24 @@ def extract_row(report, src_path):
     """
     short = report.get("short", report)  # 兼容 short/long 分开存储和合并存储两种格式
     long = report.get("long", report)
+    forward = report.get("forward", report)
     perf = short.get("performance", {})
     params = short.get("params", {})
     common = params.get("common", {})
     long_perf = long.get("performance", {})
     long_params = long.get("params", {})
     long_common = long_params.get("common", {})
+    forward_perf = forward.get("performance", {})
     return {
         "cagr": perf.get("cagr"),
         "calmar": perf.get("calmar"),
         "daily_freq" : short.get("trades", {}).get("daily_freq"),
-        "long_cagr": long_perf.get("cagr"),
-        "long_calmar": long_perf.get("calmar"),
-        "long_daily_freq" : long.get("trades", {}).get("daily_freq"),
+        "l_cagr": long_perf.get("cagr"),
+        "l_calmar": long_perf.get("calmar"),
+        "l_daily_freq" : long.get("trades", {}).get("daily_freq"),
+        "f_cagr": forward_perf.get("cagr"),
+        "f_calmar": forward_perf.get("calmar"),
+        "f_calmar" : forward.get("trades", {}).get("daily_freq"),
         "symbol": common.get("symbol"),
         "interval": common.get("interval"),
         "hash": params.get('hash',0),
@@ -180,16 +184,16 @@ def main():
     for row in sorted_cagr:
         merge_selected(selected, row, "top_cagr", row["path"])
     print(f"Total reports: {len(selected)}")
-    selected = filter_by_performance(selected.values(), period ='short'  ,min_cagr=0.2, min_calmar=1)
+    selected = filter_by_performance(selected.values(), period ='short'  ,min_cagr=0.4, min_calmar=1)
     print(f"After short performance filter: {len(selected)} reports")
     
-    selected = filter_by_performance(selected, period ='long', min_cagr=0.2, min_calmar=0.5)
+    selected = filter_by_performance(selected, period ='long', min_cagr=0.1, min_calmar=0)
     print(f"After long performance filter: {len(selected)} reports")
-    selected = filter_by_performance(selected, period ='forward', min_cagr=0.1, min_calmar=0.5)
+    selected = filter_by_performance(selected, period ='forward', min_cagr=0.3, min_calmar=0.5)
     print(f"After forward performance filter: {len(selected)} reports")
-    selected = filter_by_trades(selected, period ='short', min_daily_freq = 0.3)
+    selected = filter_by_trades(selected, period ='short', min_daily_freq = 1)
     print(f"After short trades filter: {len(selected)} reports")
-    selected = filter_by_trades(selected, period ='long', min_daily_freq = 0.3)
+    selected = filter_by_trades(selected, period ='long', min_daily_freq = 1)
     analyze_holdbar(selected)
     print(f"After long trades filter: {len(selected)} reports")
     analyze_short_long_correlation(selected)
