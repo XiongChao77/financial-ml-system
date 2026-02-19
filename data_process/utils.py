@@ -1,6 +1,6 @@
 import json,os
 import hashlib
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass,dataclass
 import numpy as np
 
 def safe_get(d, keys, default=0):
@@ -93,3 +93,12 @@ def recursive_get(data, target_key):
                 
     return None
 
+def dump_params_json(obj, logger):
+    if is_dataclass(obj):
+        data = asdict(obj)
+    elif isinstance(obj, dict):
+        data = obj
+    else:
+        raise TypeError(f"Unsupported config type: {type(obj)}")
+
+    logger.info("Params | " + json.dumps(data, indent=2, ensure_ascii=False))

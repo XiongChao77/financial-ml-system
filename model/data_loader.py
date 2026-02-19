@@ -18,7 +18,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
     def __init__(
             self,
             df: pd.DataFrame,
-            kline_interval_ms,
+            kline_interval_ms:int,
             feature_cols,
             label_col: str = None,
             window: int = common.BaseDefine.predict_num,
@@ -42,6 +42,8 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         missing = set(feature_cols) - set(df.columns)
         if missing:
             raise ValueError(f"Missing features: {list(missing)}")
+        if self.is_live == True:
+            self.stride = 1
         self.logger.info(f"Features num:{len(feature_cols)},: {feature_cols}")
 
         # --- 1. Load from Cache ---

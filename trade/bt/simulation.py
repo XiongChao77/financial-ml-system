@@ -74,16 +74,6 @@ def log_parameters(params_obj, logger):
         # 4. 打印，确保 "Para" 后面的空格与你的 SUMMARY/EXPOSURE 对齐
         logger(f"Para    | {para_str}")
 
-def dump_params_json(obj, logger):
-    if is_dataclass(obj):
-        data = asdict(obj)
-    elif isinstance(obj, dict):
-        data = obj
-    else:
-        raise TypeError(f"Unsupported config type: {type(obj)}")
-
-    logger.info("Params | " + json.dumps(data, indent=2, ensure_ascii=False))
-
 @dataclass
 class StrategyPara:
     # switches
@@ -103,7 +93,7 @@ class StrategyPara:
     take_profit: float = 0.99
     # risk
     trade_risk: float = 0.4
-    max_daily_loss_pct: float = 0.035
+    max_daily_loss_pct: float = 0.04
 
 #period: short/forward/long
 def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
@@ -637,9 +627,9 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
         },
     }
 
-    dump_params_json(train_cfg,logger)
-    dump_params_json(para,logger)
-    dump_params_json(pre_para,logger)
+    common.dump_params_json(train_cfg,logger)
+    common.dump_params_json(para,logger)
+    common.dump_params_json(pre_para,logger)
         
     # summary 输出
     logger.info("-" * 29 + f"PARAMS_HASH | {params_hash}"+"-" * 29)

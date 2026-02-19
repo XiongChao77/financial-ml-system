@@ -14,12 +14,16 @@ class BinanceDataFeed:
     3. 运行时只拉取增量数据并拼接。
     4. 自动修剪过长的数据，保持内存轻量。
     """
-    BASE_URL = "https://api.binance.com/api/v3/klines"
+    BASE_URL:dict[str,str] = {"spot":"https://api.binance.com/api/v3/klines",
+                "um":"https://fapi.binance.com/fapi/v1/klines",
+                "cm":"https://dapi.binance.com/dapi/v1/klines"}
     MAX_LIMIT_PER_REQ = 1000
-    
-    def __init__(self, symbol, interval, max_len=5000):     #"1m"/"5m"/"15m"/"1h"/"4h"/"1d"
+    #trading_type:str ="um"             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures)   
+    def __init__(self, symbol, interval, trading_type:str, max_len=5000):     #"1m"/"5m"/"15m"/"1h"/"4h"/"1d"
         self.symbol = symbol
         self.interval = interval
+        self.trading_type = trading_type
+        self.url = self.BASE_URL[trading_type]
         self.logger = logging.getLogger("BinanceFeed")
         
         # 核心：内存中的数据缓存
@@ -70,7 +74,7 @@ class BinanceDataFeed:
             }
             
             try:
-                resp = requests.get(self.BASE_URL, params=params, timeout=5)
+                resp = requests.get(self.url, params=params, timeout=5)
                 data = resp.json()
             except Exception as e:
                 self.logger.error(f"Network error: {e}")

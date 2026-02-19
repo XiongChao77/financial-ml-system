@@ -60,7 +60,6 @@ class FtmoBrain(BrainBase):
         thresh: Optional[float] = None,
         #  仿照 RulesBrain 新增的参数
         max_daily_loss_pct: float = 0.5, # 日内熔断阈值 (3.5%)
-        unit_pct_scale: float = 1.9,      # 仓位利用率缩放系数
         stop_loss_long: float = 0.05,      # 做多止损百分比
         stop_loss_short: float = 0.05,     # 做空止损百分比
         atr_sl_mult_long:float = 3,
@@ -81,7 +80,6 @@ class FtmoBrain(BrainBase):
         
         # ---  风控状态管理 ---
         self.max_daily_loss_pct = max_daily_loss_pct
-        self.unit_pct_scale = unit_pct_scale
         
         self.day_start_equity = None
         self.last_trade_date = None

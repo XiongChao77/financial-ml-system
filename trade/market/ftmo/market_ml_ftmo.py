@@ -94,6 +94,7 @@ class LiveBot:
         self.data_feed = BinanceDataFeed(
             self.pre_para.symbol, 
             self.pre_para.interval, 
+            self.pre_para.trading_type,
             max_len = self.min_bars_needed + 500
         )
         #strategy
