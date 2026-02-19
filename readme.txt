@@ -26,6 +26,8 @@ pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook j
         npm run dev
 
 ***********************ideas*********************************
+策略三大问题：为什么挣钱，挣谁的钱，是否会持续挣钱
+
 量化的本质是寻找市场规律，这种规律可能是个人/机构/AI产生的。规律始终存在，即阿尔法（Alpha）并非消失，只是不断迁移，而竞争在于发现和适应的速率
 模型 ≠ 策略，模型产生信号，策略使用信号.
 模型优化之后，precision和recall的提升非常明显。但回测的表现反而下降，令人费解！

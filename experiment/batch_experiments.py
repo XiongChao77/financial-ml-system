@@ -62,10 +62,9 @@ def _batch_temp_dir(exp_dir: str) -> str:
     """
     if exp_dir.startswith(common.PERSISTENCE_DIR):
         rel = os.path.relpath(exp_dir, common.PERSISTENCE_DIR)
-        return os.path.join(common.TEMPORARY_DIR, rel)
+        return os.path.join(common.PERSISTENCE_DIR,"train" , rel)
     base = os.path.basename(exp_dir.rstrip(os.sep)) or "run"
-    return os.path.join(common.TEMPORARY_DIR, "batch_resume", base)
-
+    return os.path.join(common.PERSISTENCE_DIR, "train" ,"batch_resume", base)
 
 def _prep_output_dir(temp_dir: str, pre_h: str) -> str:
     return os.path.join(temp_dir, f"pre_{pre_h}")
@@ -464,75 +463,116 @@ def _send_none_to_workers(q: mp.Queue, n: int) -> None:
 # -----------------------------------------------------------------------------
 def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output_dir: str, logger: logging.Logger):
     """
-    Compare selected_configs.jsonl (old) vs reports.jsonl (new), by params.hash.
+    完善版：对比 old (selected_configs) 和 new (reports) 报告。
+    支持 "short", "long", "forward" 三个周期的 CAGR 精度对比（保留一位小数）。
     """
     logger.info("\n" + "=" * 40)
-    logger.info("📊 Comparing old and new results...")
+    logger.info("📊 Starting Multi-Period Comparison...")
 
-    old_reports: Dict[str, Dict[str, Any]] = {}
-    if os.path.exists(old_reports_path):
-        for record in load_selected_configs(old_reports_path):
-            params = record.get("params", {}) or {}
-            h = params.get("hash")
-            if isinstance(h, str) and h:
-                old_reports[h] = {"params": params, "performance": record.get("performance", {}) or {}}
-        logger.info(f"📥 Loaded {len(old_reports)} old reports from {old_reports_path}")
-    else:
-        logger.warning(f"⚠️  Old reports file not found: {old_reports_path}")
+    periods = ["short", "long", "forward"]
 
-    new_reports: Dict[str, Dict[str, Any]] = {}
-    if os.path.exists(new_reports_path):
-        with open(new_reports_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                params = record.get("params", {}) or {}
-                h = params.get("hash")
-                if isinstance(h, str) and h:
-                    new_reports[h] = {"params": params, "performance": record.get("performance", {}) or {}}
-        logger.info(f"📥 Loaded {len(new_reports)} new reports from {new_reports_path}")
-    else:
-        logger.warning(f"⚠️  New reports file not found: {new_reports_path}")
+    # --- 1. 定义内部加载函数，避免冗余 I/O ---
+    def load_records_by_hash(path: str, is_selected_config: bool = False) -> Dict[str, Dict[str, Any]]:
+        """将文件中的记录按 hash 索引，保留所有周期的信息"""
+        data_map = {}
+        if not os.path.exists(path):
+            return data_map
+        
+        # 兼容 selected_configs (list) 和 reports (jsonl)
+        try:
+            if is_selected_config:
+                # 假设 load_selected_configs 是你已有的函数
+                records = load_selected_configs(path) 
+            else:
+                with open(path, "r", encoding="utf-8") as f:
+                    records = [json.loads(line.strip()) for line in f if line.strip()]
+        except Exception as e:
+            logger.error(f"❌ Failed to load {path}: {e}")
+            return data_map
+        for record in records:
+            h = record["short"].get("params", {}).get("hash")
+            data_map[h] = record
+        return data_map
 
-    compare_reports = []
-    only_in_old = []
-    only_in_new = []
+    # --- 2. 加载数据 ---
+    old_data = load_records_by_hash(old_reports_path, is_selected_config=True)
+    new_data = load_records_by_hash(new_reports_path, is_selected_config=False)
 
-    for h, old_r in old_reports.items():
-        if h in new_reports:
-            compare_reports.append({
-                "params": old_r["params"],
-                "performance": old_r["performance"],
-                "performance_r": new_reports[h]["performance"],
-            })
-        else:
-            only_in_old.append(h)
+    logger.info(f"📥 Loaded {len(old_data)} old records and {len(new_data)} new records")
 
-    for h in new_reports:
-        if h not in old_reports:
-            only_in_new.append(h)
+    # --- 3. 核心对比逻辑 ---
+    compare_results = []
+    hashes_only_in_old = []
+    hashes_only_in_new = list(set(new_data.keys()) - set(old_data.keys()))
 
-    if not compare_reports:
-        logger.warning("⚠️  No matching configurations found for comparison")
-        return None, 0, len(only_in_old), len(only_in_new)
+    for h, old_record in old_data.items():
+        if h not in new_data:
+            hashes_only_in_old.append(h)
+            continue
 
-    compare_file_path = os.path.join(output_dir, "compare_reports.jsonl")
-    with open(compare_file_path, "w", encoding="utf-8") as f:
-        for report in compare_reports:
-            f.write(json.dumps(report, ensure_ascii=False, default=str) + "\n")
+        new_record = new_data[h]
+        # 初始化对比条目
+        comparison_entry = {
+            "hash": h,
+            "verify_all_passed": True,
+            "period_details": {}
+        }
 
-    logger.info(f"📄 Compare reports saved: {compare_file_path} ({len(compare_reports)} matched)")
-    if only_in_old:
-        logger.info(f"ℹ️  {len(only_in_old)} only in old (not rerun)")
-    if only_in_new:
-        logger.info(f"ℹ️  {len(only_in_new)} only in new")
+        # 遍历三个周期
+        for p in periods:
+            old_p = old_record.get(p)
+            new_p = new_record.get(p)
 
-    return compare_file_path, len(compare_reports), len(only_in_old), len(only_in_new)
+            # 情况 A: 两个报告中都有这个周期的内容
+            if old_p and new_p:
+                old_cagr = old_p.get("performance", {}).get("cagr")
+                new_cagr = new_p.get("performance", {}).get("cagr")
+
+                # 只有当两个 CAGR 都是数值时才比较
+                if isinstance(old_cagr, (int, float)) and isinstance(new_cagr, (int, float)):
+                    # 保留一位小数比较 (假设 cagr 为 0.1556 代表 15.6%)
+                    v1 = round(old_cagr, 1)
+                    v2 = round(new_cagr, 1)
+                    is_match = (v1 == v2)
+                    
+                    if not is_match:
+                        comparison_entry["verify_all_passed"] = False
+                    
+                    comparison_entry["period_details"][p] = {
+                        "status": "match" if is_match else "mismatch",
+                        "old_cagr": v1,
+                        "new_cagr": v2
+                    }
+                else:
+                    comparison_entry["period_details"][p] = {"status": "missing_performance_data"}
+            
+            # 情况 B: 其中一方缺失该周期
+            elif old_p or new_p:
+                comparison_entry["period_details"][p] = {"status": "period_not_in_both"}
+                # 如果这个周期在策略中本该存在却缺失，标记失败
+                comparison_entry["verify_all_passed"] = False
+
+        # 将 params 保留一份在结果里方便回溯
+        comparison_entry["params"] = old_record.get("short", {}).get("params") or old_record.get("long", {}).get("params")
+        compare_results.append(comparison_entry)
+
+    # --- 4. 保存与统计 ---
+    if not compare_results:
+        logger.warning("⚠️ No matching hashes found to compare.")
+        return None, 0, len(hashes_only_in_old), len(hashes_only_in_new)
+
+    output_path = os.path.join(output_dir, "compare_reports.jsonl")
+    failed_count = sum(1 for r in compare_results if not r["verify_all_passed"])
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        for entry in compare_results:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    logger.info(f"✅ Comparison finished. Result saved to: {output_path}")
+    logger.info(f"📊 Matched: {len(compare_results)} | Failed: {failed_count}")
+    logger.info(f"ℹ️  Only in Old: {len(hashes_only_in_old)} | Only in New: {len(hashes_only_in_new)}")
+
+    return output_path, len(compare_results), len(hashes_only_in_old), len(hashes_only_in_new)
 
 
 # -----------------------------------------------------------------------------
@@ -654,10 +694,6 @@ def main():
             # sim_para.max_daily_loss_pct = 0.035
             # sim_para.atr_sl_mult_long = 8
             # sim_para.atr_sl_mult_short = 5
-            sim_para.trade_risk = 0.3
-            report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
-            report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
-            report['forward'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='forward')["statistics"][1]
             sim_para.trade_risk = 0.4
             report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
             report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]

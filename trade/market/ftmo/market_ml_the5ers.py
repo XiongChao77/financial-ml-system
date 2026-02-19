@@ -81,6 +81,7 @@ class LiveBot:
         self.data_feed = BinanceDataFeed(
             LiveConfig.SYMBOL_BINANCE, 
             LiveConfig.TIMEFRAME, 
+            "um",
             max_len = self.min_bars_needed + 500
         )
         #strategy
