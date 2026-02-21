@@ -1,7 +1,88 @@
-import json,os
+import json,os,subprocess
 import hashlib
 from dataclasses import asdict, is_dataclass,dataclass
 import numpy as np
+from datetime import datetime
+from typing import Dict, Iterable, List
+
+def auto_git_commit(logger):
+    """
+    检查是否有未提交的修改，如果有，自动执行 git add 和 commit
+    """
+    try:
+        # 1. 检查工作区状态
+        status = subprocess.check_output(["git", "status", "--porcelain"]).decode().strip()
+        
+        if not status:
+            logger.info("✅ Git workspace is clean. No auto-commit needed.")
+            return
+
+        # 2. 发现修改，执行自动提交
+        logger.info("📝 Detected uncommitted changes. Performing auto-commit...")
+        
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        commit_msg = f"Auto-commit before experiment"
+        
+        # 执行 git add .
+        subprocess.run(["git", "add", "."], check=True)
+        # 执行 git commit
+        subprocess.run(["git", "commit", "-m", commit_msg], check=True)
+        
+        # 获取最新的 commit hash 记录在 log 中方便追溯
+        new_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
+        logger.info(f"🚀 Auto-commit successful. Commit hash: {new_hash}")
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Auto-commit failed: {e}")
+    except Exception as e:
+        logger.error(f"⚠️ Unexpected error during git operation: {e}")
+
+def get_data_metadata_hash(data_files: List[str]) -> str:
+    """
+    根据文件名、大小和修改时间生成元数据哈希
+    """
+    m = hashlib.md5()
+    for f_path in sorted(data_files):
+        if not os.path.exists(f_path):
+            continue
+        stat = os.stat(f_path)
+        # 按照用户要求：文件名 + 大小 + 修改时间
+        info = f"{os.path.basename(f_path)}|{stat.st_size}|{stat.st_mtime}"
+        m.update(info.encode('utf-8'))
+    return m.hexdigest()
+
+def create_git_tag(tag_prefix="exp"):
+    """
+    为当前提交打上实验标签
+    """
+    tag_name = f"{tag_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    try:
+        subprocess.run(["git", "tag", "-a", tag_name, "-m", f"Experiment started at {tag_name}"], check=True)
+        return tag_name
+    except Exception as e:
+        return f"tag_failed_{str(e)}"
+
+def isolate_and_relaunch(exp_dir: str, ignore_patterns: List[str]):
+    """
+    将项目拷贝到实验目录并从新位置重新启动
+    """
+    src_dir = os.path.abspath(os.path.join(current_work_dir, ".."))
+    # 在实验目录下创建一个 'code' 文件夹存放代码
+    dst_dir = os.path.join(exp_dir, "source_code")
+    
+    if os.path.exists(dst_dir):
+        return # 已经处于隔离环境，不再重复拷贝
+    
+    print(f"📦 Isolating codebase to: {dst_dir}")
+    shutil.copytree(src_dir, dst_dir, ignore=shutil.ignore_patterns(*ignore_patterns))
+    
+    # 构建重新启动的命令
+    new_script_path = os.path.join(dst_dir, "experiment", os.path.basename(__file__))
+    new_args = [sys.executable, new_script_path] + sys.argv[1:] + ["--is_isolated"]
+    
+    # 重新启动并退出当前进程
+    subprocess.run(new_args)
+    sys.exit(0)
 
 def safe_get(d, keys, default=0):
     """从多层 dict 中取值，避免 KeyError"""

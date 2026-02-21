@@ -447,6 +447,79 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
         logger.info(f"start training label :{label_col}")
         full_ds = TimeSeriesWindowDataset(
             df=df.copy(), kline_interval_ms=kline_interval_ms, feature_cols=feature_list, label_col=label_col, window=data_cfg.window,
+            cache_path=os.path.join(save_dir,"train_cache.pt"), stride =train_cfg.stride, use_cache = False, show_feature_distribution=True
+        )
+        logger.warning(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):"
+                    f"{full_ds.feature_names}")
+        x_mem = full_ds.X.element_size() * full_ds.X.nelement() / (1024**2)
+        y_mem = full_ds.y.element_size() * full_ds.y.nelement() / (1024**2)
+        r_mem = full_ds.returns.element_size() * full_ds.returns.nelement() / (1024**2)
+
+        total_gpu_mem_per_process = x_mem + y_mem + r_mem
+        logger.info(f"🚀 Estimated GPU VRAM per process: {total_gpu_mem_per_process:.2f} MB")
+        # 对 ic_direction=-1 的特征进行反向（乘以 -1），使其与收益正相关
+        if feature_direction_map:
+            full_ds.X = apply_feature_direction(full_ds.X, full_ds.feature_names, feature_direction_map, logger)
+
+        # 显存预加载优化
+        logger.info(f"Pre-loading entire dataset to {device}...")
+        full_ds.X = full_ds.X.to(device)
+        full_ds.y = full_ds.y.to(device)
+        full_ds.returns = full_ds.returns.to(device) # 之前建议的是 .r，请统一为 .returns
+        logger.info("Data loaded to VRAM.")
+
+        M = len(full_ds)
+        logger.info(f"Total windows (M) = {M}, window = {data_cfg.window}")
+
+        # 2. 切分数据
+        tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
+        
+        lr_f1,report, lr_importance = run_logistic_regression_probe(full_ds, tr_rng, te_rng, logger)
+        sweep_results.append({
+            "label_column": label_col,
+            "threshold_multiplier": int(label_col.replace("label_v", "")) / 10.0, # 将 "v12" 还原为 1.2
+            "macro_f1": lr_f1,
+            "report":report
+        })
+    results_df = pd.DataFrame(sweep_results)
+    output_path = os.path.join(save_dir, "lr_probe_sweep_results.csv")
+    results_df.to_csv(output_path, index=False)
+    
+    logger.info(f"✅ All sweep tasks completed!")
+    logger.info(f"📊 Summary results saved to: {output_path}")
+    
+    # 打印简要总结
+    print("\n" + "="*30)
+    print("📈 SWEEP SUMMARY (Macro-F1)")
+    print(results_df.to_string(index=False))
+    print("="*30)
+
+    plot_f1_sweep(results_df, save_dir)
+    return sweep_results
+
+def run_subsampling_probe(feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg, pre_para: common.BaseDefine,prep_output_dir:str, save_dir,experiment:bool):
+    # 0. 初始化环境
+    set_seed(train_cfg.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Device: {device} | Model: {model_cfg.model_type} version: {model_cfg.model_version}")
+    if device.type == 'cuda':
+        # 启用 TensorFloat32 (TF32)，5090 的算力吞吐量会大幅提升
+        torch.set_float32_matmul_precision('high')
+
+    df = common.load_train_df_from_dir(prep_output_dir)
+    kline_interval_ms = common.load_interval_ms_from_dir(prep_output_dir)
+    logger.info(f"Using TimeSeriesWindowDataset with window={data_cfg.window} Origin data len {len(df)}...")
+
+    feature_list = list(feature_direction_map.keys())
+    label_v_cols = sorted(
+        [col for col in df.columns if col.startswith("label_v")],
+        key=lambda x: int(x.replace("label_v", ""))
+    )
+    sweep_results = []
+    for label_col in label_v_cols:
+        logger.info(f"start training label :{label_col}")
+        full_ds = TimeSeriesWindowDataset(
+            df=df.copy(), kline_interval_ms=kline_interval_ms, feature_cols=feature_list, label_col=label_col, window=data_cfg.window,
             cache_path=os.path.join(save_dir,"train_cache.pt"), stride =train_cfg.stride, use_cache = train_cfg.use_cache, show_feature_distribution=True
         )
         logger.warning(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):"
@@ -651,6 +724,13 @@ def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDe
 if __name__ == "__main__":
     logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
     begin_time = time.time()
-    main(logger)
+    prep_output_dir = os.path.join(common.PERSISTENCE_DIR, 'dissertation', 'data_process')
+    para = common.BaseDefine
+    para.candlestick_num =96
+    para.predict_num = 6
+    para.symbol = 'BTCUSDT'
+    para.trading_type = 'spot'
+    para.interval = "1h"
+    main(logger, pre_para = para, prep_output_dir = prep_output_dir)
     end_time = time.time()
     logger.info(f"Total training time: {(end_time - begin_time)} seconds")

@@ -1,16 +1,20 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 import os, sys, time, json, math
-
+from operator import itemgetter
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
-
+import copy
 # 引入自定义模块
 from data_process.common import *
 from data_process import common 
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_30m','09_07_11'))
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_15m','01_02_36'))
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-14','DOGEUSDT_5m','07_54_32'))
-exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','09_09_43'))
+# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','09_09_43'))
+# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','19_15_58'))
+# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','23_43_49'))
+exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-02-21','22_51_10'))
+
 output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments')
 shorts_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_short.jsonl'))
 longs_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_long.jsonl'))
@@ -152,7 +156,7 @@ def extract_row(report, src_path):
         "l_daily_freq" : long.get("trades", {}).get("daily_freq"),
         "f_cagr": forward_perf.get("cagr"),
         "f_calmar": forward_perf.get("calmar"),
-        "f_calmar" : forward.get("trades", {}).get("daily_freq"),
+        "f_daily_freq" : forward.get("trades", {}).get("daily_freq"),
         "symbol": common.get("symbol"),
         "interval": common.get("interval"),
         "hash": params.get('hash',0),
@@ -184,19 +188,36 @@ def main():
     for row in sorted_cagr:
         merge_selected(selected, row, "top_cagr", row["path"])
     print(f"Total reports: {len(selected)}")
-    selected = filter_by_performance(selected.values(), period ='short'  ,min_cagr=0.4, min_calmar=1)
-    print(f"After short performance filter: {len(selected)} reports")
-    
-    selected = filter_by_performance(selected, period ='long', min_cagr=0.1, min_calmar=0)
-    print(f"After long performance filter: {len(selected)} reports")
-    selected = filter_by_performance(selected, period ='forward', min_cagr=0.3, min_calmar=0.5)
-    print(f"After forward performance filter: {len(selected)} reports")
-    selected = filter_by_trades(selected, period ='short', min_daily_freq = 1)
-    print(f"After short trades filter: {len(selected)} reports")
-    selected = filter_by_trades(selected, period ='long', min_daily_freq = 1)
-    analyze_holdbar(selected)
-    print(f"After long trades filter: {len(selected)} reports")
-    analyze_short_long_correlation(selected)
+    all_results = list(selected.values())
+    # selected = filter_by_trades(selected, period ='short', min_daily_freq = 2)
+    # print(f"After short trades filter: {len(selected)} reports")
+    # selected = filter_by_performance(all_results, period ='long', min_cagr=0.1, min_calmar=0)
+    # analyze_short_long_correlation(all_results)
+    # print(f"After long performance filter: {len(selected)} reports")
+    # selected,short_unselected = filter_by_criteria(selected, period ='long'  ,avg_pct_gross=0.1)
+    analyze_holdbar(all_results,target_key="stride", metric_key="cagr")
+    selected1 = filter_stable(all_results)
+    analyze_holdbar(all_results,target_key="stride", metric_key="cagr")
+    sorted_selected1 = sorted(selected1, key=itemgetter("l_cagr"), reverse=True)
+    print(f"-------------After filter_stable: {len(selected1)} reports")
+    selected2 = filter_aggressive(all_results)
+    print(f"-------------After filter_aggressive: {len(selected2)} reports")
+    merged_selected = merge_selected_sort(sorted_selected1[:5],selected2[:5],period ='long', sort_key='cagr')
+    print(f"-------------After all filter: {len(merged_selected)} reports")
+    # sorted_forward_unselected = sorted(selected, key=itemgetter("l_cagr"), reverse=True)
+    # l_sorted_cagr = sorted(selected, key=itemgetter("l_cagr"), reverse=True)
+    # f_sorted_cagr = sorted(selected, key=itemgetter("f_cagr"), reverse=True)
+    # freq_sorted_cagr = sorted(selected, key=itemgetter("l_daily_freq"), reverse=True)
+
+    analyze_holdbar(merged_selected,target_key="batch_size", metric_key="l_cagr")
+    # plot_heatmap(merged_selected,'candlestick_num','holdbar')
+    # plot_heatmap(merged_selected,'candlestick_num','holdbar','l_calmar',)
+    # selected,unselected = filter_by_trades(selected, period ='short', min_daily_freq = 0.5)
+    # print(f"After short trades filter: {len(selected)} reports")
+    # selected,unselected = filter_by_trades(selected, period ='long', min_daily_freq = 1)
+    # print(f"After long trades filter: {len(selected)} reports")
+    # for r in selected:
+    #     print(f"hash:{r["hash"]} hash:{r["hash"]}")
     # selected = filter_by_rc_summary(selected,'short')
     # print(f"After short rc_summary filter: {len(selected)} reports")
     # selected = filter_by_rc_summary(selected,'long')
@@ -206,10 +227,72 @@ def main():
     out_path = os.path.join(output_dir,"selected_configs" ,"selected_configs.jsonl")
     os.makedirs(os.path.join(output_dir,"selected_configs"), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
-        for r in selected:
+        for r in merged_selected:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     print(f"[SAVE] {out_path} | total={len(selected)}")
+
+def filter_stable(selected):
+    results,unselected = filter_by_criteria(selected, period ='short', cagr=0.6, calmar=0, win_rate = 30  )
+    print(f"After short performance filter: {len(results)} reports")
+    results,long_unresults = filter_by_performance(results, period ='long', min_cagr=0.5, min_calmar=0.6)#,min_rc_cagr_median = -0.2)#,min_rc_cagr_q25 = -0.2)
+    print(f"After long cagr filter: {len(results)} reports")
+    results,long_unresults = filter_by_performance(results, period ='long', min_rc_cagr_median = 0)
+    print(f"After long rc_cagr_median filter: {len(results)} reports")
+    results,forward_unresults = filter_by_performance(results, period ='forward', min_cagr=0.1, min_calmar=0.5)
+    print(f"After forward performance filter: {len(results)} reports")
+    return results
+
+def filter_aggressive(selected):
+    # 1️⃣ short 要非常强（抓当前 regime）
+    results, _ = filter_by_criteria( selected, period='short', cagr=1, calmar=0)
+    print(f"After short performance filter: {len(results)} reports")
+    # 2️⃣ long 只保证不是垃圾，不追求极稳
+    results, _ = filter_by_performance( results, period='long', min_cagr=0.15, min_calmar=0.3 )
+    print(f"After long performance filter: {len(results)} reports")
+    results,long_unresults = filter_by_performance(results, period ='long', min_rc_cagr_median = 0)
+    print(f"After long rc_cagr_median filter: {len(results)} reports")
+    results, _ = filter_by_performance( results, period='forward', min_cagr=0.7, min_calmar=0.4)
+    print(f"After forward performance filter: {len(results)} reports")
+
+    return results
+
+def merge_selected_sort(*selected_lists, period ='short', sort_key=None, reverse=True):
+    """
+    合并多个 selected 列表，按 hash 去重，并按 sort_key 排序。
+
+    Parameters
+    ----------
+    *selected_lists : 任意多个 selected 列表
+    sort_key : str
+        用于排序的字段名，例如 "l_cagr"
+    reverse : bool
+        True 表示降序排序（默认从大到小）
+
+    Returns
+    -------
+    list
+        去重+排序后的新列表
+    """
+
+    merged_dict = {}
+
+    for selected in selected_lists:
+        for row in selected:
+            h = row.get("hash")
+            if h not in merged_dict:
+                merged_dict[h] = row
+
+    result = list(merged_dict.values())
+
+    # 排序
+    if sort_key is not None:
+        result.sort(
+            key=lambda x: common.recursive_get(x.get(period), sort_key),
+            reverse=reverse
+        )
+
+    return result
 
 def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
     """
@@ -261,20 +344,27 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
                 "Min CAGR": f"{np.min(m['cagr']):.2%}",
                 "Std CAGR": f"{np.std(m['cagr']):.4f}",
                 "Avg Calmar": f"{np.mean(m['calmar']):.2f}",
+                "Max Calmar": f"{np.max(m['calmar']):.2%}",
                 "Avg Sharpe": f"{np.mean(m['sharpe']):.2f}",
                 "Avg MaxDD": f"{np.mean(m['max_dd']):.2f}%" # 修正回撤显示
             })
 
     # 4. 完美对齐输出
     if summary_rows:
+        pd.set_option('display.max_columns', None)      # 显示所有列
+        pd.set_option('display.expand_frame_repr', False) # 禁止自动换行（保持在一行内）
+        pd.set_option('display.max_colwidth', None)     # 不限制列宽
+        pd.set_option('display.width', 1000)            # 设置足够大的总宽度
+        pd.set_option('display.expand_frame_repr', True)
         df_final = pd.DataFrame(summary_rows).set_index("Group")
-        
-        print("\n" + "="*110)
+    
+        print("\n" + "="*120) # 稍微拉长分割线
         print(f"📊 参数组对比评估 (Group 1: {label1} | Group 2: {label2})")
-        print("="*110)
-        # 使用 pandas 的 to_string 保证列对齐
-        print(df_final.to_string(justify='center', col_space=10))
-        print("="*110)
+        print("="*120)
+        
+        # 强制不换行打印
+        print(df_final.to_string(justify='center', index=True, line_width=1000))
+        print("="*120)
         
         # 5. 极简结论
         cagr1 = np.mean(g1_metrics['cagr'])
@@ -285,7 +375,48 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         print("❌ 错误: 未能分类出有效数据，请检查输入 rows 的参数。")
     exit()
 
-def filter_by_performance(reports, period= 'short', min_cagr=None, min_calmar=None, min_sharpe=None):
+def filter_by_criteria(reports, period='short', **criteria):
+    """
+    通用过滤函数：
+    - reports: 报告列表
+    - period: 指定周期 (short, long, forward)
+    - **criteria: 过滤要求，例如 cagr=0.3, sharpe=1.0
+    """
+    passed = []
+    failed = []
+    key_path_all={}
+    for key, min_value in criteria.items():
+        if min_value is None:
+            continue
+        key_path = find_key_path(reports[0].get(period, {}), key)
+        if key_path==None:
+            raise RuntimeError(f"key {key} not found")
+        key_path_all[key] = key_path
+    def meets_all(report):
+        # 1. 获取指定周期的 performance 字典
+        period_data = report.get(period, {}) # 兼容不同层级的 get
+
+        if not period_data:
+            return False
+
+        # 2. 遍历所有传入的过滤条件
+        for key, min_value in criteria.items():
+            if min_value is None:
+                continue
+            current_value = get_value_by_path(period_data, key_path_all[key])
+            if current_value is None:
+                return False
+            if current_value < min_value:
+                return False
+        return True
+    for r in reports:
+        if meets_all(r):
+            passed.append(r)
+        else:
+            failed.append(r)
+    return passed, failed
+
+def filter_by_performance(reports, period= 'short', min_cagr=None, min_calmar=None, min_sharpe=None,min_rc_cagr_median = None, min_rc_cagr_q25 = None):
     """
     Filter reports based on performance metrics.
     """
@@ -297,9 +428,20 @@ def filter_by_performance(reports, period= 'short', min_cagr=None, min_calmar=No
             return False
         if min_sharpe is not None and perf.get("sharpe", 0) < min_sharpe:
             return False
+        if min_rc_cagr_median is not None and recursive_get(perf, "rc_cagr_median") < min_rc_cagr_median:
+            return False
+        if min_rc_cagr_q25 is not None and recursive_get(perf, "rc_cagr_q25") < min_rc_cagr_q25:
+            return False
         return True
+    passed = []
+    failed = []
+    for r in reports:
+        if meets_criteria(r):
+            passed.append(r)
+        else:
+            failed.append(r)
 
-    return [r for r in reports if meets_criteria(r)]
+    return passed, failed
 
 def filter_by_rc_summary(
     reports,
@@ -383,7 +525,15 @@ def filter_by_trades(reports, period= 'short', min_win_rate=35, min_daily_freq =
             return False
         return True
 
-    return [r for r in reports if meets_criteria(r)]
+    passed = []
+    failed = []
+    for r in reports:
+        if meets_criteria(r):
+            passed.append(r)
+        else:
+            failed.append(r)
+
+    return passed, failed
 
 def find_key_path(obj, target_key, path=None):
     """
@@ -426,7 +576,7 @@ def get_value_by_path(obj, path):
         return None
 
 
-def analyze_holdbar(selected, target_key="holdbar", metric_key="cagr"):
+def analyze_holdbar(selected, target_key="holdbar", metric_key="l_cagr"):
     """
     从 selected 中递归查找 target_key，统计数量并分析性能指标，比较最优值。
     第一次遍历会自动定位 target_key 的位置，之后直接用路径索引，提高效率。
@@ -479,7 +629,7 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="cagr"):
         for report in reports:
             short = report.get("short", report)
             perf = short.get("performance", {})
-            metric = perf.get(metric_key)
+            metric = recursive_get(report,metric_key)
             calmar = perf.get("calmar")
             
             if metric is not None:
@@ -493,6 +643,7 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="cagr"):
             "percentage": (count / total_count) * 100,
             f"avg_{metric_key}": np.mean(metric_list) if metric_list else None,
             "avg_calmar": np.mean(calmar_list) if calmar_list else None,
+            f"max_calmar": np.max(calmar_list) if calmar_list else None,
             f"max_{metric_key}": np.max(metric_list) if metric_list else None,
             f"std_{metric_key}": np.std(metric_list) if len(metric_list) > 1 else 0,
         })
@@ -501,7 +652,7 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="cagr"):
     print("\n" + "="*100)
     print(f"📊 {target_key} 分析结果 (总共 {total_count} 个报告)")
     print("="*100)
-    print(f"{target_key:<15} {'Count':<8} {'%':<8} {f'平均{metric_key.upper()}':<12} {f'Max {metric_key.upper()}':<12} {f'Std {metric_key.upper()}':<12} {'平均Calmar':<12}")
+    print(f"{target_key:<15} {'Count':<8} {'%':<8} {f'平均{metric_key.upper()}':<12} {f'Max {metric_key.upper()}':<12} {f'Std {metric_key.upper()}':<12} {'平均Calmar':<12} {'MAX Calmar':<12}")
     print("-"*100)
     
     for result in analysis_results:
@@ -512,13 +663,15 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="cagr"):
         max_metric = result[f"max_{metric_key}"]
         std_metric = result[f"std_{metric_key}"]
         avg_calmar = result["avg_calmar"]
+        max_calmar = result["max_calmar"]
         
         metric_str = f"{avg_metric:.2%}" if avg_metric is not None else "N/A"
         max_metric_str = f"{max_metric:.2%}" if max_metric is not None else "N/A"
         std_metric_str = f"{std_metric:.4f}" if std_metric is not None else "N/A"
         calmar_str = f"{avg_calmar:.2f}" if avg_calmar is not None else "N/A"
+        max_calmar_str = f"{max_calmar:.2f}" if max_calmar is not None else "N/A"
         
-        print(f"{value:<15} {count:<8} {pct:<7.1f}% {metric_str:<12} {max_metric_str:<12} {std_metric_str:<12} {calmar_str:<12}")
+        print(f"{value:<15} {count:<8} {pct:<7.1f}% {metric_str:<12} {max_metric_str:<12} {std_metric_str:<12} {calmar_str:<12} {max_calmar_str:<12}")
     
     print("="*100)
     
@@ -533,40 +686,54 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="cagr"):
         print(f"  平均Calmar最优: {target_key}={best_calmar[target_key]} ({best_calmar['avg_calmar']:.2f})")
         print("="*100)
 
-def filter_by_short_longs():
+def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="heatmap.png"):
     """
-    Filter reports based on short/long trade ratio.
+    不仅打印表格，还直接生成并保存热力图图片。
     """
-    shorts = load_reports(shorts_file)
-    longs = load_reports(longs_file)
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    import numpy as np
 
-    print(f"Short total reports: {len(shorts)}")
-    short_selected = filter_by_performance(shorts, min_cagr=0.2, min_calmar=1.2)
-    print(f"Short after performance filter: {len(short_selected)} reports")
-    # selected = filter_by_rc_summary(selected, min_rc_es_05 = None, min_rc_q05 = None, max_rc_longest_neg_run = None, max_rc_neg_ratio = None, min_rc_median = None, min_rc_q25 = None)
-    print(f"Short after rc_summary filter: {len(short_selected)} reports")
-    short_selected = filter_by_trades(short_selected, min_total_trades=100)#, min_win_rate=38, min_daily_freq = 0.3)
-    print(f"Short after trades filter: {len(short_selected)} reports")
-
-    longs = sorted(longs, key=lambda x: x['performance']["cagr"], reverse=True)
-    print(f"Long total reports: {len(longs)}")
-    long_selected = filter_by_performance(longs, min_cagr=0.2, min_calmar=1)
-    print(f"Long after performance filter: {len(long_selected)} reports")
-    # long_selected = filter_by_rc_summary(long_selected, min_rc_es_05 = -2, min_rc_q05 = None, max_rc_longest_neg_run = None, max_rc_neg_ratio = None, min_rc_median = None, min_rc_q25 = None)
-    print(f"Long after rc_summary filter: {len(long_selected)} reports")
-    long_selected = filter_by_trades(long_selected, min_total_trades=100)#, min_win_rate=38)
-    print(f"Long after trades filter: {len(long_selected)} reports")
-
-    shorts_dict = {r["params"]["hash"]: r for r in short_selected}
-    longs_dict = {r["params"]["hash"]: r for r in long_selected}
-    common_keys = set(shorts_dict.keys()) & set(longs_dict.keys())
-    merged = {k: {"short": shorts_dict[k], "long": longs_dict[k]} for k in common_keys}
+    # 1. 数据准备 (复用之前的逻辑)
+    path1 = find_key_path(selected[0], var1_key)
+    path2 = find_key_path(selected[0], var2_key)
     
-    out_path = os.path.join(exp_dir,"selected_configs" ,"candidate.jsonl")
-    os.makedirs(os.path.join(exp_dir,"selected_configs"), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        for r in merged.values():
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    matrix_data = []
+    for report in selected:
+        v1 = get_value_by_path(report, path1)
+        v2 = get_value_by_path(report, path2)
+        metric = recursive_get(report, metric_key)
+        if v1 is not None and v2 is not None and metric is not None:
+            matrix_data.append({var1_key: v1, var2_key: v2, "val": metric})
+
+    df = pd.DataFrame(matrix_data)
+    # 计算平均值并转为透视表
+    heatmap_df = df.groupby([var1_key, var2_key])["val"].mean().unstack()
+
+    # 2. 绘图设置
+    plt.figure(figsize=(12, 8))
+    sns.set_theme(style="white")
+    
+    # 绘制热力图
+    # annot=True 会在格子里写数字，fmt='.2%' 格式化为百分比
+    ax = sns.heatmap(
+        heatmap_df, 
+        annot=True, 
+        fmt=".1%", 
+        cmap="RdYlBu_r", # 红黄蓝调色盘，红色代表高收益
+        cbar_kws={'label': metric_key.upper()}
+    )
+
+    plt.title(f"Parameter Heatmap: {var1_key} vs {var2_key} ({metric_key})")
+    plt.xlabel(var2_key)
+    plt.ylabel(var1_key)
+
+    # 3. 保存并显示
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    print(f"✅ 图片已保存至: {save_path}")
+    plt.show()
 
 if __name__ == "__main__":
     main()

@@ -32,7 +32,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
     label_col = 'label'
-    function =2
+    function =1
     if function==0:
         df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
         common.attach_label(df, para=para,label_col = label_col)
@@ -47,7 +47,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
         
         # 定义更精细的步长以捕捉梯度变化
         vol_range = np.arange(0.5, 3.1, 0.05).round(2)   #not include 3.1
-        stop_range = [0.1,0.2, 0.3, 0.5,2,100]  #np.arange(100, 100.1, 0.1).round(1)   #not include 1.6
+        stop_range = [10000]  #np.arange(100, 100.1, 0.1).round(1)   #not include 1.6
         
         analyzer.run_parameter_sweep(vol_range, stop_range, common.attach_label)
         # analyzer.analyze_and_plot()
@@ -128,5 +128,12 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
 
 if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
-    logger, _ = common.setup_session_logger(sub_folder='data_process')
-    main(logger,common.FEATURE_GROUP_LIST)
+    logger, _ = common.setup_session_logger(sub_folder='dissertation/data_process')
+    prep_output_dir = os.path.join(common.PERSISTENCE_DIR, 'dissertation', 'data_process')
+    para = common.BaseDefine
+    para.candlestick_num =96
+    para.predict_num = 6
+    para.symbol = 'BTCUSDT'
+    para.trading_type = 'spot'
+    para.interval = "1h"
+    main(logger,common.FEATURE_GROUP_LIST, para=para, prep_output_dir = prep_output_dir)

@@ -12,7 +12,7 @@ Key design goals
 
 from __future__ import annotations
 
-import argparse
+import argparse,shutil
 import copy
 import json
 import logging
@@ -51,8 +51,10 @@ TASKS_SPEC_FILE = "tasks_spec.json"
 REPORTS_FILE = "reports.jsonl"
 SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
-MAX_TRAIN = 3  # max concurrent train processes (each train runs in its own process)
+MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
 MAX_SIM = 4
+SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
+INTERVAL: str = "15m"
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -374,7 +376,6 @@ def _train_task(
         # IMPORTANT: enqueue sims BEFORE reporting train_done (so main can safely send None after last train_done)
         for sim in sim_tasks:
             sim_task_queue.put((pre_h, pre_params, tr_h, train_params, sim))
-
         train_result_queue.put(("train_done", pre_h, tr_h, time.time() - t0))
     except Exception:
         logger.exception(f"Train failed: {pre_h}/{tr_h}")
@@ -407,10 +408,10 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
             report = {'short':{}, 'long':{}, 'forward': {}, 'pass':False}
             report['short'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                 train_output_dir=train_output_dir, device="cpu", period='short' )["statistics"][1]
-            if report['short']["performance"]["cagr"] > 0.3 :
+            if report['short']["performance"]["cagr"] > 0.5 :
                 report['long'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                     train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
-                if report['long']["performance"]["cagr"] > -0.1 :
+                if report['long']["performance"]["cagr"] > 0 :
                     report['pass'] = True
                 report['forward'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                     train_output_dir=train_output_dir, device="cpu", period='forward' )["statistics"][1]
@@ -428,7 +429,7 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
 # -----------------------------------------------------------------------------
 # Result handling
 # -----------------------------------------------------------------------------
-def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger: logging.Logger, eta_msg) -> None:
+def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger: logging.Logger, eta_msg,pending_sim_hashes: Dict[Tuple[str, str], Set[str]],temp_dir: str, valid:bool) -> None:
     while True:
         try:
             msg = sim_result_queue.get_nowait()
@@ -446,6 +447,29 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
         stats["simulation"]["count"] += 1
         if report_stat is not None:
             common.append_jsonl(rp, report_stat)
+        # 2. 基于哈希的核销与清理逻辑
+        train_key = (pre_h, tr_h)
+        if train_key in pending_sim_hashes:
+            # 从待办集合中移除当前完成的 sim_h
+            pending_sim_hashes[train_key].discard(sim_h)
+            
+            # 如果该训练任务对应的所有模拟任务都已从集合中移除
+            if not pending_sim_hashes[train_key]:
+                train_dir = _train_output_dir(temp_dir, pre_h, tr_h)
+                if os.path.exists(train_dir):
+                    try:
+                        if valid == False:
+                            shutil.rmtree(train_dir)
+                            logger.info(f"🧹 All sims finished for Train {tr_h}. Deleted: {train_dir}")
+                        else:
+                            strategy_hash = report_stat['short']['params']['hash']
+                            target_dir = os.path.join(temp_dir, strategy_hash)
+                            if os.path.exists(target_dir):
+                                shutil.rmtree(target_dir)
+                            shutil.move(train_dir, target_dir)
+                            logger.info(f"🚀 Successfully moved artifacts: {tr_h} -> {strategy_hash} {target_dir}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to handle {train_dir}: {e}")
 
         logger.info(f"    Sim {pre_h}/{tr_h}/{sim_h} done in {elapsed:.2f}s")
         em = eta_msg()
@@ -694,30 +718,24 @@ def main():
             # sim_para.max_daily_loss_pct = 0.035
             # sim_para.atr_sl_mult_long = 8
             # sim_para.atr_sl_mult_short = 5
-            sim_para.trade_risk = 0.4
-            report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
-            report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
-            report['forward'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='forward')["statistics"][1]
-            sim_para.trade_risk = 0.5
-            report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
-            report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
-            report['forward'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='forward')["statistics"][1]
-            sim_para.trade_risk = 0.6
-            report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
-            report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
-            report['forward'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='forward')["statistics"][1]
-            report_list.append(report)
-        output_path = os.path.join(exp_dir, "loaded_reports.jsonl")
-        with open(output_path, "w", encoding="utf-8") as f:
-            for report in report_list:
-                f.write(json.dumps(report, ensure_ascii=False, default=str) + "\n")
+            for trade_risk in [0.4,0.5,0.6,0.7,0.8,0.9]:
+                sim_para.trade_risk = trade_risk
+                report['short'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='short')["statistics"][1]
+                report['long'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='long')["statistics"][1]
+                report['forward'] = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, period='forward')["statistics"][1]
+                report_list.append(report)
+            output_path = os.path.join(exp_dir, params['hash'], "loaded_reports.jsonl")
+            os.makedirs(os.path.dirname(output_path), exist_ok= True)
+            with open(output_path, "w", encoding="utf-8") as f:
+                for report in report_list:
+                    f.write(json.dumps(report, ensure_ascii=False, default=str) + "\n")
         logger.info(f"✅ Completed in {time.time() - begin_time:.2f}s")
         exit(0)
     else:
         exp_dir = common.create_experiment_dir(
             os.path.join(common.PERSISTENCE_DIR, "batch_experiments"),
-            common.BaseDefine.symbol,
-            common.BaseDefine.interval,
+            SYMBOL,
+            INTERVAL,
         )
 
     logger = _setup_root_logger(exp_dir)
@@ -752,9 +770,9 @@ def main():
 
         preparation_task: List[Any] = []
         if args.prep or run_all:
-            for cn in [96,120]: #[96,120]
-                for pn in [14,16,18]: #[10,12,14,16,18]
-                    for vol_multiplier in [1.9,2]:
+            for cn in [96,108,116,124,132,140]: #[96,120]
+                for pn in [6,8,12,16,20,24,28,32,36,40]: #[10,12,14,16,18]
+                    for vol_multiplier in [1.9]:
                         item = common.BaseDefine(
                                 candlestick_num=cn,
                                 predict_num=pn,
@@ -762,8 +780,8 @@ def main():
                                 stop_multiplier_rate_long=0.2,
                                 vol_multiplier_short=vol_multiplier,
                                 stop_multiplier_rate_short=0.2,
-                                symbol="DOGEUSDT",
-                                interval="15m",
+                                symbol=SYMBOL,   #ETHUSDT
+                                interval=INTERVAL,
                                 trading_type="um",
                                 version=0
                             )
@@ -776,18 +794,21 @@ def main():
             # for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
             #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
             for flip_penalty in np.arange(0.2, 2.1, 0.1).round(1):
-                # for miss_penalty in np.arange(0.2, 2, 0.1).round(1):
-                    t_cfg = train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,flip_penalty = float(flip_penalty),miss_penalty = float(flip_penalty/2),
-                                              stride = 2, patience = 8)
+                # for miss_penalty in np.arange(0.2, 2, 0.1).round(1):\
+                for stride in [1,2]:
+                    t_cfg = train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,
+                                              flip_penalty = float(flip_penalty),miss_penalty = float(flip_penalty/2),stride = stride, patience = 8)
                     training_task.append(t_cfg)
         else:
             training_task.append(train.TrainConfig())
 
         simulation_task: List[Any] = []
         if args.sim or run_all:
-            for holdbar in [16, 20, 24 ,28, 32,36]:
-                s_cfg = simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
-                                                stop_loss_short=0.015,atr_sl_mult_long=8.0,atr_sl_mult_short=5.0,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04)
+            for i in [6, 8,10,12,16,20,24,28, 30,32,36,40,44]: #in range(1,16):
+                holdbar = i
+                for (atr_sl_mult_long, atr_sl_mult_short) in [(10,6),(8,5),(6,4),(5,4),(5,3),(4,3),(4,2),(3,2)]:
+                    s_cfg = simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
+                                                    stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04)
                 s_cfg.holdbar = holdbar
                 simulation_task.append(s_cfg)
         else:
@@ -796,6 +817,11 @@ def main():
         # task_spec 已经 ready
         sweep = collect_param_sweep(task_spec)
         log_param_sweep(logger, sweep)
+
+        tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
+        with open(tasks_spec_path, "w", encoding="utf-8") as f:
+            json.dump(task_spec, f, indent=2, ensure_ascii=False, default=str)
+        logger.info(f"📄 Tasks spec saved: {tasks_spec_path}")
 
         n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
         logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim} (new run)")
@@ -807,11 +833,11 @@ def main():
     logger.info(f"🚀 Pipeline: MAX_PREP={MAX_PREP}, train={MAX_TRAIN}, MAX_SIM={MAX_SIM}")
 
     # ---------------- queues & workers ----------------
-    prep_task_queue: mp.Queue = mp.Queue()
-    train_task_queue: mp.Queue = mp.Queue()
-    train_result_queue: mp.Queue = mp.Queue()
-    sim_task_queue: mp.Queue = mp.Queue()
-    sim_result_queue: mp.Queue = mp.Queue()
+    prep_task_queue: mp.Queue = mp.Manager().Queue()
+    train_task_queue: mp.Queue = mp.Manager().Queue()
+    train_result_queue: mp.Queue = mp.Manager().Queue()
+    sim_task_queue: mp.Queue = mp.Manager().Queue()
+    sim_result_queue: mp.Queue = mp.Manager().Queue()
 
     # start workers
     prep_workers = []
@@ -839,6 +865,7 @@ def main():
         logger,
         prep_workers,
         sim_workers,
+        valid= args.valid
     )
     
     
@@ -871,8 +898,16 @@ def run_task_spec(
     logger,
     prep_workers,
     sim_workers,
+    valid = False
 ):
     stats = {"preparation": {"time": 0.0, "count": 0}, "train": {"time": 0.0, "count": 0}, "simulation": {"time": 0.0, "count": 0}}
+    # key: (pre_h, tr_h), value: set of sim_h
+    pending_sim_hashes = {}
+    for pre_h, pre_node in task_spec.items():
+        for tr_h, tr_node in pre_node["train"].items():
+            sim_ids = {sim["hash"] for sim in tr_node.get("sim_tasks", [])}
+            if sim_ids:
+                pending_sim_hashes[(pre_h, tr_h)] = sim_ids
     _create_output_dirs(task_spec, temp_dir)
     prep_task_queue.put(task_spec)
 
@@ -925,7 +960,7 @@ def run_task_spec(
         _reap_train_procs()
         while pending_train_items and len(train_procs) < MAX_TRAIN:
             item = pending_train_items.pop(0)
-            worker_log = os.path.join(exp_dir, f"train_{train_idx}.log")
+            worker_log = os.path.join(exp_dir, f"train_{train_idx%MAX_TRAIN}.log")
             p = mp.Process(target=_train_task, args=(worker_log, item, sim_task_queue, train_result_queue))
             p.start()
             train_procs.append(p)
@@ -954,11 +989,11 @@ def run_task_spec(
 
             _try_start_train_procs()
             _drain_train_results()
-            _drain_sim_results(sim_result_queue, stats, logger, eta_msg)
+            _drain_sim_results(sim_result_queue, stats, logger, eta_msg, pending_sim_hashes, temp_dir, valid)
 
         # final drains
         _drain_train_results()
-        _drain_sim_results(sim_result_queue, stats, logger, eta_msg)
+        _drain_sim_results(sim_result_queue, stats, logger, eta_msg, pending_sim_hashes, temp_dir, valid)
     except RuntimeError:
         pass
     finally:
