@@ -1,3 +1,9 @@
+策略筛选优先级:
+    1.长期稳定性
+    2.rolling median 是否为正
+    2.最大连续亏损长度，最大回撤
+    3.short 和 forward盈亏情况
+
 考虑到资产的稳定性，虽然Doge币在回测中表现更好，但应该同时验证Doge/Eth的策略，实盘/回测的差异可能不同
 可固定的参数(只适用于同一个标的的同一周期，跨标的/周期无效):
     candlestick_num/predict_num/vol_multiplier_long
@@ -41,17 +47,26 @@ ETH 30m:
     candlestick_num 120 优于96
 
 DOGE_15m:
-    vol_multiplier_long 2.0 better than 1.9
+    vol_multiplier_long [1.8, 1.9,2,2.1] 非常接近, 1.9的表现和鲁棒性略好些,l_cagr 1.9明显强于1.8
     batch_experiments/2026-02-12/DOGEUSDT_15m/10_29_58/reports.jsonl 
-        candlestick_num 96 和120 最优[80, 96, 120, 144, 168]。120的cagr/calmar MAX表现更好，96 mean表现更好
-        predict_num: [16, 24, 28, 32] holdbar: [12, 16, 20, 24, 28, 32]
+        candlestick_num 96 ,次优 80 [80, 96, 120, 144, 168] 120的calmar更好
+            用更细的步长探索 80-120的变化
+        predict_num: [4,6, 8,10, 12,16,24] holdbar: [2, 4 , 6 ,8, 10, 12,14,16,18,20,22,24,26,28,30,32,34,36,38,40]
+            predict_num 6 远远优于其它(91%>>59%),24是次优，需要进一步探索 24之后的参数
+            hold_bar 呈现出明显的平台状 28-46 数值接近,30最高，[30-40最好]
+                20的平均Calmar爆炸性优于其它。看起来还可以进一步探索40之后的参数。
             最优的是 predict_num 16 + holdbar 32，需要进一步测试
             [12,16,24,28]
     batch_experiments\2026-02-13\DOGEUSDT_15m\11_55_18
         predict_num 测试范围 [12,16,24,28] holdbar in [12, 16, 20, 24 ,28, 32,36,40]
             最优的是 predict_num 12 16 + holdbar [20 - 36] 需要进一步测试
     batch_experiments\2026-02-13\DOGEUSDT_15m\21_21_46
-        batch_size: int = 2048 模型的成交频率下降到0.2以下！ 探索合理区间 256 - 2048
+        batch_size: int = 2048 模型的成交频率下降到0.2以下！ 256 最优 in [64,128,256,512,2048]
+                    
+    Frequence: 从实验来看，1附近比较合理。接近2就很难保持盈利。3之后几乎不可能
+    'batch_experiments', 'DOGEUSDT_15m'
+    stride 1的极值明显更优，2的均值略优
+
 DOGE_5m:
     batch_experiments\2026-02-14\DOGEUSDT_5m\07_54_32 未完成
         通过观察交易频率并未有明显提升，cagr/calmar 相比15m下降严重。除非重新模型/策略目标之前，否则无法适用

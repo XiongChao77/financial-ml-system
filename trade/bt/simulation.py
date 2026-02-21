@@ -17,6 +17,7 @@ sys.path.append(os.path.join(current_work_dir, "..",'..'))
 from data_process.common import *
 from data_process import common 
 from model import model_loader
+from model import data_loader
 from trade.bt import cus_analyzer, cus_comminfo, result_analyze
 from model import train_2head 
 from trade.bt.bt_trade_ml import FtmoStrategy
@@ -125,9 +126,20 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
         if not os.path.isabs(tarin_out_path):
             tarin_out_path = os.path.join(PROJECT_DIR, tarin_out_path)
         handler = model_loader.ModelHandler(tarin_out_path=tarin_out_path, device=device)  # Best_F1/Best_Loss
-        # 执行预测，获取结果和指标
-        df_with_pred, model_stats = handler.predict(df, kline_interval_ms=_interval_ms, is_live = False, diff_thresh = None,
-                                                       cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
+        # # 执行预测，获取结果和指标
+        # df_with_pred, model_stats = handler.predict(df, kline_interval_ms=_interval_ms, is_live = False, diff_thresh = None,
+        #                                                cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
+
+        # 1. 准备数据：传入 is_live 标志以控制索引记录逻辑
+        ds = data_loader.TimeSeriesWindowDataset(
+            df=df, 
+            kline_interval_ms = _interval_ms,
+            feature_cols=handler.feature_cols, 
+            label_col=handler.label_col, 
+            window=handler.window,
+            is_live=False,
+        )
+        df_with_pred, model_stats = handler.predict_with_ds(ds,df,is_live=False,diff_thresh = None)                                  
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()
         # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
@@ -582,6 +594,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
             f"rc_summary":rc_summary,
         },
         f"drawdown": {
+            f"daily_loss_list": daily_returns_list,          # list）
             f"max_dd_pct": maxdd_pct,
             f"max_dd_amt": maxdd_amt,
             f"max_daily_dd": max_daily_dd,
@@ -619,9 +632,6 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     }
 
     report_additional = {
-        f"drawdown": {
-            f"daily_loss_list": daily_returns_list,          # list）
-        },
         f"raw_analyzer":{
             f"customize":perf,
         },
