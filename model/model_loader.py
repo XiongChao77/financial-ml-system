@@ -247,51 +247,96 @@ class ModelHandler:
         self.logger.info(f"Inference complete. Valid signals: {len(final_pred)}")
         return df_out, stats
     
-    def predict_live_ds(self, ds, df, batch_size=2048, diff_thresh=None, min_thresh=0.3):
-        """
-        实盘专用推理函数：接收已初始化的 ds 参数。
-        """
-        # 1. 执行推理循环
+    def predict_with_ds(self, ds, df, is_live=True, batch_size=2048, diff_thresh=None, min_thresh=0.3):
+        self.logger.info(f"Starting inference pipeline (Mode={'Live' if is_live else 'Backtest'}, diff_thresh={diff_thresh})...")
+        
+        # 检查是否产生了有效窗口（可能因为数据太短或全部不连续而被丢弃）
+        if len(ds) == 0:
+            self.logger.warning("No valid windows generated after continuity check!")
+            df_empty = df.copy()
+            for c in ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']:
+                df_empty[c] = np.nan
+            return df_empty, {}
+
+        self.logger.info(f"Dataset created. Valid windows: {len(ds)}")
         dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
+
+        # 2. 推理循环 (获取原始 Logits -> Probabilities)
         probs_list = []
         with torch.no_grad():
             for xb, _, _ in dl:
                 xb = xb.to(self.device)
                 _, fused_probs = self.model(xb, return_fused=True) 
+                
+                # 转换回 numpy 以便后续处理
                 probs_list.append(fused_probs.cpu().numpy())
 
-        # 2. 计算概率与评分
+        # 拼接所有批次结果
         probs_all = np.concatenate(probs_list)
-        p_short, p_neutral, p_long = probs_all[:, 0], probs_all[:, 1], probs_all[:, 2]
-        net_score = p_long - p_short
+        p_short = probs_all[:, 0]   # 下跌概率
+        p_neutral = probs_all[:, 1] # 震荡概率
+        p_long = probs_all[:, 2]    # 上涨概率
+        net_score = p_long - p_short # 净得分
 
-        # 3. 信号生成逻辑 (保持原样)
+        # 3. 生成最终信号逻辑
         if diff_thresh is not None:
             final_pred = np.full(len(probs_all), int(Signal.NEUTRAL))
             final_conf = np.zeros(len(probs_all))
             
+            # 做多逻辑
             mask_long = (net_score > diff_thresh) & (p_long > min_thresh)
-            final_pred[mask_long], final_conf[mask_long] = int(Signal.POSITIVE), net_score[mask_long]
+            final_pred[mask_long] = int(Signal.POSITIVE )
+            final_conf[mask_long] = net_score[mask_long]
             
+            # 做空逻辑
             mask_short = (net_score < -diff_thresh) & (p_short > min_thresh)
-            final_pred[mask_short], final_conf[mask_short] = int(Signal.NEGATIVE), -net_score[mask_short]
+            final_pred[mask_short] = int(Signal.NEGATIVE)
+            final_conf[mask_short] = -net_score[mask_short]
         else:
-            final_pred, final_conf = probs_all.argmax(axis=1), probs_all.max(axis=1)
+            final_pred = probs_all.argmax(axis=1)
+            final_conf = probs_all.max(axis=1)
 
-        # 4. 实盘对齐：仅更新最新的一根 K 线
+        # 4. 【核心修复】：精准对齐与回填
+        # 创建副本并初始化新列为 NaN，确保不连续的“空洞”被保留以进行持仓管理
         df_out = df.copy()
-        for c in ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']:
+        cols_to_init = ['pred', 'pred_prob', 'prob_short', 'prob_neutral', 'prob_long', 'net_score']
+        for c in cols_to_init:
             df_out[c] = np.nan
+        
+        if not is_live:
+            # === 回测模式：通过 ds.indices 将信号“钉”在正确的原始时间戳上 ===
+            if ds.indices is not None:
+                # 确保索引和预测值长度对齐
+                valid_len = min(len(ds.indices), len(final_pred))
+                active_indices = ds.indices[:valid_len]
+                
+                df_out.loc[active_indices, 'pred'] = final_pred[:valid_len]
+                df_out.loc[active_indices, 'pred_prob'] = final_conf[:valid_len]
+                df_out.loc[active_indices, 'prob_short'] = p_short[:valid_len]
+                df_out.loc[active_indices, 'prob_neutral'] = p_neutral[:valid_len]
+                df_out.loc[active_indices, 'prob_long'] = p_long[:valid_len]
+                df_out.loc[active_indices, 'net_score'] = net_score[:valid_len]
+        else:
+            # === 实盘模式：仅回填最新一根 K 线的结果 ===
+            if len(final_pred) > 0:
+                last_idx = df.index[-1]
+                df_out.at[last_idx, 'pred'] = final_pred[-1]
+                df_out.at[last_idx, 'pred_prob'] = final_conf[-1]
+                df_out.at[last_idx, 'net_score'] = net_score[-1]
 
-        last_idx = df.index[-1]
-        df_out.at[last_idx, 'pred'] = final_pred[-1]
-        df_out.at[last_idx, 'pred_prob'] = final_conf[-1]
-        df_out.at[last_idx, 'prob_short'] = p_short[-1]
-        df_out.at[last_idx, 'prob_neutral'] = p_neutral[-1]
-        df_out.at[last_idx, 'prob_long'] = p_long[-1]
-        df_out.at[last_idx, 'net_score'] = net_score[-1]
-
-        return df_out, {'feature_cols': self.feature_cols}
+        # 5. 计算评估指标 (仅在非实盘且包含标签列时执行)
+        stats = {}
+        if not is_live and self.label_col in df_out.columns:
+            # 仅评估有预测值且有标签的部分
+            df_valid = df_out.dropna(subset=['pred', self.label_col])
+            if not df_valid.empty:
+                y_true = df_valid[self.label_col].values.astype(int)
+                y_pred = df_valid['pred'].values.astype(int)
+                stats = self.evaluate_performance(y_true, y_pred)
+        stats['feature_config'] = self.raw_config
+        stats['feature_cols']   = self.feature_cols
+        self.logger.info(f"Inference complete. Valid signals: {len(final_pred)}")
+        return df_out, stats
     
     def scan_thresholds(self, df, kline_interval_ms, thresholds=[0.05, 0.1, 0.15, 0.2, 0.25, 0.3], batch_size=1024):
         """

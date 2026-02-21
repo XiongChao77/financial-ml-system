@@ -35,9 +35,9 @@ class LabelRegimeAnalyzer:
                 para = self.para
                 # Explicitly round to prevent floating point precision issues causing 1.49999
                 para.vol_multiplier_long = round(float(vol), 2)
-                para.stop_multiplier_rate_long = round(float(stop), 4)
+                para.stop_multiplier_rate_long = stop
                 para.vol_multiplier_short = round(float(vol), 2)
-                para.stop_multiplier_rate_short = round(float(stop), 4)
+                para.stop_multiplier_rate_short = stop
                 
                 temp_df = fun(temp_df, para=para)
                 

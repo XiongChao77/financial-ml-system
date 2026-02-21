@@ -109,7 +109,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     # ---------------------------------------------------------
     # 3. 划分数据并保存
     # ---------------------------------------------------------
-    split_ts = pd.to_datetime(df['open_time_date_utc'].iloc[-1]) - pd.DateOffset(months=6)
+    split_ts = pd.to_datetime(df['open_time_date_utc'].iloc[-1]) - pd.DateOffset(months=8)
     train_df, test_df = df[df['open_time_date_utc'] < str(split_ts)], df[df['open_time_date_utc'] >= str(split_ts)]
 
     # 统一写入 para.prep_output_dir（默认 common.DATA_OUT_DIR，batch 多进程时为独立目录）

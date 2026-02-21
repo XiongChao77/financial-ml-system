@@ -79,7 +79,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self._finalize_dataset(X_filtered, y_filtered, final_indices)
 
         # --- 3. Save to Cache ---
-        if cache_path:
+        if use_cache and cache_path:
             self._save_to_cache(cache_path)
 
     def _save_to_cache(self, path: str):
