@@ -1,5 +1,9 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 import os, sys, time, json, math
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import numpy as np
 from operator import itemgetter
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
@@ -13,7 +17,7 @@ from data_process import common
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','09_09_43'))
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','19_15_58'))
 # exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','23_43_49'))
-exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-02-21','22_51_10'))
+exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-02-21','22_58_48'))
 
 output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments')
 shorts_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_short.jsonl'))
@@ -89,25 +93,26 @@ def analyze_short_long_correlation(selected):
     print("="*100)
 
 
-def merge_selected(selected, report, rule_name, src_path):
+def merge_selected(records):
     """
     selected: dict[hash] -> full_report
     report: 原始 report（json 读出来的 dict）
     row: extract_row 的结果（用于取 cagr / calmar）
     """
-    h = report['hash']
-    if h is None:
-        return
+    reslut_set = set()
+    uni_results = []
+    duplicate_r = []
 
-    if h not in selected:
-        r = dict(report)  # 浅拷贝，避免改原对象
-        r["rule"] = [rule_name]
-        r["path"] = src_path
-        selected[h] = r
-    else:
-        if rule_name not in selected[h]["rule"]:
-            selected[h]["rule"].append(rule_name)
-
+    for r in records:
+        h = r['hash']
+        if h not in reslut_set:
+            reslut_set.add(h)
+            # print(f" Duplicate records {h}")
+            uni_results.append(r)
+        else:
+            duplicate_r.append(r)
+    print(f" Total:{len(records)} Duplicate records {len(duplicate_r)}, uni_results {len(uni_results)}")
+    return uni_results
 
 def iter_reports_jsonl(root):
     """
@@ -132,6 +137,31 @@ def load_reports(path):
                 pass
     return reports
 
+def save_raw_reports(selected_rows, exp_dir ='' ,output_filename="reports_raw.jsonl"):
+    """
+    将 rows 中存储的 'raw' 原始报告内容提取出来，并保存到与 exp_dir 同级的指定文件中。
+    保持 jsonl 格式。
+    """
+    if not selected_rows:
+        print("⚠️ 没有数据可供保存")
+        return
+
+    out_path = os.path.join(exp_dir, output_filename)
+
+    print(f"📦 正在提取并保存 {len(selected_rows)} 条原始报告至: {out_path}")
+
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            for row in selected_rows:
+                # 提取 raw 字段（它是原始加载时的完整字典）
+                raw_data = row.get("raw")
+                if raw_data:
+                    f.write(json.dumps(raw_data, ensure_ascii=False) + "\n")
+        
+        print(f"✅ 原始数据保存完成！")
+    except Exception as e:
+        print(f"❌ 保存失败: {str(e)}")
+
 
 def extract_row(report, src_path):
     """
@@ -154,92 +184,354 @@ def extract_row(report, src_path):
         "l_cagr": long_perf.get("cagr"),
         "l_calmar": long_perf.get("calmar"),
         "l_daily_freq" : long.get("trades", {}).get("daily_freq"),
+        "l_win_rate" : long.get("trades", {}).get("win_rate"),
+        "l_avg_pct_gross" : long.get("trades", {}).get("avg_pct_gross"),
+        "l_sharpe" : long_perf.get("sharpe"),
         "f_cagr": forward_perf.get("cagr"),
         "f_calmar": forward_perf.get("calmar"),
         "f_daily_freq" : forward.get("trades", {}).get("daily_freq"),
-        "symbol": common.get("symbol"),
-        "interval": common.get("interval"),
         "hash": params.get('hash',0),
         "path": src_path,
         "short" : short,
         "long": long,
-        "forward": report.get("forward", report)
+        "forward": report.get("forward", report),
+        "raw" : report,
     }
 
+def basic_filter(all_results):
+    analyze_holdbar(all_results,target_key="holdbar", period ='short',metric_key="cagr")
+    ps_results_0,unselected = filter_by_criteria(all_results, period ='short', cagr=0)
+    print(f"After 0-screening short: {len(ps_results_0)}, {len(ps_results_0)/len(all_results)*100:.2f}%")
+    ps_results,unselected = filter_by_criteria(ps_results_0, period ='short', cagr=0.2)
+    print(f"After Pre-screening short: {len(ps_results)}, {len(ps_results)/len(ps_results_0)*100:.2f}%")
+    pf_results,unselected = filter_by_criteria(ps_results, period ='forward', cagr=0.2)
+    print(f"After Pre-screening forward: {len(pf_results)}, {len(pf_results)/len(ps_results)*100:.2f}%")
+    l_results,unselected = filter_by_criteria(pf_results, period ='long', cagr=0.1)
+    print(f"After Pre-screening long: {len(l_results)}, {len(l_results)/len(pf_results)*100:.2f}%")
+    return l_results
+
+def show_performance(all_results,output_dir, batch_size=5):
+    print("-"*20 + 'Key strategy indicators' +"-"*20)
+    print(f"{'Num':>5}"
+          f"{'Hash':>10}"
+          f"{'CAGR':>10}"
+          f"{'Sharpe':>10}"
+          f"{'Calmar':>10}"
+          f"{'Max_DD':>12}"
+          f"{'DailyFreq':>12}"
+          f"{'WinRate':>10}"
+          f"{'RC_Median':>12}"
+          f"{'RC_PosRatio':>12}")
+
+    print("-" * 98)
+
+    for i, r in enumerate(all_results):
+        g = lambda k: common.recursive_get(r['long'], k)
+        g('daily_loss_list')
+        print(f"{i:>4}"
+              f"{str(g('hash')):>12}"
+              f"{g('cagr'):10.2f}"
+              f"{g('sharpe'):10.2f}"
+              f"{g('calmar'):10.2f}"
+              f"{g('max_dd_pct'):12.2f}"
+              f"{g('daily_freq'):12.2f}"
+              f"{g('win_rate'):10.2f}"
+              f"{g('rc_median'):12.2f}"
+              f"{g('rc_pos_ratio'):12.2f}")
+    compute_correlation(all_results,output_dir)
+    plot_in_batches(all_results,output_dir,batch_size)
+    exit()
+
+def sort_by_correlation_diversity(all_results):
+    """
+    计算每个策略与其他策略的平均相关性，并按独立性排序
+    """
+    import pandas as pd
+    
+    # 1. 构建收益率 DataFrame (复用你原有的 build_return_series)
+    returns_dict = {}
+    for i, r in enumerate(all_results):
+        # 假设 build_return_series 已定义
+        ret = build_return_series(r) 
+        returns_dict[f"S{i}"] = ret
+    
+    df = pd.DataFrame(returns_dict).dropna()
+    
+    # 2. 计算相关性矩阵
+    corr_matrix = df.corr()
+    
+    # 3. 计算每个策略与其他策略的平均相关性 (排除对角线的 1.0)
+    # 公式: (每列总和 - 1) / (策略总数 - 1)
+    n = len(corr_matrix)
+    mean_corr = (corr_matrix.sum() - 1) / (n - 1)
+    
+    # 4. 将结果转为 DataFrame 并排序
+    diversity_df = mean_corr.to_frame(name="mean_correlation").sort_values(by="mean_correlation")
+    
+    print("\n" + "-"*20 + " Strategy Diversity Ranking " + "-"*20)
+    print(diversity_df)
+    
+    # 5. 根据排序结果重新组织 all_results
+    sorted_indices = [int(idx.replace('S', '')) for idx in diversity_df.index]
+    sorted_results = [all_results[idx] for idx in sorted_indices]
+    
+    return sorted_results
+
+def build_return_series(report):
+    g = lambda k: common.recursive_get(report['long'], k)
+    daily = g('daily_loss_list')
+
+    df = pd.DataFrame(daily)
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.sort_values('date')
+    df.set_index('date', inplace=True)
+
+    # 用 equity 计算日收益率
+    df['ret'] = df['equity'].pct_change()
+
+    return df['ret'].dropna()
+
+
+def compute_correlation(all_results, output_dir):
+    """
+    动态计算尺寸生成相关性热力图，确保格子大小固定且文字清晰
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, "correlation_heatmap_fixed_cell.png")
+
+    # ===== 1. 构建收益率序列 =====
+    returns_dict = {}
+    for i, r in enumerate(all_results):
+        # 使用 build_return_series
+        ret = build_return_series(r)
+        returns_dict[f"S{i}"] = ret
+    
+    df = pd.DataFrame(returns_dict).dropna()
+    if df.empty:
+        print("⚠️ 数据为空，跳过热力图生成")
+        return
+
+    corr_matrix = df.corr()
+    num_strategies = len(corr_matrix)
+
+    # ===== 2. 动态计算图片尺寸 =====
+    # 设定每个格子的目标尺寸 (inches)
+    cell_size = 0.5  
+    # 边缘留白（用于显示坐标轴刻度和标题）
+    margin = 3.0     
+    
+    # 动态总宽和总高
+    fig_width = num_strategies * cell_size + margin
+    fig_height = num_strategies * cell_size + margin
+    
+    # 根据策略数量调整字体大小，防止文字重叠
+    font_scale = 1.0 if num_strategies < 20 else 0.8 if num_strategies < 50 else 0.5
+
+    plt.figure(figsize=(fig_width, fig_height))
+    sns.set_theme(font_scale=font_scale)
+
+    # ===== 3. 绘制热力图 =====
+    # cbar_pos 用于微调颜色条，防止在超大图下显得太窄
+    ax = sns.heatmap(
+        corr_matrix, 
+        annot=True, 
+        fmt=".2f", 
+        cmap='RdYlBu_r', 
+        vmin=-1, vmax=1, 
+        center=0,
+        square=True, 
+        linewidths=.5,
+        annot_kws={"size": 10 if num_strategies < 30 else 7}, # 动态调整格内数字大小
+        cbar_kws={"shrink": 0.8}
+    )
+
+    plt.title(f"Strategy Correlation Matrix (N={num_strategies})", fontsize=16, pad=20)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    
+    plt.tight_layout()
+    
+    # ===== 4. 保存图片 =====
+    plt.savefig(save_path, dpi=150) # 由于尺寸已经很大，150 DPI 足够清晰
+    plt.close()
+
+    print(f"📊 动态尺寸热力图已保存 (Size: {fig_width:.1f}x{fig_height:.1f} in): {save_path}")
+
+def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.png", start_index=0):
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, file_name)
+
+    # ===== 1. 获取价格背景数据 =====
+    pere_para = all_results[0]['long']['params']['common']
+    price_file = os.path.join(
+        common.PROJECT_DATA_DIR, 
+        pere_para['trading_type'],
+        f"{pere_para['symbol']}_{pere_para['interval']}.csv"
+    )
+    
+    price_df = pd.read_csv(price_file)
+    price_df['open_time_date_utc'] = pd.to_datetime(price_df['open_time_date_utc'])
+    price_df.set_index('open_time_date_utc', inplace=True)
+    price_series = price_df['close'].sort_index()
+
+    fig, ax1 = plt.subplots(figsize=(16, 8))
+    ax1.plot(price_series.index, price_series, color='black', linewidth=0.8, alpha=0.15, label='Market Price')
+    ax1.set_ylabel('Market Price (USD)')
+    
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('Continuous Strategy Equity (Normalized)')
+
+    # ===== 2. 拼接并绘制曲线 =====
+    # 用于记录分界线的时间点
+    split_dates = {}
+
+    for i, r in enumerate(all_results):
+        segments = []
+        current_multiplier = 1.0
+        
+        for period in ['long', 'short', 'forward']:
+            period_data = r.get(period)
+            daily_list = common.recursive_get(period_data,'daily_loss_list')
+
+            df = pd.DataFrame(daily_list)
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.sort_values('date').set_index('date')
+            
+            # 记录该阶段的起始时间（用于画竖线）
+            if period not in split_dates:
+                split_dates[period] = df.index[0]
+            
+            returns_sequence = df['equity'] / df['equity'].iloc[0]
+            df['continuous_equity'] = returns_sequence * current_multiplier
+            segments.append(df[['continuous_equity']])
+            current_multiplier = df['continuous_equity'].iloc[-1]
+
+        full_path_df = pd.concat(segments)
+        full_path_df = full_path_df[~full_path_df.index.duplicated(keep='first')]
+        
+        ax2.plot(full_path_df.index, full_path_df['continuous_equity'], 
+                 linewidth=1.5, alpha=0.8, label=f"S{start_index + i}")
+
+    # ===== 3. 绘制阶段切分竖线 =====
+    # 仅绘制竖线，不添加文字，且颜色调至更淡 (alpha=0.3)
+    if 'short' in split_dates:
+        s_start = split_dates['short']
+        # 使用较细的虚线，蓝色代表从 Long 进入 Short
+        ax1.axvline(x=s_start, color='blue', linestyle='--', linewidth=1, alpha=0.3)
+
+    if 'forward' in split_dates:
+        f_start = split_dates['forward']
+        # 使用红色虚线代表进入最关键的 Forward 阶段
+        ax1.axvline(x=f_start, color='red', linestyle='--', linewidth=1, alpha=0.3)
+
+    # ===== 4. 图例与美化 =====
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax1.legend(h1 + h2, l1 + l2, loc='upper left', ncol=4, fontsize=8)
+
+    plt.title(f"Strategy Performance: Long (Train) -> Short (Val) -> Forward (Test)")
+    fig.tight_layout()
+    print(f"[SAVE] {save_path}")
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+def plot_in_batches(all_results, output_dir, batch_size=5):
+    total = len(all_results)
+    
+    sns.set_theme(style="white")
+    for i in range(0, total, batch_size):
+        batch = all_results[i:i + batch_size]
+        filename = f"batch_{i//batch_size + 1}.png"
+        # ✨ 传入当前的循环索引 i 作为起始编号
+        plot_equity_curves(batch, output_dir, filename, start_index=i)
 
 def main():
+    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-02-21','22_58_48')
+    exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-02-27','14_41_59')
+    filter_report = None
+    filter_report =  os.path.join(exp_dir,'filtered_raw_reports.jsonl')
+    report_files = []
     rows = []
-
-    for jsonl_path in iter_reports_jsonl(exp_dir):
-        reports = load_reports(jsonl_path)
-        for r in reports:
-            if 'long' not in r and 'short' not in r:
-                continue
-            row = extract_row(r, jsonl_path)
-            if row["cagr"] is not None and row["calmar"] is not None:
-                rows.append(row)
-
+    records = []
+    if filter_report:
+        report_files.append(filter_report)
+    else:
+        for jsonl_path in iter_reports_jsonl(exp_dir):
+            report_files.append(jsonl_path)
+    for report_file in report_files:
+        records = load_reports(report_file)
+        for r in records:
+            row = extract_row(r, report_file)
+            rows.append(row)
+    
     print(f"Total reports loaded: {len(rows)}")
-    # para_evaluation(rows)
-    # ===== 按 CAGR 排序 =====
-    sorted_cagr = sorted(rows, key=lambda x: x["cagr"], reverse=True)
+    uin_records = merge_selected(rows)
+    print(f"Total uint reports: {len(uin_records)}")
+    if not filter_report:
+        uin_records = basic_filter(uin_records)
+        save_raw_reports(uin_records,exp_dir, "filtered_raw_reports.jsonl")
+        exit()
+    
+    sorted_selected1 = sorted(uin_records, key=itemgetter("l_cagr"), reverse=True)
+    plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
+    plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
+    plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
+    exit()
+    l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.6,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1.9,daily_freq = 0.3,sharpe = 1)
+    # sort_by_correlation_result = sort_by_correlation_diversity(l_results)
+    analyze_holdbar(l_results,target_key="stride",period ='long', metric_key="cagr")
+    # sorted_by_pos_ratio = sorted(
+    #     l_results, 
+    #     key=lambda r: common.recursive_get(r.get('long', {}), 'rc_pos_ratio') or 0, 
+    #     reverse=True
+    # )
+    sorted_calmar = sorted(l_results, key=itemgetter("l_calmar"), reverse=True)
+    selected = l_results
+    filter_hash = ['c48fc76e','ad40b408','dc6c1390','584eb8de','83b16fb9','b3b9b8c5','9b0facb8','08c2acf6','20d6cd8a','e6c308e5','0824cbdc',
+                   'd72bb0d4','ae6b5897','48514f66','31a957db','89f39876','c780edee','64afb891','f9a98676']
+    selected = [
+        r for r in l_results 
+        if str(common.recursive_get(r.get('long', {}), 'hash'))[:8] not in filter_hash
+    ]
 
-    selected = {}
-    for row in sorted_cagr:
-        merge_selected(selected, row, "top_cagr", row["path"])
-    print(f"Total reports: {len(selected)}")
-    all_results = list(selected.values())
-    # selected = filter_by_trades(selected, period ='short', min_daily_freq = 2)
-    # print(f"After short trades filter: {len(selected)} reports")
-    # selected = filter_by_performance(all_results, period ='long', min_cagr=0.1, min_calmar=0)
-    # analyze_short_long_correlation(all_results)
-    # print(f"After long performance filter: {len(selected)} reports")
-    # selected,short_unselected = filter_by_criteria(selected, period ='long'  ,avg_pct_gross=0.1)
-    analyze_holdbar(all_results,target_key="stride", metric_key="cagr")
-    selected1 = filter_stable(all_results)
-    analyze_holdbar(all_results,target_key="stride", metric_key="cagr")
-    sorted_selected1 = sorted(selected1, key=itemgetter("l_cagr"), reverse=True)
-    print(f"-------------After filter_stable: {len(selected1)} reports")
-    selected2 = filter_aggressive(all_results)
-    print(f"-------------After filter_aggressive: {len(selected2)} reports")
-    merged_selected = merge_selected_sort(sorted_selected1[:5],selected2[:5],period ='long', sort_key='cagr')
-    print(f"-------------After all filter: {len(merged_selected)} reports")
-    # sorted_forward_unselected = sorted(selected, key=itemgetter("l_cagr"), reverse=True)
-    # l_sorted_cagr = sorted(selected, key=itemgetter("l_cagr"), reverse=True)
-    # f_sorted_cagr = sorted(selected, key=itemgetter("f_cagr"), reverse=True)
-    # freq_sorted_cagr = sorted(selected, key=itemgetter("l_daily_freq"), reverse=True)
+    print(f"🎯 Hash 过滤完成: 过滤前 {len(l_results)} 条 -> 过滤后 {len(selected)} 条")
+    # show_performance(selected,output_dir,3)
+    analyze_holdbar(l_results,target_key="stride",period ='long', metric_key="cagr")  
+    # stable_selected1 = filter_stable(rc_median_results)
+    # print(f"-------------After filter_stable: {len(stable_selected1)} reports")
+    # # selected2 = filter_aggressive(rc_results)
+    # # print(f"-------------After filter_aggressive: {len(selected2)} reports")
+    # # merged_selected = merge_selected_sort(sorted_selected1[:5],selected2[:5],period ='long', sort_key='cagr')
+    # # print(f"-------------After all filter: {len(merged_selected)} reports")
+    
+    # rc_pos_ratio_results,unselected = filter_by_criteria(stable_selected1, period ='long', rc_pos_ratio = 0.7)
+    # print(f"-------------After rc_pos_ratio: {len(rc_pos_ratio_results)} reports")
 
-    analyze_holdbar(merged_selected,target_key="batch_size", metric_key="l_cagr")
-    # plot_heatmap(merged_selected,'candlestick_num','holdbar')
-    # plot_heatmap(merged_selected,'candlestick_num','holdbar','l_calmar',)
-    # selected,unselected = filter_by_trades(selected, period ='short', min_daily_freq = 0.5)
-    # print(f"After short trades filter: {len(selected)} reports")
-    # selected,unselected = filter_by_trades(selected, period ='long', min_daily_freq = 1)
-    # print(f"After long trades filter: {len(selected)} reports")
-    # for r in selected:
-    #     print(f"hash:{r["hash"]} hash:{r["hash"]}")
-    # selected = filter_by_rc_summary(selected,'short')
-    # print(f"After short rc_summary filter: {len(selected)} reports")
-    # selected = filter_by_rc_summary(selected,'long')
-    # print(f"After long rc_summary filter: {len(selected)} reports")
-    # for config in selected:
-    #     print(f"holdbar: {common.recursive_get(config,'holdbar')} | holdbar: {common.recursive_get(config,'holdbar')} | holdbar: {common.recursive_get(config,'holdbar')}")
+
+
+    # sorted_l_sharpe = sorted(rc_pos_ratio_results, key=itemgetter("l_sharpe"), reverse=True)
+    # sorted_calmar = sorted(rc_pos_ratio_results, key=itemgetter("l_calmar"), reverse=True)
+    # # sorted_l_win_rate = sorted(rc_results, key=itemgetter("l_win_rate"), reverse=True)
+    # # sorted_l_daily_freq = sorted(rc_results, key=itemgetter("l_daily_freq"), reverse=True)
+    # top_k = 40
+    # merged_selected = merge_selected_sort(sorted_l_sharpe[:top_k],sorted_calmar[:top_k],rc_pos_ratio_results[:top_k],period ='long', sort_key='cagr')
+    # show_performance(merged_selected,output_dir,3)
     out_path = os.path.join(output_dir,"selected_configs" ,"selected_configs.jsonl")
     os.makedirs(os.path.join(output_dir,"selected_configs"), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
-        for r in merged_selected:
+        for r in selected:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     print(f"[SAVE] {out_path} | total={len(selected)}")
 
 def filter_stable(selected):
-    results,unselected = filter_by_criteria(selected, period ='short', cagr=0.6, calmar=0, win_rate = 30  )
+    results,unselected = filter_by_criteria(selected, period ='short', cagr=0.7, calmar=0, win_rate = 30  )
     print(f"After short performance filter: {len(results)} reports")
-    results,long_unresults = filter_by_performance(results, period ='long', min_cagr=0.5, min_calmar=0.6)#,min_rc_cagr_median = -0.2)#,min_rc_cagr_q25 = -0.2)
+    results,long_unresults = filter_by_performance(results, period ='long', min_cagr=0.7, min_calmar=0.5)#,min_rc_cagr_median = -0.2)#,min_rc_cagr_q25 = -0.2)
     print(f"After long cagr filter: {len(results)} reports")
     results,long_unresults = filter_by_performance(results, period ='long', min_rc_cagr_median = 0)
     print(f"After long rc_cagr_median filter: {len(results)} reports")
-    results,forward_unresults = filter_by_performance(results, period ='forward', min_cagr=0.1, min_calmar=0.5)
+    results,forward_unresults = filter_by_performance(results, period ='forward', min_cagr=0.7, min_calmar=0.5)
     print(f"After forward performance filter: {len(results)} reports")
     return results
 
@@ -248,12 +540,14 @@ def filter_aggressive(selected):
     results, _ = filter_by_criteria( selected, period='short', cagr=1, calmar=0)
     print(f"After short performance filter: {len(results)} reports")
     # 2️⃣ long 只保证不是垃圾，不追求极稳
-    results, _ = filter_by_performance( results, period='long', min_cagr=0.15, min_calmar=0.3 )
+    results, _ = filter_by_performance( results, period='long', min_cagr=0.6, min_calmar=0.3 )
     print(f"After long performance filter: {len(results)} reports")
     results,long_unresults = filter_by_performance(results, period ='long', min_rc_cagr_median = 0)
     print(f"After long rc_cagr_median filter: {len(results)} reports")
-    results, _ = filter_by_performance( results, period='forward', min_cagr=0.7, min_calmar=0.4)
+    results, _ = filter_by_performance( results, period='forward', min_cagr=1, min_calmar=0.4)
     print(f"After forward performance filter: {len(results)} reports")
+    results, _ = filter_by_criteria( results, period='short', daily_freq = 0.7)
+    print(f"After long daily_freq filter: {len(results)} reports")
 
     return results
 
@@ -377,43 +671,58 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
 
 def filter_by_criteria(reports, period='short', **criteria):
     """
-    通用过滤函数：
-    - reports: 报告列表
-    - period: 指定周期 (short, long, forward)
-    - **criteria: 过滤要求，例如 cagr=0.3, sharpe=1.0
+    分步过滤函数：
+    - 顺序应用每个筛选条件
+    - 实时打印本步筛选后的存活数量及相对于上一步的留存比例
     """
-    passed = []
-    failed = []
-    key_path_all={}
+    if not reports:
+        return [], []
+    initial_len = len(reports)
+    passed = reports
+    
     for key, min_value in criteria.items():
+        # 跳过空值
         if min_value is None:
             continue
-        key_path = find_key_path(reports[0].get(period, {}), key)
-        if key_path==None:
-            raise RuntimeError(f"key {key} not found")
-        key_path_all[key] = key_path
-    def meets_all(report):
-        # 1. 获取指定周期的 performance 字典
-        period_data = report.get(period, {}) # 兼容不同层级的 get
+            
+        # 如果池子已经空了，直接记录后续结果为 0
+        if not passed:
+            print(f"After screening {period} {key:<12} >= {min_value:>3}: 0, 0.00%")
+            continue
 
-        if not period_data:
-            return False
+        prev_len = len(passed)
+        
+        # 1. 定位该指标在字典中的路径 (复用你现有的 find_key_path)
+        # 注意：这里基于当前 surviving 池子的第一个样本来找路径
+        key_path = find_key_path(passed[0].get(period, {}), key)
+        if key_path is None:
+            print(f"⚠️ Warning: key '{key}' not found in {period} reports, skipping this filter.")
+            continue
 
-        # 2. 遍历所有传入的过滤条件
-        for key, min_value in criteria.items():
-            if min_value is None:
-                continue
-            current_value = get_value_by_path(period_data, key_path_all[key])
-            if current_value is None:
-                return False
-            if current_value < min_value:
-                return False
-        return True
-    for r in reports:
-        if meets_all(r):
-            passed.append(r)
-        else:
-            failed.append(r)
+        # 2. 执行本轮单项过滤
+        step_passed = []
+        for r in passed:
+            period_data = r.get(period, {})
+            # 复用你现有的 get_value_by_path
+            current_value = get_value_by_path(period_data, key_path)
+            
+            # 比较逻辑
+            if current_value is not None and current_value >= min_value:
+                step_passed.append(r)
+        
+        # 3. 更新当前池子并打印结果
+        passed = step_passed
+        curr_len = len(passed)
+        ratio = (curr_len / prev_len * 100) if prev_len > 0 else 0
+        
+        # 按照你要求的格式打印
+        print(f"After screening {period} {key:<12} >= {min_value:>3}: {curr_len}, {ratio:.2f}%")
+    final_len = len(passed)
+    filtered_count = initial_len - final_len
+    summary_desc = f"TOTAL SUMMARY ({period.upper()})"
+    print(f"{summary_desc:<25}: {final_len:>6} remaining, {filtered_count:>6} filtered out, {final_len/initial_len*100:.2f}%")
+    passed_ids = {id(r) for r in passed}
+    failed = [r for r in reports if id(r) not in passed_ids]
     return passed, failed
 
 def filter_by_performance(reports, period= 'short', min_cagr=None, min_calmar=None, min_sharpe=None,min_rc_cagr_median = None, min_rc_cagr_q25 = None):
@@ -576,7 +885,7 @@ def get_value_by_path(obj, path):
         return None
 
 
-def analyze_holdbar(selected, target_key="holdbar", metric_key="l_cagr"):
+def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="cagr"):
     """
     从 selected 中递归查找 target_key，统计数量并分析性能指标，比较最优值。
     第一次遍历会自动定位 target_key 的位置，之后直接用路径索引，提高效率。
@@ -589,23 +898,32 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="l_cagr"):
     from collections import defaultdict
     import numpy as np
     
-    if not selected:
+    if not records:
         print("❌ 报告列表为空")
         return
     
     # 第一次遍历：找到 target_key 的路径
-    key_path = find_key_path(selected[0], target_key)
+    key_path = find_key_path(records[0], target_key)
     
     if key_path is None:
         print(f"❌ 未找到任何 {target_key}")
         return
     
     print(f"✓ 定位 {target_key} 的路径: {' -> '.join(map(str, key_path))}")
+
+    # 第一次遍历：找到 target_key 的路径
+    key_path = find_key_path(records[0], target_key)
     
+    if key_path is None:
+        print(f"❌ 未找到任何 {target_key}")
+        return
+    
+    print(f"✓ 定位 {target_key} 的路径: {' -> '.join(map(str, key_path))}")
+
     # 按 target_key 分组
     groups = defaultdict(list)
     
-    for report in selected:
+    for report in records:
         value = get_value_by_path(report, key_path)
         if value is not None:
             groups[value].append(report)
@@ -622,14 +940,14 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="l_cagr"):
         reports = groups[value]
         count = len(reports)
         
-        # 提取性能指标 (short)
+        # 提取性能指标 (long)
         metric_list = []
         calmar_list = []
         
         for report in reports:
-            short = report.get("short", report)
-            perf = short.get("performance", {})
-            metric = recursive_get(report,metric_key)
+            p_report = report.get(period, report)
+            perf = p_report.get("performance", {})
+            metric = recursive_get(p_report,metric_key)
             calmar = perf.get("calmar")
             
             if metric is not None:
@@ -644,15 +962,17 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="l_cagr"):
             f"avg_{metric_key}": np.mean(metric_list) if metric_list else None,
             "avg_calmar": np.mean(calmar_list) if calmar_list else None,
             f"max_calmar": np.max(calmar_list) if calmar_list else None,
+            f"med_calmar": np.median(calmar_list) if calmar_list else None,
             f"max_{metric_key}": np.max(metric_list) if metric_list else None,
             f"std_{metric_key}": np.std(metric_list) if len(metric_list) > 1 else 0,
+            f"med_{metric_key}": np.median(metric_list) if metric_list else None,
         })
     
     # 打印结果
     print("\n" + "="*100)
-    print(f"📊 {target_key} 分析结果 (总共 {total_count} 个报告)")
+    print(f"📊 {target_key} {period} 分析结果 (总共 {total_count} 个报告)")
     print("="*100)
-    print(f"{target_key:<15} {'Count':<8} {'%':<8} {f'平均{metric_key.upper()}':<12} {f'Max {metric_key.upper()}':<12} {f'Std {metric_key.upper()}':<12} {'平均Calmar':<12} {'MAX Calmar':<12}")
+    print(f"{target_key:<15} {'Count':<8} {'%':<6} {f'{metric_key.upper()}':<12} {'':<2}{'AVG':<6}{'Max':<6}{'Std':<6}{'Med':<6} {'Calmar:':<8}{'AVG':<6}{'MAX':<6}{'Med':<6}")
     print("-"*100)
     
     for result in analysis_results:
@@ -662,16 +982,20 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="l_cagr"):
         avg_metric = result[f"avg_{metric_key}"]
         max_metric = result[f"max_{metric_key}"]
         std_metric = result[f"std_{metric_key}"]
+        med_metric = result[f"med_{metric_key}"]
         avg_calmar = result["avg_calmar"]
         max_calmar = result["max_calmar"]
+        med_calmar = result["med_calmar"]
         
         metric_str = f"{avg_metric:.2%}" if avg_metric is not None else "N/A"
         max_metric_str = f"{max_metric:.2%}" if max_metric is not None else "N/A"
         std_metric_str = f"{std_metric:.4f}" if std_metric is not None else "N/A"
+        med_metric_str = f"{med_metric:.4f}" if med_metric is not None else "N/A"
         calmar_str = f"{avg_calmar:.2f}" if avg_calmar is not None else "N/A"
         max_calmar_str = f"{max_calmar:.2f}" if max_calmar is not None else "N/A"
+        med_calmar_str = f"{med_calmar:.2f}" if med_calmar is not None else "N/A"
         
-        print(f"{value:<15} {count:<8} {pct:<7.1f}% {metric_str:<12} {max_metric_str:<12} {std_metric_str:<12} {calmar_str:<12} {max_calmar_str:<12}")
+        print(f"{value:<15} {count:<8} {pct:<5.1f}% {metric_key.upper():<12}  {metric_str:<6} {max_metric_str:<6} {std_metric_str:<6} {med_metric_str:<6} {'':<8}{calmar_str:<6} {max_calmar_str:<6} {med_calmar_str:<6}")
     
     print("="*100)
     
@@ -686,16 +1010,14 @@ def analyze_holdbar(selected, target_key="holdbar", metric_key="l_cagr"):
         print(f"  平均Calmar最优: {target_key}={best_calmar[target_key]} ({best_calmar['avg_calmar']:.2f})")
         print("="*100)
 
-def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="heatmap.png"):
+def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="heatmap_combined.png"):
     """
-    不仅打印表格，还直接生成并保存热力图图片。
+    生成 2x2 的热力图矩阵，包含：均值、中位数、标准差、最大值
     """
-    import pandas as pd
     import seaborn as sns
     import matplotlib.pyplot as plt
-    import numpy as np
 
-    # 1. 数据准备 (复用之前的逻辑)
+    # 1. 数据准备
     path1 = find_key_path(selected[0], var1_key)
     path2 = find_key_path(selected[0], var2_key)
     
@@ -708,32 +1030,50 @@ def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="h
             matrix_data.append({var1_key: v1, var2_key: v2, "val": metric})
 
     df = pd.DataFrame(matrix_data)
-    # 计算平均值并转为透视表
-    heatmap_df = df.groupby([var1_key, var2_key])["val"].mean().unstack()
-
-    # 2. 绘图设置
-    plt.figure(figsize=(12, 8))
-    sns.set_theme(style="white")
     
-    # 绘制热力图
-    # annot=True 会在格子里写数字，fmt='.2%' 格式化为百分比
-    ax = sns.heatmap(
-        heatmap_df, 
-        annot=True, 
-        fmt=".1%", 
-        cmap="RdYlBu_r", # 红黄蓝调色盘，红色代表高收益
-        cbar_kws={'label': metric_key.upper()}
-    )
+    # 2. 计算四种统计维度
+    # 使用 groupby 一次性聚合所有指标
+    agg_df = df.groupby([var1_key, var2_key])["val"].agg(['mean', 'median', 'std', 'max']).reset_index()
 
-    plt.title(f"Parameter Heatmap: {var1_key} vs {var2_key} ({metric_key})")
-    plt.xlabel(var2_key)
-    plt.ylabel(var1_key)
+    # 3. 创建 2x2 画布
+    # 为了防止干扰全局背景，使用上下文管理器
+    with sns.axes_style("white"):
+        fig, axes = plt.subplots(2, 2, figsize=(20, 16))
+        axes = axes.flatten()
+        
+        stats_titles = {
+            'mean': 'Mean (Expectation)',
+            'median': 'Median (Robustness)',
+            'std': 'Std Dev (Volatility)',
+            'max': 'Max (Potential)'
+        }
+        
+        # 循环绘制四个子图
+        for i, stat in enumerate(['mean', 'median', 'std', 'max']):
+            # 将当前指标转为透视表
+            pivot_df = agg_df.pivot(index=var1_key, columns=var2_key, values=stat)
+            
+            # Std 通常用数值显示，收益类指标用百分比显示
+            fmt_str = ".2f" if stat == 'std' else ".1%"
+            
+            sns.heatmap(
+                pivot_df, 
+                annot=True, 
+                fmt=fmt_str, 
+                cmap="RdYlBu_r", 
+                ax=axes[i],
+                cbar_kws={'label': stat.upper()}
+            )
+            axes[i].set_title(f"{stats_titles[stat]} - {metric_key.upper()}", fontsize=14, fontweight='bold')
+            axes[i].set_xlabel(var2_key)
+            axes[i].set_ylabel(var1_key)
 
-    # 3. 保存并显示
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    print(f"✅ 图片已保存至: {save_path}")
-    plt.show()
+    plt.suptitle(f"Parameter Sensitivity Analysis: {var1_key} vs {var2_key}", fontsize=18, y=0.98)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # 为总标题留出空间
+    
+    plt.savefig(save_path, dpi=200)
+    print(f"✅ 四合一热力图已保存至: {save_path}")
+    plt.close() # 及时释放内存
 
 if __name__ == "__main__":
     main()

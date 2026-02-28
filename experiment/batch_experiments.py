@@ -53,7 +53,7 @@ SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
 MAX_SIM = 4
-SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
+SYMBOL: str = "ETHUSDT"    #ETHUSDT DOGEUSDT
 INTERVAL: str = "15m"
 # -----------------------------------------------------------------------------
 # Path layout helpers
@@ -64,9 +64,9 @@ def _batch_temp_dir(exp_dir: str) -> str:
     """
     if exp_dir.startswith(common.PERSISTENCE_DIR):
         rel = os.path.relpath(exp_dir, common.PERSISTENCE_DIR)
-        return os.path.join(common.PERSISTENCE_DIR,"train" , rel)
+        return os.path.join(common.TEMPORARY_DIR,"train" , rel)
     base = os.path.basename(exp_dir.rstrip(os.sep)) or "run"
-    return os.path.join(common.PERSISTENCE_DIR, "train" ,"batch_resume", base)
+    return os.path.join(common.TEMPORARY_DIR, "train" ,"batch_temp", base)
 
 def _prep_output_dir(temp_dir: str, pre_h: str) -> str:
     return os.path.join(temp_dir, f"pre_{pre_h}")
@@ -408,13 +408,16 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
             report = {'short':{}, 'long':{}, 'forward': {}, 'pass':False}
             report['short'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                 train_output_dir=train_output_dir, device="cpu", period='short' )["statistics"][1]
-            if report['short']["performance"]["cagr"] > 0.5 :
-                report['long'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
-                                    train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
-                if report['long']["performance"]["cagr"] > 0 :
-                    report['pass'] = True
+            if report['short']["performance"]["cagr"] > 0.2 :
                 report['forward'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                     train_output_dir=train_output_dir, device="cpu", period='forward' )["statistics"][1]
+                if report['forward']["performance"]["cagr"] > 0.2 :
+                    report['long'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
+                                        train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
+                    if report['long']["performance"]["cagr"] > 0 :
+                        report['pass'] = True
+                else:
+                    logger.info(f"Sim {pre_h}/{tr_h}/{sim_h} skip long test due to forward period performance cagr:{report['forward']['performance']['cagr']}")
             else:
                 logger.info(f"Sim {pre_h}/{tr_h}/{sim_h} skip long test due to short period performance cagr:{report['short']['performance']['cagr']}")
             report_stat = report
@@ -463,7 +466,7 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
                             logger.info(f"🧹 All sims finished for Train {tr_h}. Deleted: {train_dir}")
                         else:
                             strategy_hash = report_stat['short']['params']['hash']
-                            target_dir = os.path.join(temp_dir, strategy_hash)
+                            target_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', pre_h,tr_h)
                             if os.path.exists(target_dir):
                                 shutil.rmtree(target_dir)
                             shutil.move(train_dir, target_dir)
@@ -668,6 +671,67 @@ def _setup_root_logger(exp_dir: str) -> logging.Logger:
     logger.setLevel(logging.INFO)
     return logger
 
+def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, Any] = {}):
+    import model.train_2head as train
+    from trade.bt import simulation
+    #data prepare
+    results = {}
+    for pre_h, pre_node in task_spec.items():
+        pre_params = pre_node["params"]
+        pre_para = common.BaseDefine(**pre_params)
+        prep_output_dir = os.path.join(output_dir,'prep',f'{pre_para.symbol}_{pre_para.interval}')
+        if not os.path.exists(prep_output_dir):
+            preparation.main(logger, para=pre_para, prep_output_dir=prep_output_dir)
+            time.sleep(1)
+        original_symbol = pre_para.symbol
+        original_interval = pre_para.interval
+        for tr_h, tr_node in pre_node["train"].items():
+            train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', pre_h,tr_h)
+            if not os.path.exists(train_save_dir):
+                raise RuntimeError("run valid first!")
+            train_params = tr_node["params"]
+            t_cfg = _config_from_dict_train(train_params)
+            for sim_task in tr_node['sim_tasks']:
+                hash_value =  sim_task['hash']
+                strategy_hash = sim_task['strategy_hash']
+                sim_params = sim_task['params']
+                sim_para=simulation.StrategyPara(**sim_params)
+                results[strategy_hash] = {'orignal_symbol': f'{pre_para.symbol}_{pre_para.interval}','CAGR':{}}
+                for symbol in ["DOGEUSDT","ETHUSDT", "BTCUSDT"]:   #BTCUSDT ETHUSDT DOGEUSDT
+                    if symbol != original_symbol:
+                        t_pre_para = common.BaseDefine(**pre_params)
+                        t_pre_para.symbol = symbol
+                        t_pre_para.interval = original_interval
+                        sim_prep_output_dir = os.path.join(output_dir,'prep',f'{t_pre_para.symbol}_{t_pre_para.interval}')
+                        if not os.path.exists(sim_prep_output_dir):
+                            preparation.main(logger, para=t_pre_para, prep_output_dir=sim_prep_output_dir)
+                            time.sleep(1)
+                        result = simulation.main( logger, para=sim_para, pre_para=t_pre_para, train_cfg=t_cfg, prep_output_dir=sim_prep_output_dir,
+                                                                train_output_dir=train_save_dir, device="cpu", period='long' )["statistics"][1]
+                        results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
+                        results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result['performance']['cagr']
+                    else:
+                        for interval in ["15m","30m","1h"]:
+                            t_pre_para = common.BaseDefine(**pre_params)
+                            t_pre_para.symbol = original_symbol
+                            t_pre_para.interval = interval
+                            sim_prep_output_dir = os.path.join(output_dir,'prep',f'{t_pre_para.symbol}_{t_pre_para.interval}')
+                            if not os.path.exists(sim_prep_output_dir):
+                                preparation.main(logger, para=t_pre_para, prep_output_dir=sim_prep_output_dir)
+                                time.sleep(1)
+                            result = simulation.main( logger, para=sim_para, pre_para=t_pre_para, train_cfg=t_cfg, prep_output_dir=sim_prep_output_dir,
+                                                                    train_output_dir=train_save_dir, device="cpu", period='long' )["statistics"][1]
+                            results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
+                            results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result['performance']['cagr']
+    output_path = os.path.join(output_dir, "cross_test_reports.jsonl")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        for s_hash, data in results.items():
+            record = {"strategy_hash": s_hash}
+            record.update(data) 
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    logger.info(f"Successfully saved {len(results)} cross test records to {output_path}")
+
 def main():
     parser = argparse.ArgumentParser(description="Batch experiments: prep -> train -> sim (with resume)")
     parser.add_argument("-p", "--prep", action="store_true", help="Execute data preparation stage")
@@ -676,6 +740,7 @@ def main():
     parser.add_argument("-a", "--all", choices=["fast", "full", "all"], default="all",  help="Two-stage training: fast / full / all")
     parser.add_argument("-v", "--valid", action="store_true", default=False, help="Rerun selected_configs.jsonl then compare")
     parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
+    parser.add_argument("-c", "--cross_test", action="store_true", default=False, help="crosss test")
     parser.add_argument("-l", "--load", type=str, help="load condidate configs for verification,befor applying to market")
 
     args = parser.parse_args()
@@ -693,6 +758,13 @@ def main():
         os.makedirs(exp_dir, exist_ok=True)
         if not os.path.exists(selected_configs):
             print(f"❌ Error: valid file not found: {selected_configs}")
+            return
+    elif args.cross_test:
+        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
+        exp_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "selected_configs", "cross_test")
+        os.makedirs(exp_dir, exist_ok=True)
+        if not os.path.exists(selected_configs):
+            print(f"❌ Error: select file not found: {selected_configs}")
             return
     elif args.load:
         load_file = os.path.join(common.PERSISTENCE_DIR, args.load)
@@ -764,14 +836,21 @@ def main():
         n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
         logger.info(f"📥 Loaded from {selected_configs}")
         logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim}")
+    elif args.cross_test:
+        task_spec = _load_task_from_configs(selected_configs)
+        n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
+        logger.info(f"📥 Loaded from {selected_configs}")
+        logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim}")
+        train_and_cross_test(logger,temp_dir,task_spec)
+        exit()
     else:
         import model.train_2head as train
         from trade.bt import simulation
 
         preparation_task: List[Any] = []
         if args.prep or run_all:
-            for cn in [96,108,116,124,132,140]: #[96,120]
-                for pn in [6,8,12,16,20,24,28,32,36,40]: #[10,12,14,16,18]
+            for cn in [72,80,88,96]: #[96,120]
+                for pn in [6,8,12,16,20,24,28]: #[10,12,14,16,18]
                     for vol_multiplier in [1.9]:
                         item = common.BaseDefine(
                                 candlestick_num=cn,
@@ -795,7 +874,7 @@ def main():
             #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
             for flip_penalty in np.arange(0.2, 2.1, 0.1).round(1):
                 # for miss_penalty in np.arange(0.2, 2, 0.1).round(1):\
-                for stride in [1,2]:
+                for stride in [4,8]:
                     t_cfg = train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,
                                               flip_penalty = float(flip_penalty),miss_penalty = float(flip_penalty/2),stride = stride, patience = 8)
                     training_task.append(t_cfg)
@@ -804,13 +883,13 @@ def main():
 
         simulation_task: List[Any] = []
         if args.sim or run_all:
-            for i in [6, 8,10,12,16,20,24,28, 30,32,36,40,44]: #in range(1,16):
+            for i in [24,28, 30,32,36,40,44,48]: #in range(1,16):
                 holdbar = i
-                for (atr_sl_mult_long, atr_sl_mult_short) in [(10,6),(8,5),(6,4),(5,4),(5,3),(4,3),(4,2),(3,2)]:
+                for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5),(5,4)]:
                     s_cfg = simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
                                                     stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04)
-                s_cfg.holdbar = holdbar
-                simulation_task.append(s_cfg)
+                    s_cfg.holdbar = holdbar
+                    simulation_task.append(s_cfg)
         else:
             simulation_task.append(simulation.StrategyPara())
         task_spec = build_task_spec(preparation_task, training_task, simulation_task)
@@ -1017,6 +1096,7 @@ def _load_task_from_configs(path: str) -> Dict[str, Any]:
     for r in records:
         params = common.recursive_get(r, "params")
 
+        r_hash = params['hash']
         pre_conf =  common.recursive_get(params, "common")
         tr_conf  =   common.recursive_get(params, "train")
         sim_conf =  common.recursive_get(params, "strategy")
@@ -1038,10 +1118,9 @@ def _load_task_from_configs(path: str) -> Dict[str, Any]:
 
         existing = {s["hash"] for s in node_tr["sim_tasks"]}
         if sim_h not in existing:
-            node_tr["sim_tasks"].append({"hash": sim_h, "params": json_safe(sim_conf)})
+            node_tr["sim_tasks"].append({"hash": sim_h, "params": json_safe(sim_conf),"strategy_hash":r_hash})
 
     return task_spec
-
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
