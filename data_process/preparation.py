@@ -9,6 +9,7 @@ from data_process import common
 
 def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine, prep_output_dir =common.DATA_OUT_DIR ):
     file = os.path.join(common.PROJECT_DATA_DIR, para.trading_type ,f"{para.symbol}_{para.interval}.csv")
+    logger.info(f"using file :{file}")
     # 1. 获取周期字符串并转为毫秒
     interval_ms = common.get_interval_ms(para.interval)
     

@@ -99,6 +99,7 @@ class StrategyPara:
 #period: short/forward/long
 def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
          device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'short'):
+    logger.info(f"prep_output_dir:{prep_output_dir}, train_output_dir:{train_output_dir}")
     if period == 'short' or period == 'forward':
         df = common.load_test_df_from_dir(prep_output_dir)
         recent_month = 2
@@ -209,7 +210,7 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
     )
     # cerebro.broker.set_coc(True)  #
 
-    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, compression=1, factor=365)
+    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, compression=1, annualize=True, factor=365)
     cerebro.addanalyzer(bt.analyzers.Returns, _name='returns' , tann=365)
     cerebro.addanalyzer(btanalyzers.DrawDown, _name="dd")
     cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
@@ -462,6 +463,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     violation_days = perf.get('daily_dd_violation_days', 0)
     # 1. 获取全局最低净值
     global_min_equity = perf.get('global_min_equity', 0.0)
+    max_hwm_duration_days = perf.get('max_hwm_duration_days', 0)
     # 2. 计算距离初始资金的跌幅 (FTMO Max Loss)
     start_cash = strat.broker.startingcash
     dist_to_start_pct = (global_min_equity - start_cash) / start_cash
@@ -603,6 +605,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
             f"dd_3_pct_days": max_3_violation_days,
             f"dd_4_pct_days": violation_days,
             f"dd_5_pct_days": max_violation_days,
+            f"max_hwm_duration_days":max_hwm_duration_days,
         },
 
         f"exposure": {

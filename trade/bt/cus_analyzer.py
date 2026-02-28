@@ -30,6 +30,10 @@ class CusAnalyzer(bt.Analyzer):
         self._flat_days_round = 2 
         self._flat_periods_days = []        # 每段空仓长度（单位：天）
 
+        # --- 新增：HWM 状态 ---
+        self._hwm = self._global_min_equity
+        self._hwm_dt = self.strategy.data.datetime.datetime(0)
+        self._max_hwm_duration = 0
     def next(self):
         """每个 Bar 结束时调用，分发逻辑"""
         self._track_exposure()
@@ -46,7 +50,10 @@ class CusAnalyzer(bt.Analyzer):
         exposure_metrics = self._finalize_exposure()
         drawdown_metrics = self._finalize_drawdown()
 
-        global_metrics = {'global_min_equity': self._global_min_equity}
+        global_metrics = {
+                    'global_min_equity': self._global_min_equity,
+                    'max_hwm_duration_days': self._max_hwm_duration  # 直接输出整数
+        }
 
         # --- FLAT DIST: 回测结束时收尾（新增）---
         flat_metrics = self._finalize_flat_distribution()
@@ -63,7 +70,14 @@ class CusAnalyzer(bt.Analyzer):
         current_equity = self.strategy.broker.getvalue()
         if current_equity < self._global_min_equity:
             self._global_min_equity = current_equity
-
+        if current_equity >= self._hwm:
+            self._hwm = current_equity
+            self._hwm_dt = self.strategy.data.datetime.datetime(0)
+        else:
+            # .days 直接返回两个时间点相差的整数天数
+            duration = (self.strategy.data.datetime.datetime(0) - self._hwm_dt).days
+            if duration > self._max_hwm_duration:
+                self._max_hwm_duration = duration
     # =========================================================
     # 持仓暴露
     # =========================================================
@@ -127,7 +141,7 @@ class CusAnalyzer(bt.Analyzer):
         self._daily_stats.append({
             'date': str(date_obj),
             'dd_pct': dd_pct,
-            'equity': day_end_equity,   # ⭐ 新增
+            'equity': day_end_equity,
         })
 
     def _finalize_drawdown(self):
