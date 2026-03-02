@@ -1287,7 +1287,7 @@ class FeatureOrderFlow(FeatureBase):
         self._normalize_signal_group(X, feature_cols, poc_feats, factory, method='log')
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
-        return int(max(self.windows,self.poc_bias_step) * 1.5)
+        return int(int(max(max(self.windows), max(self.poc_bias_step)))* 1.5)
 
 class FeatureClassicFactors(FeatureBase):
     """

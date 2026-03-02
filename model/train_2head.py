@@ -385,7 +385,7 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
             input_size=full_ds.feature_count, n_classes=len(classes),
             **params
         )
-        model = torch.compile(model)
+        # model = torch.compile(model)
         # --- 核心修改：实现 gate_lr 差异化学习率 ---
         # 1. 提取参数
         gate_params = []
