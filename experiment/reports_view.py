@@ -11,17 +11,8 @@ import copy
 # 引入自定义模块
 from data_process.common import *
 from data_process import common 
-# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_30m','09_07_11'))
-# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-15','ETHUSDT_15m','01_02_36'))
-# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', '2026-02-14','DOGEUSDT_5m','07_54_32'))
-# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','09_09_43'))
-# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','19_15_58'))
-# exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m', '2026-02-19','23_43_49'))
-exp_dir = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-02-21','22_58_48'))
 
 output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments')
-shorts_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_short.jsonl'))
-longs_file = (os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'selected_configs', 'reports_long.jsonl'))
 TOP_K = 50
 SKIP_PERCENT = 0  # 跳过前百分之多少，0表示不跳过，从最前面开始选择
 
@@ -463,7 +454,8 @@ def main():
         for r in records:
             row = extract_row(r, report_file)
             rows.append(row)
-    
+    symbol = rows[0]['short']['params']['common']['symbol']
+    interval = rows[0]['short']['params']['common']['interval']
     print(f"Total reports loaded: {len(rows)}")
     uin_records = merge_selected(rows)
     print(f"Total uint reports: {len(uin_records)}")
@@ -473,11 +465,15 @@ def main():
         exit()
     
     sorted_selected1 = sorted(uin_records, key=itemgetter("l_cagr"), reverse=True)
-    plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
-    plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
-    plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
-    exit()
-    l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.6,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1.9,daily_freq = 0.3,sharpe = 1)
+    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
+    # exit()
+    if symbol == 'DOGEUSDT' and interval=='15m':
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.6,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1.9,daily_freq = 0.3,sharpe = 1)
+    if symbol == 'ETHUSDT' and interval=='15m':
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 0.9,daily_freq = 0.2,sharpe = 0.5)
+
     # sort_by_correlation_result = sort_by_correlation_diversity(l_results)
     analyze_holdbar(l_results,target_key="stride",period ='long', metric_key="cagr")
     # sorted_by_pos_ratio = sorted(
@@ -487,8 +483,11 @@ def main():
     # )
     sorted_calmar = sorted(l_results, key=itemgetter("l_calmar"), reverse=True)
     selected = l_results
-    filter_hash = ['c48fc76e','ad40b408','dc6c1390','584eb8de','83b16fb9','b3b9b8c5','9b0facb8','08c2acf6','20d6cd8a','e6c308e5','0824cbdc',
-                   'd72bb0d4','ae6b5897','48514f66','31a957db','89f39876','c780edee','64afb891','f9a98676']
+    filter_hash_doge_15 = ['c48fc76e','ad40b408','dc6c1390','584eb8de','83b16fb9','b3b9b8c5','9b0facb8','08c2acf6','20d6cd8a','e6c308e5','0824cbdc',
+                   'd72bb0d4','ae6b5897','48514f66','31a957db','89f39876','c780edee','64afb891','f9a98676' , '084c68b5','d22cf3db','2c2321b3'
+                   '4d008904','7a430104','c0e6a3dd','436a8503','b4633eab','243b56c6','0d6533f3']
+    filter_hash_eth_15 = ['943143f8', '21f9fce3', 'e4927150', '9a3f7676', '4afa85ac' ,'3163d070','ed96bd77','cc89356b']
+    filter_hash = filter_hash_doge_15 + filter_hash_eth_15
     selected = [
         r for r in l_results 
         if str(common.recursive_get(r.get('long', {}), 'hash'))[:8] not in filter_hash
@@ -515,7 +514,6 @@ def main():
     # # sorted_l_daily_freq = sorted(rc_results, key=itemgetter("l_daily_freq"), reverse=True)
     # top_k = 40
     # merged_selected = merge_selected_sort(sorted_l_sharpe[:top_k],sorted_calmar[:top_k],rc_pos_ratio_results[:top_k],period ='long', sort_key='cagr')
-    # show_performance(merged_selected,output_dir,3)
     out_path = os.path.join(output_dir,"selected_configs" ,"selected_configs.jsonl")
     os.makedirs(os.path.join(output_dir,"selected_configs"), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
