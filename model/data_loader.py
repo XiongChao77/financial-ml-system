@@ -42,6 +42,8 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         missing = set(feature_cols) - set(df.columns)
         if missing:
             raise ValueError(f"Missing features: {list(missing)}")
+        if 'atr_14' in feature_cols:
+            raise RuntimeError("atr_14 is used for strategy now , can't be normalize")
         if self.is_live == True:
             self.stride = 1
         self.logger.info(f"Features num:{len(feature_cols)},: {feature_cols}")

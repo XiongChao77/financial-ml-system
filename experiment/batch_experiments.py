@@ -868,7 +868,7 @@ def main():
                                 stop_multiplier_rate_short=0.2,
                                 symbol=SYMBOL,   #ETHUSDT
                                 interval=INTERVAL,
-                                trading_type="um",
+                                trading_type=common.TradingType.UM,
                                 version=0
                             )
                         preparation_task.append(item)

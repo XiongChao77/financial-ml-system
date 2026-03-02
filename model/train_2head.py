@@ -105,7 +105,6 @@ feature_conf_list = [
 @dataclass
 class DataConfig:
     label_col: str = "label"
-    window: int = common.BaseDefine.predict_num
     train_ratio: float = 0.7
     val_ratio: float = 0.15
 
@@ -199,8 +198,6 @@ class XGBoostConfig:
     xgb_depth: int = 6
     xgb_estimators: int = 100
     learning_rate: float = 3e-4
-    # 新增：用于 Flatten 维度计算
-    window_size: int = common.BaseDefine.predict_num
 
 @dataclass
 class CNNConfig:
@@ -302,11 +299,11 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
 
     df = common.load_train_df_from_dir(prep_output_dir)
     kline_interval_ms = common.load_interval_ms_from_dir(prep_output_dir)
-    logger.info(f"Using TimeSeriesWindowDataset with window={data_cfg.window} Origin data len {len(df)}...")
+    logger.info(f"Using TimeSeriesWindowDataset with window={pre_para.candlestick_num} Origin data len {len(df)}...")
 
     feature_list = list(feature_direction_map.keys())
     full_ds = TimeSeriesWindowDataset(
-        df=df, kline_interval_ms=kline_interval_ms, feature_cols=feature_list, label_col=data_cfg.label_col, window=data_cfg.window,
+        df=df, kline_interval_ms=kline_interval_ms, feature_cols=feature_list, label_col=data_cfg.label_col, window=pre_para.candlestick_num,
         cache_path=os.path.join(save_dir,"train_cache.pt"), stride =train_cfg.stride, use_cache = train_cfg.use_cache, show_feature_distribution=True
     )
     logger.warning(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):"
@@ -329,7 +326,7 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
     logger.info("Data loaded to VRAM.")
 
     M = len(full_ds)
-    logger.info(f"Total windows (M) = {M}, window = {data_cfg.window}")
+    logger.info(f"Total windows (M) = {M}, window = {pre_para.candlestick_num}")
 
     # 2. 切分数据
     tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
@@ -368,7 +365,7 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
     
     # 默认值修正 logic
     if hasattr(model_cfg, 'max_len') and params['max_len'] is None:
-        params['max_len'] = data_cfg.window
+        params['max_len'] = pre_para.candlestick_num
 
     # 特殊处理 XGBoost
     if m_type == 'xgboost':
@@ -376,7 +373,7 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
         model = ModelFactory.build_for_training(
             model_type=m_type, model_version=m_ver, device=device,
             input_size=full_ds.feature_count, n_classes=len(classes),
-            input_dim=data_cfg.window * full_ds.feature_count, window_size = model_cfg.window_size,
+            input_dim=pre_para.candlestick_num * full_ds.feature_count, window_size = pre_para.predict_num,
             xgb_params=params
         )
     else:
@@ -385,7 +382,7 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
             input_size=full_ds.feature_count, n_classes=len(classes),
             **params
         )
-        # model = torch.compile(model)
+        model = torch.compile(model)
         # --- 核心修改：实现 gate_lr 差异化学习率 ---
         # 1. 提取参数
         gate_params = []
@@ -964,7 +961,7 @@ def evaluate_and_save_results(
     classes: np.ndarray,
     logger: logging.Logger,
     mtl_manager: MTLManager,
-    pre_para,
+    pre_para:common.BaseDefine,
     save_dir:str
 ):
     """
@@ -1013,7 +1010,7 @@ def evaluate_and_save_results(
             "feature_list" : feature_list,
             "classes": classes.tolist(),
             "channel": full_ds.feature_count,
-            "window": data_cfg.window,
+            "window": pre_para.candlestick_num,
             "feature_cols": full_ds.feature_names,
             "label_col": data_cfg.label_col,
             "val_score": val_score,
@@ -1025,7 +1022,7 @@ def evaluate_and_save_results(
             feature_cols=full_ds.feature_names,
             label_col=data_cfg.label_col,
             classes=classes.tolist(),
-            window=data_cfg.window,
+            window=pre_para.candlestick_num,
             model_version_tag=suffix,
         )
         with open(os.path.join(save_dir, f"model_{suffix.lower()}_meta.json"), "w", encoding="utf-8") as f:

@@ -16,6 +16,7 @@ sys.path.append(os.path.join(current_work_dir, "..", '..' , '..'))
 from data_process import common
 from data_process.common import FeatureFactory
 from model import model_loader
+from model import data_loader
 from trade.strategy.strategy_ml import FtmoBrain, MarketState, PositionDir, ActionType, Signal
 from trade.market.ftmo import mt5_executor
 from trade.market.binance_data_feed import  BinanceDataFeed
@@ -155,6 +156,14 @@ class LiveBot:
             # ModelHandler 内部会进行 TimeSeriesWindowDataset 处理和归一化
             # 注意：predict 返回的是包含 pred 和 pred_prob 的 DataFrame
             inference_df = df.iloc[-(self.model_handler.window + 200):]
+            ds = data_loader.TimeSeriesWindowDataset(
+                df=df, 
+                kline_interval_ms = _interval_ms,
+                feature_cols=handler.feature_cols, 
+                label_col=handler.label_col, 
+                window=handler.window,
+                is_live=False,
+            )
             df_pred, _ = self.model_handler.predict(inference_df, kline_interval_ms= self.interval_ms, is_live = True, diff_thresh = None)
             
             # 获取最新一根 K 线的预测结果
