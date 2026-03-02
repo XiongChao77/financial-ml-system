@@ -11,8 +11,8 @@ from trade.strategy.strategy_ml import PositionDir, ActionType
 from trade.strategy.base_executor import BaseExecutor
 
 class BybitExecutor(BaseExecutor):
-    def __init__(self, key_path,rsa_pem_path, symbol: str):
-        self.engine = BybitEngine(key_path,rsa_pem_path)
+    def __init__(self, key_path, symbol: str):
+        self.engine = BybitEngine(key_path)
         self.symbol = symbol
         self.logger = logging.getLogger("BybitExecutor")
         

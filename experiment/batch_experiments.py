@@ -53,8 +53,8 @@ SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
 MAX_SIM = 4
-SYMBOL: str = "BTCUSDT"    #ETHUSDT DOGEUSDT
-INTERVAL: str = "15m"
+SYMBOL: str = "ETHUSDT"    #ETHUSDT DOGEUSDT
+INTERVAL: str = "30m"
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -858,7 +858,7 @@ def main():
         if args.prep or run_all:
             for cn in [56,64,72,80,88,96,168]: #[96,120]
                 for pn in [6,8,12,16,20,24,28]: #[10,12,14,16,18]
-                    for vol_multiplier in [1.9]:
+                    for vol_multiplier in [1.8,1.9,2]:
                         item = common.BaseDefine(
                                 candlestick_num=cn,
                                 predict_num=pn,
@@ -890,7 +890,7 @@ def main():
 
         simulation_task: List[Any] = []
         if args.sim or run_all:
-            for i in [30,32,36,40,44,48]: #in range(1,16):
+            for i in [16,24,30,32,36,40,44,48]: #in range(1,16):
                 holdbar = i
                 for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5),(5,4)]:
                     s_cfg = simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
