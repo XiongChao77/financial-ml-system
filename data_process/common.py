@@ -1,4 +1,4 @@
-from enum import IntEnum
+from enum import IntEnum,Enum
 from functools import lru_cache
 from dataclasses import dataclass
 import logging,math,re,git
@@ -38,6 +38,11 @@ os.makedirs(PERSISTENCE_DIR, exist_ok=True)
 DATA_OUT_DIR = os.path.join(TEMPORARY_DIR, "data")
 os.makedirs(DATA_OUT_DIR, exist_ok=True)
 
+class TradingType(Enum):
+    SPOT = "spot"
+    UM = "um"    # USDT-M Futures
+    CM = "cm"    # Coin-M Futures
+
 @dataclass
 class BaseDefine:
     # model / data
@@ -51,7 +56,7 @@ class BaseDefine:
     # market
     symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
     interval: str = "15m"
-    trading_type:str ="um"             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures)   
+    trading_type:TradingType =TradingType.UM             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures)   
     version:int = 0
 
 log_level = logging.INFO
