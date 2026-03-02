@@ -465,17 +465,19 @@ def main():
         exit()
     
     sorted_selected1 = sorted(uin_records, key=itemgetter("l_cagr"), reverse=True)
-    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
-    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
-    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='candlestick_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
     # exit()
+    analyze_holdbar(sorted_selected1,target_key="predict_num",period ='long', metric_key="cagr")
     if symbol == 'DOGEUSDT' and interval=='15m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.6,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1.9,daily_freq = 0.3,sharpe = 1)
     if symbol == 'ETHUSDT' and interval=='15m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 0.9,daily_freq = 0.2,sharpe = 0.5)
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1,daily_freq = 0.15,sharpe = 0.5)
 
     # sort_by_correlation_result = sort_by_correlation_diversity(l_results)
-    analyze_holdbar(l_results,target_key="stride",period ='long', metric_key="cagr")
+    analyze_holdbar(l_results,target_key="predict_num",period ='long', metric_key="cagr")
+    # exit()
     # sorted_by_pos_ratio = sorted(
     #     l_results, 
     #     key=lambda r: common.recursive_get(r.get('long', {}), 'rc_pos_ratio') or 0, 
@@ -494,8 +496,7 @@ def main():
     ]
 
     print(f"🎯 Hash 过滤完成: 过滤前 {len(l_results)} 条 -> 过滤后 {len(selected)} 条")
-    # show_performance(selected,output_dir,3)
-    analyze_holdbar(l_results,target_key="stride",period ='long', metric_key="cagr")  
+    show_performance(selected,output_dir,3)
     # stable_selected1 = filter_stable(rc_median_results)
     # print(f"-------------After filter_stable: {len(stable_selected1)} reports")
     # # selected2 = filter_aggressive(rc_results)
