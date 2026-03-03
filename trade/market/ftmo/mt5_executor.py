@@ -11,10 +11,13 @@ class MT5Executor(BaseExecutor):
         self.symbol = MT5_SYMBOL_FTMO_MAP[symbol]
         self.magic = magic
         self.logger = logger
+        self.path = path
         
         if not mt5.initialize(path=path):
             self.logger.error(f"❌ 初始化失败! 错误码: {mt5.last_error()}")
             raise RuntimeError("MT5 初始化失败")
+        else:
+            self.logger.info(f"init success {path}")
         
         # 确保品种已在市场报价中
         if not mt5.symbol_select(self.symbol, True):
@@ -87,7 +90,9 @@ class MT5Executor(BaseExecutor):
         res = mt5.order_send(request)
         if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
             err_msg = res.comment if res else "Unknown Error"
-            self.logger.error(f"❌ 下单失败: {err_msg} | 尝试手数: {lots}")
+            self.logger.error(f"❌ 下单失败: {err_msg} | 尝试手数: {lots}, | {self.path}")
+            code, msg = mt5.last_error()
+            self.logger.error(f"❌ order_send 返回 None | last_error: {code} - {msg}")
         else:
             self.logger.info(f"✅ 下单成功: {lots} Lots")
 

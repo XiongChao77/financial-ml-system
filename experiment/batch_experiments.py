@@ -53,8 +53,8 @@ SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
 MAX_SIM = 4
-SYMBOL: str = "ETHUSDT"    #ETHUSDT DOGEUSDT
-INTERVAL: str = "30m"
+SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
+INTERVAL: str = "15m"
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -301,6 +301,71 @@ def log_param_sweep(logger, sweep):
         logger.info(f"  [{stage}]")
         for k, v in sweep[stage].items():
             logger.info(f"    {k}: {v}")
+
+def create_task_spec(logger, exp_dir,done_set: set[str]):
+
+    import model.train_2head as train
+    from trade.bt import simulation
+
+    preparation_task: List[Any] = []
+
+    for cn in [80,88,216,224]:#list(range(56, 224, 8)): #[56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
+        for pn in [4,8,24,28]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
+            for vol_multiplier in [1.7,1.8,1.9,2]:#1.8,1.9,2
+                item = common.BaseDefine(
+                        vol_ewma_span = 200,
+                        candlestick_num=cn,
+                        predict_num=pn,
+                        vol_multiplier_long=vol_multiplier,
+                        stop_multiplier_rate_long=0.2,
+                        vol_multiplier_short=vol_multiplier,
+                        stop_multiplier_rate_short=0.2,
+                        symbol=SYMBOL,   #ETHUSDT
+                        interval=INTERVAL,
+                        trading_type= 'um',
+                        version=0
+                    )
+                preparation_task.append(item)
+
+    training_task: List[train.TrainConfig] = []
+
+    # for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
+    #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
+    for flip_penalty in np.arange(0.2, 2.1, 0.1).round(1):
+        # for miss_penalty in np.arange(0.2, 2, 0.1).round(1):\
+        for stride in [8]: #2,4,8
+            t_cfg = train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,
+                                        flip_penalty = float(flip_penalty),miss_penalty = float(flip_penalty/2),stride = stride, patience = 8)
+            training_task.append(t_cfg)
+
+    simulation_task: List[Any] = []
+
+    for i in [30, 32]: #16,24,30,32,36,40,44,48
+        holdbar = i
+        for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5)]: #(6,5),(5,4)
+            s_cfg = simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
+                                            stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04)
+            s_cfg.holdbar = holdbar
+            simulation_task.append(s_cfg)
+    task_spec = build_task_spec(preparation_task, training_task, simulation_task)
+    # task_spec 已经 ready
+    sweep = collect_param_sweep(task_spec)
+    log_param_sweep(logger, sweep)
+
+    tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
+    with open(tasks_spec_path, "w", encoding="utf-8") as f:
+        json.dump(task_spec, f, indent=2, ensure_ascii=False, default=str)
+    logger.info(f"📄 Tasks spec saved: {tasks_spec_path}")
+
+    (n_prep_total, n_train_total, n_sim_total) = _count_spec_tasks(task_spec)
+    total_all = n_prep_total + n_train_total + n_sim_total
+    logger.info(f"📊 Total: {total_all} (prep={n_prep_total}, train={n_train_total}, sim={n_sim_total})")
+    if done_set:
+        task_spec = filter_pending_from_spec(task_spec, done_set)
+        n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
+        total_pending = n_prep + n_train + n_sim
+        logger.info(f"📊 Pending: {total_pending} (prep={n_prep}, train={n_train}, sim={n_sim}), done: {total_all - total_pending}")
+    return task_spec
 
 # -----------------------------------------------------------------------------
 # Worker loops
@@ -736,14 +801,15 @@ def main():
     parser.add_argument("-p", "--prep", action="store_true", help="Execute data preparation stage")
     parser.add_argument("-t", "--train", action="store_true", help="Execute model training stage")
     parser.add_argument("-s", "--sim", action="store_true", help="Execute backtest simulation stage")
-    parser.add_argument("-a", "--all", choices=["fast", "full", "all"], default="all",  help="Two-stage training: fast / full / all")
+    parser.add_argument("-n", "--new", action="store_true",  help="new train")
+    parser.add_argument("-a", "--add", type=str, help="add more to exist expirement")
     parser.add_argument("-v", "--valid", action="store_true", default=False, help="Rerun selected_configs.jsonl then compare")
     parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
     parser.add_argument("-c", "--cross_test", action="store_true", default=False, help="crosss test")
-    parser.add_argument("-l", "--load", type=str, help="load condidate configs for verification,befor applying to market")
+    parser.add_argument("-l", "--load", action="store_true", default=False, help="load condidate configs for verification,befor applying to market")
 
     args = parser.parse_args()
-    run_all = args.all
+    run_all = args.new
 
     # ---------------- resolve exp_dir ----------------
     if args.resume:
@@ -751,6 +817,11 @@ def main():
         if not os.path.exists(exp_dir):
             print(f"❌ Error: Resume directory not found: {exp_dir}")
             return
+    elif args.add:
+        exp_dir = os.path.join(common.PERSISTENCE_DIR, args.add)
+        if not os.path.exists(exp_dir):
+            print(f"❌ Error: add directory not found: {exp_dir}")
+            return 
     elif args.valid:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs")
@@ -766,8 +837,8 @@ def main():
             print(f"❌ Error: select file not found: {selected_configs}")
             return
     elif args.load:
-        load_file = os.path.join(common.PERSISTENCE_DIR, args.load)
-        records = common.load_selected_configs(load_file)  # just to validate file and format
+        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
+        records = common.load_selected_configs(selected_configs)  # just to validate file and format
         from trade.bt import simulation
         import model.train_2head as train
         exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "load_configs")
@@ -789,6 +860,7 @@ def main():
                 logger.info(f"skip {strategy_hash}, tarin data not found {train_save_dir}")
                 continue
             preparation.main(logger, para=pre_para,prep_output_dir = load_prep_output_dir)
+            last_cagr = 0
             for trade_risk in [0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
                 result = {}
                 sim_para.trade_risk = trade_risk
@@ -803,6 +875,9 @@ def main():
                 result[strategy_hash][trade_risk]['long'] = long_result
                 result[strategy_hash][trade_risk]['forward'] = forward_result
                 results.append(result)
+                if long_result['performance']['cagr'] < last_cagr:
+                    break
+                last_cagr = long_result['performance']['cagr']
         output_path = os.path.join(exp_dir, 'trade_risk_test' , "loaded_reports.jsonl")
         os.makedirs(os.path.dirname(output_path), exist_ok= True)
         with open(output_path, "w", encoding="utf-8") as f:
@@ -836,7 +911,9 @@ def main():
         logger.info(f"📥 Loaded from {exp_dir}")
         logger.info(f"📊 Total: {total_all} (prep={n_prep_total}, train={n_train_total}, sim={n_sim_total})")
         logger.info(f"📊 Pending: {total_pending} (prep={n_prep}, train={n_train}, sim={n_sim}), done: {total_all - total_pending}")
-
+    elif args.add:
+        done_set = load_done_set(reports_path)
+        task_spec = create_task_spec(logger, exp_dir, done_set)
     elif args.valid:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         task_spec = _load_task_from_configs(selected_configs)
@@ -851,67 +928,7 @@ def main():
         train_and_cross_test(logger,temp_dir,task_spec)
         exit()
     else:
-        import model.train_2head as train
-        from trade.bt import simulation
-
-        preparation_task: List[Any] = []
-        if args.prep or run_all:
-            for cn in [56,64,72,80,88,96,168]: #[96,120]
-                for pn in [6,8,12,16,20,24,28]: #[10,12,14,16,18]
-                    for vol_multiplier in [1.8,1.9,2]:
-                        item = common.BaseDefine(
-                                candlestick_num=cn,
-                                predict_num=pn,
-                                vol_multiplier_long=vol_multiplier,
-                                stop_multiplier_rate_long=0.2,
-                                vol_multiplier_short=vol_multiplier,
-                                stop_multiplier_rate_short=0.2,
-                                symbol=SYMBOL,   #ETHUSDT
-                                interval=INTERVAL,
-                                trading_type=common.TradingType.UM,
-                                version=0
-                            )
-                        preparation_task.append(item)
-        else:
-            preparation_task.append(common.BaseDefine())
-
-        training_task: List[train.TrainConfig] = []
-        if args.train or run_all:
-            # for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
-            #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
-            for flip_penalty in np.arange(0.2, 2.1, 0.1).round(1):
-                # for miss_penalty in np.arange(0.2, 2, 0.1).round(1):\
-                for stride in [2,4,8]:
-                    t_cfg = train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,
-                                              flip_penalty = float(flip_penalty),miss_penalty = float(flip_penalty/2),stride = stride, patience = 8)
-                    training_task.append(t_cfg)
-        else:
-            training_task.append(train.TrainConfig())
-
-        simulation_task: List[Any] = []
-        if args.sim or run_all:
-            for i in [16,24,30,32,36,40,44,48]: #in range(1,16):
-                holdbar = i
-                for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5),(5,4)]:
-                    s_cfg = simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
-                                                    stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04)
-                    s_cfg.holdbar = holdbar
-                    simulation_task.append(s_cfg)
-        else:
-            simulation_task.append(simulation.StrategyPara())
-        task_spec = build_task_spec(preparation_task, training_task, simulation_task)
-        # task_spec 已经 ready
-        sweep = collect_param_sweep(task_spec)
-        log_param_sweep(logger, sweep)
-
-        tasks_spec_path = os.path.join(exp_dir, TASKS_SPEC_FILE)
-        with open(tasks_spec_path, "w", encoding="utf-8") as f:
-            json.dump(task_spec, f, indent=2, ensure_ascii=False, default=str)
-        logger.info(f"📄 Tasks spec saved: {tasks_spec_path}")
-
-        n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
-        logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim} (new run)")
-
+        task_spec = create_task_spec(logger, exp_dir, None)
     if not task_spec:
         logger.info("✅ No pending tasks.")
         return

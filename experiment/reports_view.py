@@ -12,7 +12,7 @@ import copy
 from data_process.common import *
 from data_process import common 
 
-output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments')
+output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments',"selected_configs")
 TOP_K = 50
 SKIP_PERCENT = 0  # 跳过前百分之多少，0表示不跳过，从最前面开始选择
 
@@ -83,6 +83,151 @@ def analyze_short_long_correlation(selected):
 
     print("="*100)
 
+def analyze_model_performance_correlation(all_results):
+    """
+    统计图片中出现的模型指标 (Accuracy, F1, Precision, Recall) 与 l_cagr 的相关性
+    """
+    from scipy.stats import pearsonr, spearmanr
+    import pandas as pd
+
+    # 1. 定义需要分析的指标名称（对应图片中的 key）
+    metrics_to_check = [
+        'accuracy', 
+        'f1_macro', 
+        'f1_weighted', 
+        'precision_weighted', 
+        'recall_weighted'
+    ]
+    
+    # 2. 提取数据
+    data_list = []
+    for r in all_results:
+        # 获取目标收益指标
+        l_cagr = r.get("l_cagr")
+        # 获取模型指标字典
+        model_metrics = r['long']["model_metrics"]
+        
+        if l_cagr is not None and model_metrics:
+            row = {"l_cagr": l_cagr}
+            # 只提取图片中存在的 5 个指标
+            for m in metrics_to_check:
+                val = model_metrics.get(m)
+                if val is not None:
+                    row[m] = val
+            data_list.append(row)
+
+    if len(data_list) < 10:
+        print(f"⚠️ 样本量不足 ({len(data_list)})，无法进行有效相关性分析")
+        return
+
+    df = pd.DataFrame(data_list)
+    
+    print("\n" + "="*80)
+    print(f"📊 模型评估指标 vs Long CAGR 相关性分析 (N={len(df)})")
+    print("-" * 80)
+    print(f"{'Metric Name':<20} | {'Pearson r':>10} | {'p-value':>12} | {'Spearman r':>10}")
+    print("-" * 80)
+
+    # 3. 逐个计算指标与 l_cagr 的相关性
+    for m in metrics_to_check:
+        if m not in df.columns:
+            continue
+            
+        # 剔除空值
+        sub_df = df[['l_cagr', m]].dropna()
+        if len(sub_df) < 5: continue
+
+        p_r, p_val = pearsonr(sub_df[m], sub_df['l_cagr'])
+        s_r, _ = spearmanr(sub_df[m], sub_df['l_cagr'])
+
+        # 标注显著性
+        sig = "*" if p_val < 0.05 else ""
+        
+        print(f"{m:<20} | {p_r:10.4f}{sig} | {p_val:12.2e} | {s_r:10.4f}")
+
+    print("="*80)
+    print("💡 注: Pearson r 越接近 1 表示正线性相关；p-value < 0.05 (*) 表示统计显著。")
+
+def analyze_model_metrics_by_decile(all_results):
+    """
+    分桶统计：将收益指标 (CAGR, Calmar, Sharpe) 分成10个区间，
+    观察每个区间内模型指标 (Accuracy, F1等) 的平均水平。
+    """
+    import pandas as pd
+    import numpy as np
+
+    # 1. 配置
+    trading_metrics = ['l_cagr', 'l_calmar', 'l_sharpe']
+    model_keys = ['accuracy', 'f1_macro', 'f1_weighted', 'precision_weighted', 'recall_weighted']
+    
+    # 2. 提取数据
+    data_list = []
+    for r in all_results:
+        # 获取交易表现
+        row = {
+            'l_cagr': r.get('l_cagr'),
+            'l_calmar': r.get('l_calmar'),
+            'l_sharpe': r.get('long', {}).get('performance', {}).get('sharpe') # 部分版本键名可能略有不同
+        }
+        
+        # 获取模型指标
+        model_metrics = r['long'].get("model_metrics", {})
+        for mk in model_keys:
+            row[mk] = model_metrics.get(mk)
+            
+        if row['l_cagr'] is not None:
+            data_list.append(row)
+
+    if len(data_list) < 20:
+        print("⚠️ 数据量太少，无法进行分桶分析")
+        return
+
+    df = pd.DataFrame(data_list)
+
+    # 3. 对每个交易指标进行分桶分析
+    for t_metric in trading_metrics:
+        if t_metric not in df.columns or df[t_metric].isnull().all():
+            continue
+            
+        print("\n" + "="*100)
+        print(f"📈 分桶分析：按 {t_metric.upper()} 排名的模型指标表现 (10% 分位区间)")
+        print("="*100)
+
+        # 使用 qcut 将交易指标分为 10 个等份区间 (Deciles)
+        # duplicates='drop' 是为了防止某些指标值完全一样导致无法分桶
+        try:
+            df['bucket'] = pd.qcut(df[t_metric], 10, labels=[f"Q{i+1}" for i in range(10)], duplicates='drop')
+        except ValueError:
+            # 如果样本太少或值太集中，退而求其次分 5 桶
+            df['bucket'] = pd.qcut(df[t_metric], 5, labels=[f"Q{i+1}" for i in range(5)], duplicates='drop')
+            print(f"注：由于数据分布原因，{t_metric} 已自动调整为 5 桶统计")
+
+        # 按桶聚合计算均值
+        bucket_stats = df.groupby('bucket', observed=True)[model_keys].mean()
+        
+        # 加上该桶的交易指标平均值作为参考
+        bucket_stats[f'avg_{t_metric}'] = df.groupby('bucket', observed=True)[t_metric].mean()
+        
+        # 调整列顺序，把参考指标放前面
+        cols = [f'avg_{t_metric}'] + model_keys
+        bucket_stats = bucket_stats[cols]
+
+        # 打印结果
+        pd.options.display.max_columns = None
+        pd.options.display.width = 1000
+        print(bucket_stats.to_string(formatters={
+            f'avg_{t_metric}': '{:,.4f}'.format,
+            'accuracy': '{:,.4f}'.format,
+            'f1_macro': '{:,.4f}'.format,
+            'f1_weighted': '{:,.4f}'.format
+        }))
+        
+        # 简单单调性提示
+        first_val = bucket_stats[model_keys[0]].iloc[0]
+        last_val = bucket_stats[model_keys[0]].iloc[-1]
+        trend = "✅ 正向单调" if last_val > first_val else "❌ 逆向/无单调"
+        print(f"\n💡 趋势观察 ({model_keys[0]}): 从最低分桶到最高分桶 {trend}")
+        print("-" * 100)
 
 def merge_selected(records):
     """
@@ -190,7 +335,7 @@ def extract_row(report, src_path):
     }
 
 def basic_filter(all_results):
-    analyze_holdbar(all_results,target_key="holdbar", period ='short',metric_key="cagr")
+    # analyze_holdbar(all_results,target_key="holdbar", period ='short',metric_key="cagr")
     ps_results_0,unselected = filter_by_criteria(all_results, period ='short', cagr=0)
     print(f"After 0-screening short: {len(ps_results_0)}, {len(ps_results_0)/len(all_results)*100:.2f}%")
     ps_results,unselected = filter_by_criteria(ps_results_0, period ='short', cagr=0.2)
@@ -437,10 +582,10 @@ def plot_in_batches(all_results, output_dir, batch_size=5):
         plot_equity_curves(batch, output_dir, filename, start_index=i)
 
 def main():
-    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-02-21','22_58_48')
-    exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-02-27','14_41_59')
+    exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-02','20_41_33')
+    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_30m','2026-03-02','17_52_10')
     filter_report = None
-    filter_report =  os.path.join(exp_dir,'filtered_raw_reports.jsonl')
+    # filter_report =  os.path.join(exp_dir,'filtered_raw_reports.jsonl')
     report_files = []
     rows = []
     records = []
@@ -462,19 +607,23 @@ def main():
     if not filter_report:
         uin_records = basic_filter(uin_records)
         save_raw_reports(uin_records,exp_dir, "filtered_raw_reports.jsonl")
-        exit()
+        # exit()
     
+    # analyze_model_performance_correlation(uin_records)
+    # analyze_model_metrics_by_decile(uin_records)
+    # exit()
     sorted_selected1 = sorted(uin_records, key=itemgetter("l_cagr"), reverse=True)
-    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
-    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
-    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='candlestick_num',var2_key='predict_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='candlestick_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='candlestick_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
     # exit()
     analyze_holdbar(sorted_selected1,target_key="holdbar",period ='long', metric_key="cagr")
     if symbol == 'DOGEUSDT' and interval=='15m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.6,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1.9,daily_freq = 0.3,sharpe = 1)
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.4,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1.3 ,daily_freq = 0.3,sharpe = 0.6)
     if symbol == 'ETHUSDT' and interval=='15m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1,daily_freq = 0.15,sharpe = 0.5)
-
+    if symbol == 'ETHUSDT' and interval=='30m':
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 0.9,daily_freq = 0.15,sharpe = 0.5)
     # sort_by_correlation_result = sort_by_correlation_diversity(l_results)
     analyze_holdbar(l_results,target_key="holdbar",period ='long', metric_key="cagr")
     # exit()
@@ -485,16 +634,14 @@ def main():
     # )
     sorted_calmar = sorted(l_results, key=itemgetter("l_calmar"), reverse=True)
     selected = l_results
-    filter_hash_doge_15 = ['c48fc76e','ad40b408','dc6c1390','584eb8de','83b16fb9','b3b9b8c5','9b0facb8','08c2acf6','20d6cd8a','e6c308e5','0824cbdc',
-                   'd72bb0d4','ae6b5897','48514f66','31a957db','89f39876','c780edee','64afb891','f9a98676' , '084c68b5','d22cf3db','2c2321b3'
-                   '4d008904','7a430104','c0e6a3dd','436a8503','b4633eab','243b56c6','0d6533f3']
+    filter_hash_doge_15 = ['caeffbd3','6c90c6c8','c2e56676','baed2635']
     filter_hash_eth_15 = ['943143f8', '21f9fce3', 'e4927150', '9a3f7676', '4afa85ac' ,'3163d070','ed96bd77','cc89356b']
     filter_hash = filter_hash_doge_15 + filter_hash_eth_15
     selected = [
         r for r in l_results 
         if str(common.recursive_get(r.get('long', {}), 'hash'))[:8] not in filter_hash
     ]
-
+    # long model_metrics accuracy
     print(f"🎯 Hash 过滤完成: 过滤前 {len(l_results)} 条 -> 过滤后 {len(selected)} 条")
     show_performance(selected,output_dir,3)
     # stable_selected1 = filter_stable(rc_median_results)
@@ -515,8 +662,8 @@ def main():
     # # sorted_l_daily_freq = sorted(rc_results, key=itemgetter("l_daily_freq"), reverse=True)
     # top_k = 40
     # merged_selected = merge_selected_sort(sorted_l_sharpe[:top_k],sorted_calmar[:top_k],rc_pos_ratio_results[:top_k],period ='long', sort_key='cagr')
-    out_path = os.path.join(output_dir,"selected_configs" ,"selected_configs.jsonl")
-    os.makedirs(os.path.join(output_dir,"selected_configs"), exist_ok=True)
+    out_path = os.path.join(output_dir,"selected_configs.jsonl")
+    os.makedirs(output_dir, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         for r in selected:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
