@@ -21,7 +21,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             kline_interval_ms:int,
             feature_cols,
             label_col: str = None,
-            window: int = common.BaseDefine.predict_num,
+            window: int = common.BaseDefine.candlestick_num,
             stride: int = 1,
             is_live: bool = False,
             cache_path: Optional[str] = None,

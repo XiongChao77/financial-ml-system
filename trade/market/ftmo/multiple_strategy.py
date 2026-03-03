@@ -44,7 +44,9 @@ def sleep_until_next_tick(base_seconds: int):
     wait_time = base_seconds - (now % base_seconds)
     
     # 增加 0.5s 缓冲，确保交易所数据已更新
+    self.info(f"sleep {wait_time}s from now")
     time.sleep(wait_time + 0.5)
+    self.info(f"wake up")
 
 class StrategyType:
     MT5 = "MT5"
@@ -93,7 +95,7 @@ class SymbolRegistry:
 @dataclass
 class TradingConfig:
     # key 为 interval (如 '5m'), value 为 WindowConfig 对象
-    trading_type: Dict[common.TradingType, SymbolRegistry] = field(default_factory=dict)
+    trading_type: Dict[str, SymbolRegistry] = field(default_factory=dict)
 
 # ============================================================
 # 数据中心与推理机
@@ -107,7 +109,7 @@ class MasterController:
         self.strategy_input = TradingConfig()   #symbol:{interval:window:feature_conf_list}
         self.feature_conf_list:list = []  #feature_conf_list
         self.logger, _ = common.setup_session_logger(sub_folder="master", symbol="GLOBAL")
-        self.debug = True
+        self.debug = False
         self.init()
 
     def init(self):
@@ -154,7 +156,7 @@ class MasterController:
             w_cfg = s_cfg.intervals.setdefault(strategy.pre_para.interval, WindowConfig())
             w_cfg.items[strategy.pre_para.candlestick_num] = self.feature_conf_list
             if strategy.type == StrategyType.MT5:
-                executor = mt5_executor.MT5Executor(strategy.path, strategy.pre_para.symbol,hash_value, logger=self.logger)
+                executor = mt5_executor.MT5Executor(strategy.path, strategy.pre_para.symbol,int(hash_value, 16), logger=self.logger)
             elif strategy.type == StrategyType.BYBIT:
                 executor = BybitExecutor(strategy.path, strategy.pre_para.symbol)
             else:
@@ -238,7 +240,7 @@ class MasterController:
                         if self.debug == False:
                             interval_seconds = ms_to_seconds(common.get_interval_ms(interval_str))
                         else:
-                            interval_seconds = 5
+                            interval_seconds = 10
                         if now_ts - i_config.last_excute_time_s > (interval_seconds -1):# (interval_seconds -1):
                             i_config.last_excute_time_s = now_ts
                             if trading_type not in activate_strategy.trading_type:
@@ -265,14 +267,14 @@ class MasterController:
                         if df_with_feature is  None or df_with_feature.empty:
                             self.run_invalid_signal(symbol,interval_str,i_config)
                             continue
-                        for window in i_config.items.keys():
-                            current_candle_time = df_with_feature.iloc[-1]["open_time_date_utc"]
-                            if i_config.last_candle_time == current_candle_time:
-                                self.logger.info(f"✨ {symbol} {interval_str} no new Candle, lastest is {current_candle_time} | Buffer Size: {len(df)}")
-                                if self.debug == False:
-                                    continue
-                            i_config.last_candle_time = current_candle_time
-                            self.logger.info(f"✨ {symbol} {interval_str} New Candle Closed: {current_candle_time} | Buffer Size: {len(df)}")
+                        current_candle_time = df_with_feature.iloc[-1]["open_time_date_utc"]
+                        if i_config.last_candle_time == current_candle_time:
+                            self.logger.info(f"✨ {symbol} {interval_str} no new Candle, lastest is {current_candle_time} | Buffer Size: {len(df)}")
+                            if self.debug == False:
+                                continue
+                        i_config.last_candle_time = current_candle_time
+                        self.logger.info(f"✨ {symbol} {interval_str} New Candle Closed: {current_candle_time} | Buffer Size: {len(df)}")
+                        for window in i_config.items.keys():                            
                             ds = TimeSeriesWindowDataset(
                                 df=df_with_feature, 
                                 kline_interval_ms = common.get_interval_ms(interval_str),
@@ -282,6 +284,7 @@ class MasterController:
                                 is_live=True,
                             )
                             for hash_value,strategy in self.strategies.items():
+                                self.logger.info(f"check {hash_value} {strategy.pre_para.symbol} {strategy.pre_para.interval} {strategy.pre_para.candlestick_num} and {symbol}  {interval_str} {window}")
                                 if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.candlestick_num == window:
                                     try:
                                         df_pred, model_stats = strategy.model.predict_with_ds(ds,df_with_feature,is_live=True,diff_thresh = None)
@@ -292,6 +295,6 @@ class MasterController:
                                         self.logger.error(f"Error in strategy work {strategy.pre_para.symbol}: {e}")
 
 if __name__ == "__main__":
-    strategy_path = r"C:\Users\xc176\Desktop\Project\quant_output\market_prepare\strategy_0"
+    strategy_path = os.path.join(common.PERSISTENCE_DIR,"market_prepare","strategy_0")
     master = MasterController(strategy_path)
     master.run_forever()

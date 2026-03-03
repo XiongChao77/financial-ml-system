@@ -29,7 +29,8 @@ class BybitEngine:
 
     def _load_key(self, path):
         try: return open(path, 'r').read().strip()
-        except: return ""
+        except Exception as e:
+            raise RuntimeError(f" load key fail: {path}, e")
 
     # --- 新增：环境配置逻辑 ---
 
