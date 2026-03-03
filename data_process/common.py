@@ -38,14 +38,10 @@ os.makedirs(PERSISTENCE_DIR, exist_ok=True)
 DATA_OUT_DIR = os.path.join(TEMPORARY_DIR, "data")
 os.makedirs(DATA_OUT_DIR, exist_ok=True)
 
-class TradingType(Enum):
-    SPOT = "spot"
-    UM = "um"    # USDT-M Futures
-    CM = "cm"    # Coin-M Futures
-
 @dataclass
 class BaseDefine:
     # model / data
+    vol_ewma_span: int  = 200
     candlestick_num: int = 120     # 160 best for LSTM
     predict_num: int = 24
     # risk / vol
@@ -56,7 +52,7 @@ class BaseDefine:
     # market
     symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
     interval: str = "15m"
-    trading_type:TradingType =TradingType.UM             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures)   
+    trading_type:str ='um'             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures)   
     version:int = 0
 
 log_level = logging.INFO
@@ -275,36 +271,51 @@ def attach_triple_barrier_label(df,
     df.loc[~final_valid_mask, 'label'] = Signal.INVALID
     return df
 
-def calculate_thresholds(df, para = BaseDefine, **kwargs): 
+def calculate_thresholds(df, para=BaseDefine, **kwargs):
     """
-    计算非对称动态止盈和止损阈值（支持禁用止损）
+    使用 Rogers–Satchell + EWMA 计算动态波动率阈值
     """
-    assert 'close' in df.columns, "缺少 Close 数据"
-    
-    # 1. 计算波动率基准
-    vol_window = para.candlestick_num
-    returns = df['close'].pct_change()
-    rolling_std = returns.rolling(window=vol_window).std()
-    
-    # 2. 时间扩充波动率
-    expected_vol = rolling_std * np.sqrt(para.predict_num)
-    
-    # 3. 生成非对称阈值
-    # 多头 (Long)
-    df['threshold_long'] = (expected_vol * para.vol_multiplier_long)
-    # 如果 multiplier 为 None，则止损设为无穷大，即逻辑上关闭止损检查
+
+    required_cols = ['open', 'high', 'low', 'close']
+    for col in required_cols:
+        assert col in df.columns, f"缺少 {col} 数据"
+
+    # ===== 1️⃣ Rogers–Satchell 单期方差 =====
+    log_ho = np.log(df['high'] / df['open'])
+    log_hc = np.log(df['high'] / df['close'])
+    log_lo = np.log(df['low'] / df['open'])
+    log_lc = np.log(df['low'] / df['close'])
+
+    rs_var = log_hc * log_ho + log_lc * log_lo
+
+    # 防止极端异常（理论上应为非负，数值误差可能导致微小负数）
+    rs_var = rs_var.clip(lower=0)
+
+    # ===== 2️⃣ EWMA 平滑方差 =====
+    span = para.vol_ewma_span
+    ewma_var = rs_var.ewm(span=span, adjust=False).mean()
+
+    # 开方得到波动率
+    ewma_vol = np.sqrt(ewma_var)
+
+    # ===== 3️⃣ 时间扩展到预测区间 =====
+    # 假设方差线性扩展
+    expected_vol = ewma_vol * np.sqrt(para.predict_num)
+
+    # ===== 4️⃣ 非对称阈值 =====
+    df['threshold_long'] = expected_vol * para.vol_multiplier_long
+    df['threshold_short'] = expected_vol * para.vol_multiplier_short
+
     if para.stop_multiplier_rate_long is not None:
         df['stop_threshold_long'] = df['threshold_long'] * para.stop_multiplier_rate_long
     else:
         df['stop_threshold_long'] = np.inf
-    
-    # 空头 (Short)
-    df['threshold_short'] = (expected_vol * para.vol_multiplier_short)
+
     if para.stop_multiplier_rate_short is not None:
         df['stop_threshold_short'] = df['threshold_short'] * para.stop_multiplier_rate_short
     else:
         df['stop_threshold_short'] = np.inf
-    
+
     return df
 
 def attach_macd_event_lifecycle_label(df, 

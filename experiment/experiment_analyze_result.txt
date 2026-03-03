@@ -62,7 +62,7 @@ DOGE_15m:
             [12,16,24,28]
     batch_experiments\2026-02-13\DOGEUSDT_15m\11_55_18
         predict_num 测试范围 [12,16,24,28] holdbar in [12, 16, 20, 24 ,28, 32,36,40]
-            最优的是 predict_num 12 16 + holdbar [20 - 36] 需要进一步测试
+            最优的是 predict_num 12 16 + holdbar [20 - 36] 需要进一步测试. holdbar不宜太大，否则会放大beta
     batch_experiments\2026-02-13\DOGEUSDT_15m\21_21_46
         batch_size: int = 2048 模型的成交频率下降到0.2以下！ 256 最优 in [64,128,256,512,2048]
                     
