@@ -81,7 +81,7 @@ class StrategyPara:
     allow_long: bool = True
     allow_short: bool = True
     # execution
-    holdbar: int = BaseDefine.predict_num//2          # 默认值，初始化时可覆盖
+    holdbar: int = BaseDefine.predict_num          # 默认值，初始化时可覆盖
     commission: float = 0.05   # 0.1 = 0.1%, can't be 0
     cash: float = 10000.0
     # signal
@@ -140,7 +140,10 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
             window=handler.window,
             is_live=False,
         )
-        df_with_pred, model_stats = handler.predict_with_ds(ds,df,is_live=False,diff_thresh = None)                                  
+        length = max(10, round(0.8 * para.holdbar))
+        df['stop_loss_atr'] = common.stop_loss_atr(df, length=length)
+        atr_colum = 'stop_loss_atr'
+        df_with_pred, model_stats = handler.predict_with_ds(ds,df,is_live=False,diff_thresh = None)
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()
         # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
@@ -193,7 +196,7 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
         low="low",
         close="close",
         volume="volume",
-        atr = "atr_14",
+        atr = atr_colum,
         # slow_atr = "atr_5000",
         # vol_regime = "vol_regime_100",
         label = "label",

@@ -98,15 +98,15 @@ def single_run_analysis(pre_task: common.BaseDefine, train_cfg: train.TrainConfi
     try:
         # 1. 基础准备
         df =common.attach_label(df, pre_task)
-        # 确保 return_rate 存在
-        if 'return_rate' not in df.columns:
-            logging.warning("df 中未找到 return_rate，将尝试计算。")
-            df['return_rate'] = df['close'].pct_change(pre_task.predict_num).shift(-pre_task.predict_num)
+        # 确保 trend_strength 存在
+        if 'trend_strength' not in df.columns:
+            logging.warning("df 中未找到 trend_strength，将尝试计算。")
+            df['trend_strength'] = df['close'].pct_change(pre_task.predict_num).shift(-pre_task.predict_num)
 
         # 2. 构造特征列表
-        # 核心技巧：将 return_rate 暂时放入 feat_cols 参与 Dataset 窗口对齐，这样能拿到与特征同步的截面数据
+        # 核心技巧：将 trend_strength 暂时放入 feat_cols 参与 Dataset 窗口对齐，这样能拿到与特征同步的截面数据
         all_cols = [c for c in df.columns if c not in data_loader.DROP_FEATURES]
-        if 'return_rate' not in all_cols: all_cols.append('return_rate')
+        if 'trend_strength' not in all_cols: all_cols.append('trend_strength')
         
         ds = data_loader.TimeSeriesWindowDataset(
             df=df, 
@@ -123,10 +123,10 @@ def single_run_analysis(pre_task: common.BaseDefine, train_cfg: train.TrainConfi
         df_final = pd.DataFrame(X_last_step, columns=ds.feature_names)
         df_final['label'] = ds.y.numpy()
         
-        # 将 return_rate 从特征列中分离出来作为目标
+        # 将 trend_strength 从特征列中分离出来作为目标
         target_label = df_final['label']
         target_return = pd.Series(ds.returns.numpy(), index=df_final.index)
-        feature_names = [c for c in ds.feature_names if c != 'return_rate']
+        feature_names = [c for c in ds.feature_names if c != 'trend_strength']
         
         res_corr = {}
         

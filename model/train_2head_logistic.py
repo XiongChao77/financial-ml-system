@@ -569,6 +569,102 @@ def run_subsampling_probe(feature_direction_map, logger: logging, data_cfg: Data
 
     plot_f1_sweep(results_df, save_dir)
     return sweep_results
+
+def run_fixed_neutral_subsampling_experiment(feature_direction_map, logger, data_cfg, train_cfg, pre_para,prep_output_dir, save_dir):
+    # --- 1. 环境准备 ---
+    set_seed(train_cfg.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    df = common.load_train_df_from_dir(prep_output_dir)
+    kline_interval_ms = common.load_interval_ms_from_dir(prep_output_dir)
+    feature_list = list(feature_direction_map.keys())
+    
+    # 获取标签列：从 v01 到 v30
+    label_cols = sorted([c for c in df.columns if c.startswith("label_v")], 
+                         key=lambda x: int(x.replace("label_v", "")))
+    most_strict_col = label_cols[-1]
+
+    # --- 2. 确定全局 Neutral 交集池 ---
+    # 只有所有参数都认为是 Neutral 的样本才进入固定池，确保背景纯净
+    is_always_neutral = (df[label_cols] == common.Signal.NEUTRAL).all(axis=1)
+    neutral_pool_indices = df[is_always_neutral].index.values
+    
+    # 确定基准数量 N (以最严格标签的 Pos/Neg 最小值为准)
+    pos_indices_strict = df[df[most_strict_col] == common.Signal.POSITIVE].index.values
+    neg_indices_strict = df[df[most_strict_col] == common.Signal.NEGATIVE].index.values
+    N = min(len(pos_indices_strict), len(neg_indices_strict))
+    
+    logger.info(f"🎯 实验基准 N={N} (源自 {most_strict_col})")
+    logger.info(f"🛡️ 全局共识 Neutral 池大小: {len(neutral_pool_indices)}")
+
+    all_results = []
+
+    # --- 3. 开启 10 组重复实验 ---
+    for iter_idx in range(1, 11):
+        logger.info(f"🌀 [Iteration {iter_idx}/10] 正在生成实验数据集...")
+        # 每一组实验使用不同的种子，但该组内的所有参数共享相同的 Neutral 样本
+        iter_seed = train_cfg.seed + iter_idx
+        np.random.seed(iter_seed)
+        
+        # 【关键：固定该轮次的中性样本】
+        fixed_neutral_idx = np.random.choice(neutral_pool_indices, N, replace=False)
+
+        for label_col in label_cols:
+            # 获取当前参数下的趋势样本池
+            current_pos_pool = df[df[label_col] == common.Signal.POSITIVE].index.values
+            current_neg_pool = df[df[label_col] == common.Signal.NEGATIVE].index.values
+            
+            # 从当前参数池中随机抽取 N 个
+            sampled_pos_idx = np.random.choice(current_pos_pool, N, replace=False)
+            sampled_neg_idx = np.random.choice(current_neg_pool, N, replace=False)
+            
+            # 合并：Fixed Neutral + Variable Trend
+            final_indices = np.concatenate([fixed_neutral_idx, sampled_pos_idx, sampled_neg_idx])
+            experiment_df = df.loc[final_indices].copy()
+            
+            # --- 4. 训练与评估 ---
+            train_ds = TimeSeriesWindowDataset(
+                df=experiment_df, 
+                kline_interval_ms=kline_interval_ms, 
+                feature_cols=feature_list, 
+                label_col=label_col, 
+                window=pre_para.candlestick_num,
+                use_cache=False, # 抽样数据不建议缓存
+                show_feature_distribution=False
+            )
+            
+            # 处理特征方向
+            if feature_direction_map:
+                train_ds.X = apply_feature_direction(train_ds.X, train_ds.feature_names, feature_direction_map, logger)
+            
+            # 搬运到 GPU
+            train_ds.X, train_ds.y = train_ds.X.to(device), train_ds.y.to(device)
+            
+            # 简单 Chrono Split (由于已经 shuffle 抽样，此处 split 相当于随机分层)
+            M = len(train_ds)
+            tr_rng, _, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
+            
+            f1, report, _ = run_logistic_regression_probe(train_ds, tr_rng, te_rng, logger)
+            
+            all_results.append({
+                "iteration": iter_idx,
+                "label_col": label_col,
+                "threshold": int(label_col.replace("label_v", "")) / 10.0,
+                "macro_f1": f1,
+                "pos_pool_size": len(current_pos_pool)
+            })
+
+    # --- 5. 结果汇总 ---
+    results_df = pd.DataFrame(all_results)
+    results_df.to_csv(os.path.join(save_dir, "fixed_neutral_experiment.csv"), index=False)
+    
+    summary = results_df.groupby("threshold")["macro_f1"].agg(['mean', 'std']).reset_index()
+    print("\n" + "="*50)
+    print("📈 FIXED NEUTRAL EXPERIMENT SUMMARY")
+    print(summary.to_string(index=False))
+    print("="*50)
+    
+    return results_df
 # ==============================================================================
 # 4. 辅助函数
 # ==============================================================================
@@ -716,7 +812,8 @@ def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDe
     # m_cfg.model_version = 1
     
     logger.info(f"Training {m_cfg.model_type}...")
-    return run_training(feature_direction_map_filtered, logger, d_cfg, train_cfg, m_cfg, pre_para,prep_output_dir,save_dir,experiment)
+    # return run_training(feature_direction_map_filtered, logger, d_cfg, train_cfg, m_cfg, pre_para,prep_output_dir,save_dir,experiment)
+    return run_fixed_neutral_subsampling_experiment(feature_direction_map_filtered, logger, d_cfg, train_cfg,pre_para,prep_output_dir,save_dir)
 # ==============================================================================
 # 5. 调用入口 (Main Entry)
 # ==============================================================================
