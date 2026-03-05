@@ -219,17 +219,23 @@ class TrainConfig:
     weight_decay: float = 5e-4
     patience: int = 8
     seed: int = 42
-    stride: int = 2
+    stride: int = 8
     use_cache: bool = False
     lambda_trig: float = 0.5
     lambda_dir: float = 0.7
+    lambda_main:float = 0.3 
+    lambda_cost:float = 0.5
     lambda_gate: float = 1e-3
     mag_alpha: float = 0
     mag_limit: float = 4.0
-    flip_penalty: float = 1.6
-    miss_penalty: float = 1.2
+    flip_penalty: float = 1.2
+    miss_penalty: float = 1.8
+    false_trade: float = 1
     mag_warmup_epochs:int = 8
     temperature:float = 2.0
+    best_f1 : bool = True
+    label_smoothing :float = 0.02
+    loss_fun_version : int = 4
 # ==============================================================================
 # 3. 核心逻辑 (Core Logic)
 # ==============================================================================
@@ -488,7 +494,7 @@ class MTLManager:
         cw_main = compute_class_weight("balanced", classes=np.array([0, 1, 2]), y=y_raw)
         cw_trig = compute_class_weight("balanced", classes=np.array([0, 1]), y=y_trig)
         cw_dir = compute_class_weight("balanced", classes=np.array([0, 1]), y=y_dir)
-
+        
         self.weights = {
             'main': torch.tensor(cw_main, dtype=torch.float32, device=self.device),
             'trig': torch.tensor(cw_trig, dtype=torch.float32, device=self.device),
@@ -512,7 +518,14 @@ class MTLManager:
         return target_trig, target_dir, action_mask
 
     def compute_combined_loss(self, logits_trig, logits_dir, yb, rb, epoch):
-        return self.compute_combined_loss_v2(logits_trig, logits_dir, yb, rb, epoch)
+        if self.cfg.loss_fun_version == 1:
+            return self.compute_combined_loss_v1(logits_trig, logits_dir, yb, rb, epoch)
+        elif self.cfg.loss_fun_version == 2:
+            return self.compute_combined_loss_v2(logits_trig, logits_dir, yb, rb, epoch)
+        elif self.cfg.loss_fun_version == 3:
+            return self.compute_combined_loss_v3(logits_trig, logits_dir, yb, rb, epoch)
+        elif self.cfg.loss_fun_version == 4:
+            return self.compute_combined_loss_v4(logits_trig, logits_dir, yb, rb, epoch)
 
     def compute_combined_loss_v1(self, logits_trig, logits_dir, yb, rb, epoch: int = 0):
         """
@@ -771,8 +784,107 @@ class MTLManager:
             total_loss = (w_cls * loss_cls) + (w_pnl * loss_pnl) + (w_risk * loss_risk) + (self.cfg.bias_lambda * bias_loss)
 
             return total_loss, loss_cls, loss_pnl, loss_risk, bias_loss
+                                
+    def compute_combined_loss_v4(self, logits_trig, logits_dir, yb, trend_strength, epoch: int = 0):
+        """
+        Simplified v4 (keep core trading-aware parts):
+        - trigger CE
+        - direction CE (only on action samples, strength-weighted)
+        - fused 3-class NLL (log-space, stable)
+        - expected cost term (optional strength-weighted on action samples)
 
+        yb: 0=Short, 1=Neutral, 2=Long
+        trend_strength: |return| / threshold, >=0; usually >=1 for action samples; may be NaN on invalid rows
+        """
+        eps = 1e-8
+        device = logits_trig.device
+        dtype = logits_trig.dtype
 
+        # ---- (0) filter invalid labels and invalid strength (NaN) ----
+        valid_mask = (yb >= 0) & (yb <= 2)
+        if trend_strength is not None:
+            valid_mask = valid_mask & torch.isfinite(trend_strength)
+
+        if not valid_mask.all():
+            logits_trig = logits_trig[valid_mask]
+            logits_dir  = logits_dir[valid_mask]
+            yb          = yb[valid_mask]
+            trend_strength = trend_strength[valid_mask]
+
+        # ---- (1) targets for subheads ----
+        t_trig, t_dir, act_mask = self.get_targets(yb)  # act_mask: yb!=1
+
+        label_smoothing = float(getattr(self.cfg, "label_smoothing", 0.02))
+
+        # ---- (2) trigger CE ----
+        loss_trig = F.cross_entropy(
+            logits_trig, t_trig,
+            weight=self.weights.get("trig", None),
+            label_smoothing=label_smoothing
+        )
+
+        # ---- (3) direction CE (action-only) + strength weight ----
+        loss_dir = torch.zeros((), device=device, dtype=dtype)
+        if act_mask.any():
+            ce_dir = F.cross_entropy(
+                logits_dir[act_mask], t_dir[act_mask],
+                weight=self.weights.get("dir", None),
+                reduction="none",
+                label_smoothing=label_smoothing
+            )
+
+            # trend_strength is >=0, and for action samples usually >=1
+            # use max(trend_strength,1) to ensure action weights start at 1
+            s = trend_strength[act_mask].clamp(min=1.0)
+            w = 1.0 + torch.log1p(s - 1.0)          # >=1, safe
+            w = w / (w.mean().detach() + eps)
+            w = w.clamp(max=3.0)
+
+            loss_dir = (ce_dir * w).mean()
+
+        # ---- (4) fused 3-class NLL (log-space stable) ----
+        lt = F.log_softmax(logits_trig, dim=1)  # [B,2]
+        ld = F.log_softmax(logits_dir,  dim=1)  # [B,2]
+
+        logp_short   = lt[:, 1] + ld[:, 0]
+        logp_neutral = lt[:, 0]
+        logp_long    = lt[:, 1] + ld[:, 1]
+        logp_fused   = torch.stack([logp_short, logp_neutral, logp_long], dim=1)  # [B,3]
+
+        nll_main = F.nll_loss(logp_fused, yb, reduction="mean")
+        fused_probs = logp_fused.exp()  # for cost
+
+        # ---- (5) expected cost (trading semantics) ----\
+        
+        flip = float(self.cfg.flip_penalty) 
+        miss = float(self.cfg.miss_penalty)
+        false_trade = float(self.cfg.false_trade)
+
+        C = torch.tensor([
+            [0.0,   miss,  flip],        # true short
+            [false_trade, 0.0, false_trade],  # true neutral
+            [flip,  miss,  0.0],         # true long
+        ], device=device, dtype=dtype)
+
+        exp_cost = (C[yb] * fused_probs).sum(dim=1)  # [B]
+
+        # optional: mild strength weight ONLY on action samples
+        if float(getattr(self.cfg, "cost_use_strength", 1.0)) > 0:
+            s_all = torch.where(act_mask, trend_strength.clamp(min=1.0) - 1.0, torch.zeros_like(trend_strength))
+            w_cost = 1.0 + 0.5 * torch.log1p(s_all)   # safe (>=1)
+            w_cost = w_cost / (w_cost.mean() + eps)
+            loss_cost = (exp_cost * w_cost).mean()
+        else:
+            loss_cost = exp_cost.mean()
+
+        # ---- (6) total ----
+        lam_dir  = self.cfg.lambda_dir
+        lam_main = self.cfg.lambda_main
+        lam_cost = self.cfg.lambda_cost
+
+        total_loss = loss_trig + lam_dir * loss_dir + lam_main * nll_main + lam_cost * loss_cost
+        return total_loss, loss_trig, loss_dir, nll_main, loss_cost
+        
 class MTLLossTracker:
     def __init__(self, alpha=0.9):
         self.alpha = alpha  # 用于平滑损耗的动量系数
@@ -1028,17 +1140,16 @@ def evaluate_and_save_results(
         with open(os.path.join(save_dir, f"model_{suffix.lower()}_meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        if suffix == "Best_F1":
-            final_metrics.update({
-                "test_f1": test_f1,
-                "val_f1": val_score,
-                "test_loss": test_loss,
-                "precision_short": report_dict.get('0', {}).get('precision', 0),
-                "recall_short": report_dict.get('0', {}).get('recall', 0),
-                "precision_long": report_dict.get('2', {}).get('precision', 0),
-                "recall_long": report_dict.get('2', {}).get('recall', 0),
-                "overfit_gap": abs(val_score - test_f1)
-            })
+        final_metrics.update({
+            "test_f1": test_f1,
+            "val_f1": val_score,
+            "test_loss": test_loss,
+            "precision_short": report_dict.get('0', {}).get('precision', 0),
+            "recall_short": report_dict.get('0', {}).get('recall', 0),
+            "precision_long": report_dict.get('2', {}).get('precision', 0),
+            "recall_long": report_dict.get('2', {}).get('recall', 0),
+            "overfit_gap": abs(val_score - test_f1)
+        })
             
         if train_cfg.model_cfg.use_feature_weighting:
             logger.info(f"🎨 Generating Interpretability Analysis for {suffix}...")
@@ -1081,7 +1192,7 @@ def evaluate_and_save_results(
             #     device=device
             # )
     #  生成 Task Description (Single Mode)
-    primary_suffix = "Best_F1" if results.get("best_f1_state") is not None else "Best_Loss"
+    primary_suffix = "Best_F1" if train_cfg.best_f1 == True else "Best_Loss"
     
     task_desc = {
         "task_type": "single",
@@ -1417,7 +1528,7 @@ def find_best_threshold(results, model, dl_te, device, logger):
 @torch.no_grad()
 def eval_epoch(model, loader, device, mtl_manager:MTLManager):
     model.eval()
-    tl, yt, yp, yr = 0.0, [], [], [] # 🌟 增加 yr 用于存储 return_rate
+    tl, yt, yp, yr = 0.0, [], [], [] # 🌟 增加 yr 用于存储 trend_strength
 
     for xb, yb, rb in loader:
         xb, yb, rb = xb.to(device), yb.to(device), rb.to(device)

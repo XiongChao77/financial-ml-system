@@ -17,6 +17,7 @@ class Signal(IntEnum):
     NEUTRAL = 1
     POSITIVE  = 2
 
+eps = 1e-8
 # 波动率系数 (0.5 ~ 1.0 之间调整)
 '''
 乘数 (Multiplier),阈值位置,含义
@@ -68,8 +69,6 @@ EXPERIMENT_DIR = os.path.join(PROJECT_DATA_DIR, "experiment")
 os.makedirs(EXPERIMENT_DIR, exist_ok=True)
 
 CONF_DF = 'to_feather'#/'to_feather'/'to_csv'
-
-import os
 
 def save_train_df(df):
     if os.path.exists(train_data_path):
@@ -211,8 +210,86 @@ def attach_label(df, para = BaseDefine, label_col = 'label'):
     choices = [Signal.INVALID, Signal.NEGATIVE, Signal.POSITIVE ]
     df[label_col] = np.select(conditions, choices, default=Signal.NEUTRAL).astype(int)
     
-    df['return_rate'] = pct_final 
+    # volatility normalized return
+    df['trend_strength'] = np.where(
+        pct_final >= 0,
+        pct_final / (df['threshold_long'] + eps),
+        np.abs(pct_final) / (df['threshold_short'] + eps)
+    )
+
+    # 处理无效数据（物理时间越界的部分）
+    df.loc[~final_valid_mask, 'trend_strength'] = np.nan
+    
     return df
+
+def calculate_thresholds(df, para=BaseDefine, **kwargs):
+    """
+    使用 Rogers–Satchell + EWMA 计算动态波动率阈值
+    """
+
+    required_cols = ['open', 'high', 'low', 'close']
+    for col in required_cols:
+        assert col in df.columns, f"缺少 {col} 数据"
+
+    # ===== 1️⃣ Rogers–Satchell 单期方差 =====
+    log_ho = np.log(df['high'] / df['open'])
+    log_hc = np.log(df['high'] / df['close'])
+    log_lo = np.log(df['low'] / df['open'])
+    log_lc = np.log(df['low'] / df['close'])
+
+    rs_var = log_hc * log_ho + log_lc * log_lo
+
+    # 防止极端异常（理论上应为非负，数值误差可能导致微小负数）
+    rs_var = rs_var.clip(lower=0)
+
+    # ===== 2️⃣ EWMA 平滑方差 =====
+    span = para.vol_ewma_span
+    ewma_var = rs_var.ewm(span=span, adjust=False).mean()
+
+    # 开方得到波动率
+    ewma_vol = np.sqrt(ewma_var)
+
+    # ===== 3️⃣ 时间扩展到预测区间 =====
+    # 假设方差线性扩展
+    expected_vol = ewma_vol * np.sqrt(para.predict_num)
+    df['expected_vol'] = expected_vol
+
+    # ===== 4️⃣ 非对称阈值 =====
+    df['threshold_long'] = expected_vol * para.vol_multiplier_long
+    df['threshold_short'] = expected_vol * para.vol_multiplier_short
+
+    if para.stop_multiplier_rate_long is not None:
+        df['stop_threshold_long'] = df['threshold_long'] * para.stop_multiplier_rate_long
+    else:
+        df['stop_threshold_long'] = np.inf
+
+    if para.stop_multiplier_rate_short is not None:
+        df['stop_threshold_short'] = df['threshold_short'] * para.stop_multiplier_rate_short
+    else:
+        df['stop_threshold_short'] = np.inf
+
+    return df
+
+def print_zret_statistics(df, label_col='label'):
+    print("\n================ trend_strength Statistics ================\n")
+
+    valid = df['trend_strength'].notna()
+
+    overall = df.loc[valid, 'trend_strength']
+
+    print("Overall trend_strength distribution:")
+    print(overall.describe(percentiles=[0.5,0.75,0.9,0.95,0.99]))
+
+    print("\nBy label:")
+
+    for label in sorted(df[label_col].unique()):
+        sub = df.loc[(df[label_col] == label) & valid, 'trend_strength']
+
+        if len(sub) == 0:
+            continue
+
+        print(f"\nLabel {label}  count={len(sub)}")
+        print(sub.describe(percentiles=[0.5,0.75,0.9,0.95,0.99]))
 
 def attach_triple_barrier_label(df, 
                                  interval_ms,
@@ -269,53 +346,6 @@ def attach_triple_barrier_label(df,
 
     df['label'] = labels
     df.loc[~final_valid_mask, 'label'] = Signal.INVALID
-    return df
-
-def calculate_thresholds(df, para=BaseDefine, **kwargs):
-    """
-    使用 Rogers–Satchell + EWMA 计算动态波动率阈值
-    """
-
-    required_cols = ['open', 'high', 'low', 'close']
-    for col in required_cols:
-        assert col in df.columns, f"缺少 {col} 数据"
-
-    # ===== 1️⃣ Rogers–Satchell 单期方差 =====
-    log_ho = np.log(df['high'] / df['open'])
-    log_hc = np.log(df['high'] / df['close'])
-    log_lo = np.log(df['low'] / df['open'])
-    log_lc = np.log(df['low'] / df['close'])
-
-    rs_var = log_hc * log_ho + log_lc * log_lo
-
-    # 防止极端异常（理论上应为非负，数值误差可能导致微小负数）
-    rs_var = rs_var.clip(lower=0)
-
-    # ===== 2️⃣ EWMA 平滑方差 =====
-    span = para.vol_ewma_span
-    ewma_var = rs_var.ewm(span=span, adjust=False).mean()
-
-    # 开方得到波动率
-    ewma_vol = np.sqrt(ewma_var)
-
-    # ===== 3️⃣ 时间扩展到预测区间 =====
-    # 假设方差线性扩展
-    expected_vol = ewma_vol * np.sqrt(para.predict_num)
-
-    # ===== 4️⃣ 非对称阈值 =====
-    df['threshold_long'] = expected_vol * para.vol_multiplier_long
-    df['threshold_short'] = expected_vol * para.vol_multiplier_short
-
-    if para.stop_multiplier_rate_long is not None:
-        df['stop_threshold_long'] = df['threshold_long'] * para.stop_multiplier_rate_long
-    else:
-        df['stop_threshold_long'] = np.inf
-
-    if para.stop_multiplier_rate_short is not None:
-        df['stop_threshold_short'] = df['threshold_short'] * para.stop_multiplier_rate_short
-    else:
-        df['stop_threshold_short'] = np.inf
-
     return df
 
 def attach_macd_event_lifecycle_label(df, 
