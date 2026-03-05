@@ -37,6 +37,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     if function==0:
         df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
         common.attach_label(df, para=para,label_col = label_col)
+        common.print_zret_statistics(df)
         # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)

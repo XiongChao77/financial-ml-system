@@ -335,7 +335,6 @@ def extract_row(report, src_path):
     }
 
 def basic_filter(all_results):
-    # analyze_holdbar(all_results,target_key="holdbar", period ='short',metric_key="cagr")
     ps_results_0,unselected = filter_by_criteria(all_results, period ='short', cagr=0)
     print(f"After 0-screening short: {len(ps_results_0)}, {len(ps_results_0)/len(all_results)*100:.2f}%")
     ps_results,unselected = filter_by_criteria(ps_results_0, period ='short', cagr=0.2)
@@ -374,9 +373,8 @@ def show_performance(all_results,output_dir, batch_size=5):
               f"{g('win_rate'):10.2f}"
               f"{g('rc_median'):12.2f}"
               f"{g('rc_pos_ratio'):12.2f}")
-    compute_correlation(all_results,output_dir)
+    # compute_correlation(all_results,output_dir)
     plot_in_batches(all_results,output_dir,batch_size)
-    exit()
 
 def sort_by_correlation_diversity(all_results):
     """
@@ -582,7 +580,12 @@ def plot_in_batches(all_results, output_dir, batch_size=5):
         plot_equity_curves(batch, output_dir, filename, start_index=i)
 
 def main():
-    exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-02','20_41_33')
+    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-02','20_41_33')
+    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-04','04_43_41')
+    #features
+    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-04','05_56_36')
+    #best f1 or best loss
+    exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-05','03_05_16')
     # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_30m','2026-03-02','17_52_10')
     filter_report = None
     # filter_report =  os.path.join(exp_dir,'filtered_raw_reports.jsonl')
@@ -605,7 +608,10 @@ def main():
     uin_records = merge_selected(rows)
     print(f"Total uint reports: {len(uin_records)}")
     if not filter_report:
+        analyze_holdbar(uin_records,target_key="loss_fun_version", period ='short',metric_key="cagr")
         uin_records = basic_filter(uin_records)
+        analyze_holdbar(uin_records,target_key="loss_fun_version", period ='short',metric_key="cagr")
+        analyze_holdbar(uin_records,target_key="loss_fun_version", period ='long',metric_key="cagr")
         save_raw_reports(uin_records,exp_dir, "filtered_raw_reports.jsonl")
         # exit()
     
@@ -613,19 +619,22 @@ def main():
     # analyze_model_metrics_by_decile(uin_records)
     # exit()
     sorted_selected1 = sorted(uin_records, key=itemgetter("l_cagr"), reverse=True)
-    # plot_heatmap(sorted_selected1,var1_key='candlestick_num',var2_key='predict_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
-    # plot_heatmap(sorted_selected1,var1_key='candlestick_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
-    # plot_heatmap(sorted_selected1,var1_key='candlestick_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
+    # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
     # exit()
-    analyze_holdbar(sorted_selected1,target_key="holdbar",period ='long', metric_key="cagr")
+    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="loss_fun_version",period ='long', metric_key="cagr")
     if symbol == 'DOGEUSDT' and interval=='15m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.4,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1.3 ,daily_freq = 0.3,sharpe = 0.6)
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = -0.3,rc_pos_ratio = 0.4,calmar = 1.3 ,daily_freq = 0.3,sharpe = 0.6)
     if symbol == 'ETHUSDT' and interval=='15m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1,daily_freq = 0.15,sharpe = 0.5)
     if symbol == 'ETHUSDT' and interval=='30m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 0.9,daily_freq = 0.15,sharpe = 0.5)
     # sort_by_correlation_result = sort_by_correlation_diversity(l_results)
-    analyze_holdbar(l_results,target_key="holdbar",period ='long', metric_key="cagr")
+    stats, f_map, groups = analyze_holdbar(l_results,target_key="loss_fun_version",period ='long', metric_key="cagr")
+    # for h,r in groups.items():
+    #     h_output_dir = os.path.join(output_dir, str(h))
+    #     show_performance(r,h_output_dir,3)
     # exit()
     # sorted_by_pos_ratio = sorted(
     #     l_results, 
@@ -634,7 +643,7 @@ def main():
     # )
     sorted_calmar = sorted(l_results, key=itemgetter("l_calmar"), reverse=True)
     selected = l_results
-    filter_hash_doge_15 = ['caeffbd3','6c90c6c8','c2e56676','baed2635']
+    filter_hash_doge_15 = ['caeffbd3','6c90c6c8','c2e56676','baed2635','12874c7e']
     filter_hash_eth_15 = ['943143f8', '21f9fce3', 'e4927150', '9a3f7676', '4afa85ac' ,'3163d070','ed96bd77','cc89356b']
     filter_hash = filter_hash_doge_15 + filter_hash_eth_15
     selected = [
@@ -643,7 +652,9 @@ def main():
     ]
     # long model_metrics accuracy
     print(f"🎯 Hash 过滤完成: 过滤前 {len(l_results)} 条 -> 过滤后 {len(selected)} 条")
+    analyze_holdbar(selected,target_key="holdbar",period ='long', metric_key="cagr")
     show_performance(selected,output_dir,3)
+    exit()
     # stable_selected1 = filter_stable(rc_median_results)
     # print(f"-------------After filter_stable: {len(stable_selected1)} reports")
     # # selected2 = filter_aggressive(rc_results)
@@ -1033,67 +1044,71 @@ def get_value_by_path(obj, path):
 
 def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="cagr"):
     """
-    从 selected 中递归查找 target_key，统计数量并分析性能指标，比较最优值。
-    第一次遍历会自动定位 target_key 的位置，之后直接用路径索引，提高效率。
+    终极改造版：
+    1. 支持 list 类型的 target_key（自动进行排序、拼接、hash）。
+    2. 返回值增加 grouped_records，按组分好原始记录。
     
-    Args:
-        selected: 选中的报告列表
-        target_key: 要查找的键名（默认 "holdbar"）
-        metric_key: 性能指标的键名（默认 "cagr"）
+    Returns:
+        analysis_results (list): 统计结果列表。
+        hash_map (dict): hash 值与原始 list 的对应关系。
+        grouped_records (dict): {hash_or_value: [original_records...]}。
     """
     from collections import defaultdict
     import numpy as np
-    
+
     if not records:
         print("❌ 报告列表为空")
-        return
-    
-    # 第一次遍历：找到 target_key 的路径
+        return [], {}, {}
+
+    # 1. 定位 target_key 的路径
     key_path = find_key_path(records[0], target_key)
-    
     if key_path is None:
         print(f"❌ 未找到任何 {target_key}")
-        return
-    
+        return [], {}, {}
+
     print(f"✓ 定位 {target_key} 的路径: {' -> '.join(map(str, key_path))}")
 
-    # 第一次遍历：找到 target_key 的路径
-    key_path = find_key_path(records[0], target_key)
-    
-    if key_path is None:
-        print(f"❌ 未找到任何 {target_key}")
-        return
-    
-    print(f"✓ 定位 {target_key} 的路径: {' -> '.join(map(str, key_path))}")
+    # 2. 按分组逻辑分拣 records
+    grouped_records = defaultdict(list) # 存储原始 record 分组
+    hash_map = {} # 存储 hash 到 list 的映射
 
-    # 按 target_key 分组
-    groups = defaultdict(list)
-    
     for report in records:
         value = get_value_by_path(report, key_path)
-        if value is not None:
-            groups[value].append(report)
-    
-    if not groups:
+        if value is None:
+            continue
+
+        # 处理 list 类型：排序、拼接、取 hash
+        if isinstance(value, list):
+            key_str = ",".join(map(str, sorted(value)))
+            current_key = hash(key_str)
+            if current_key not in hash_map:
+                hash_map[current_key] = value
+        else:
+            current_key = value
+
+        grouped_records[current_key].append(report)
+
+    if not grouped_records:
         print(f"❌ 未找到任何有效的 {target_key}")
-        return
-    
-    # 统计每个值的性能
+        return [], {}, {}
+
+    # 3. 统计每个分组的性能
     analysis_results = []
-    total_count = sum(len(v) for v in groups.values())
-    
-    for value in sorted(groups.keys()):
-        reports = groups[value]
-        count = len(reports)
+    total_count = sum(len(v) for v in grouped_records.values())
+
+    # 按 key 排序以便稳定输出
+    for key in sorted(grouped_records.keys(), key=lambda x: str(x)):
+        group_items = grouped_records[key]
+        count = len(group_items)
         
-        # 提取性能指标 (long)
         metric_list = []
         calmar_list = []
         
-        for report in reports:
+        for report in group_items:
+            # 这里的 report 已经是分组后的原始 record
             p_report = report.get(period, report)
             perf = p_report.get("performance", {})
-            metric = recursive_get(p_report,metric_key)
+            metric = recursive_get(p_report, metric_key)
             calmar = perf.get("calmar")
             
             if metric is not None:
@@ -1101,8 +1116,13 @@ def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="c
             if calmar is not None:
                 calmar_list.append(calmar)
         
+        # 确定显示用的标签
+        display_label = f"Hash:{str(key)[:8]}" if key in hash_map else key
+
         analysis_results.append({
-            target_key: value,
+            "group_key": key,              # 用于从 grouped_records 中取数的键
+            "original_value": hash_map.get(key, key), # 原始 list 或数值
+            "display_key": display_label,
             "count": count,
             "percentage": (count / total_count) * 100,
             f"avg_{metric_key}": np.mean(metric_list) if metric_list else None,
@@ -1113,48 +1133,64 @@ def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="c
             f"std_{metric_key}": np.std(metric_list) if len(metric_list) > 1 else 0,
             f"med_{metric_key}": np.median(metric_list) if metric_list else None,
         })
-    
-    # 打印结果
-    print("\n" + "="*100)
+
+    # 4. 打印统计表格
+    print("\n" + "="*110)
     print(f"📊 {target_key} {period} 分析结果 (总共 {total_count} 个报告)")
-    print("="*100)
-    print(f"{target_key:<15} {'Count':<8} {'%':<6} {f'{metric_key.upper()}':<12} {'':<2}{'AVG':<6}{'Max':<6}{'Std':<6}{'Med':<6} {'Calmar:':<8}{'AVG':<6}{'MAX':<6}{'Med':<6}")
-    print("-"*100)
+    print("="*110)
+    header = f"{'Value/Hash':<15} {'Count':<8} {'%':<6} {f'{metric_key.upper()}':<12} {'':<2}{'AVG':<6}{'Max':<6}{'Std':<6}{'Med':<6} {'Calmar:':<8}{'AVG':<6}{'MAX':<6}{'Med':<6}"
+    print(header)
+    print("-" * 110)
     
-    for result in analysis_results:
-        value = result[target_key]
-        count = result["count"]
-        pct = result["percentage"]
-        avg_metric = result[f"avg_{metric_key}"]
-        max_metric = result[f"max_{metric_key}"]
-        std_metric = result[f"std_{metric_key}"]
-        med_metric = result[f"med_{metric_key}"]
-        avg_calmar = result["avg_calmar"]
-        max_calmar = result["max_calmar"]
-        med_calmar = result["med_calmar"]
-        
-        metric_str = f"{avg_metric:.2%}" if avg_metric is not None else "N/A"
-        max_metric_str = f"{max_metric:.2%}" if max_metric is not None else "N/A"
-        std_metric_str = f"{std_metric:.4f}" if std_metric is not None else "N/A"
-        med_metric_str = f"{med_metric:.4f}" if med_metric is not None else "N/A"
-        calmar_str = f"{avg_calmar:.2f}" if avg_calmar is not None else "N/A"
-        max_calmar_str = f"{max_calmar:.2f}" if max_calmar is not None else "N/A"
-        med_calmar_str = f"{med_calmar:.2f}" if med_calmar is not None else "N/A"
-        
-        print(f"{value:<15} {count:<8} {pct:<5.1f}% {metric_key.upper():<12}  {metric_str:<6} {max_metric_str:<6} {std_metric_str:<6} {med_metric_str:<6} {'':<8}{calmar_str:<6} {max_calmar_str:<6} {med_calmar_str:<6}")
+    for r in analysis_results:
+        fmt = lambda v, p: f"{v:.2%}" if v is not None and p else (f"{v:.2f}" if v is not None else "N/A")
+        print(f"{str(r['display_key']):<15} {r['count']:<8} {r['percentage']:<5.1f}% {metric_key.upper():<12}  {fmt(r[f'avg_{metric_key}'],1):<6} {fmt(r[f'max_{metric_key}'],1):<6} {fmt(r[f'std_{metric_key}'],0):<6} {fmt(r[f'med_{metric_key}'],0):<6} {'':<8}{fmt(r['avg_calmar'],0):<6} {fmt(r['max_calmar'],0):<6} {fmt(r['med_calmar'],0):<6}")
     
-    print("="*100)
+    print("="*110)
     
-    # 找出最优值
-    valid_results = [r for r in analysis_results if r[f"avg_{metric_key}"] is not None]
-    if valid_results:
-        best_metric = max(valid_results, key=lambda x: x[f"avg_{metric_key}"])
-        best_calmar = max(valid_results, key=lambda x: x["avg_calmar"] if x["avg_calmar"] is not None else -float('inf'))
+    return analysis_results, hash_map, grouped_records
+
+def analyze_feature_regimes(records, target_key="predict_num", period='short', metric_key="cagr"):
+    """
+    专门用于分析不同特征配置列表对性能的影响
+    """
+    from collections import defaultdict
+    import numpy as np
+
+    # 1. 定位路径
+    key_path = find_key_path(records[0], target_key)
+    if key_path is None:
+        print(f"❌ 未找到键: {target_key}")
+        return
+
+    # 2. 按特征组合分组
+    groups = defaultdict(list)
+    for report in records:
+        value = get_value_by_path(report, key_path)
+        if value is not None:
+            # ✨ 核心修正：将 list 转换为 string 以便作为 dict 的 key
+            # 这样 ['open', 'high'] 会变成 "open, high"
+            key_repr = ", ".join(sorted(value)) if isinstance(value, list) else str(value)
+            groups[key_repr].append(report)
+
+    # 3. 统计逻辑（复用你之前的统计代码）
+    analysis_results = []
+    for key_repr, reports in groups.items():
+        metrics = [recursive_get(r.get(period, r), metric_key) for r in reports]
+        calmars = [recursive_get(r.get(period, r), "calmar") for r in reports]
         
-        print(f"\n🏆 最优值对比:")
-        print(f"  平均{metric_key.upper()}最优: {target_key}={best_metric[target_key]} ({best_metric[f'avg_{metric_key}']:.2%})")
-        print(f"  平均Calmar最优: {target_key}={best_calmar[target_key]} ({best_calmar['avg_calmar']:.2f})")
-        print("="*100)
+        analysis_results.append({
+            "feature_set": key_repr,
+            "count": len(reports),
+            "avg_metric": np.mean(metrics) if metrics else 0,
+            "avg_calmar": np.mean(calmars) if calmars else 0
+        })
+
+    # 4. 排序打印
+    print(f"\n📊 特征配置集 ({target_key}) 影响分析 - Period: {period}")
+    print("-" * 100)
+    for res in sorted(analysis_results, key=lambda x: x['avg_metric'], reverse=True):
+        print(f"Count: {res['count']:<4} | Avg {metric_key.upper()}: {res['avg_metric']:.2%} | Calmar: {res['avg_calmar']:.2f} | Features: {res['feature_set']}")
 
 def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="heatmap_combined.png"):
     """

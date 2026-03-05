@@ -4,6 +4,27 @@ from dataclasses import asdict, is_dataclass,dataclass
 import numpy as np
 from datetime import datetime
 from typing import Dict, Iterable, List
+import pandas as pd
+
+def stop_loss_atr(df: pd.DataFrame, length: int) -> pd.Series:
+    length = int(length)
+    length = max(length, 2)
+
+    high = df['high'].astype(float)
+    low = df['low'].astype(float)
+    close = df['close'].astype(float)
+
+    prev_close = close.shift(1)
+
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1/length, adjust=False, min_periods=length).mean()
+
+    return atr / close
 
 def auto_git_commit(logger):
     """

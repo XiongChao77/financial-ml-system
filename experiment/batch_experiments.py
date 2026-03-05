@@ -309,9 +309,9 @@ def create_task_spec(logger, exp_dir,done_set: set[str]):
 
     preparation_task: List[Any] = []
 
-    for cn in [80,88,216,224]:#list(range(56, 224, 8)): #[56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
-        for pn in [4,8,24,28]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-            for vol_multiplier in [1.7,1.8,1.9,2]:#1.8,1.9,2
+    for cn in [80,88,224,320]:#list(range(56, 224, 8)): #[56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
+        for pn in [4,6,8,12,16,20,24,28]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
+            for vol_multiplier in [1.9]:#1.8,1.9,2
                 item = common.BaseDefine(
                         vol_ewma_span = 200,
                         candlestick_num=cn,
@@ -331,18 +331,22 @@ def create_task_spec(logger, exp_dir,done_set: set[str]):
 
     # for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
     #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
-    for flip_penalty in np.arange(0.2, 2.1, 0.1).round(1):
-        # for miss_penalty in np.arange(0.2, 2, 0.1).round(1):\
-        for stride in [8]: #2,4,8
-            t_cfg = train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,
-                                        flip_penalty = float(flip_penalty),miss_penalty = float(flip_penalty/2),stride = stride, patience = 8)
-            training_task.append(t_cfg)
+    for false_trade in [1]:
+        for flip_penalty in np.arange(0.2, 2.1, 0.1).round(1):
+            # for miss_penalty in np.arange(0.8, 2.1, 0.1).round(1):
+                for stride in [2,4,8]: #2,4,8
+                    for bestf1 in [True]:
+                        for loss_fun_version_v in [2]:
+                            t_cfg = train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
+                                                        flip_penalty = float(flip_penalty),miss_penalty = float(flip_penalty/2),false_trade = false_trade,
+                                                        stride = stride, patience = 8)
+                            training_task.append(t_cfg)
 
     simulation_task: List[Any] = []
 
-    for i in [30, 32]: #16,24,30,32,36,40,44,48
+    for i in [30,32, 34,38]: #16,24,30,32,36,40,44,48
         holdbar = i
-        for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5)]: #(6,5),(5,4)
+        for (atr_sl_mult_long, atr_sl_mult_short) in [(6,6),(6,5),(6,4)]: #(6,5),(5,4)
             s_cfg = simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
                                             stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04)
             s_cfg.holdbar = holdbar

@@ -131,6 +131,25 @@ if __name__ == "__main__":
     logger, _ = common.setup_session_logger(sub_folder='dissertation/data_process')
     prep_output_dir = os.path.join(common.PERSISTENCE_DIR, 'dissertation', 'data_process')
     para = common.BaseDefine
+    para.symbol = "DOGEUSDT"
+    para.interval = "15m"
+    para.trading_type = "um"
+    para.version = 0
+
+    # 窗口与预测参数
+    para.candlestick_num = 120
+    para.predict_num = 24
+
+    # 波动率平滑参数
+    para.vol_ewma_span = 100  # 优先采用你赋值的 100
+
+    # 做多 (Long) 标签参数
+    para.vol_multiplier_long = 1.9
+    para.stop_multiplier_rate_long = 0.2
+
+    # 做空 (Short) 标签参数
+    para.vol_multiplier_short = 1.9
+    para.stop_multiplier_rate_short = 0.2
     # para.candlestick_num =96
     # para.predict_num = 6
     # para.symbol = ''

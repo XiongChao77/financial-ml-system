@@ -7,7 +7,7 @@ from data_process import common
 
 #number_of_trades 和vloume高度重合，统计相关性低,quote_asset_volume和vloume高度重合.
 #taker_buy_quote_volume--taker_buy_base_volume,
-DROP_FEATURES =['threshold_long', 'stop_threshold_long','threshold_short', 'stop_threshold_short', 'label', 'return_rate', 'open_time_ms_utc', 'open_time_date_utc',
+DROP_FEATURES =['threshold_long', 'stop_threshold_long','threshold_short', 'stop_threshold_short', 'label', 'trend_strength', 'open_time_ms_utc', 'open_time_date_utc',
                  'close_time_ms_utc', 'ignore' ]
 LOW_CORRELATION_FEATURES = ['number_of_trades','quote_asset_volume', 'taker_buy_quote_volume']
 
@@ -174,10 +174,10 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         clean_features = [c for c in feature_cols if c not in DROP_FEATURES]
         cols = clean_features + ([label_col] if label_col and label_col in df.columns else []) + [self.time_col]
         
-        #  核心改动：把 return_rate 强制塞进 DataFrame 提取列表，但它不属于 clean_features
-        if 'return_rate' in df.columns:
-            if 'return_rate' not in cols:
-                cols.append('return_rate')
+        #  核心改动：把 trend_strength 强制塞进 DataFrame 提取列表，但它不属于 clean_features
+        if 'trend_strength' in df.columns:
+            if 'trend_strength' not in cols:
+                cols.append('trend_strength')
 
         df_work = df[cols].copy()
         if not self.is_live:
@@ -291,14 +291,14 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             self.logger.warning(f"   - ❌ 丢弃 (标签无效/INVALID): {fail_label}")
         self.logger.info(f"   - ✅ 最终保留数量: {final_count} ({final_count/original_count:.2%})")
     
-        if 'return_rate' in df_work.columns:
+        if 'trend_strength' in df_work.columns:
             # 使用与标签一致的切片逻辑：从 window-1 开始按 stride 采样
-            aligned_returns = df_work['return_rate'].values[self.window - 1 :: self.stride]
-            df_work.drop(columns=['return_rate'], inplace=True)
+            aligned_returns = df_work['trend_strength'].values[self.window - 1 :: self.stride]
+            df_work.drop(columns=['trend_strength'], inplace=True)
             # 截取到与窗口数量一致
             self.returns = aligned_returns[:original_count][final_mask]
         else:
-            self.logger.warning("⚠️ df_work 中缺失 return_rate，回报率已设为 0")
+            self.logger.warning("⚠️ df_work 中缺失 z_ret，回报率已设为 0")
             self.returns = np.zeros(final_count)
 
         return X3d[final_mask], labels_all[final_mask], final_indices
@@ -334,7 +334,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             msg = (f"❌ 维度不匹配！数据特征列数 ({num_features_in_data}) "
                    f"与特征名称数量 ({num_feature_names}) 不一致。")
             self.logger.critical(msg)
-            # 如果不一致，说明有特征（如 return_rate）误入，必须停止程序
+            # 如果不一致，说明有特征（如 z_ret）误入，必须停止程序
             raise RuntimeError(msg)
 
         # 提取最后一帧数据 [Batch, Feature]

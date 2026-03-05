@@ -544,8 +544,8 @@ def build_from_timeseries_window_dataset(
     factors = pd.DataFrame(X_last, columns=cols)
 
     drops = set(drop_cols or [])
-    if "return_rate" in factors.columns:
-        drops.add("return_rate")
+    if "z_ret" in factors.columns:
+        drops.add("z_ret")
     if drops:
         factors = factors.drop(columns=[c for c in drops if c in factors.columns])
 
@@ -573,15 +573,15 @@ def main():
     df = common.clean_data_quality_auto(df, logger)
     df = common.attach_attr(df, common.FEATURE_GROUP_LIST, para=pre_task)
     common.attach_label(df, pre_task)
-    # 确保 return_rate 存在
-    if 'return_rate' not in df.columns:
-        logger.warning("df 中未找到 return_rate，将尝试计算。")
-        df['return_rate'] = df['close'].pct_change(pre_task.predict_num).shift(-pre_task.predict_num)
+    # 确保 z_ret 存在
+    if 'z_ret' not in df.columns:
+        logger.warning("df 中未找到 z_ret，将尝试计算。")
+        df['z_ret'] = df['close'].pct_change(pre_task.predict_num).shift(-pre_task.predict_num)
 
     # 2. 构造特征列表
-    # 核心技巧：将 return_rate 暂时放入 feat_cols 参与 Dataset 窗口对齐，这样能拿到与特征同步的截面数据
+    # 核心技巧：将 z_ret 暂时放入 feat_cols 参与 Dataset 窗口对齐，这样能拿到与特征同步的截面数据
     all_cols = [c for c in df.columns if c not in data_loader.DROP_FEATURES]
-    if 'return_rate' not in all_cols: all_cols.append('return_rate')
+    if 'z_ret' not in all_cols: all_cols.append('z_ret')
     
     ds = data_loader.TimeSeriesWindowDataset(
         df=df, 
@@ -595,7 +595,7 @@ def main():
     # 1) 从 dataset 里取“单资产截面特征 + 未来收益”及 time_index
     factors_df, fwd_ret, time_index = build_from_timeseries_window_dataset(
         ds,
-        drop_cols=["return_rate"],
+        drop_cols=["z_ret"],
         df=df,
     )
 
