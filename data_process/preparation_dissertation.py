@@ -3,27 +3,16 @@ from tkinter import TRUE
 import pandas as pd
 import numpy as np
 import datetime, os, sys, re, math, json, logging
+from dataclasses import asdict
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 
-def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine, prep_output_dir =common.DATA_OUT_DIR ):
+def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine(), prep_output_dir =common.DATA_OUT_DIR ):
     file = os.path.join(common.PROJECT_DATA_DIR, para.trading_type ,f"{para.symbol}_{para.interval}.csv")
     # 1. 获取周期字符串并转为毫秒
     interval_ms = common.get_interval_ms(para.interval)
     
-    # 2. 存入元数据，方便 attach_label_v2 和后续模型使用
-    metadata = {
-        "symbol_interval": para.interval,
-        "interval_ms": interval_ms, # <--- 新增
-        "candlestick_num": para.predict_num,
-        "predict_num": para.predict_num,
-        "vol_multiplier_long": para.vol_multiplier_long,
-        "stop_multiplier_rate_long": para.stop_multiplier_rate_long,
-        "vol_multiplier_short": para.vol_multiplier_short,
-        "stop_multiplier_rate_short": para.stop_multiplier_rate_short,
-    }
-
     df = pd.read_csv(file)
     #成交量等为0的数据对价格不会有任何影响，因此去掉不会影响训练和测试;
     #在真实场景下确实有成交量为0的数据.还是选择保留
@@ -77,7 +66,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
             df.loc[is_unanimous, label_col] = df.loc[is_unanimous, label_cols[0]]
             
             return df
-        for v_range in np.arange(0.1, 3.1, 0.1).round(1):
+        for v_range in np.arange(0.1, 2.6, 0.1).round(1):
             para.vol_multiplier_long = v_range
             para.stop_multiplier_rate_long = None
             para.vol_multiplier_short = v_range
@@ -118,8 +107,10 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     common.save_train_df_to_dir(train_df, out_dir)
     common.save_test_df_to_dir(test_df, out_dir)
     meta_path = common.get_data_config_path_in_dir(out_dir)
+    para_dict = asdict(para)
+    safe_para = common.json_safe(para_dict)
     with open(meta_path, 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, indent=4, ensure_ascii=False)
+        json.dump(safe_para, f, indent=4, ensure_ascii=False)
 
     logger.info(f"✅ 数据处理完成！")
     logger.info(f"📍 周期识别: {para.interval}")
@@ -130,14 +121,14 @@ if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     logger, _ = common.setup_session_logger(sub_folder='dissertation/data_process')
     prep_output_dir = os.path.join(common.PERSISTENCE_DIR, 'dissertation', 'data_process')
-    para = common.BaseDefine
+    para = common.BaseDefine()
     para.symbol = "DOGEUSDT"
     para.interval = "15m"
     para.trading_type = "um"
     para.version = 0
 
     # 窗口与预测参数
-    para.candlestick_num = 120
+    para.candlestick_num = 48
     para.predict_num = 24
 
     # 波动率平滑参数

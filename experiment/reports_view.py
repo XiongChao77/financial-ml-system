@@ -341,6 +341,7 @@ def basic_filter(all_results):
     print(f"After Pre-screening short: {len(ps_results)}, {len(ps_results)/len(ps_results_0)*100:.2f}%")
     pf_results,unselected = filter_by_criteria(ps_results, period ='forward', cagr=0.2)
     print(f"After Pre-screening forward: {len(pf_results)}, {len(pf_results)/len(ps_results)*100:.2f}%")
+    analyze_holdbar(pf_results,target_key="predict_num", period ='short',metric_key="cagr")
     l_results,unselected = filter_by_criteria(pf_results, period ='long', cagr=0.1)
     print(f"After Pre-screening long: {len(l_results)}, {len(l_results)/len(pf_results)*100:.2f}%")
     return l_results
@@ -585,7 +586,7 @@ def main():
     #features
     # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-04','05_56_36')
     #best f1 or best loss
-    exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-05','03_05_16')
+    exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-07','01_03_38')
     # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_30m','2026-03-02','17_52_10')
     filter_report = None
     # filter_report =  os.path.join(exp_dir,'filtered_raw_reports.jsonl')
@@ -608,10 +609,12 @@ def main():
     uin_records = merge_selected(rows)
     print(f"Total uint reports: {len(uin_records)}")
     if not filter_report:
-        analyze_holdbar(uin_records,target_key="loss_fun_version", period ='short',metric_key="cagr")
+        analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='short',metric_key="daily_freq")
         uin_records = basic_filter(uin_records)
-        analyze_holdbar(uin_records,target_key="loss_fun_version", period ='short',metric_key="cagr")
-        analyze_holdbar(uin_records,target_key="loss_fun_version", period ='long',metric_key="cagr")
+        analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='long',metric_key="cagr")
+        plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
+        plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
+        plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
         save_raw_reports(uin_records,exp_dir, "filtered_raw_reports.jsonl")
         # exit()
     
@@ -623,15 +626,15 @@ def main():
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
     # exit()
-    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="loss_fun_version",period ='long', metric_key="cagr")
+    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="vol_multiplier_long",period ='long', metric_key="cagr")
     if symbol == 'DOGEUSDT' and interval=='15m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = -0.3,rc_pos_ratio = 0.4,calmar = 1.3 ,daily_freq = 0.3,sharpe = 0.6)
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = -0.3,rc_pos_ratio = 0.6,calmar = 1.3 ,daily_freq = 0.1,sharpe = 0.6)
     if symbol == 'ETHUSDT' and interval=='15m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1,daily_freq = 0.15,sharpe = 0.5)
     if symbol == 'ETHUSDT' and interval=='30m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 0.9,daily_freq = 0.15,sharpe = 0.5)
     # sort_by_correlation_result = sort_by_correlation_diversity(l_results)
-    stats, f_map, groups = analyze_holdbar(l_results,target_key="loss_fun_version",period ='long', metric_key="cagr")
+    stats, f_map, groups = analyze_holdbar(l_results,target_key="holdbar",period ='long', metric_key="cagr")
     # for h,r in groups.items():
     #     h_output_dir = os.path.join(output_dir, str(h))
     #     show_performance(r,h_output_dir,3)
@@ -654,7 +657,8 @@ def main():
     print(f"🎯 Hash 过滤完成: 过滤前 {len(l_results)} 条 -> 过滤后 {len(selected)} 条")
     analyze_holdbar(selected,target_key="holdbar",period ='long', metric_key="cagr")
     show_performance(selected,output_dir,3)
-    exit()
+    selected = [selected[19],selected[20],selected[41]]
+    # exit()
     # stable_selected1 = filter_stable(rc_median_results)
     # print(f"-------------After filter_stable: {len(stable_selected1)} reports")
     # # selected2 = filter_aggressive(rc_results)
@@ -756,7 +760,7 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
     # 1. 灵活分类逻辑
     for row in rows:
         # 你可以根据需要修改这里的判断条件，函数整体是通用的
-        # vol = row["report"]["params"]["common"]["vol_multiplier_long"]
+        # vol = row["report"]["params"]["common"]["vol_multiplier_long_long"]
         # if vol == 1.9:
         #     group_1_data.append(row)
         # elif vol == 1.7:

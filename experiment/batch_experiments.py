@@ -64,9 +64,9 @@ def _batch_temp_dir(exp_dir: str) -> str:
     """
     if exp_dir.startswith(common.PERSISTENCE_DIR):
         rel = os.path.relpath(exp_dir, common.PERSISTENCE_DIR)
-        return os.path.join(common.TEMPORARY_DIR,"train" , rel)
+        return os.path.join(common.PERSISTENCE_DIR,"train" , rel)
     base = os.path.basename(exp_dir.rstrip(os.sep)) or "run"
-    return os.path.join(common.TEMPORARY_DIR, "train" ,"batch_temp", base)
+    return os.path.join(common.PERSISTENCE_DIR, "train" ,"batch_temp", base)
 
 def _prep_output_dir(temp_dir: str, pre_h: str) -> str:
     return os.path.join(temp_dir, f"pre_{pre_h}")
@@ -133,7 +133,7 @@ def load_done_set(reports_path: str) -> set[str]:
     """
     done: set[str] = set()
     if not os.path.exists(reports_path):
-        return done
+        raise RuntimeError(f"{reports_path}")
     with open(reports_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -309,48 +309,53 @@ def create_task_spec(logger, exp_dir,done_set: set[str]):
 
     preparation_task: List[Any] = []
 
-    for cn in [80,88,224,320]:#list(range(56, 224, 8)): #[56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
-        for pn in [4,6,8,12,16,20,24,28]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-            for vol_multiplier in [1.9]:#1.8,1.9,2
-                item = common.BaseDefine(
-                        vol_ewma_span = 200,
-                        candlestick_num=cn,
-                        predict_num=pn,
-                        vol_multiplier_long=vol_multiplier,
-                        stop_multiplier_rate_long=0.2,
-                        vol_multiplier_short=vol_multiplier,
-                        stop_multiplier_rate_short=0.2,
-                        symbol=SYMBOL,   #ETHUSDT
-                        interval=INTERVAL,
-                        trading_type= 'um',
-                        version=0
-                    )
-                preparation_task.append(item)
+    for cn in [16,24,32]:#list(range(56, 224, 8)): #[56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
+        for pn in [4,8,24,40]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
+            for vol_multiplier in [1.8,1.9]:#1.8,1.9,2
+                for vol_ewma_span in [80,88]:
+                    preparation_task.append(common.BaseDefine(
+                            vol_ewma_span = vol_ewma_span,
+                            candlestick_num=cn,
+                            predict_num=pn,
+                            vol_multiplier_long=vol_multiplier,
+                            stop_multiplier_rate_long=0.2,
+                            vol_multiplier_short=vol_multiplier,
+                            stop_multiplier_rate_short=0.2,
+                            symbol=SYMBOL,   #ETHUSDT
+                            interval=INTERVAL,
+                            trading_type= 'um',
+                            version=0
+                        ))
 
     training_task: List[train.TrainConfig] = []
 
     # for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
     #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
+    # for lambda_dir in np.arange(0.1, 0.7, 0.1).round(1):
+    #     for lambda_cost in np.arange(0.1, 0.7, 0.1).round(1):
+    #         for stride in [8]: #2,4,8
+    #             for bestf1 in [True]:
+    #                 for loss_fun_version_v in [4]:
+    #                     training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
+    #                                                 flip_penalty = float(1.3),miss_penalty = float(1.7),false_trade = 1,
+    #                                                 stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = lambda_dir,lambda_cost = lambda_cost))
     for false_trade in [1]:
-        for flip_penalty in np.arange(0.2, 2.1, 0.1).round(1):
-            # for miss_penalty in np.arange(0.8, 2.1, 0.1).round(1):
+        for flip_penalty in np.arange(1, 1.6, 0.1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
+            for miss_penalty in np.arange(0.8, 1.1, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
                 for stride in [2,4,8]: #2,4,8
                     for bestf1 in [True]:
                         for loss_fun_version_v in [2]:
-                            t_cfg = train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
-                                                        flip_penalty = float(flip_penalty),miss_penalty = float(flip_penalty/2),false_trade = false_trade,
-                                                        stride = stride, patience = 8)
-                            training_task.append(t_cfg)
+                            training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
+                                                        flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
+                                                        stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0))
 
     simulation_task: List[Any] = []
 
-    for i in [30,32, 34,38]: #16,24,30,32,36,40,44,48
+    for i in [8,16,30,32,36]: #16,24,30,32,36,40,44,48
         holdbar = i
-        for (atr_sl_mult_long, atr_sl_mult_short) in [(6,6),(6,5),(6,4)]: #(6,5),(5,4)
-            s_cfg = simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
-                                            stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04)
-            s_cfg.holdbar = holdbar
-            simulation_task.append(s_cfg)
+        for (atr_sl_mult_long, atr_sl_mult_short) in [(8,6),(6,5),(5,4)]: #(6,5),(5,4)
+            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
+                                            stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04))
     task_spec = build_task_spec(preparation_task, training_task, simulation_task)
     # task_spec 已经 ready
     sweep = collect_param_sweep(task_spec)
@@ -754,14 +759,14 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
         original_symbol = pre_para.symbol
         original_interval = pre_para.interval
         for tr_h, tr_node in pre_node["train"].items():
-            train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', pre_h,tr_h)
-            if not os.path.exists(train_save_dir):
-                raise RuntimeError("run valid first!")
             train_params = tr_node["params"]
             t_cfg = _config_from_dict_train(train_params)
             for sim_task in tr_node['sim_tasks']:
                 hash_value =  sim_task['hash']
                 strategy_hash = sim_task['strategy_hash']
+                train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', strategy_hash)
+                if not os.path.exists(train_save_dir):
+                    raise RuntimeError(f" {train_save_dir} not exist,run valid first!")
                 sim_params = sim_task['params']
                 sim_para=simulation.StrategyPara(**sim_params)
                 results[strategy_hash] = {'orignal_symbol': f'{pre_para.symbol}_{pre_para.interval}','CAGR':{}}
@@ -859,6 +864,7 @@ def main():
             train_para=_config_from_dict_train(params["params"]["train"])
             load_prep_output_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "load_configs",'prep',f'{pre_para.symbol}_{pre_para.interval}')
             strategy_hash = params["params"]['hash']
+            #prepare train output for market
             train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', strategy_hash)
             if not os.path.exists(train_save_dir):
                 logger.info(f"skip {strategy_hash}, tarin data not found {train_save_dir}")
@@ -929,7 +935,7 @@ def main():
         n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
         logger.info(f"📥 Loaded from {selected_configs}")
         logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim}")
-        train_and_cross_test(logger,temp_dir,task_spec)
+        train_and_cross_test(logger,exp_dir,task_spec)
         exit()
     else:
         task_spec = create_task_spec(logger, exp_dir, None)

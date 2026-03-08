@@ -60,6 +60,7 @@ DOGE_15m:
                 20的平均Calmar爆炸性优于其它。看起来还可以进一步探索40之后的参数。
             最优的是 predict_num 16 + holdbar 32，需要进一步测试
             [12,16,24,28]
+    vol_ewma_span 88>120
     batch_experiments\2026-02-13\DOGEUSDT_15m\11_55_18
         predict_num 测试范围 [12,16,24,28] holdbar in [12, 16, 20, 24 ,28, 32,36,40]
             最优的是 predict_num 12 16 + holdbar [20 - 36] 需要进一步测试. holdbar不宜太大，否则会放大beta
