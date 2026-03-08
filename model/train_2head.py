@@ -222,14 +222,14 @@ class TrainConfig:
     stride: int = 8
     use_cache: bool = False
     lambda_trig: float = 0.5
-    lambda_dir: float = 0.7
-    lambda_main:float = 0.3 
-    lambda_cost:float = 0.5
+    lambda_dir: float = 0.1 #多空方向的重要性
+    lambda_main:float = 0.7
+    lambda_cost:float = 0.4 #flip/错过趋势/乱交易
     lambda_gate: float = 1e-3
     mag_alpha: float = 0
     mag_limit: float = 4.0
-    flip_penalty: float = 1.2
-    miss_penalty: float = 1.8
+    flip_penalty: float = 1.5
+    miss_penalty: float = 2
     false_trade: float = 1
     mag_warmup_epochs:int = 8
     temperature:float = 2.0
@@ -304,7 +304,8 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
         torch.set_float32_matmul_precision('high')
 
     df = common.load_train_df_from_dir(prep_output_dir)
-    kline_interval_ms = common.load_interval_ms_from_dir(prep_output_dir)
+    para = common.load_interval_ms_from_dir(prep_output_dir)
+    kline_interval_ms = common.get_interval_ms(para.interval)
     logger.info(f"Using TimeSeriesWindowDataset with window={pre_para.candlestick_num} Origin data len {len(df)}...")
 
     feature_list = list(feature_direction_map.keys())
@@ -836,7 +837,7 @@ class MTLManager:
             # trend_strength is >=0, and for action samples usually >=1
             # use max(trend_strength,1) to ensure action weights start at 1
             s = trend_strength[act_mask].clamp(min=1.0)
-            w = 1.0 + torch.log1p(s - 1.0)          # >=1, safe
+            w = 1.0 + self.cfg.mag_alpha*torch.log1p(s - 1.0)          # >=1, safe
             w = w / (w.mean().detach() + eps)
             w = w.clamp(max=3.0)
 
@@ -871,7 +872,7 @@ class MTLManager:
         # optional: mild strength weight ONLY on action samples
         if float(getattr(self.cfg, "cost_use_strength", 1.0)) > 0:
             s_all = torch.where(act_mask, trend_strength.clamp(min=1.0) - 1.0, torch.zeros_like(trend_strength))
-            w_cost = 1.0 + 0.5 * torch.log1p(s_all)   # safe (>=1)
+            w_cost = 1.0 + self.cfg.mag_alpha * torch.log1p(s_all)   # safe (>=1)
             w_cost = w_cost / (w_cost.mean() + eps)
             loss_cost = (exp_cost * w_cost).mean()
         else:

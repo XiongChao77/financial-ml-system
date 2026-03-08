@@ -42,13 +42,13 @@ os.makedirs(DATA_OUT_DIR, exist_ok=True)
 @dataclass
 class BaseDefine:
     # model / data
-    vol_ewma_span: int  = 200
-    candlestick_num: int = 120     # 160 best for LSTM
-    predict_num: int = 24
+    vol_ewma_span: int  = 8
+    candlestick_num: int = 32     # 160 best for LSTM
+    predict_num: int = 8
     # risk / vol
-    vol_multiplier_long: float = 1.9
+    vol_multiplier_long: float = 1.7
     stop_multiplier_rate_long: Optional[float] = 0.2
-    vol_multiplier_short: float = 1.9
+    vol_multiplier_short: float = 1.7
     stop_multiplier_rate_short: Optional[float] = 0.2
     # market
     symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
@@ -142,17 +142,15 @@ def load_test_df_from_dir(base_dir):
 def get_data_config_path_in_dir(base_dir):
     return _data_path_in_dir(base_dir, "data_config_meta.json")
 
-def load_interval_ms_from_dir(base_dir):
+def load_interval_ms_from_dir(base_dir) -> BaseDefine:
     """从指定目录的 data_config_meta.json 读取 interval_ms，不依赖全局路径，适用于多进程。"""
     config_path = get_data_config_path_in_dir(base_dir)
     if not os.path.exists(config_path):
         raise RuntimeError(f"❌ 找不到配置文件: {config_path}")
     with open(config_path, 'r', encoding='utf-8') as f:
         meta = json.load(f)
-    interval_ms = meta.get("interval_ms")
-    if interval_ms is None:
-        raise RuntimeError(f"⚠️ 配置文件中缺失 'interval_ms' 字段！")
-    return interval_ms
+        para = BaseDefine(**meta)
+    return para
 
 def attach_attr(df, feature_group_list, feature_conf_list = [], para = BaseDefine):
     # 1. 基础处理
@@ -182,7 +180,7 @@ def attach_label(df, para = BaseDefine, label_col = 'label'):
 
     # 3. 计算未来收益与极致波动 (保持不变)
     future_close = np.where(final_valid_mask, df['close'].values[safe_idx], np.nan)
-    pct_final = (future_close - df['close']) / df['close']
+    pct_final = np.log(future_close / df['close'])
 
     high_mtx = np.column_stack([df['high'].shift(-i).values for i in range(1, para.predict_num + 1)])
     low_mtx = np.column_stack([df['low'].shift(-i).values for i in range(1, para.predict_num + 1)])
@@ -245,10 +243,8 @@ def calculate_thresholds(df, para=BaseDefine, **kwargs):
     # ===== 2️⃣ EWMA 平滑方差 =====
     span = para.vol_ewma_span
     ewma_var = rs_var.ewm(span=span, adjust=False).mean()
-
     # 开方得到波动率
     ewma_vol = np.sqrt(ewma_var)
-
     # ===== 3️⃣ 时间扩展到预测区间 =====
     # 假设方差线性扩展
     expected_vol = ewma_vol * np.sqrt(para.predict_num)
