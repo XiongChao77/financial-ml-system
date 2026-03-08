@@ -3,28 +3,18 @@ from tkinter import TRUE
 import pandas as pd
 import numpy as np
 import datetime, os, sys, re, math, json, logging
+from dataclasses import asdict
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 
-def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine, prep_output_dir =common.DATA_OUT_DIR ):
+def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine(), prep_output_dir =common.DATA_OUT_DIR ):
     file = os.path.join(common.PROJECT_DATA_DIR, para.trading_type ,f"{para.symbol}_{para.interval}.csv")
     logger.info(f"using file :{file}")
     # 1. 获取周期字符串并转为毫秒
     interval_ms = common.get_interval_ms(para.interval)
     
     # 2. 存入元数据，方便 attach_label_v2 和后续模型使用
-    metadata = {
-        "symbol_interval": para.interval,
-        "interval_ms": interval_ms, # <--- 新增
-        "candlestick_num": para.predict_num,
-        "predict_num": para.predict_num,
-        "vol_multiplier_long": para.vol_multiplier_long,
-        "stop_multiplier_rate_long": para.stop_multiplier_rate_long,
-        "vol_multiplier_short": para.vol_multiplier_short,
-        "stop_multiplier_rate_short": para.stop_multiplier_rate_short,
-    }
-
     df = pd.read_csv(file)
     #成交量等为0的数据对价格不会有任何影响，因此去掉不会影响训练和测试;
     #在真实场景下确实有成交量为0的数据.还是选择保留
@@ -37,7 +27,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     if function==0:
         df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
         common.attach_label(df, para=para,label_col = label_col)
-        common.print_zret_statistics(df)
+        # common.print_zret_statistics(df)
         # common.attach_triple_barrier_label(df, interval_ms=interval_ms)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
@@ -120,8 +110,10 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     common.save_train_df_to_dir(train_df, out_dir)
     common.save_test_df_to_dir(test_df, out_dir)
     meta_path = common.get_data_config_path_in_dir(out_dir)
+    para_dict = asdict(para)
+    safe_para = common.json_safe(para_dict)
     with open(meta_path, 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, indent=4, ensure_ascii=False)
+        json.dump(safe_para, f, indent=4, ensure_ascii=False)
 
     logger.info(f"✅ 数据处理完成！")
     logger.info(f"📍 周期识别: {para.interval}")
