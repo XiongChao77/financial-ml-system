@@ -248,7 +248,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         mask_global = (global_actual_span <= global_ideal_span) 
 
         # 2. 严格的尾部检查 (最后 10 根 K 线)
-        check_tail_count = 10
+        check_tail_count = 2
         tail_actual_span = time_windows[:, -1] - time_windows[:, -(check_tail_count + 1)]
         tail_ideal_span = check_tail_count * interval
         mask_tail = (tail_actual_span <= tail_ideal_span)

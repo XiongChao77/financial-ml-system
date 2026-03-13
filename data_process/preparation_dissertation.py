@@ -21,7 +21,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     # 3. 将 interval_ms 传入 label 逻辑
     # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
     label_col = 'label'
-    function =2
+    function =1
     if function==0:
         df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
         common.attach_label(df, para=para,label_col = label_col)

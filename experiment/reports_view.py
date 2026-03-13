@@ -13,6 +13,7 @@ from data_process.common import *
 from data_process import common 
 
 output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments',"selected_configs")
+os.makedirs(output_dir, exist_ok=True)
 TOP_K = 50
 SKIP_PERCENT = 0  # 跳过前百分之多少，0表示不跳过，从最前面开始选择
 
@@ -250,14 +251,15 @@ def merge_selected(records):
     print(f" Total:{len(records)} Duplicate records {len(duplicate_r)}, uni_results {len(uni_results)}")
     return uni_results
 
-def iter_reports_jsonl(root):
+def iter_reports_jsonl(root_list):
     """
     递归扫描所有 reports.jsonl
     """
-    for dirpath, _, filenames in os.walk(root):
-        for fname in filenames:
-            if fname == "reports.jsonl":
-                yield os.path.join(dirpath, fname)
+    for root in root_list:
+        for dirpath, _, filenames in os.walk(root):
+            for fname in filenames:
+                if fname == "reports.jsonl":
+                    yield os.path.join(dirpath, fname)
 
 
 def load_reports(path):
@@ -341,10 +343,35 @@ def basic_filter(all_results):
     print(f"After Pre-screening short: {len(ps_results)}, {len(ps_results)/len(ps_results_0)*100:.2f}%")
     pf_results,unselected = filter_by_criteria(ps_results, period ='forward', cagr=0.2)
     print(f"After Pre-screening forward: {len(pf_results)}, {len(pf_results)/len(ps_results)*100:.2f}%")
-    analyze_holdbar(pf_results,target_key="predict_num", period ='short',metric_key="cagr")
     l_results,unselected = filter_by_criteria(pf_results, period ='long', cagr=0.1)
     print(f"After Pre-screening long: {len(l_results)}, {len(l_results)/len(pf_results)*100:.2f}%")
     return l_results
+
+def filter_and_rank_strategies(data, metric, k=30, final_sort_key="l_cagr"):
+    """
+    按照指定指标筛选前 K 个策略，并按 final_sort_key 重新排序。
+    
+    :param data: 原始策略列表 (list of dicts)
+    :param metric: 筛选指标名 (str) 或 自定义 lambda 函数
+    :param k: 筛选前多少个 (int)
+    :param final_sort_key: 最终展示时的排序基准，默认为 'l_cagr'
+    :return: 经过二次排序的策略列表
+    """
+    
+    # 1. 定义排序键值 (处理 lambda 或普通 key)
+    if callable(metric):
+        key_func = metric
+    else:
+        # 使用 get 处理 key 不存在的情况，防止报错
+        key_func = lambda x: x.get(metric, 0) if x.get(metric) is not None else 0
+
+    # 2. 按照指定指标选出表现最好的前 K 个 (降序)
+    top_k = sorted(data, key=key_func, reverse=True)[:k]
+
+    # 3. 对这 K 个结果按照最终基准 (如 CAGR) 重新排序
+    final_sorted = sorted(top_k, key=itemgetter(final_sort_key), reverse=True)
+    
+    return final_sorted
 
 def show_performance(all_results,output_dir, batch_size=5):
     print("-"*20 + 'Key strategy indicators' +"-"*20)
@@ -357,7 +384,8 @@ def show_performance(all_results,output_dir, batch_size=5):
           f"{'DailyFreq':>12}"
           f"{'WinRate':>10}"
           f"{'RC_Median':>12}"
-          f"{'RC_PosRatio':>12}")
+          f"{'RC_PosRatio':>12}"
+          f"{'MAX_DD_DAYS':>12}")
 
     print("-" * 98)
 
@@ -373,8 +401,9 @@ def show_performance(all_results,output_dir, batch_size=5):
               f"{g('daily_freq'):12.2f}"
               f"{g('win_rate'):10.2f}"
               f"{g('rc_median'):12.2f}"
-              f"{g('rc_pos_ratio'):12.2f}")
-    # compute_correlation(all_results,output_dir)
+              f"{g('rc_pos_ratio'):12.2f}"
+              f"{g('max_hwm_duration_days'):12.2f}")
+    compute_correlation(all_results,output_dir)
     plot_in_batches(all_results,output_dir,batch_size)
 
 def sort_by_correlation_diversity(all_results):
@@ -431,7 +460,6 @@ def compute_correlation(all_results, output_dir):
     """
     动态计算尺寸生成相关性热力图，确保格子大小固定且文字清晰
     """
-    os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, "correlation_heatmap_fixed_cell.png")
 
     # ===== 1. 构建收益率序列 =====
@@ -493,7 +521,6 @@ def compute_correlation(all_results, output_dir):
     print(f"📊 动态尺寸热力图已保存 (Size: {fig_width:.1f}x{fig_height:.1f} in): {save_path}")
 
 def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.png", start_index=0):
-    os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, file_name)
 
     # ===== 1. 获取价格背景数据 =====
@@ -581,22 +608,18 @@ def plot_in_batches(all_results, output_dir, batch_size=5):
         plot_equity_curves(batch, output_dir, filename, start_index=i)
 
 def main():
-    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-02','20_41_33')
-    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-04','04_43_41')
-    #features
-    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-04','05_56_36')
-    #best f1 or best loss
-    exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-07','01_03_38')
-    # exp_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_30m','2026-03-02','17_52_10')
+    exp_dir1 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-07','01_03_38')
+    exp_dir2 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-09','17_33_35')
+    exp_dir_list = [exp_dir2]#,exp_dir2]
     filter_report = None
-    # filter_report =  os.path.join(exp_dir,'filtered_raw_reports.jsonl')
+    filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
     rows = []
     records = []
     if filter_report:
         report_files.append(filter_report)
     else:
-        for jsonl_path in iter_reports_jsonl(exp_dir):
+        for jsonl_path in iter_reports_jsonl(exp_dir_list):
             report_files.append(jsonl_path)
     for report_file in report_files:
         records = load_reports(report_file)
@@ -609,14 +632,14 @@ def main():
     uin_records = merge_selected(rows)
     print(f"Total uint reports: {len(uin_records)}")
     if not filter_report:
-        analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='short',metric_key="daily_freq")
+        analyze_holdbar(uin_records,target_key="candlestick_num", period ='short',metric_key="daily_freq")
         uin_records = basic_filter(uin_records)
-        analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='long',metric_key="cagr")
+        analyze_holdbar(uin_records,target_key="candlestick_num", period ='long',metric_key="cagr")
         plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
         plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
         plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
-        save_raw_reports(uin_records,exp_dir, "filtered_raw_reports.jsonl")
-        # exit()
+        save_raw_reports(uin_records,output_dir, "filtered_raw_reports.jsonl")
+        exit()
     
     # analyze_model_performance_correlation(uin_records)
     # analyze_model_metrics_by_decile(uin_records)
@@ -626,15 +649,35 @@ def main():
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
     # exit()
-    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="vol_multiplier_long",period ='long', metric_key="cagr")
+    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="candlestick_num",period ='long', metric_key="cagr")
     if symbol == 'DOGEUSDT' and interval=='15m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = -0.3,rc_pos_ratio = 0.6,calmar = 1.3 ,daily_freq = 0.1,sharpe = 0.6)
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.3,rc_median = 0,rc_pos_ratio = 0.8,calmar = 1.3 ,daily_freq = 0.1,sharpe = 0.6)
+        # 定义你关心的所有指标
+        metrics_to_test = [
+            ("Calmar", "l_calmar"),
+            ("CAGR", "l_cagr"),
+            ("Sharpe", "l_sharpe"),
+            # ("WinRate", "l_win_rate"),
+            ("Median Return", lambda r: common.recursive_get(r.get('long', {}), 'rc_median') or 0),
+            # ("l_daily_freq", "l_daily_freq"),
+            # ("Pos Ratio", lambda r: common.recursive_get(r.get('long', {}), 'rc_pos_ratio') or 0),
+        ]
+
+        for label, metric in metrics_to_test:
+            refined_data = filter_and_rank_strategies(unselected, metric, k=20)
+            print(f">>> Processing top strategies by {label}...")
+            # show_performance(refined_data, output_dir, 3)
+            l_results = l_results + refined_data
+        l_results = merge_selected(l_results)
+        l_results = sorted(l_results, key=itemgetter("l_cagr"), reverse=True)
+        l_results,unselected = filter_by_criteria(l_results, period ='long', cagr=0.5,calmar = 1,sharpe = 1,rc_pos_ratio = 0.7,daily_freq = 0.1)
+        # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.8)
+        # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.6)
     if symbol == 'ETHUSDT' and interval=='15m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1,daily_freq = 0.15,sharpe = 0.5)
     if symbol == 'ETHUSDT' and interval=='30m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 0.9,daily_freq = 0.15,sharpe = 0.5)
     # sort_by_correlation_result = sort_by_correlation_diversity(l_results)
-    stats, f_map, groups = analyze_holdbar(l_results,target_key="holdbar",period ='long', metric_key="cagr")
     # for h,r in groups.items():
     #     h_output_dir = os.path.join(output_dir, str(h))
     #     show_performance(r,h_output_dir,3)
@@ -644,20 +687,27 @@ def main():
     #     key=lambda r: common.recursive_get(r.get('long', {}), 'rc_pos_ratio') or 0, 
     #     reverse=True
     # )
-    sorted_calmar = sorted(l_results, key=itemgetter("l_calmar"), reverse=True)
+    l_results = l_results#[:2]
     selected = l_results
-    filter_hash_doge_15 = ['caeffbd3','6c90c6c8','c2e56676','baed2635','12874c7e']
+    filter_hash_doge_15 = ['1df68cde','2c833b42','4e6d96d6','b4643441','b1d3aa34','358126fe','404b9edc','8918c3a8','652c9e37','d5eb8b05','6810b357','ef82f618','4e1bcd26','d81ee9ea','1351d037','d40a5588'
+                           ,'f1fa2ba1','978a1afb','1870ccac','5290ee6d','d1062846','6d2b9fc9','c6943cca','b7a08817','2babf5c5','f7c92570','044c22f4','e7653d4c','9cc7065e',
+                           '759a6e64','04c36e97','261d23d3','a1d96a57','ecf1eed1','ab31665b','c32333fc','4f9f4307','adff58e6','bbbeece4','b4b1d10f','781b9c01','7313dcfb',
+                           'c8d405bf','6483c804','493904fe','8c3c266b','a6270c43','a6ab4b8a']
+    keep_hash = ['63ee07fc','1f8b68ae','903e836f','1b5d9b3c','2ced173e','b2f09163','0180b8fc','f75e3f11','31a2c243','b0a375e7','3c9f67cc','49486743'
+                  ]
     filter_hash_eth_15 = ['943143f8', '21f9fce3', 'e4927150', '9a3f7676', '4afa85ac' ,'3163d070','ed96bd77','cc89356b']
-    filter_hash = filter_hash_doge_15 + filter_hash_eth_15
+    filter_set = set(filter_hash_doge_15 + filter_hash_eth_15)
+    keep_set = set(keep_hash)
     selected = [
         r for r in l_results 
-        if str(common.recursive_get(r.get('long', {}), 'hash'))[:8] not in filter_hash
+        if (h := str(common.recursive_get(r.get('long', {}), 'hash'))[:8]) not in filter_set 
+        # and h in keep_set
     ]
-    # long model_metrics accuracy
-    print(f"🎯 Hash 过滤完成: 过滤前 {len(l_results)} 条 -> 过滤后 {len(selected)} 条")
+    print(f"🎯 过滤完成: 最终保留 {len(selected)} 条符合双重条件的策略")
     analyze_holdbar(selected,target_key="holdbar",period ='long', metric_key="cagr")
+    analyze_holdbar(selected,target_key="predict_num", period ='long',metric_key="cagr")
+    analyze_holdbar(selected,target_key="atr_sl_mult_long", period ='long',metric_key="cagr")
     show_performance(selected,output_dir,3)
-    selected = [selected[19],selected[20],selected[41]]
     # exit()
     # stable_selected1 = filter_stable(rc_median_results)
     # print(f"-------------After filter_stable: {len(stable_selected1)} reports")
@@ -669,8 +719,6 @@ def main():
     # rc_pos_ratio_results,unselected = filter_by_criteria(stable_selected1, period ='long', rc_pos_ratio = 0.7)
     # print(f"-------------After rc_pos_ratio: {len(rc_pos_ratio_results)} reports")
 
-
-
     # sorted_l_sharpe = sorted(rc_pos_ratio_results, key=itemgetter("l_sharpe"), reverse=True)
     # sorted_calmar = sorted(rc_pos_ratio_results, key=itemgetter("l_calmar"), reverse=True)
     # # sorted_l_win_rate = sorted(rc_results, key=itemgetter("l_win_rate"), reverse=True)
@@ -678,7 +726,6 @@ def main():
     # top_k = 40
     # merged_selected = merge_selected_sort(sorted_l_sharpe[:top_k],sorted_calmar[:top_k],rc_pos_ratio_results[:top_k],period ='long', sort_key='cagr')
     out_path = os.path.join(output_dir,"selected_configs.jsonl")
-    os.makedirs(output_dir, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         for r in selected:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
