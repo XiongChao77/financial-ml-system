@@ -42,7 +42,7 @@ os.makedirs(DATA_OUT_DIR, exist_ok=True)
 @dataclass
 class BaseDefine:
     # model / data
-    vol_ewma_span: int  = 8
+    vol_ewma_span: int  = 80
     candlestick_num: int = 32     # 160 best for LSTM
     predict_num: int = 8
     # risk / vol

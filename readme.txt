@@ -1,5 +1,5 @@
 ################################ environment ########################################
-
+Python 3.10
 pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4 pytorch-ignite  colorlog backtrader pyarrow numba GitPython ignite
 pip install MetaTrader5 pybit
 
@@ -109,20 +109,10 @@ taker_buy_quote_volume：taker 主动买入对应的计价资产成交额。
 增加更多数据，分析市场和回测的gap
 尝试Deep Forrest 
 控制单笔风险，仓位和波动率反比，修改止损ATR计算和参考周期(和持仓固定)
-
-
-增加过去CANDLESTICK_NUM的波动率，可能对模型有参考意义
-通过统计预测上涨/下跌成功时反方向的回撤，来设置合理的止损，过滤FP的同时减少TP的回撤
-优化盈亏比，降低回撤，提升夏普比率
-保存每一步的参数，训练结果和回测结果。避免反复测试并可以复现
-
 套利？
 优化模型(长期)
 优化回测(长期)
-相关性筛选，特征归一化(Done)
-相关性因子挖掘(没有统计学基础支撑，模型是学不到东西的)(Done)
-尝试不同时间尺度(目前在不同品类完全不适用)
-尝试不同品类(目前在不同品类完全不适用)
+设计更符合盈利目标的损失函数
 ***************************Problem***************************************
 1.模型对上涨/下跌的预测在相反的大趋势行情中非常不准，持续预测错误导致巨额亏损。
     解决思路：引入长期均线。由模型学习；或者直接禁止逆势交易。
