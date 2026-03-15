@@ -3,6 +3,7 @@ import math
 from functools import reduce
 import pandas as pd
 import numpy as np
+import argparse
 from multiprocessing import Process, Queue, Manager
 from datetime import datetime
 from typing import Optional
@@ -20,8 +21,6 @@ from trade.market.ftmo import mt5_executor
 from trade.market.bybit.bybit_executor import BybitExecutor 
 from trade.market.binance_data_feed import BinanceDataFeed
 
-ADDITIONAL_FEATURES = ["atr_14"]
-
 def ms_to_seconds(s):
     return s//1000
 
@@ -34,19 +33,6 @@ def get_base_interval_seconds(intervals: list[int]) -> int:
     # 计算所有秒数的最大公约数 (Greatest Common Divisor)
     gcd_seconds = reduce(math.gcd, seconds_list)
     return gcd_seconds
-
-def sleep_until_next_tick(base_seconds: int):
-    """
-    精准休眠到下一个 base_seconds 的整倍数时间点
-    """
-    now = time.time()
-    # 计算距离下一个整点还差多少秒
-    wait_time = base_seconds - (now % base_seconds)
-    
-    # 增加 0.5s 缓冲，确保交易所数据已更新
-    self.info(f"sleep {wait_time}s from now")
-    time.sleep(wait_time + 0.5)
-    self.info(f"wake up")
 
 class StrategyType:
     MT5 = "MT5"
@@ -101,7 +87,7 @@ class TradingConfig:
 # 数据中心与推理机
 # ============================================================
 class MasterController:
-    def __init__(self, strategy_path):
+    def __init__(self, strategy_path,debug = True):
         self.strategy_path = strategy_path
         self.strategies:dict[int,StrategyHolder] = {}
         self.label_col = None
@@ -109,7 +95,8 @@ class MasterController:
         self.strategy_input = TradingConfig()   #symbol:{interval:window:feature_conf_list}
         self.feature_conf_list:list = []  #feature_conf_list
         self.logger, _ = common.setup_session_logger(sub_folder="master", symbol="GLOBAL")
-        self.debug = False
+        self.debug = debug
+        self.logger.info(f"run in debug {debug}")
         self.init()
 
     def init(self):
@@ -156,9 +143,11 @@ class MasterController:
             w_cfg = s_cfg.intervals.setdefault(strategy.pre_para.interval, WindowConfig())
             w_cfg.items[strategy.pre_para.candlestick_num] = self.feature_conf_list
             if strategy.type == StrategyType.MT5:
-                executor = mt5_executor.MT5Executor(strategy.path, strategy.pre_para.symbol,int(hash_value, 16), logger=self.logger)
+                MT5_path = strategy.path
+                executor = mt5_executor.MT5Executor(MT5_path, strategy.pre_para.symbol,int(hash_value, 16), logger=self.logger)
             elif strategy.type == StrategyType.BYBIT:
-                executor = BybitExecutor(strategy.path, strategy.pre_para.symbol)
+                key_path = os.path.join(self.strategy_path, strategy.path)
+                executor = BybitExecutor(key_path, strategy.pre_para.symbol)
             else:
                 raise RuntimeError(f"invalid strategy type :{strategy.type}")
             strategy.brain = FtmoBrain(
@@ -179,7 +168,7 @@ class MasterController:
         for trading_type, symbols in self.strategy_input.trading_type.items():
             for symbol, interval_items in symbols.symbols.items():
                 for interval, window_items in interval_items.intervals.items():
-                    window_items.factory = FeatureFactory(common.get_interval_ms(interval), feature_conf_list=self.feature_conf_list+ADDITIONAL_FEATURES)
+                    window_items.factory = FeatureFactory(common.get_interval_ms(interval), feature_conf_list=self.feature_conf_list)
                     window_items.min_bars_needed = window_items.factory.get_global_min_history() + max(window_items.items.keys())*2
                     window_items.data_feed = BinanceDataFeed(symbol, interval, trading_type, max_len=window_items.min_bars_needed + 500) #buffer
                     window_items.data_feed.initialize_cache(window_items.min_bars_needed, common.get_interval_ms(interval))
@@ -212,7 +201,19 @@ class MasterController:
                 if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.candlestick_num == window:
                     self.execute_strategy(strategy,current_price=None,pred=Signal.INVALID,pred_prob=1,atr=None )
 
-
+    def sleep_until_next_tick(self,base_seconds: int):
+        """
+        精准休眠到下一个 base_seconds 的整倍数时间点
+        """
+        now = time.time()
+        # 计算距离下一个整点还差多少秒
+        wait_time = base_seconds - (now % base_seconds)
+        
+        # 增加 0.5s 缓冲，确保交易所数据已更新
+        self.info(f"sleep {wait_time}s from now")
+        time.sleep(wait_time + 0.5)
+        self.info(f"wake up")
+        
     def run_forever(self):
         self.logger.info(f"🚀 Master Controller started. Handling {len(self.strategies)} strategies.")
         # 1. 启动时计算所有 interval 的 GCD
@@ -225,7 +226,7 @@ class MasterController:
         while True:
             # 2. 精准休眠
             if self.debug == False:
-                sleep_until_next_tick(base_step_s)
+                self.sleep_until_next_tick(base_step_s)
             
             # 3. 醒来后检查哪些 interval 到时了
             now_ts = int(time.time())
@@ -287,14 +288,22 @@ class MasterController:
                                 self.logger.info(f"check {hash_value} {strategy.pre_para.symbol} {strategy.pre_para.interval} {strategy.pre_para.candlestick_num} and {symbol}  {interval_str} {window}")
                                 if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.candlestick_num == window:
                                     try:
+                                        df['stop_loss_atr'] = common.stop_loss_atr(df, strategy.st_para.holdbar)
                                         df_pred, model_stats = strategy.model.predict_with_ds(ds,df_with_feature,is_live=True,diff_thresh = None)
                                         last_row = df_pred.iloc[-1]
-                                        self.execute_strategy(strategy, last_row["close"], last_row["pred"], last_row["pred_prob"], last_row['atr_14'])
+                                        self.execute_strategy(strategy, last_row["close"], last_row["pred"], last_row["pred_prob"], last_row['stop_loss_atr'])
                                         
                                     except Exception as e:
                                         self.logger.error(f"Error in strategy work {strategy.pre_para.symbol}: {e}")
 
 if __name__ == "__main__":
-    strategy_path = os.path.join(common.PERSISTENCE_DIR,"market_prepare","strategy_0")
-    master = MasterController(strategy_path)
+    parser = argparse.ArgumentParser(description="MasterController start")
+    default_strategy = os.path.join(common.PERSISTENCE_DIR, "market_prepare", "strategy_0")
+    parser.add_argument("-s", "--strategy", type=str, default=default_strategy,help=f"strategy path (default: {default_strategy})")
+    parser.add_argument("-d", "--debug",action="store_true",default=False,help="open debug model? (default: False)")
+
+    args = parser.parse_args()
+    if args.debug:
+        print(f"--- DEBUG {args.debug} ---")
+    master = MasterController(args.strategy,args.debug)
     master.run_forever()
