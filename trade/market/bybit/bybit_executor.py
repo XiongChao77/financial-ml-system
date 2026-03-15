@@ -15,6 +15,7 @@ class BybitExecutor(BaseExecutor):
         self.engine = BybitEngine(key_path)
         self.symbol = symbol
         self.logger = logging.getLogger("BybitExecutor")
+        self.logger.info(f"BybitExecutor key_path:{key_path} symbol {symbol}")
         
         # 初始化精度信息
         self.qty_step = 0.0
