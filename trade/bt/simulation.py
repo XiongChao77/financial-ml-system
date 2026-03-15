@@ -174,6 +174,7 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
     cerebro = bt.Cerebro(runonce=False,cheat_on_open=True,maxcpus=1)
     cerebro.addstrategy(
         FtmoStrategy,
+        predict_num = pre_para.predict_num,
         holdbar=para.holdbar,
         allow_short=para.allow_short,
         allow_long=para.allow_long,
