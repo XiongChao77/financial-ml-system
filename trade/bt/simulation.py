@@ -140,8 +140,7 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
             window=handler.window,
             is_live=False,
         )
-        length = max(10, round(0.8 * para.holdbar))
-        df['stop_loss_atr'] = common.stop_loss_atr(df, length=length)
+        df['stop_loss_atr'] = common.stop_loss_atr(df, para.holdbar)
         atr_colum = 'stop_loss_atr'
         df_with_pred, model_stats = handler.predict_with_ds(ds,df,is_live=False,diff_thresh = None)
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])

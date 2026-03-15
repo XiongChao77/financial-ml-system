@@ -6,7 +6,8 @@ from datetime import datetime
 from typing import Dict, Iterable, List
 import pandas as pd
 
-def stop_loss_atr(df: pd.DataFrame, length: int) -> pd.Series:
+def stop_loss_atr(df: pd.DataFrame, holdbar: int) -> pd.Series:
+    length = max(10, round(0.8 * holdbar))
     length = int(length)
     length = max(length, 2)
 
