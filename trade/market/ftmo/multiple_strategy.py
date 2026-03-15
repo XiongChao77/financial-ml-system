@@ -1,3 +1,6 @@
+import os
+import certifi
+os.environ['WEBSOCKET_CLIENT_CA_BUNDLE'] = certifi.where()
 import os,sys,torch,logging,time
 import math
 from functools import reduce
@@ -210,9 +213,9 @@ class MasterController:
         wait_time = base_seconds - (now % base_seconds)
         
         # 增加 0.5s 缓冲，确保交易所数据已更新
-        self.info(f"sleep {wait_time}s from now")
+        self.logger.info(f"sleep {wait_time}s from now")
         time.sleep(wait_time + 0.5)
-        self.info(f"wake up")
+        self.logger.info(f"wake up")
         
     def run_forever(self):
         self.logger.info(f"🚀 Master Controller started. Handling {len(self.strategies)} strategies.")
@@ -283,12 +286,12 @@ class MasterController:
                                 label_col=self.label_col, 
                                 window=window,
                                 is_live=True,
+                                show_feature_distribution = False,
                             )
                             for hash_value,strategy in self.strategies.items():
-                                self.logger.info(f"check {hash_value} {strategy.pre_para.symbol} {strategy.pre_para.interval} {strategy.pre_para.candlestick_num} and {symbol}  {interval_str} {window}")
                                 if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.candlestick_num == window:
                                     try:
-                                        df['stop_loss_atr'] = common.stop_loss_atr(df, strategy.st_para.holdbar)
+                                        df_with_feature['stop_loss_atr'] = common.stop_loss_atr(df, strategy.st_para.holdbar)
                                         df_pred, model_stats = strategy.model.predict_with_ds(ds,df_with_feature,is_live=True,diff_thresh = None)
                                         last_row = df_pred.iloc[-1]
                                         self.execute_strategy(strategy, last_row["close"], last_row["pred"], last_row["pred_prob"], last_row['stop_loss_atr'])
