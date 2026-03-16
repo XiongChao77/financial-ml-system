@@ -20,7 +20,7 @@ from model import model_loader
 from model import data_loader
 from trade.bt import cus_analyzer, cus_comminfo, result_analyze
 from model import train_2head 
-from trade.bt.bt_trade_ml import FtmoStrategy
+from trade.bt.bt_trade_ml import BtFtmoStrategy
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
 
 class TradeResult:
@@ -172,7 +172,7 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
     # 4. Backtrader 执行
     cerebro = bt.Cerebro(runonce=False,cheat_on_open=True,maxcpus=1)
     cerebro.addstrategy(
-        FtmoStrategy,
+        BtFtmoStrategy,
         predict_num = pre_para.predict_num,
         holdbar=para.holdbar,
         allow_short=para.allow_short,
