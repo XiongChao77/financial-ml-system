@@ -26,7 +26,8 @@ class MarketState:
 
     position_dir: PositionDir   #仓位方向
     layers: int
-    
+    hold_bar_count:int
+
     #  用于风控审计的元数据
     current_time: datetime
     account_balance: float

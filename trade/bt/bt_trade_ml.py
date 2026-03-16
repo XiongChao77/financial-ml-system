@@ -6,7 +6,7 @@ from trade.bt.bt_executor import BtExecutor
 from trade.strategy.strategy_ml import FtmoBrain,MarketState,TradingAction,ActionType,PositionDir,Signal
 from data_process import common
 # --- Strategy ---
-class FtmoStrategy(BtExecutor):
+class BtFtmoStrategy(BtExecutor):
     params = dict(
         predict_num = None,
         holdbar=1,
@@ -185,6 +185,7 @@ class FtmoStrategy(BtExecutor):
             pred_prob=float(current_prob),
             position_dir=self.dir,
             layers=self.layers,
+            hold_bar_count = self.brain.bars_held,  #it's always correct in test
             current_time= self.data.datetime.datetime(0),
             account_balance=self.broker.getvalue(),
             atr=self.data.atr[0] if hasattr(self.data, 'atr') else 0.0,
