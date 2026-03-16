@@ -68,7 +68,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self.feature_count = len(clean_features)
         cols_set = set(self.feature_cols)
         unused = [f for f in self.factory.all_feature_list if f not in cols_set]    #keep order
-        self.logger.info(f"feature unused: {unused}")
+        self.logger.debug(f"feature unused: {unused}")
         # B. Window Generation
         X3d, time_windows = self._generate_windows(df_work)
 

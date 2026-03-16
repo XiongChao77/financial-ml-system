@@ -9,7 +9,8 @@ import numpy as np
 import argparse
 from multiprocessing import Process, Queue, Manager
 from datetime import datetime
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", '..' , '..'))
 
@@ -41,7 +42,7 @@ def get_base_interval_seconds(intervals: list[int]) -> int:
 class StrategyType:
     MT5 = "MT5"
     BYBIT = "BYBIT"
-  
+
 class StrategyHolder:
     def __init__(self,strategy_hash,strategy_type:str,path:str,tarin_out_path:str,pre_para:common.BaseDefine, train_para:TrainConfig, st_para:StrategyPara):
         self.strategy_hash = strategy_hash
@@ -53,9 +54,8 @@ class StrategyHolder:
         self.tarin_out_path = tarin_out_path
         self.model:Optional[model_loader.ModelHandler] = None
         self.brain:FtmoBrain = None
-
-from dataclasses import dataclass, field
-from typing import Dict, List
+        self.queue: Optional[Queue] = None
+        self.process: Optional[Process] = None
 
 @dataclass
 class WindowConfig:
@@ -90,6 +90,65 @@ class TradingConfig:
 # ============================================================
 # Data center and inference engine
 # ============================================================
+def strategy_worker(strategy_hash, strategy_type, path, pre_para, st_para, q):
+    logger, _ = common.setup_session_logger(
+        sub_folder="worker", symbol=strategy_hash
+    )
+
+    if strategy_type == StrategyType.MT5:
+        executor = mt5_executor.MT5Executor(
+            path, pre_para.symbol, int(strategy_hash, 16), logger=logger
+        )
+    else:
+        executor = BybitExecutor(path, pre_para.symbol)
+
+    brain = FtmoBrain(
+        executor,
+        trade_risk=st_para.trade_risk,
+        max_layers=1,
+        holdbar=st_para.holdbar,
+        allow_long=st_para.allow_long,
+        allow_short=st_para.allow_short,
+        thresh=st_para.thresh,
+        stop_loss_long=st_para.stop_loss_long,
+        stop_loss_short=st_para.stop_loss_short,
+        atr_sl_mult_long=st_para.atr_sl_mult_long,
+        atr_sl_mult_short=st_para.atr_sl_mult_short,
+        max_daily_loss_pct=st_para.max_daily_loss_pct,
+    )
+
+    while True:
+        msg = q.get()
+        if msg["type"] != "signal":
+            continue
+
+        try:
+            curr_dir, curr_layers, _ = executor.get_current_state()
+
+            state = MarketState(
+                price=msg["price"],
+                signal=Signal(msg["signal"]),
+                pred_prob=msg["pred_prob"],
+                atr=msg["atr"],
+                slow_atr=msg["slow_atr"],
+                vol_regime=msg["vol_regime"],
+                position_dir=PositionDir(curr_dir),
+                layers=curr_layers,
+                hold_bar_count = 0 ,
+                current_time=executor.get_server_time(),
+                account_balance=executor.get_account_equity(),
+            )
+
+            action = brain.decide(state)
+
+            logger.info(
+                f"🧠 {strategy_hash} {pre_para.symbol} "
+                f"Signal={msg['signal']} Price={msg['price']} action={action.action}"
+            )
+
+        except Exception as e:
+            logger.error(f"worker error {e}")
+
 class MasterController:
     def __init__(self, strategy_path,debug = True):
         self.strategy_path = strategy_path
@@ -134,6 +193,7 @@ class MasterController:
                 raise RuntimeError(f"Duplicate strategy hash detected: {strategy_hash}. Please check CSV for duplicate configurations.")
             self.strategies[strategy_hash]= StrategyHolder(strategy_hash,strategy_type,config_path,train_out_path,pre_para, train_para, st_para)
             self.strategies[strategy_hash].model = model_loader.ModelHandler(tarin_out_path=train_out_path, device='cpu')
+            self.strategies[strategy_hash].queue = Queue(maxsize=8)
             self.label_col = self.strategies[strategy_hash].model.label_col
             self.logger.info(f"load strategy {strategy_hash} {strategy_type}")
         self.logger.info(f"load total {len(self.strategies)} strategies ")
@@ -147,28 +207,24 @@ class MasterController:
             w_cfg = s_cfg.intervals.setdefault(strategy.pre_para.interval, WindowConfig())
             w_cfg.items[strategy.pre_para.candlestick_num] = self.feature_conf_list
             if strategy.type == StrategyType.MT5:
-                MT5_path = strategy.path
-                executor = mt5_executor.MT5Executor(MT5_path, strategy.pre_para.symbol,int(hash_value, 16), logger=self.logger)
+                pass
             elif strategy.type == StrategyType.BYBIT:
-                key_path = os.path.join(self.strategy_path, strategy.path)
-                executor = BybitExecutor(key_path, strategy.pre_para.symbol)
+                strategy.path = os.path.join(self.strategy_path, strategy.path)
             else:
                 raise RuntimeError(f"invalid strategy type :{strategy.type}")
-            strategy.brain = FtmoBrain(
-                            executor,
-                            trade_risk=strategy.st_para.trade_risk,
-                            max_layers=1,
-                            holdbar=strategy.st_para.holdbar,
-                            allow_long=strategy.st_para.allow_long,
-                            allow_short=strategy.st_para.allow_short,
-                            thresh=strategy.st_para.thresh,
-                            stop_loss_long = strategy.st_para.stop_loss_long,
-                            stop_loss_short = strategy.st_para.stop_loss_short,
-                            atr_sl_mult_long = strategy.st_para.atr_sl_mult_long,
-                            atr_sl_mult_short = strategy.st_para.atr_sl_mult_short,
-                            max_daily_loss_pct = strategy.st_para.max_daily_loss_pct,
-                        )
-        
+            strategy.process = Process(
+                target=strategy_worker,
+                args=(
+                    strategy.strategy_hash,
+                    strategy.type,
+                    strategy.path,
+                    strategy.pre_para,
+                    strategy.st_para,
+                    strategy.queue,
+                ),
+            )
+            strategy.process.start()
+            
         for trading_type, symbols in self.strategy_input.trading_type.items():
             for symbol, interval_items in symbols.symbols.items():
                 for interval, window_items in interval_items.intervals.items():
@@ -180,24 +236,21 @@ class MasterController:
                     window_items.last_candle_time = initial_df.iloc[-1]["open_time_date_utc"] if not initial_df.empty else None
                     self.logger.info(f"History Required: {window_items.min_bars_needed} bars")
 
-    def execute_strategy(self,strategy:StrategyHolder,current_price,pred,pred_prob,atr):
+    def execute_strategy(self, strategy: StrategyHolder, current_price, pred, pred_prob, atr):
         try:
-            curr_dir, curr_layers, curr_vol = strategy.brain.executor.get_current_state()
-            state = MarketState(
-                price=current_price,
-                signal=Signal(int(pred)),
-                pred_prob=float(pred_prob),
-                position_dir=curr_dir,
-                layers=curr_layers,
-                current_time=strategy.brain.executor.get_server_time(),
-                account_balance=strategy.brain.executor.get_account_equity(),
-                atr=atr,
-                slow_atr=None, vol_regime=None
-            )
-            action = strategy.brain.decide(state)
-            self.logger.info(f"🧠 {strategy.strategy_hash} {strategy.pre_para.symbol} Decided: Signal={pred} | Price={current_price} | action {action.action}")
+            strategy.queue.put({
+                "type": "signal",
+                "price": None if current_price is None else float(current_price),
+                "signal": int(pred),
+                "pred_prob": None if pred_prob is None else float(pred_prob),
+                "atr": None if atr is None else float(atr),
+                "slow_atr": None,
+                "vol_regime": None
+            })
         except Exception as e:
-            self.logger.error(f"Error in execute strategy {strategy.strategy_hash} {strategy.pre_para.symbol} {strategy.pre_para.interval}: {e}")
+            self.logger.error(
+                f"signal dispatch error {strategy.strategy_hash} {strategy.pre_para.symbol}: {e}"
+            )
 
     def run_invalid_signal(self,symbol:str,interval_str:str, i_config:WindowConfig):
         for window in i_config.items.keys():
@@ -296,7 +349,7 @@ class MasterController:
                                         df_pred, model_stats = strategy.model.predict_with_ds(ds,df_with_feature,is_live=True,diff_thresh = None)
                                         last_row = df_pred.iloc[-1]
                                         self.execute_strategy(strategy, last_row["close"], last_row["pred"], last_row["pred_prob"], last_row['stop_loss_atr'])
-                                        
+
                                     except Exception as e:
                                         self.logger.error(f"Error in strategy work {strategy.pre_para.symbol}: {e}")
 
@@ -304,7 +357,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MasterController start")
     default_strategy = os.path.join(common.PERSISTENCE_DIR, "market_prepare", "strategy_0")
     parser.add_argument("-s", "--strategy", type=str, default=default_strategy,help=f"strategy path (default: {default_strategy})")
-    parser.add_argument("-d", "--debug",action="store_true",default=False,help="open debug model? (default: False)")
+    parser.add_argument("-d", "--debug",action="store_true",default=True,help="open debug model? (default: False)")
 
     args = parser.parse_args()
     if args.debug:
