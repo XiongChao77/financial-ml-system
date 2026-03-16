@@ -95,24 +95,24 @@ def plot_atr_ratio_hold_heatmap(
     title_prefix="Heatmap",
 ):
     """
-    生成热力图：ATR比例 A + 持仓周期 T  -> 未来T周期内真实波动的统计一致性评分
+    Generate a heatmap: ATR ratio A + hold period T -> consistency score vs realized risk over next T bars.
 
-    - ATR窗口: L = int(round(A * T))  (必须为整数；若<2则强制=2)
-    - 评分:
-        * spearman: Spearman(ATR_L(t), realized_{T}(t))
-        * mare: median(|realized - c*ATR| / |realized|)  (c为robust scale)
-    - df 必须包含列: ['high','low','close'] (open可有可无)
+    - ATR window: L = int(round(A * T)) (must be integer; if <2 then forced to 2)
+    - Scoring:
+        * spearman: Spearman(ATR_L(t), realized_T(t))
+        * mare: median(|realized - c*ATR| / |realized|) where c is a robust scale
+    - df must include: ['high','low','close'] (open is optional)
     """
     needed = {"high", "low", "close"}
     missing = needed - set(df.columns)
     if missing:
-        raise ValueError(f"df缺少必要列: {sorted(missing)}，需要包含 {sorted(needed)}")
+        raise ValueError(f"df is missing required columns: {sorted(missing)}; expected {sorted(needed)}")
 
     high = df["high"].astype(float)
     low = df["low"].astype(float)
     close = df["close"].astype(float)
 
-    # 预计算 future realized risk (按T)
+    # Pre-compute future realized risk (by T)
     future_map = {}
     for T in T_list:
         T_int = int(T)
@@ -121,14 +121,14 @@ def plot_atr_ratio_hold_heatmap(
         elif future_kind == "range":
             future_map[T_int] = _realized_range_future(close, T_int)
         else:
-            raise ValueError("future_kind 必须是 'vol' 或 'range'")
+            raise ValueError("future_kind must be 'vol' or 'range'")
 
     scorer = _score_spearman if score_kind == "spearman" else _score_mare_scaled
 
-    # 缓存 ATR(L)（按整数L）
+    # Cache ATR(L) by integer L
     atr_cache = {}
 
-    # 输出网格：行=A，列=T
+    # Output grid: rows=A, columns=T
     A_list = [float(a) for a in A_list]
     T_list = [int(t) for t in T_list]
     grid = pd.DataFrame(index=A_list, columns=T_list, dtype=float)
@@ -137,7 +137,7 @@ def plot_atr_ratio_hold_heatmap(
 
     for A in A_list:
         for T in T_list:
-            L = int(round(A * T))      # 必须整数
+            L = int(round(A * T))      # must be integer
             if L < 2:
                 L = 2
 
@@ -148,7 +148,7 @@ def plot_atr_ratio_hold_heatmap(
             y = future_map[T]
 
             if use_nonoverlap:
-                idx = np.arange(0, n, T)  # 步长=T，避免未来窗口重叠
+                idx = np.arange(0, n, T)  # step=T, avoid overlap inflation
                 x_sub = x.iloc[idx]
                 y_sub = y.iloc[idx]
             else:
@@ -156,7 +156,7 @@ def plot_atr_ratio_hold_heatmap(
 
             grid.loc[A, T] = scorer(x_sub, y_sub, min_samples=min_samples)
 
-    # 画图（不指定颜色，使用matplotlib默认）
+    # Plot (matplotlib defaults)
     plt.figure(figsize=(11, 6))
     arr = grid.values.astype(float)
     im = plt.imshow(arr, aspect="auto")
@@ -175,20 +175,20 @@ def plot_atr_ratio_hold_heatmap(
     save_path = f"{future_kind}_{score_kind}.png"
     plt.savefig(save_path, dpi=200)
     plt.close()
-    print(f"Svae to {save_path}")
+    print(f"Saved to {save_path}")
     return grid
 
 def main(para = common.BaseDefine, output_dir =common.DATA_OUT_DIR ):
     file = os.path.join(common.PROJECT_DATA_DIR, para.trading_type ,f"{para.symbol}_{para.interval}.csv")
     print(f"using file :{file}")
-    # 1. 获取周期字符串并转为毫秒
+    # 1. Convert interval string to milliseconds
     interval_ms = common.get_interval_ms(para.interval)
     
     df = pd.read_csv(file)
-    # df 已经读入并包含 ['open','high','low','close']（至少 high/low/close）
+    # df is loaded and contains ['open','high','low','close'] (at least high/low/close)
     grid1 = plot_atr_ratio_hold_heatmap(df, future_kind="vol", score_kind="spearman")
     grid2 = plot_atr_ratio_hold_heatmap(df, future_kind="range", score_kind="spearman")
-    # 或者看误差平台（越小越好）
+    # Or check the error surface (lower is better)
     grid3 = plot_atr_ratio_hold_heatmap(df, future_kind="vol", score_kind="mare")
 
 

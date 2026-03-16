@@ -45,8 +45,8 @@ Caution
 
 class LSTM1D_V1(BaseTimeSeriesModel):
     """
-    双向 LSTM 支持版本
-    输入: [B, T, F]   输出: logits [B, n_classes]
+    Bi-directional LSTM supported version.
+    Input: [B, T, F]   Output: logits [B, n_classes]
     """
     MODEL_TYPE = "lstm"
     MODEL_VERSION = 1
@@ -54,28 +54,28 @@ class LSTM1D_V1(BaseTimeSeriesModel):
         super().__init__()
         if len(kwargs) > 0:
             print(f"[BetterLSTM1D] Ignored kwargs: {list(kwargs.keys())}")
-        # ===== 保存架构信息（用于 meta）=====
+        # ===== Save architecture info (for meta) =====
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.p_drop = p_drop
         
-        # 1. LSTM 层
+        # 1. LSTM layer
         self.lstm = nn.LSTM(
             input_size=input_size, 
             hidden_size=hidden_size, 
             num_layers=num_layers,
             batch_first=True,
             dropout=p_drop if num_layers > 1 else 0,
-            bidirectional=bidirectional  # 【修改点1】开启双向
+            bidirectional=bidirectional  # Change 1: enable bi-directional
         )
         
-        # 2. Dropout 层
+        # 2. Dropout layer
         self.dropout = nn.Dropout(p_drop)
         
-        # 3. 全连接分类层
-        # 【修改点2】如果是双向，LSTM 输出的特征维度会翻倍
+        # 3. Fully-connected classifier head
+        # Change 2: bi-directional LSTM doubles the feature dimension
         fc_input_dim = hidden_size * 2 if bidirectional else hidden_size
         self.fc = nn.Linear(fc_input_dim, n_classes)
 
@@ -85,16 +85,16 @@ class LSTM1D_V1(BaseTimeSeriesModel):
         output, (h_n, c_n) = self.lstm(x)
         
         if self.bidirectional:
-            # 【修改点3】双向时的隐藏状态处理
-            # h_n 的形状是 [num_layers * 2, B, hidden_size]
-            # 这种布局下：
-            # h_n[-2] 是最后一层的前向 (Forward) 最终状态
-            # h_n[-1] 是最后一层的后向 (Backward) 最终状态
+            # Change 3: hidden state handling for bi-directional
+            # h_n shape: [num_layers * 2, B, hidden_size]
+            # In this layout:
+            # h_n[-2] is the last layer's forward final state
+            # h_n[-1] is the last layer's backward final state
             
-            # 我们将这两个方向的状态拼接起来，得到包含完整上下文的向量
+            # Concatenate forward/backward states to get a full-context vector
             last_hidden_state = torch.cat((h_n[-2], h_n[-1]), dim=1) # -> [B, hidden_size * 2]
         else:
-            # 单向时，直接取最后一层的状态
+            # Uni-directional: take the last layer state directly
             last_hidden_state = h_n[-1] # -> [B, hidden_size]
         
         out = self.dropout(last_hidden_state)
@@ -121,7 +121,7 @@ class LSTM1D_V1(BaseTimeSeriesModel):
     def build_from_meta(cls, meta: dict, state: dict, device):
         """
         Rebuild model from meta + checkpoint.
-        推理 / 回测时关闭 dropout。
+        Disable dropout for inference / backtesting.
         """
         model = cls(
             input_size=state["channel"],
@@ -129,7 +129,7 @@ class LSTM1D_V1(BaseTimeSeriesModel):
             num_layers=meta["lstm_layers"],
             n_classes=len(meta["classes"]),
             bidirectional=meta["bidirectional"],
-            p_drop=0.0,   # 🔥 推理时关闭
+            p_drop=0.0,   # 🔥 Disable for inference
         )
 
         model.load_state_dict(state["state_dict"])

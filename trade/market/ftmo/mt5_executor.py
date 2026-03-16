@@ -17,11 +17,11 @@ class MT5Executor(BaseExecutor):
             self.logger.error(f"❌ 初始化失败! 错误码: {mt5.last_error()}")
             raise RuntimeError("MT5 初始化失败")
         else:
-            self.logger.info(f"init success {path}")
+            self.logger.info(f"init success | {self.magic}")
         
-        # 确保品种已在市场报价中
+        # make sure the symbol exist
         if not mt5.symbol_select(self.symbol, True):
-            raise RuntimeError(f"{symbol} not support")
+            raise RuntimeError(f"{symbol} not support | {self.magic}")
 
     def get_account_equity(self):
         """用于每日风控审计"""
@@ -51,7 +51,7 @@ class MT5Executor(BaseExecutor):
     def user_order(self, size, is_buy, stop_loss=None):
         symbol_info = mt5.symbol_info(self.symbol)
         if symbol_info is None:
-            self.logger.error(f"❌ 找不到品种信息: {self.symbol}")
+            self.logger.error(f"❌ can't find symbol: {self.symbol} | {self.magic}")
             return
 
         # 1. 计算原始手数
@@ -90,11 +90,12 @@ class MT5Executor(BaseExecutor):
         res = mt5.order_send(request)
         if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
             err_msg = res.comment if res else "Unknown Error"
-            self.logger.error(f"❌ 下单失败: {err_msg} | 尝试手数: {lots}, | {self.path}")
-            code, msg = mt5.last_error()
-            self.logger.error(f"❌ order_send 返回 None | last_error: {code} - {msg}")
+            self.logger.error(f"order fail: {err_msg} | volume: {lots} | {self.magic}")
+            if res is None:
+                code, msg = mt5.last_error()
+                self.logger.error(f"order_send return None | last_error: {code} - {msg}")
         else:
-            self.logger.info(f"✅ 下单成功: {lots} Lots")
+            self.logger.info(f"order success Lots {lots} | {self.magic}")
 
     def user_close(self, **kwargs):
         """全平当前 Magic 订单"""
@@ -111,3 +112,4 @@ class MT5Executor(BaseExecutor):
                 "magic": self.magic,
                 # "type_filling": mt5.ORDER_FILLING_IOC,
             })
+        self.logger.info(f"order close {self.magic}")

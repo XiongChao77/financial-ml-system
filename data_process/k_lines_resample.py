@@ -1,11 +1,11 @@
 # batch_kline_resample.py
-# 只依赖：common + 本文件
-# 功能：读取 {PROJECT_DATA_DIR}/{symbol}_{interval}.csv
-#      批量聚合：DOGEUSDT 1m -> 7m offset 1min；13m offset 0min
-# 约束：
-#  1) target_freq 必须能被 base_freq 整除
-#  2) 检测缺失：bin 内 bar 数不够 或存在 gap -> 丢弃该 bin
-#  3) offset 语义采用 pandas：只影响起点相位，后续等间隔自然排布
+# Dependencies: common + this file only
+# Purpose: read {PROJECT_DATA_DIR}/{symbol}_{interval}.csv and resample in batch.
+# Example: DOGEUSDT 1m -> 8m with offset 1min
+# Constraints:
+#  1) target_freq must be divisible by base_freq
+#  2) Missing-data detection: if a bin has insufficient bars or contains a gap -> drop the bin
+#  3) offset follows pandas semantics: shifts the phase of the start only; subsequent bins remain evenly spaced
 
 import os,sys
 import re
@@ -14,7 +14,7 @@ import pandas as pd
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
-import common  # 需要 common.PROJECT_DATA_DIR
+import common  # requires common.PROJECT_DATA_DIR
 
 
 _FREQ_RE = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$", re.IGNORECASE)
@@ -63,12 +63,12 @@ def resample_klines(
     drop_incomplete: bool = True,
 ) -> pd.DataFrame:
     """
-    适配输入列（Binance风格）：
+    Expected input columns (Binance-style):
       open_time_ms_utc, open_time_date_utc, open, high, low, close, volume,
       number_of_trades, close_time_ms_utc, quote_asset_volume,
       taker_buy_base_volume, taker_buy_quote_volume
 
-    输出同风格字段，时间按聚合 bin 边界生成：
+    Outputs Binance-style columns; timestamps are generated from resample bin boundaries:
       open_time_ms_utc = bin_start_ms
       close_time_ms_utc = bin_end_ms - 1
     """
@@ -84,12 +84,12 @@ def resample_klines(
     idx = pd.to_datetime(df["open_time_ms_utc"], unit="ms", utc=True)
     df = df.set_index(idx).sort_index()
 
-    # gap 标记：相邻 open_time_ms 必须严格等于 base_ms
+    # Gap flag: adjacent open_time_ms must equal base_ms exactly
     diff_ms = df["open_time_ms_utc"].diff()
     df["_gap"] = (diff_ms != base_ms).fillna(False).astype(int)
     df["_cnt"] = 1
 
-    # 聚合列（存在才聚合）
+    # Aggregate columns (only if present)
     agg = {
         "open": "first",
         "high": "max",
@@ -113,13 +113,13 @@ def resample_klines(
     ).agg(agg)
 
     if drop_incomplete:
-        # bin内bar数量必须完整 + 无gap
+        # Bin must have full bar count and no gaps
         if "_cnt" in rs.columns:
             rs = rs[rs["_cnt"] == expected_count]
         if "_gap" in rs.columns:
             rs = rs[rs["_gap"] == 0]
 
-    # 生成时间字段：bin_start / bin_end-1ms
+    # Generate time fields: bin_start / bin_end-1ms
     bin_start = rs.index  # UTC tz-aware
     bin_start_ms = (bin_start.view("int64") // 10**6).astype("int64")
     bin_end_ms = bin_start_ms + target_ms
@@ -127,12 +127,12 @@ def resample_klines(
     rs["open_time_date_utc"] = bin_start.strftime("%Y-%m-%d %H:%M:%S")
     rs["close_time_ms_utc"] = (bin_end_ms - 1).astype("int64")
 
-    # 清理内部列
+    # Clean internal columns
     for c in ("_gap", "_cnt"):
         if c in rs.columns:
             rs.drop(columns=[c], inplace=True)
 
-    # 输出列顺序（尽量贴近原始）
+    # Output columns (keep close to original layout)
     out_cols = [
         "open_time_ms_utc",
         "open_time_date_utc",

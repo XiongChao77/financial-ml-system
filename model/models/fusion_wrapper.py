@@ -3,14 +3,14 @@ import torch.nn as nn
 
 class FusionWrapper(nn.Module):
     """
-    推理专用包装器：
-    不负责保存/加载权重（由子模型自己负责），只负责在 forward 时把两个模型串起来。
+    Inference-only wrapper.
+    It does not save/load weights (handled by sub-models); it only chains models during forward.
     """
     def __init__(self, models_dict, mode):
         super().__init__()
         self.mode = mode
-        # 使用 ModuleDict 确保子模型在 eval() 时能同步切换，
-        # 但我们不需要保存这个 Wrapper 的 state_dict
+        # Use ModuleDict so sub-models switch together under eval(),
+        # but we don't need to save this wrapper's state_dict
         self.models = nn.ModuleDict(models_dict)
 
     def forward(self, x, return_fused=True):
@@ -54,7 +54,7 @@ class FusionWrapper(nn.Module):
         logits_short = self.models["short_ovr"](x)
         score_short = logits_short[:, 1]
 
-        bias = 0  # 负值增加进攻性，正值增加保守性
+        bias = 0  # Negative is more aggressive; positive is more conservative
         score_neutral = torch.full_like(score_long, bias)
         
         fused_logits = torch.stack([score_short, score_neutral, score_long], dim=1)
@@ -64,46 +64,46 @@ class FusionWrapper(nn.Module):
     
     def _forward_exclusive_filter(self, x):
         """
-        互斥融合逻辑：只有一方给出信号 (Signal)，另一方为中性 (Other)，才是方向信号。
-        适配二分类 OVR 子模型：
+        Exclusive fusion logic: only when one side emits a signal and the other stays neutral,
+        do we treat it as a directional signal.
+        Adapted for binary OVR sub-models:
         - model_s: [0: Other/Neutral, 1: Short]
         - model_l: [0: Other/Neutral, 1: Long]
         """
         model_keys = list(self.models.keys())
-        # 1. 自动识别模型角色 (基于键名)
+        # 1. Auto-detect model roles (by key names)
         short_key = next(k for k in model_keys if "short" in k.lower())
         long_key = next(k for k in model_keys if "long" in k.lower())
         
         model_s = self.models[short_key]
         model_l = self.models[long_key]
         
-        # 2. 获取原始 Logits [B, 2]
+        # 2. Get raw logits [B, 2]
         logits_s = model_s(x)
         logits_l = model_l(x)
         
-        # 3. 判定子模型是否给出非 Neutral 信号 (即 Argmax 为 1)
+        # 3. Whether a sub-model emits a non-neutral signal (argmax == 1)
         is_sig_s = (torch.argmax(logits_s, dim=1) == 1)
         is_sig_l = (torch.argmax(logits_l, dim=1) == 1)
         
-        # 4. 构造互斥掩码 (只有一方为信号，另一方必须为 Neutral/0)
-        # 有效空头：Short 是 1，Long 必须是 0
+        # 4. Exclusive masks (only one side can be signal; the other must be neutral/0)
+        # Valid short: Short==1 and Long==0
         mask_exclusive_short = is_sig_s & (~is_sig_l)
-        # 有效多头：Long 是 1，Short 必须是 0
+        # Valid long: Long==1 and Short==0
         mask_exclusive_long  = is_sig_l & (~is_sig_s)
 
-        # 5.  构造 3 分类 Logit 竞争空间 [Short, Neutral, Long]
-        # 初始化分数：不满足互斥条件的信号类分数设为极低 (-100.0) 以实现硬过滤
+        # 5. Build 3-class logit space [Short, Neutral, Long]
+        # Initialize scores: set non-exclusive signal classes to very low (-100.0) for hard filtering
         score_short = torch.full_like(logits_s[:, 0], -100.0) 
         score_long  = torch.full_like(logits_l[:, 0], -100.0)
-        # Neutral 支点设为 0
+        # Neutral pivot at 0
         score_neutral = torch.zeros_like(logits_s[:, 0])
 
-        # 仅在满足互斥信号时，填入子模型对信号类 (index 1) 的原始 Logit 信心
+        # Only when exclusive condition holds, fill in original signal-class (index 1) logit confidence
         score_short[mask_exclusive_short] = logits_s[mask_exclusive_short, 1]
         score_long[mask_exclusive_long]  = logits_l[mask_exclusive_long, 1]
 
-        # 6. 堆叠并 Softmax，产出标准的 3 分类概率分布 [B, 3]
-        # 这样 p_long = probs_all[:, 2] 就不再报错了
+        # 6. Stack and softmax to produce standard 3-class probs [B, 3]
         fused_logits = torch.stack([score_short, score_neutral, score_long], dim=1)
         fused_probs = torch.softmax(fused_logits, dim=1)
         

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from sklearn.utils.class_weight import compute_class_weight
 
 class DualHeadV2Strategy(BaseTaskStrategy):
-    """针对 V2 架构的双头融合策略"""
+    """Dual-head fusion strategy for V2 architecture."""
     def __init__(self, train_cfg, device, logger):
         self.cfg = train_cfg
         self.device = device
@@ -16,50 +16,50 @@ class DualHeadV2Strategy(BaseTaskStrategy):
         self.criteria = {}
 
     def preprocess_labels(self, y):
-        return y # V2 保持原始 [0, 1, 2]，内部拆分
+        return y  # V2 keeps raw [0, 1, 2]; internal splitting is handled inside
 
     def prepare_resources(self, y_train_raw):
-        """初始化权重和损失函数 (原 MTLManager 逻辑)"""
-        # 1. 生成子任务标签用于计算权重
+        """Initialize weights and loss functions (former MTLManager logic)."""
+        # 1. Create sub-task labels for weight computation
         y_trig = (y_train_raw != 1).astype(int) # 0: Neutral, 1: Action
         mask_dir = (y_train_raw != 1)
         y_dir = np.where(y_train_raw[mask_dir] == 2, 1, 0) # 0: Short, 1: Long
 
-        # 2. 计算各层级平衡权重
+        # 2. Compute balanced weights for each level
         cw_main = compute_class_weight("balanced", classes=np.array([0, 1, 2]), y=y_train_raw)
         cw_trig = compute_class_weight("balanced", classes=np.array([0, 1]), y=y_trig)
         cw_dir = compute_class_weight("balanced", classes=np.array([0, 1]), y=y_dir)
 
-        # 3. 存储为 Tensor
+        # 3. Store as tensors
         self.weights = {
             'main': torch.tensor(cw_main, dtype=torch.float32, device=self.device),
             'trig': torch.tensor(cw_trig, dtype=torch.float32, device=self.device),
             'dir': torch.tensor(cw_dir, dtype=torch.float32, device=self.device)
         }
         
-        # 4. 初始化损失函数
+        # 4. Initialize loss functions
         self.criteria = {
             'trig': nn.CrossEntropyLoss(weight=self.weights['trig']),
             'dir': nn.CrossEntropyLoss(weight=self.weights['dir'])
         }
 
-        #  增加详细的权重打印逻辑
+        # Log detailed weight info
         self.logger.info(f"⚖️ [MTL Weights Prepared] Main (Short/Neu/Long): {cw_main} | Trig (Neu/Act): {cw_trig} | Dir (Short/Long): {cw_dir}")
 
     def compute_loss(self, model_output, targets):
-        """计算复合损失并返回字典格式，以支持引擎解耦"""
+        """Compute composite loss and return dict-form details for engine decoupling."""
         logits_trig, logits_dir = model_output
         t_trig = (targets != 1).long()
         t_dir = torch.where(targets == 2, 1, 0).long()
         act_mask = (targets != 1)
 
-        # 1. 计算各子任务 Loss
+        # 1. Sub-task losses
         loss_trig = self.criteria['trig'](logits_trig, t_trig)
         loss_dir = torch.tensor(0.0, device=self.device)
         if act_mask.any():
             loss_dir = self.criteria['dir'](logits_dir[act_mask], t_dir[act_mask])
 
-        # 2. 计算融合 Main Loss
+        # 2. Fused main loss
         p_trig = torch.softmax(logits_trig, dim=1)
         p_dir = torch.softmax(logits_dir, dim=1)
         fused_probs = torch.stack([
@@ -69,16 +69,16 @@ class DualHeadV2Strategy(BaseTaskStrategy):
         ], dim=1)
         loss_main = F.nll_loss(torch.log(fused_probs + 1e-10), targets, weight=self.weights['main'])
 
-        # 3. 对称性惩罚
+        # 3. Symmetry penalty
         bias_loss = torch.abs(p_dir[act_mask, 0].mean() - p_dir[act_mask, 1].mean()) if act_mask.any() else torch.tensor(0.0, device=self.device)
 
-        # 4. 计算总和
+        # 4. Total
         total_loss = loss_main + \
                      (self.cfg.lambda_trig * loss_trig) + \
                      (self.cfg.lambda_dir * loss_dir) + \
                      (getattr(self.cfg, 'bias_lambda', 0.5) * bias_loss)
         
-        #  核心修改：返回总 Loss 和包含子项的字典
+        # Core change: return total loss plus per-component dict
         loss_dict = {
             "main": loss_main,
             "trig": loss_trig,
@@ -86,18 +86,18 @@ class DualHeadV2Strategy(BaseTaskStrategy):
             "bias": bias_loss
         }
         
-        return total_loss, loss_dict #  现在返回 2 个值了
+        return total_loss, loss_dict  # Return 2 values
 
     def get_predictions(self, model, xb):
-        # 统一返回预测标签和概率分布
+        # Always return predicted labels and probability distribution
         return model(xb, return_fused=True)
     
     def get_model_out_dim(self):
-        # 对于 V2 架构，虽然内部是双头，但在 Factory 构建时仍需指定逻辑输出维度
+        # For V2, internal is dual-head, but factory still expects a logical output dimension
         return 3    
     
     def log_warmup_info(self, i, yb):
-        """实现 3 分类的样本分布打印"""
+        """Print sample distribution for 3-class labels."""
         if i < 5:
             cnt_action = (yb != 1).sum().item()
             cnt_short = (yb == 0).sum().item()
@@ -105,5 +105,5 @@ class DualHeadV2Strategy(BaseTaskStrategy):
             self.logger.info(f"[Warmup Batch] action={cnt_action}, short={cnt_short}, long={cnt_long}")
 
     def call_model(self, model, xb, train_mode=True):
-        # V2 模型需要 return_fused 参数
+        # V2 model supports return_fused
         return model(xb, return_fused=False if train_mode else True)
