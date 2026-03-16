@@ -3,13 +3,13 @@
 
 """
 Fixed Neutral Subsampling Experiment (Probe)
-- 目的：比较不同 label strictness（label_vxx）下样本组成变化对训练的影响
-- 设计：固定 neutral（consensus neutral），每个阈值重新采样 pos/neg，训练 LR probe
-- 关键优化：
-  1) 去掉 StandardScaler（dataset 已做窗口内 normalize）
-  2) X 只 flatten 一次；test set flat 缓存一次；避免循环内重复 reshape
-  3) 不做 GPU preload（sklearn 用 CPU）
-  4) 清理无关的 model configs / training pipeline / sampler 等
+- Goal: compare how different label strictness (label_vxx) changes sample composition and affects training
+- Design: fix neutral (consensus neutral); for each threshold, resample pos/neg and train an LR probe
+- Key optimizations:
+  1) Remove StandardScaler (dataset already does in-window normalization)
+  2) Flatten X only once; cache flattened test set; avoid repeated reshape inside the loop
+  3) No GPU preload (sklearn runs on CPU)
+  4) Remove unrelated model configs / training pipeline / samplers, etc.
 """
 
 import os,sys
@@ -50,7 +50,7 @@ DEFAULT_FEATURES: List[str] = [
 
 @dataclass
 class DataConfig:
-    # 这里只用来切分 windows，不直接用 label_col
+    # Used only to split windows; label_col is not used directly here
     train_ratio: float = 0.70
     val_ratio: float = 0.15
 
@@ -62,10 +62,10 @@ class TrainConfig:
     seed: int = 42
     n_iterations: int = 3
 
-    # LogisticRegression 超参（probe 用）
+    # LogisticRegression hyperparameters (for probe)
     lr_C: float = 1.0
     lr_max_iter: int = 1000
-    lr_solver: str = "lbfgs"  # 可选：'saga' 更不容易 warning，但可能更慢一些
+    lr_solver: str = "lbfgs"  # Optional: 'saga' reduces warnings but may be slower
 
 
 # -----------------------------
@@ -93,8 +93,8 @@ def sample_balanced_test_indices_downsample(
     seed: int,
 ) -> np.ndarray:
     """
-    在 candidate_idx 内，按当前 y 做三类平衡下采样。
-    每类采样到 min(pos, neg, neutral)。
+    Within candidate_idx, perform 3-class balanced downsampling according to current y.
+    Each class is downsampled to min(pos, neg, neutral).
     """
     rng = np.random.default_rng(seed)
 

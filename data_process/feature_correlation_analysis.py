@@ -7,7 +7,7 @@ import matplotlib.font_manager as fm
 import concurrent.futures
 from typing import Dict, Any, List, Set
 
-# 引入项目路径
+# Project path setup
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir, '..'))
 
@@ -17,7 +17,7 @@ from sklearn.feature_selection import mutual_info_regression
 from scipy.cluster.hierarchy import dendrogram, linkage
 import torch
 
-# 尝试导入 HSIC，若无 ignite 则静默跳过
+# Try to import HSIC; silently skip if ignite is not installed
 try:
     from ignite.metrics import HSIC
 except ImportError:
@@ -25,31 +25,31 @@ except ImportError:
 
 import model.train_2head as train
 
-# --- 全局配置 ---
+# --- Global config ---
 HIGH_CORR_THRESHOLD = 0.80     
 
-# --- 绘图字体与清晰度设置 ---
+# --- Plot font and rendering settings ---
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 plt.rcParams['font.size'] = 10
 plt.rcParams['axes.titlesize'] = 12
 plt.rcParams['figure.dpi'] = 100
-# 保存时使用更高 DPI
+# Use higher DPI when saving
 FIG_SAVE_DPI = 150
 
 # ==============================================================================
-# 1. 核心计算工具
+# 1. Core compute utilities
 # ==============================================================================
 
 def compute_hsic_ignite(x_data, y_data, max_samples=2000) -> float:
-    """使用 PyTorch Ignite 计算 HSIC (非线性依赖)"""
+    """Compute HSIC (nonlinear dependence) via PyTorch Ignite."""
     if HSIC is None: return 0.0
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     try:
         if hasattr(x_data, 'values'): x_data = x_data.values
         if hasattr(y_data, 'values'): y_data = y_data.values
         
-        # 采样保护，HSIC 计算复杂度为 O(N^2)
+        # Sampling guard: HSIC complexity is O(N^2)
         N = len(x_data)
         if N > max_samples:
             indices = np.random.choice(N, max_samples, replace=False)
@@ -68,7 +68,7 @@ def compute_hsic_ignite(x_data, y_data, max_samples=2000) -> float:
         if device.type == 'cuda': torch.cuda.empty_cache()
 
 def get_smart_redundancy_filter(df: pd.DataFrame, target_col: str, threshold: float = 0.90):
-    """剔除冗余特征：保留与目标相关性更高的一方"""
+    """Drop redundant features: keep the one with higher correlation to the target."""
     feature_cols = [c for c in df.columns if c != target_col]
     if not feature_cols: return []
     
@@ -90,21 +90,21 @@ def get_smart_redundancy_filter(df: pd.DataFrame, target_col: str, threshold: fl
     return drop_suggestions
 
 # ==============================================================================
-# 2. 核心分析逻辑
+# 2. Core analysis logic
 # ==============================================================================
 
 def single_run_analysis(pre_task: common.BaseDefine, train_cfg: train.TrainConfig, df: pd.DataFrame, output_dir: str):
-    """单次分析流程：特征生成 -> 归一化 -> 针对 Label 和 Return_Rate 的双重相关性度量"""
+    """Single-run pipeline: label -> dataset alignment -> correlation vs label and returns."""
     try:
-        # 1. 基础准备
+        # 1. Basic setup
         df =common.attach_label(df, pre_task)
-        # 确保 trend_strength 存在
+        # Ensure trend_strength exists
         if 'trend_strength' not in df.columns:
-            logging.warning("df 中未找到 trend_strength，将尝试计算。")
+            logging.warning("trend_strength not found in df; attempting to compute it.")
             df['trend_strength'] = df['close'].pct_change(pre_task.predict_num).shift(-pre_task.predict_num)
 
-        # 2. 构造特征列表
-        # 核心技巧：将 trend_strength 暂时放入 feat_cols 参与 Dataset 窗口对齐，这样能拿到与特征同步的截面数据
+        # 2. Build feature list.
+        # Trick: include trend_strength temporarily so the dataset aligns windows and we can extract synchronized cross-sections.
         all_cols = [c for c in df.columns if c not in data_loader.DROP_FEATURES]
         if 'trend_strength' not in all_cols: all_cols.append('trend_strength')
         
@@ -118,37 +118,37 @@ def single_run_analysis(pre_task: common.BaseDefine, train_cfg: train.TrainConfi
             use_cache=False
         )
         
-        # 3. 提取最后一帧截面数据
+        # 3. Extract last-step cross-section
         X_last_step = ds.X[:, -1, :].numpy()
         df_final = pd.DataFrame(X_last_step, columns=ds.feature_names)
         df_final['label'] = ds.y.numpy()
         
-        # 将 trend_strength 从特征列中分离出来作为目标
+        # Separate trend_strength from features (used as target)
         target_label = df_final['label']
         target_return = pd.Series(ds.returns.numpy(), index=df_final.index)
         feature_names = [c for c in ds.feature_names if c != 'trend_strength']
         
         res_corr = {}
         
-        # 4. 计算相关性
-        # 批量计算 MI (对 Label 用分类/回归均可，对 Return 必须用回归)
+        # 4. Compute correlations / MI
+        # Mutual information: label can be treated as regression here; returns must be regression.
         mi_label = mutual_info_regression(df_final[feature_names], target_label, random_state=42)
         mi_return = mutual_info_regression(df_final[feature_names], target_return, random_state=42)
         
         for idx, feat in enumerate(feature_names):
-            # --- 针对 Label 的分析 ---
+            # --- Label analysis ---
             res_corr[f"{feat}_L_pearson"] = abs(df_final[feat].corr(target_label, method='pearson'))
             res_corr[f"{feat}_L_mi"] = mi_label[idx]
             
-            # --- 针对 Return Rate 的分析 ---
+            # --- Return-rate analysis ---
             res_corr[f"{feat}_R_pearson"] = abs(df_final[feat].corr(target_return, method='pearson'))
             res_corr[f"{feat}_R_spearman"] = abs(df_final[feat].corr(target_return, method='spearman'))
             res_corr[f"{feat}_R_mi"] = mi_return[idx]
-            # 如果安装了 HSIC，计算非线性相关性
+            # If HSIC is available, compute nonlinear dependence
             if HSIC:
                 res_corr[f"{feat}_R_hsic"] = compute_hsic_ignite(df_final[feat], target_return)
 
-        # 5. 绘图（保持原有逻辑）
+        # 5. Plot (keep original behavior)
         plot_visualizations(df_final[feature_names + ['label']], 'label', output_dir, f"{pre_task.interval}_dual")
     
         return {
@@ -163,13 +163,13 @@ def single_run_analysis(pre_task: common.BaseDefine, train_cfg: train.TrainConfi
         return {'error': str(e)}
 
 def plot_visualizations(df, target_col, output_dir, tag):
-    """生成特征聚类图与重要性排行（高清晰度）"""
+    """Generate feature clustering plots and importance ranking (high DPI)."""
     feats = [c for c in df.columns if c != target_col]
     if len(feats) < 5:
         return
 
     n_feats = len(feats)
-    # 按特征数量动态调整画布：特征多时放大，保证标签可读
+    # Dynamically scale canvas size for readability with many features
     fig_h = max(6, n_feats * 0.35)
     fig_w = max(14, n_feats * 0.4)
     label_fontsize = max(8, min(11, 120 // max(1, n_feats // 10)))
@@ -196,7 +196,7 @@ def _unpack_and_run(args):
     return single_run_analysis(*args)
 
 # ==============================================================================
-# 3. Main Entry
+# 3. Main entry
 # ==============================================================================
 
 def main():
@@ -216,46 +216,46 @@ def main():
     df_raw = common.clean_data_quality_auto(df_raw, logger)
     df_raw = common.attach_attr(df_raw, common.FEATURE_GROUP_LIST, para=pre_task)
     
-    # 构造任务元组
+    # Build task tuples
     tasks = [(pre_task, train_cfg, df_raw.copy(), output_dir)]
     
     all_rows = []
     redundancy_rows = []
 
-    # 运行分析
+    # Run analysis
     with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
         for res in executor.map(_unpack_and_run, tasks):
             if not res or 'error' in res: continue
             
-            # 1. 整合主结果：仅保留存在于 res 中的键
+            # 1. Merge main results (only keep keys present)
             row = {
                 'period': res.get('period', pre_task.interval),
                 **res.get('corr_res', {})
             }
             all_rows.append(row)
             
-            # 2. 整合冗余建议
+            # 2. Merge redundancy suggestions
             if res.get('redundancy_res'):
                 for r in res['redundancy_res']:
                     r.update({'period': res.get('period', pre_task.interval)})
                     redundancy_rows.append(r)
 
-    # 保存并展示结果
+    # Save and print results
     if all_rows:
         df_summary = pd.DataFrame(all_rows)
         df_summary.to_csv(os.path.join(output_dir, 'analysis_summary.csv'), index=False)
         
-        # --- 新增：转换为 Feature x Metric 矩阵 ---
-        # 提取相关性列
+        # --- Convert to Feature x Metric matrix ---
+        # Extract metric columns
         metric_types = ['pearson', 'spearman', 'mi', 'hsic']
         metric_cols = [c for c in df_summary.columns if any(m in c for m in metric_types)]
         
-        # 假设我们只关心第一个周期的数据（如果是多周期，可在此循环）
+        # Assume we focus on the first period row (extend here if multi-period)
         first_row = df_summary.iloc[0][metric_cols]
         
         matrix_data = []
         for col_name, value in first_row.items():
-            # 识别是 Label 还是 Return 的指标
+            # Identify metrics for Label vs Return
             if '_L_' in col_name:
                 parts = col_name.rsplit('_L_', 1)
                 target_prefix = "L_"
@@ -263,30 +263,30 @@ def main():
                 parts = col_name.rsplit('_R_', 1)
                 target_prefix = "R_"
             else:
-                continue # 跳过非指标列
+                continue # skip non-metric columns
                 
             if len(parts) == 2:
                 feature_name = parts[0]
-                metric_name = target_prefix + parts[1] # 组合成 L_mi, R_mi 等
+                metric_name = target_prefix + parts[1] # e.g. L_mi, R_mi
                 matrix_data.append({
                     'Feature': feature_name, 
                     'Metric': metric_name, 
                     'Value': value
                 })
         
-        # 转换为 2D 矩阵
+        # Convert to 2D matrix
         df_matrix = pd.DataFrame(matrix_data).pivot(index='Feature', columns='Metric', values='Value')
         
-        # 按照 Return 的互信息（R_mi）降序排列，这是量化里最有含金量的指标
+        # Sort by return mutual information (R_mi), usually the most informative metric here
         if 'R_mi' in df_matrix.columns:
             df_matrix = df_matrix.sort_values(by='R_mi', ascending=False)
         
-        # 保存并打印
+        # Save and print
         matrix_path = os.path.join(output_dir, 'feature_comparison_matrix.csv')
         df_matrix.to_csv(matrix_path)
         
-        print("\n📊 特征全维度对比矩阵 (Top 15 sorted by R_mi):")
-        # 选取你最关心的几列展示
+        print("\n📊 Feature comparison matrix (top 15 sorted by R_mi):")
+        # Print selected columns
         show_cols = [c for c in ['L_mi', 'R_mi', 'L_pearson', 'R_pearson'] if c in df_matrix.columns]
         print(df_matrix[show_cols].head(15).to_string())
 

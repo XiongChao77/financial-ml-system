@@ -53,7 +53,7 @@ SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
 MAX_SIM = 4
-SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
+SYMBOL: str = "ETHUSDT"    #ETHUSDT DOGEUSDT
 INTERVAL: str = "15m"
 # -----------------------------------------------------------------------------
 # Path layout helpers
@@ -262,6 +262,16 @@ def collect_from_any(
             collect_from_any(v, out, key)
         return
 
+def log_param_sweep(logger, sweep):
+    logger.info("📌 Experiment parameter sweep:")
+
+    for stage in ["pre", "train", "sim"]:
+        if not sweep[stage]:
+            continue
+        logger.info(f"  [{stage}]")
+        for k, v in sweep[stage].items():
+            logger.info(f"    {k}: {v}")
+
 def collect_param_sweep(task_spec):
     sweep = {
         "pre": defaultdict(set),
@@ -292,26 +302,14 @@ def collect_param_sweep(task_spec):
         "sim": finalize(sweep["sim"]),
     }
 
-def log_param_sweep(logger, sweep):
-    logger.info("📌 Experiment parameter sweep:")
-
-    for stage in ["pre", "train", "sim"]:
-        if not sweep[stage]:
-            continue
-        logger.info(f"  [{stage}]")
-        for k, v in sweep[stage].items():
-            logger.info(f"    {k}: {v}")
-
-def create_task_spec(logger, exp_dir,done_set: set[str]):
-
+def construct_task_doge():
     import model.train_2head as train
     from trade.bt import simulation
-
     preparation_task: List[Any] = []
 
     for cn in [12]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
-        for pn in [4,8,24,40]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-            for vol_multiplier in [1.7,1.8,1.9,2]:#1.8,1.9,2
+        for pn in [16,24,40]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
+            for vol_multiplier in [2,2.1,2.2]:#1.8,1.9,2
                 for vol_ewma_span in [80,88]:
                     preparation_task.append(common.BaseDefine(
                             vol_ewma_span = vol_ewma_span,
@@ -340,9 +338,9 @@ def create_task_spec(logger, exp_dir,done_set: set[str]):
     #                                                 flip_penalty = float(1.3),miss_penalty = float(1.7),false_trade = 1,
     #                                                 stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = lambda_dir,lambda_cost = lambda_cost))
     for false_trade in [1]:
-        for flip_penalty in np.arange(1, 1.6, 0.1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
-            for miss_penalty in np.arange(0.8, 1.1, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
-                for stride in [4,8]: #2,4,8
+        for flip_penalty in np.arange(0.8, 1.7, 0.1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
+            for miss_penalty in np.arange(0.5, 1.3, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
+                for stride in [2,4,8]: #2,4,8
                     for bestf1 in [True]:
                         for loss_fun_version_v in [2]:
                             training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
@@ -356,8 +354,63 @@ def create_task_spec(logger, exp_dir,done_set: set[str]):
         for (atr_sl_mult_long, atr_sl_mult_short) in [(8,6),(6,6)]: #(6,5),(5,4)
             simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
                                             stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04))
+    return preparation_task, training_task, simulation_task
+
+def construct_task_eth():
+    import model.train_2head as train
+    from trade.bt import simulation
+    preparation_task: List[Any] = []
+
+    for cn in [12,16]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
+        for pn in [4,8,16,24]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
+            for vol_multiplier in [1.8,1.9,2,2.1]:#1.8,1.9,2
+                for vol_ewma_span in [88]:
+                    preparation_task.append(common.BaseDefine(
+                            vol_ewma_span = vol_ewma_span,
+                            candlestick_num=cn,
+                            predict_num=pn,
+                            vol_multiplier_long=vol_multiplier,
+                            stop_multiplier_rate_long=0.2,
+                            vol_multiplier_short=vol_multiplier,
+                            stop_multiplier_rate_short=0.2,
+                            symbol=SYMBOL,   #ETHUSDT
+                            interval=INTERVAL,
+                            trading_type= 'um',
+                            version=0
+                        ))
+
+    training_task: List[train.TrainConfig] = []
+
+    for false_trade in [1]:
+        for flip_penalty in np.arange(0.9, 1.7, 0.1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
+            for miss_penalty in np.arange(0.7, 1.2, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
+                for stride in [4,8]: #2,4,8
+                    for bestf1 in [True]:
+                        for loss_fun_version_v in [2]:
+                            training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
+                                                        flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
+                                                        stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0))
+
+    simulation_task: List[Any] = []
+
+    for i in [30,32,36,38,40,44]: #16,24,30,32,36,40,44,48
+        holdbar = i
+        for (atr_sl_mult_long, atr_sl_mult_short) in [(6,6),(5,4)]: #(6,5),(5,4)
+            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
+                                            stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.025))
+    return preparation_task, training_task, simulation_task
+
+def create_task_spec(logger, exp_dir,done_set: set[str]):
+
+    if SYMBOL == "DOGEUSDT":
+        preparation_task, training_task, simulation_task = construct_task_doge()
+    elif SYMBOL == "ETHUSDT":
+        preparation_task, training_task, simulation_task = construct_task_eth()
+    else:
+        raise RuntimeError(f"no construct for {SYMBOL} yet")
+
     task_spec = build_task_spec(preparation_task, training_task, simulation_task)
-    # task_spec 已经 ready
+    # task_spec is already ready
     sweep = collect_param_sweep(task_spec)
     log_param_sweep(logger, sweep)
 
@@ -533,13 +586,13 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
                     shutil.rmtree(target_dir)
                 shutil.copytree(train_dir, target_dir)
                 logger.info(f"🚀 Successfully moved artifacts: {tr_h} -> {strategy_hash} {target_dir}")
-        # 2. 基于哈希的核销与清理逻辑
+        # 2. Hash-based cleanup and deletion logic
         train_key = (pre_h, tr_h)
         if train_key in pending_sim_hashes:
-            # 从待办集合中移除当前完成的 sim_h
+            # Remove current finished sim_h from the pending set
             pending_sim_hashes[train_key].discard(sim_h)
             
-            # 如果该训练任务对应的所有模拟任务都已从集合中移除
+            # If all sim tasks for this train task have been removed
             if not pending_sim_hashes[train_key]:
                 if os.path.exists(train_dir):
                     try:
@@ -565,25 +618,25 @@ def _send_none_to_workers(q: mp.Queue, n: int) -> None:
 # -----------------------------------------------------------------------------
 def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output_dir: str, logger: logging.Logger):
     """
-    完善版：对比 old (selected_configs) 和 new (reports) 报告。
-    支持 "short", "long", "forward" 三个周期的 CAGR 精度对比（保留一位小数）。
+    Enhanced comparison between old (selected_configs) and new (reports) files.
+    Supports CAGR precision comparison for \"short\", \"long\" and \"forward\" periods (rounded to 1 decimal place).
     """
     logger.info("\n" + "=" * 40)
     logger.info("📊 Starting Multi-Period Comparison...")
 
     periods = ["short", "long", "forward"]
 
-    # --- 1. 定义内部加载函数，避免冗余 I/O ---
+    # --- 1. Define internal loader to avoid redundant I/O ---
     def load_records_by_hash(path: str, is_selected_config: bool = False) -> Dict[str, Dict[str, Any]]:
-        """将文件中的记录按 hash 索引，保留所有周期的信息"""
+        """Load records from file and index them by hash, preserving all period information."""
         data_map = {}
         if not os.path.exists(path):
             return data_map
         
-        # 兼容 selected_configs (list) 和 reports (jsonl)
+        # Support both selected_configs (list) and reports (jsonl)
         try:
             if is_selected_config:
-                # 假设 load_selected_configs 是你已有的函数
+                # Assume load_selected_configs is the existing helper
                 records = load_selected_configs(path) 
             else:
                 with open(path, "r", encoding="utf-8") as f:
@@ -596,13 +649,13 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
             data_map[h] = record
         return data_map
 
-    # --- 2. 加载数据 ---
+    # --- 2. Load data ---
     old_data = load_records_by_hash(old_reports_path, is_selected_config=True)
     new_data = load_records_by_hash(new_reports_path, is_selected_config=False)
 
     logger.info(f"📥 Loaded {len(old_data)} old records and {len(new_data)} new records")
 
-    # --- 3. 核心对比逻辑 ---
+    # --- 3. Core comparison logic ---
     compare_results = []
     hashes_only_in_old = []
     hashes_only_in_new = list(set(new_data.keys()) - set(old_data.keys()))
@@ -613,26 +666,26 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
             continue
 
         new_record = new_data[h]
-        # 初始化对比条目
+        # Initialize comparison entry
         comparison_entry = {
             "hash": h,
             "verify_all_passed": True,
             "period_details": {}
         }
 
-        # 遍历三个周期
+        # Iterate over three periods
         for p in periods:
             old_p = old_record.get(p)
             new_p = new_record.get(p)
 
-            # 情况 A: 两个报告中都有这个周期的内容
+            # Case A: both reports contain this period
             if old_p and new_p:
                 old_cagr = old_p.get("performance", {}).get("cagr")
                 new_cagr = new_p.get("performance", {}).get("cagr")
 
-                # 只有当两个 CAGR 都是数值时才比较
+                # Only compare when both CAGR values are numeric
                 if isinstance(old_cagr, (int, float)) and isinstance(new_cagr, (int, float)):
-                    # 保留一位小数比较 (假设 cagr 为 0.1556 代表 15.6%)
+                    # Compare with one decimal place (e.g., 0.1556 represents 15.6%)
                     v1 = round(old_cagr, 1)
                     v2 = round(new_cagr, 1)
                     is_match = (v1 == v2)
@@ -648,17 +701,17 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
                 else:
                     comparison_entry["period_details"][p] = {"status": "missing_performance_data"}
             
-            # 情况 B: 其中一方缺失该周期
+            # Case B: one side is missing this period
             elif old_p or new_p:
                 comparison_entry["period_details"][p] = {"status": "period_not_in_both"}
-                # 如果这个周期在策略中本该存在却缺失，标记失败
+            # If the period should exist in the strategy but is missing, mark as failed
                 comparison_entry["verify_all_passed"] = False
 
-        # 将 params 保留一份在结果里方便回溯
+        # Keep params in results for easier inspection
         comparison_entry["params"] = old_record.get("short", {}).get("params") or old_record.get("long", {}).get("params")
         compare_results.append(comparison_entry)
 
-    # --- 4. 保存与统计 ---
+    # --- 4. Save and summarize ---
     if not compare_results:
         logger.warning("⚠️ No matching hashes found to compare.")
         return None, 0, len(hashes_only_in_old), len(hashes_only_in_new)
@@ -672,7 +725,7 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
 
     logger.info(f"✅ Comparison finished. Result saved to: {output_path}")
     logger.info(f"📊 Matched: {len(compare_results)} | Failed: {failed_count}")
-    logger.info(f"ℹ️  Only in Old: {len(hashes_only_in_old)} | Only in New: {len(hashes_only_in_new)}")
+    logger.info(f"ℹ️  Only in old: {len(hashes_only_in_old)} | Only in new: {len(hashes_only_in_new)}")
 
     return output_path, len(compare_results), len(hashes_only_in_old), len(hashes_only_in_new)
 

@@ -6,20 +6,20 @@ import sys
 import json
 import logging
 import torch
-# 路径设置
+# Path setup
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process import common
-# 1. 强制开启持久化图缓存
+# 1. Force-enable persistent graph cache
 torch._inductor.config.fx_graph_cache = True
 
-# 2. 指定统一的缓存路径 (建议放在项目目录下)
-# 这样即便进程重启，或者并行运行，都能避开重复编译
+# 2. Use a unified cache directory (recommended under project output)
+# This avoids repeated compilation across restarts and parallel runs
 cache_dir = os.path.join(common.TRAIN_OUT_DIR, ".inductor_cache")
 os.makedirs(cache_dir, exist_ok=True)
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
 
-# 3. 针对 5090 的优化建议：如果输入维度变化频率不高，可以关闭动态形状以换取极限性能
+# 3. 5090 optimization: if input shapes don't change often, consider disabling dynamic shapes for maximum throughput
 # torch._inductor.config.dynamic_shapes = False
 
 import torch.nn as nn
@@ -44,7 +44,7 @@ from model.model_factory import ModelFactory
 feature_conf_list = [
 
     # =========================
-    # 原始市场基础信息（Raw Market State）
+    # Raw Market State
     # =========================
     "open",
     "high",
@@ -56,46 +56,46 @@ feature_conf_list = [
     "taker_buy_base_volume",
     "taker_buy_quote_volume",
     # =========================
-    # 一、趋势 / 方向持续（Trend） 描述：价格是否存在延续性
+    # 1) Trend / directional persistence: whether price has continuation
     # =========================
-    "MA_WEEK_M_L",        # 长期结构方向（Regime核心）
-    "PVT",                    # 量价增强型动量
-    "dist_to_high_100",       # 突破型趋势结构
+    "MA_WEEK_M_L",        # Long-term regime direction (core)
+    "PVT",                # Price-volume enhanced momentum
+    "dist_to_high_100",   # Breakout-style trend structure
     "id_factor_100",
     "id_factor_20",
-    "MFI_999",              # 资金流向极端
+    "MFI_999",            # Extreme money flow
     "MFI_99",
     # =========================
-    # 二、波动结构（Volatility Regime） 描述：振幅与风险环境
+    # 2) Volatility regime: amplitude and risk environment
     # =========================
-    "vol_gk_100",             # 长期波动
-    "vol_gk_14",              # 短期波动
+    "vol_gk_100",          # Long-term volatility
+    "vol_gk_14",           # Short-term volatility
     "skew_100",
-    "kurt_100",               # 尾部结构（极端风险）
-    # "BOLL_BW_25",           # 需要增益测试后决定
-    "RSI_14",                    # 相对强弱指数（动量与过热信号，间接反映波动环境）
+    "kurt_100",            # Tail structure (extreme risk)
+    # "BOLL_BW_25",         # Decide after uplift testing
+    "RSI_14",              # Relative Strength Index (momentum/overheat; indirectly reflects volatility)
     # =========================
-    # 三、路径效率 / 市场结构（Efficiency / Regime） 描述：趋势 vs 震荡
+    # 3) Efficiency / market structure: trending vs ranging
     # =========================
-    "er_126",                 # 趋势效率比（高质量结构因子）
+    "er_126",              # Trend efficiency ratio (high-quality structure factor)
     # =========================
-    # 四、参与强度（Participation / Liquidity） 描述：市场活跃度
+    # 4) Participation / liquidity: market activity
     # =========================
-    "trade_density_14",       # 连续参与强度
-    "vol_event_flag_500",     # 极端成交事件（Regime触发器）
+    "trade_density_14",    # Continuous participation intensity
+    "vol_event_flag_500",  # Extreme volume event (regime trigger)
     # =========================
-    # 五、订单流 / 失衡（Order Flow） 描述：买卖主导结构
+    # 5) Order flow / imbalance: buy-vs-sell dominance
     # =========================
-    "vpin_49",                # 中期订单流失衡
-    "vpin_14",              # 需要增益测试
+    "vpin_49",             # Mid-term order-flow imbalance
+    "vpin_14",             # Needs uplift testing
     # =========================
-    # 六、空间位置结构（Spatial / Price Position） 描述：价格在区间或成本中的位置
+    # 6) Spatial / price position: where price sits within ranges/cost
     # =========================
-    "poc_bias_600",           # 成交密集区偏离（强结构锚点）
+    "poc_bias_600",        # Deviation from high-volume node (strong structural anchor)
     "poc_bias_99",
-    "close_pos",              # 区间相对位置
+    "close_pos",           # Relative position within range
     # =========================
-    # 七、K线形态 / 微观博弈（Path Microstructure）
+    # 7) Candlestick / path microstructure
     # =========================
     "upper_wick_pct",
     "lower_wick_pct",
@@ -123,7 +123,7 @@ class LSTMConfig:
     in_locked_p: float = 0.05               # V4 locked dropout on inputs
     out_locked_p: float = 0              # V4 locked dropout on LSTM outputs (before pooling)
     input_norm: bool = True                # V4 LayerNorm on input features
-    input_proj_dim: int | None = None      # V4 optional projection before LSTM.一个可选的线性层，将原始特征维度（如 48）映射到一个新的维度 $D$ 后再送入.降维
+    input_proj_dim: int | None = None      # V4 optional projection before LSTM: a linear layer mapping raw feature dim (e.g. 48) to a new dim D (dim reduction)
     logit_clip: float | None = None        # V4 
 
 @dataclass
@@ -222,9 +222,9 @@ class TrainConfig:
     stride: int = 8
     use_cache: bool = False
     lambda_trig: float = 0.5
-    lambda_dir: float = 0.1 #多空方向的重要性
+    lambda_dir: float = 0.1  # Importance of long/short direction
     lambda_main:float = 0.7
-    lambda_cost:float = 0.4 #flip/错过趋势/乱交易
+    lambda_cost: float = 0.4  # Flip / missed trend / noisy trades
     lambda_gate: float = 1e-3
     mag_alpha: float = 0
     mag_limit: float = 4.0
@@ -237,31 +237,31 @@ class TrainConfig:
     label_smoothing :float = 0.02
     loss_fun_version : int = 4
 # ==============================================================================
-# 3. 核心逻辑 (Core Logic)
+# 3. Core Logic
 # ==============================================================================
 def get_balanced_sampler(dataset):
-    # 1. 提取所有样本的标签
+    # 1. Extract labels for all samples
     all_labels = dataset.labels 
     
-    # 2. 统计各类别原始数量: [Short(0), Neutral(1), Long(2)]
+    # 2. Count each class: [Short(0), Neutral(1), Long(2)]
     class_counts = torch.bincount(torch.tensor(all_labels))
     total_n = class_counts.sum().float()
     
-    # 3. 计算“自然”比例
-    # 保持 Neutral 的原始占比不变
+    # 3. Compute "natural" proportions
+    # Keep Neutral at its original share
     p_neutral = class_counts[1] / total_n
-    # 计算 Action (Long + Short) 的总占比
+    # Compute total Action share (Long + Short)
     p_action = (class_counts[0] + class_counts[2]) / total_n
     
-    # 4. 设置目标比例: 让 Long 和 Short 平分 p_action
-    # 索引对应: [0: Short, 1: Neutral, 2: Long]
+    # 4. Set target proportions: split p_action equally between Long and Short
+    # Index mapping: [0: Short, 1: Neutral, 2: Long]
     target_props = torch.tensor([p_action / 2, p_neutral, p_action / 2]) 
     
-    # 5. 计算采样权重: Weight = Target_Prop / Actual_Count
-    # 这样在采样时，Long/Short 被选中的总概率相等，且 Neutral 的总概率维持自然水平
+    # 5. Sampling weights: Weight = Target_Prop / Actual_Count
+    # This makes Long/Short have equal total selection probability while keeping Neutral at natural level
     class_weights = target_props / class_counts.float()
     
-    # 6. 为每个样本分配权重并创建采样器
+    # 6. Assign weight to each sample and create sampler
     sample_weights = [class_weights[label] for label in all_labels]
     sampler = WeightedRandomSampler(
         weights=sample_weights,
@@ -272,9 +272,9 @@ def get_balanced_sampler(dataset):
 
 def apply_feature_direction(X: torch.Tensor, feature_names: List[str], direction_map: Dict[str, int], logger) -> torch.Tensor:
     """
-    对 direction=-1 的特征列乘以 -1，使其与收益正相关。
-    X: shape [N, T, F]，归一化后的特征张量
-    feature_names: 特征名列表，与 X 的第 3 维对应
+    Multiply feature columns with direction=-1 by -1 to make them positively correlated with returns.
+    X: shape [N, T, F], normalized feature tensor
+    feature_names: list of feature names aligned with X's 3rd dimension
     direction_map: {feature_name: 1 or -1}
     """
     if direction_map is None or len(direction_map) == 0:
@@ -295,12 +295,12 @@ def apply_feature_direction(X: torch.Tensor, feature_names: List[str], direction
 
 
 def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg, pre_para: common.BaseDefine,prep_output_dir:str, save_dir,experiment:bool):
-    # 0. 初始化环境
+    # 0. Initialize environment
     set_seed(train_cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device} | Model: {model_cfg.model_type} version: {model_cfg.model_version}")
     if device.type == 'cuda':
-        # 启用 TensorFloat32 (TF32)，5090 的算力吞吐量会大幅提升
+        # Enable TensorFloat32 (TF32): 5090 throughput improves significantly
         torch.set_float32_matmul_precision('high')
 
     df = common.load_train_df_from_dir(prep_output_dir)
@@ -321,32 +321,32 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
 
     total_gpu_mem_per_process = x_mem + y_mem + r_mem
     logger.info(f"🚀 Estimated GPU VRAM per process: {total_gpu_mem_per_process:.2f} MB")
-    # 对 ic_direction=-1 的特征进行反向（乘以 -1），使其与收益正相关
+    # Flip ic_direction=-1 features (multiply by -1) to make them positively correlated with returns
     if feature_direction_map:
         full_ds.X = apply_feature_direction(full_ds.X, full_ds.feature_names, feature_direction_map, logger)
 
-    # 显存预加载优化
+    # VRAM preload optimization
     logger.info(f"Pre-loading entire dataset to {device}...")
     full_ds.X = full_ds.X.to(device)
     full_ds.y = full_ds.y.to(device)
-    full_ds.returns = full_ds.returns.to(device) # 之前建议的是 .r，请统一为 .returns
+    full_ds.returns = full_ds.returns.to(device)  # Use .returns consistently (not .r)
     logger.info("Data loaded to VRAM.")
 
     M = len(full_ds)
     logger.info(f"Total windows (M) = {M}, window = {pre_para.candlestick_num}")
 
-    # 2. 切分数据
+    # 2. Split data
     tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
     
     ds_tr = SeqDataset(full_ds.X[tr_rng[0]:tr_rng[1]], full_ds.y[tr_rng[0]:tr_rng[1]], full_ds.returns[tr_rng[0]:tr_rng[1]])
     # More efficient alternative: just pass the sliced tensors
     ds_va = SeqDataset(full_ds.X[va_rng[0]:va_rng[1]], full_ds.y[va_rng[0]:va_rng[1]], full_ds.returns[va_rng[0]:va_rng[1]])
     ds_te = SeqDataset(full_ds.X[te_rng[0]:te_rng[1]], full_ds.y[te_rng[0]:te_rng[1]], full_ds.returns[te_rng[0]:te_rng[1]])
-    # 3. 计算权重
+    # 3. Compute weights
     y_tr_np = full_ds.y[tr_rng[0]:tr_rng[1]].cpu().numpy()
     classes = np.unique(y_tr_np)
-    #  注入平衡采样逻辑
-    # 使用你代码中定义的 get_balanced_sampler (Neutral 50%, Short 25%, Long 25%)
+    # Inject balanced sampling logic
+    # Use get_balanced_sampler (Neutral 50%, Short 25%, Long 25%)
     sampler_tr = get_balanced_sampler(ds_tr) 
     
     cw_balanced = compute_class_weight("balanced", classes=classes, y=y_tr_np)

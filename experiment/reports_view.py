@@ -8,18 +8,18 @@ from operator import itemgetter
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 import copy
-# 引入自定义模块
+# Import project modules
 from data_process.common import *
 from data_process import common 
 
 output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments',"selected_configs")
 os.makedirs(output_dir, exist_ok=True)
 TOP_K = 50
-SKIP_PERCENT = 0  # 跳过前百分之多少，0表示不跳过，从最前面开始选择
+SKIP_PERCENT = 0  # Percentage of front part to skip; 0 means no skip, select from the very beginning
 
 def analyze_short_long_correlation(selected):
     """
-    分析 short 与 long 的线性相关性
+    Analyze linear correlation between short and long periods.
     """
 
     import numpy as np
@@ -46,11 +46,11 @@ def analyze_short_long_correlation(selected):
             l_calmar.append(l_cal)
 
     if len(short_cagr) < 5:
-        print("❌ 样本太少，无法计算相关性")
+        print("❌ Sample size too small to compute correlation")
         return
 
     print("\n" + "="*100)
-    print("📈 Short vs Long 相关性分析")
+    print("📈 Short vs Long correlation analysis")
     print("="*100)
 
     # CAGR
@@ -70,8 +70,8 @@ def analyze_short_long_correlation(selected):
 
     print("="*100)
 
-    # 分位数单调性测试
-    print("\n🔎 分位数单调性检验（按 short CAGR 分桶）")
+    # Quantile monotonicity test
+    print("\n🔎 Quantile monotonicity check (bucketed by short CAGR)")
 
     pairs = list(zip(short_cagr, l_cagr))
     pairs.sort(key=lambda x: x[0])
@@ -86,12 +86,12 @@ def analyze_short_long_correlation(selected):
 
 def analyze_model_performance_correlation(all_results):
     """
-    统计图片中出现的模型指标 (Accuracy, F1, Precision, Recall) 与 l_cagr 的相关性
+    Analyze correlation between model metrics (Accuracy, F1, Precision, Recall) and l_cagr.
     """
     from scipy.stats import pearsonr, spearmanr
     import pandas as pd
 
-    # 1. 定义需要分析的指标名称（对应图片中的 key）
+    # 1. Metrics to analyze (must exist in model_metrics)
     metrics_to_check = [
         'accuracy', 
         'f1_macro', 
@@ -100,17 +100,17 @@ def analyze_model_performance_correlation(all_results):
         'recall_weighted'
     ]
     
-    # 2. 提取数据
+    # 2. Extract data
     data_list = []
     for r in all_results:
-        # 获取目标收益指标
+        # Fetch target return metric
         l_cagr = r.get("l_cagr")
-        # 获取模型指标字典
+        # Fetch model metrics dict
         model_metrics = r['long']["model_metrics"]
         
         if l_cagr is not None and model_metrics:
             row = {"l_cagr": l_cagr}
-            # 只提取图片中存在的 5 个指标
+            # Only extract the 5 metrics shown in the figure
             for m in metrics_to_check:
                 val = model_metrics.get(m)
                 if val is not None:
@@ -118,60 +118,60 @@ def analyze_model_performance_correlation(all_results):
             data_list.append(row)
 
     if len(data_list) < 10:
-        print(f"⚠️ 样本量不足 ({len(data_list)})，无法进行有效相关性分析")
+        print(f"⚠️ Sample size too small ({len(data_list)}) for meaningful correlation analysis")
         return
 
     df = pd.DataFrame(data_list)
     
     print("\n" + "="*80)
-    print(f"📊 模型评估指标 vs Long CAGR 相关性分析 (N={len(df)})")
+    print(f"📊 Model evaluation metrics vs long CAGR correlation (N={len(df)})")
     print("-" * 80)
     print(f"{'Metric Name':<20} | {'Pearson r':>10} | {'p-value':>12} | {'Spearman r':>10}")
     print("-" * 80)
 
-    # 3. 逐个计算指标与 l_cagr 的相关性
+    # 3. Compute correlation between each metric and l_cagr
     for m in metrics_to_check:
         if m not in df.columns:
             continue
             
-        # 剔除空值
+        # Drop NaNs
         sub_df = df[['l_cagr', m]].dropna()
         if len(sub_df) < 5: continue
 
         p_r, p_val = pearsonr(sub_df[m], sub_df['l_cagr'])
         s_r, _ = spearmanr(sub_df[m], sub_df['l_cagr'])
 
-        # 标注显著性
+        # Mark statistical significance
         sig = "*" if p_val < 0.05 else ""
         
         print(f"{m:<20} | {p_r:10.4f}{sig} | {p_val:12.2e} | {s_r:10.4f}")
 
     print("="*80)
-    print("💡 注: Pearson r 越接近 1 表示正线性相关；p-value < 0.05 (*) 表示统计显著。")
+    print("💡 Note: Pearson r close to 1 implies strong positive linear correlation; p-value < 0.05 (*) is statistically significant.")
 
 def analyze_model_metrics_by_decile(all_results):
     """
-    分桶统计：将收益指标 (CAGR, Calmar, Sharpe) 分成10个区间，
-    观察每个区间内模型指标 (Accuracy, F1等) 的平均水平。
+    Bucket analysis: split return metrics (CAGR, Calmar, Sharpe) into 10 quantile buckets
+    and observe the average model metrics (Accuracy, F1, etc.) within each bucket.
     """
     import pandas as pd
     import numpy as np
 
-    # 1. 配置
+    # 1. Config
     trading_metrics = ['l_cagr', 'l_calmar', 'l_sharpe']
     model_keys = ['accuracy', 'f1_macro', 'f1_weighted', 'precision_weighted', 'recall_weighted']
     
-    # 2. 提取数据
+    # 2. Extract data
     data_list = []
     for r in all_results:
-        # 获取交易表现
+        # Fetch trading performance
         row = {
             'l_cagr': r.get('l_cagr'),
             'l_calmar': r.get('l_calmar'),
-            'l_sharpe': r.get('long', {}).get('performance', {}).get('sharpe') # 部分版本键名可能略有不同
+            'l_sharpe': r.get('long', {}).get('performance', {}).get('sharpe')  # Some versions may use slightly different key names
         }
         
-        # 获取模型指标
+        # Fetch model metrics
         model_metrics = r['long'].get("model_metrics", {})
         for mk in model_keys:
             row[mk] = model_metrics.get(mk)
@@ -180,40 +180,40 @@ def analyze_model_metrics_by_decile(all_results):
             data_list.append(row)
 
     if len(data_list) < 20:
-        print("⚠️ 数据量太少，无法进行分桶分析")
+        print("⚠️ Not enough data for decile analysis")
         return
 
     df = pd.DataFrame(data_list)
 
-    # 3. 对每个交易指标进行分桶分析
+    # 3. For each trading metric, run bucket analysis
     for t_metric in trading_metrics:
         if t_metric not in df.columns or df[t_metric].isnull().all():
             continue
-            
+
         print("\n" + "="*100)
-        print(f"📈 分桶分析：按 {t_metric.upper()} 排名的模型指标表现 (10% 分位区间)")
+        print(f"📈 Bucket analysis: model metrics ranked by {t_metric.upper()} (10% quantile buckets)")
         print("="*100)
 
-        # 使用 qcut 将交易指标分为 10 个等份区间 (Deciles)
-        # duplicates='drop' 是为了防止某些指标值完全一样导致无法分桶
+        # Use qcut to divide trading metric into 10 equal-sized buckets (deciles).
+        # duplicates='drop' avoids failure when too many identical values exist.
         try:
             df['bucket'] = pd.qcut(df[t_metric], 10, labels=[f"Q{i+1}" for i in range(10)], duplicates='drop')
         except ValueError:
-            # 如果样本太少或值太集中，退而求其次分 5 桶
+            # If samples are too few or values too concentrated, fall back to 5 buckets
             df['bucket'] = pd.qcut(df[t_metric], 5, labels=[f"Q{i+1}" for i in range(5)], duplicates='drop')
-            print(f"注：由于数据分布原因，{t_metric} 已自动调整为 5 桶统计")
+            print(f"Note: due to data distribution, {t_metric} bucket count automatically reduced to 5.")
 
-        # 按桶聚合计算均值
+        # Aggregate and compute mean per bucket
         bucket_stats = df.groupby('bucket', observed=True)[model_keys].mean()
         
-        # 加上该桶的交易指标平均值作为参考
+        # Add bucket-wise average trading metric as reference
         bucket_stats[f'avg_{t_metric}'] = df.groupby('bucket', observed=True)[t_metric].mean()
         
-        # 调整列顺序，把参考指标放前面
+        # Reorder columns to put reference metric first
         cols = [f'avg_{t_metric}'] + model_keys
         bucket_stats = bucket_stats[cols]
 
-        # 打印结果
+        # Print results
         pd.options.display.max_columns = None
         pd.options.display.width = 1000
         print(bucket_stats.to_string(formatters={
@@ -223,18 +223,16 @@ def analyze_model_metrics_by_decile(all_results):
             'f1_weighted': '{:,.4f}'.format
         }))
         
-        # 简单单调性提示
+        # Simple monotonicity hint
         first_val = bucket_stats[model_keys[0]].iloc[0]
         last_val = bucket_stats[model_keys[0]].iloc[-1]
-        trend = "✅ 正向单调" if last_val > first_val else "❌ 逆向/无单调"
-        print(f"\n💡 趋势观察 ({model_keys[0]}): 从最低分桶到最高分桶 {trend}")
+        trend = "✅ positively monotonic" if last_val > first_val else "❌ non-monotonic or reversed"
+        print(f"\n💡 Trend check ({model_keys[0]}): from lowest to highest bucket -> {trend}")
         print("-" * 100)
 
 def merge_selected(records):
     """
-    selected: dict[hash] -> full_report
-    report: 原始 report（json 读出来的 dict）
-    row: extract_row 的结果（用于取 cagr / calmar）
+    Deduplicate records by hash and return a unique list.
     """
     reslut_set = set()
     uni_results = []
@@ -244,7 +242,7 @@ def merge_selected(records):
         h = r['hash']
         if h not in reslut_set:
             reslut_set.add(h)
-            # print(f" Duplicate records {h}")
+            # print(f" Duplicate record {h}")
             uni_results.append(r)
         else:
             duplicate_r.append(r)
@@ -253,7 +251,7 @@ def merge_selected(records):
 
 def iter_reports_jsonl(root_list):
     """
-    递归扫描所有 reports.jsonl
+    Recursively scan for all reports.jsonl files under given roots.
     """
     for root in root_list:
         for dirpath, _, filenames in os.walk(root):
@@ -264,7 +262,7 @@ def iter_reports_jsonl(root_list):
 
 def load_reports(path):
     """
-    逐行读取 jsonl，跳过损坏行
+    Read jsonl file line by line and skip malformed lines.
     """
     reports = []
     with open(path, "r", encoding="utf-8") as f:
@@ -277,35 +275,34 @@ def load_reports(path):
 
 def save_raw_reports(selected_rows, exp_dir ='' ,output_filename="reports_raw.jsonl"):
     """
-    将 rows 中存储的 'raw' 原始报告内容提取出来，并保存到与 exp_dir 同级的指定文件中。
-    保持 jsonl 格式。
+    Extract 'raw' report field from rows and save to a jsonl file next to exp_dir.
     """
     if not selected_rows:
-        print("⚠️ 没有数据可供保存")
+        print("⚠️ No data to save")
         return
 
     out_path = os.path.join(exp_dir, output_filename)
 
-    print(f"📦 正在提取并保存 {len(selected_rows)} 条原始报告至: {out_path}")
+    print(f"📦 Extracting and saving {len(selected_rows)} raw reports to: {out_path}")
 
     try:
         with open(out_path, "w", encoding="utf-8") as f:
             for row in selected_rows:
-                # 提取 raw 字段（它是原始加载时的完整字典）
+                # Extract the raw field (the full original dict loaded at the beginning)
                 raw_data = row.get("raw")
                 if raw_data:
                     f.write(json.dumps(raw_data, ensure_ascii=False) + "\n")
         
-        print(f"✅ 原始数据保存完成！")
+        print(f"✅ Raw data saved successfully!")
     except Exception as e:
-        print(f"❌ 保存失败: {str(e)}")
+        print(f"❌ Failed to save: {str(e)}")
 
 
 def extract_row(report, src_path):
     """
-    从单条 report 中抽取关键信息
+    Extract key fields from a single report.
     """
-    short = report.get("short", report)  # 兼容 short/long 分开存储和合并存储两种格式
+    short = report.get("short", report)  # Support both separated short/long storage and merged formats
     long = report.get("long", report)
     forward = report.get("forward", report)
     perf = short.get("performance", {})
@@ -340,35 +337,35 @@ def basic_filter(all_results):
     ps_results_0,unselected = filter_by_criteria(all_results, period ='short', cagr=0)
     print(f"After 0-screening short: {len(ps_results_0)}, {len(ps_results_0)/len(all_results)*100:.2f}%")
     ps_results,unselected = filter_by_criteria(ps_results_0, period ='short', cagr=0.2)
-    print(f"After Pre-screening short: {len(ps_results)}, {len(ps_results)/len(ps_results_0)*100:.2f}%")
+    print(f"After pre-screening short: {len(ps_results)}, {len(ps_results)/len(ps_results_0)*100:.2f}%")
     pf_results,unselected = filter_by_criteria(ps_results, period ='forward', cagr=0.2)
-    print(f"After Pre-screening forward: {len(pf_results)}, {len(pf_results)/len(ps_results)*100:.2f}%")
+    print(f"After pre-screening forward: {len(pf_results)}, {len(pf_results)/len(ps_results)*100:.2f}%")
     l_results,unselected = filter_by_criteria(pf_results, period ='long', cagr=0.2)
-    print(f"After Pre-screening long: {len(l_results)}, {len(l_results)/len(pf_results)*100:.2f}%")
+    print(f"After pre-screening long: {len(l_results)}, {len(l_results)/len(pf_results)*100:.2f}%")
     return l_results
 
 def filter_and_rank_strategies(data, metric, k=30, final_sort_key="l_cagr"):
     """
-    按照指定指标筛选前 K 个策略，并按 final_sort_key 重新排序。
-    
-    :param data: 原始策略列表 (list of dicts)
-    :param metric: 筛选指标名 (str) 或 自定义 lambda 函数
-    :param k: 筛选前多少个 (int)
-    :param final_sort_key: 最终展示时的排序基准，默认为 'l_cagr'
-    :return: 经过二次排序的策略列表
+    Select top K strategies by a given metric, then re-sort them by final_sort_key.
+
+    :param data: original strategy list (list of dicts)
+    :param metric: metric name (str) or custom lambda function
+    :param k: how many top strategies to select (int)
+    :param final_sort_key: final sort key for presentation, default 'l_cagr'
+    :return: list of strategies after two-stage sorting
     """
     
-    # 1. 定义排序键值 (处理 lambda 或普通 key)
+    # 1. Define sort key (handle lambda or normal key)
     if callable(metric):
         key_func = metric
     else:
-        # 使用 get 处理 key 不存在的情况，防止报错
+        # Use get to handle missing keys gracefully
         key_func = lambda x: x.get(metric, 0) if x.get(metric) is not None else 0
 
-    # 2. 按照指定指标选出表现最好的前 K 个 (降序)
+    # 2. Select top K strategies by the given metric (descending)
     top_k = sorted(data, key=key_func, reverse=True)[:k]
 
-    # 3. 对这 K 个结果按照最终基准 (如 CAGR) 重新排序
+    # 3. Re-sort these K results by final benchmark (e.g., CAGR)
     final_sorted = sorted(top_k, key=itemgetter(final_sort_key), reverse=True)
     
     return final_sorted
@@ -408,34 +405,34 @@ def show_performance(all_results,output_dir, batch_size=5):
 
 def sort_by_correlation_diversity(all_results):
     """
-    计算每个策略与其他策略的平均相关性，并按独立性排序
+    Compute the average correlation of each strategy with all others and sort by independence.
     """
     import pandas as pd
     
-    # 1. 构建收益率 DataFrame (复用你原有的 build_return_series)
+    # 1. Build returns DataFrame (reuse existing build_return_series)
     returns_dict = {}
     for i, r in enumerate(all_results):
-        # 假设 build_return_series 已定义
+        # Assume build_return_series is already defined
         ret = build_return_series(r) 
         returns_dict[f"S{i}"] = ret
     
     df = pd.DataFrame(returns_dict).dropna()
     
-    # 2. 计算相关性矩阵
+    # 2. Compute correlation matrix
     corr_matrix = df.corr()
     
-    # 3. 计算每个策略与其他策略的平均相关性 (排除对角线的 1.0)
-    # 公式: (每列总和 - 1) / (策略总数 - 1)
+    # 3. Compute average correlation of each strategy with others (excluding diagonal 1.0)
+    # Formula: (column_sum - 1) / (num_strategies - 1)
     n = len(corr_matrix)
     mean_corr = (corr_matrix.sum() - 1) / (n - 1)
     
-    # 4. 将结果转为 DataFrame 并排序
+    # 4. Convert result to DataFrame and sort
     diversity_df = mean_corr.to_frame(name="mean_correlation").sort_values(by="mean_correlation")
     
     print("\n" + "-"*20 + " Strategy Diversity Ranking " + "-"*20)
     print(diversity_df)
     
-    # 5. 根据排序结果重新组织 all_results
+    # 5. Reorder all_results according to ranking
     sorted_indices = [int(idx.replace('S', '')) for idx in diversity_df.index]
     sorted_results = [all_results[idx] for idx in sorted_indices]
     
@@ -450,7 +447,7 @@ def build_return_series(report):
     df = df.sort_values('date')
     df.set_index('date', inplace=True)
 
-    # 用 equity 计算日收益率
+    # Use equity to compute daily returns
     df['ret'] = df['equity'].pct_change()
 
     return df['ret'].dropna()
@@ -458,43 +455,43 @@ def build_return_series(report):
 
 def compute_correlation(all_results, output_dir):
     """
-    动态计算尺寸生成相关性热力图，确保格子大小固定且文字清晰
+    Dynamically compute figure size for correlation heatmap to keep cell size fixed and text clear.
     """
     save_path = os.path.join(output_dir, "correlation_heatmap_fixed_cell.png")
 
-    # ===== 1. 构建收益率序列 =====
+    # ===== 1. Build return series =====
     returns_dict = {}
     for i, r in enumerate(all_results):
-        # 使用 build_return_series
+        # Use build_return_series
         ret = build_return_series(r)
         returns_dict[f"S{i}"] = ret
     
     df = pd.DataFrame(returns_dict).dropna()
     if df.empty:
-        print("⚠️ 数据为空，跳过热力图生成")
+        print("⚠️ Data is empty, skip heatmap generation")
         return
 
     corr_matrix = df.corr()
     num_strategies = len(corr_matrix)
 
-    # ===== 2. 动态计算图片尺寸 =====
-    # 设定每个格子的目标尺寸 (inches)
+    # ===== 2. Dynamically compute figure size =====
+    # Target size (inches) for each cell
     cell_size = 0.5  
-    # 边缘留白（用于显示坐标轴刻度和标题）
+    # Margin for axes ticks and title
     margin = 3.0     
     
-    # 动态总宽和总高
+    # Dynamic total width and height
     fig_width = num_strategies * cell_size + margin
     fig_height = num_strategies * cell_size + margin
     
-    # 根据策略数量调整字体大小，防止文字重叠
+    # Adjust font size based on number of strategies to avoid label overlap
     font_scale = 1.0 if num_strategies < 20 else 0.8 if num_strategies < 50 else 0.5
 
     plt.figure(figsize=(fig_width, fig_height))
     sns.set_theme(font_scale=font_scale)
 
-    # ===== 3. 绘制热力图 =====
-    # cbar_pos 用于微调颜色条，防止在超大图下显得太窄
+    # ===== 3. Draw heatmap =====
+    # cbar_pos can be used to tweak color bar width for large figures
     ax = sns.heatmap(
         corr_matrix, 
         annot=True, 
@@ -504,7 +501,7 @@ def compute_correlation(all_results, output_dir):
         center=0,
         square=True, 
         linewidths=.5,
-        annot_kws={"size": 10 if num_strategies < 30 else 7}, # 动态调整格内数字大小
+        annot_kws={"size": 10 if num_strategies < 30 else 7},  # Dynamically adjust font size inside cells
         cbar_kws={"shrink": 0.8}
     )
 
@@ -514,16 +511,16 @@ def compute_correlation(all_results, output_dir):
     
     plt.tight_layout()
     
-    # ===== 4. 保存图片 =====
-    plt.savefig(save_path, dpi=150) # 由于尺寸已经很大，150 DPI 足够清晰
+    # ===== 4. Save image =====
+    plt.savefig(save_path, dpi=150)  # 150 DPI is enough because the figure is already large
     plt.close()
 
-    print(f"📊 动态尺寸热力图已保存 (Size: {fig_width:.1f}x{fig_height:.1f} in): {save_path}")
+    print(f"📊 Dynamic-size correlation heatmap saved (Size: {fig_width:.1f}x{fig_height:.1f} in): {save_path}")
 
 def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.png", start_index=0):
     save_path = os.path.join(output_dir, file_name)
 
-    # ===== 1. 获取价格背景数据 =====
+    # ===== 1. Get price background data =====
     pere_para = all_results[0]['long']['params']['common']
     price_file = os.path.join(
         common.PROJECT_DATA_DIR, 
@@ -543,8 +540,8 @@ def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.
     ax2 = ax1.twinx()
     ax2.set_ylabel('Continuous Strategy Equity (Normalized)')
 
-    # ===== 2. 拼接并绘制曲线 =====
-    # 用于记录分界线的时间点
+    # ===== 2. Concatenate and plot curves =====
+    # Record split timestamps for vertical lines
     split_dates = {}
 
     for i, r in enumerate(all_results):
@@ -559,7 +556,7 @@ def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.
             df['date'] = pd.to_datetime(df['date'])
             df = df.sort_values('date').set_index('date')
             
-            # 记录该阶段的起始时间（用于画竖线）
+            # Record the start time of this phase (used to draw vertical lines)
             if period not in split_dates:
                 split_dates[period] = df.index[0]
             
@@ -574,19 +571,19 @@ def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.
         ax2.plot(full_path_df.index, full_path_df['continuous_equity'], 
                  linewidth=1.5, alpha=0.8, label=f"S{start_index + i}")
 
-    # ===== 3. 绘制阶段切分竖线 =====
-    # 仅绘制竖线，不添加文字，且颜色调至更淡 (alpha=0.3)
+    # ===== 3. Draw phase-split vertical lines =====
+    # Only draw lines, no labels, with lighter color (alpha=0.3)
     if 'short' in split_dates:
         s_start = split_dates['short']
-        # 使用较细的虚线，蓝色代表从 Long 进入 Short
+        # Use thin blue dashed line to mark transition from Long to Short
         ax1.axvline(x=s_start, color='blue', linestyle='--', linewidth=1, alpha=0.3)
 
     if 'forward' in split_dates:
         f_start = split_dates['forward']
-        # 使用红色虚线代表进入最关键的 Forward 阶段
+        # Use red dashed line to mark entering the critical Forward phase
         ax1.axvline(x=f_start, color='red', linestyle='--', linewidth=1, alpha=0.3)
 
-    # ===== 4. 图例与美化 =====
+    # ===== 4. Legend and styling =====
     h1, l1 = ax1.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
     ax1.legend(h1 + h2, l1 + l2, loc='upper left', ncol=4, fontsize=8)
@@ -604,13 +601,15 @@ def plot_in_batches(all_results, output_dir, batch_size=5):
     for i in range(0, total, batch_size):
         batch = all_results[i:i + batch_size]
         filename = f"batch_{i//batch_size + 1}.png"
-        # ✨ 传入当前的循环索引 i 作为起始编号
+        # ✨ Pass current loop index i as the starting number
         plot_equity_curves(batch, output_dir, filename, start_index=i)
 
 def main():
     exp_dir1 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-07','01_03_38')
     exp_dir2 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-09','17_33_35')
-    exp_dir_list = [exp_dir1, exp_dir2]
+    exp_dir3 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','18_41_56')
+    exp_dir4 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','20_17_30')
+    exp_dir_list = [exp_dir4]
     filter_report = None
     filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
@@ -649,10 +648,10 @@ def main():
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
     # exit()
-    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="candlestick_num",period ='long', metric_key="cagr")
+    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="stride",period ='long', metric_key="cagr")
     if symbol == 'DOGEUSDT' and interval=='15m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.3,rc_median = 0,rc_pos_ratio = 0.8,calmar = 1.3 ,daily_freq = 0.1,sharpe = 0.6)
-        # 定义你关心的所有指标
+        # Define all metrics of interest
         metrics_to_test = [
             ("Calmar", "l_calmar"),
             ("CAGR", "l_cagr"),
@@ -674,7 +673,7 @@ def main():
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.8)
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.6)
     if symbol == 'ETHUSDT' and interval=='15m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1,daily_freq = 0.15,sharpe = 0.5)
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 1,daily_freq = 0,sharpe = 0.5)
     if symbol == 'ETHUSDT' and interval=='30m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 0.9,daily_freq = 0.15,sharpe = 0.5)
     # sort_by_correlation_result = sort_by_correlation_diversity(l_results)
@@ -705,12 +704,12 @@ def main():
     selected = [
         r for r in l_results 
         if (h := str(common.recursive_get(r.get('long', {}), 'hash'))[:8]) not in filter_set 
-        and h in keep_set
+        # and h in keep_set
     ]
     print(f"🎯 hash fitler, {len(l_results)} -> {len(selected)}")
     analyze_holdbar(selected,target_key="holdbar",period ='long', metric_key="cagr")
     analyze_holdbar(selected,target_key="predict_num", period ='long',metric_key="cagr")
-    analyze_holdbar(selected,target_key="atr_sl_mult_long", period ='long',metric_key="cagr")
+    analyze_holdbar(selected,target_key="vol_multiplier_long", period ='long',metric_key="cagr")
     show_performance(selected,output_dir,3)
     # exit()
     # stable_selected1 = filter_stable(rc_median_results)
@@ -748,10 +747,10 @@ def filter_stable(selected):
     return results
 
 def filter_aggressive(selected):
-    # 1️⃣ short 要非常强（抓当前 regime）
+    # 1️⃣ Short must be very strong (capture current regime)
     results, _ = filter_by_criteria( selected, period='short', cagr=1, calmar=0)
     print(f"After short performance filter: {len(results)} reports")
-    # 2️⃣ long 只保证不是垃圾，不追求极稳
+    # 2️⃣ Long only needs to be acceptable, not extremely stable
     results, _ = filter_by_performance( results, period='long', min_cagr=0.6, min_calmar=0.3 )
     print(f"After long performance filter: {len(results)} reports")
     results,long_unresults = filter_by_performance(results, period ='long', min_rc_cagr_median = 0)
@@ -765,20 +764,20 @@ def filter_aggressive(selected):
 
 def merge_selected_sort(*selected_lists, period ='short', sort_key=None, reverse=True):
     """
-    合并多个 selected 列表，按 hash 去重，并按 sort_key 排序。
+    Merge multiple selected lists, deduplicate by hash, then sort by sort_key.
 
     Parameters
     ----------
-    *selected_lists : 任意多个 selected 列表
+    *selected_lists : any number of selected lists
     sort_key : str
-        用于排序的字段名，例如 "l_cagr"
+        Field name used for sorting, e.g. "l_cagr"
     reverse : bool
-        True 表示降序排序（默认从大到小）
+        True for descending order (default from large to small)
 
     Returns
     -------
     list
-        去重+排序后的新列表
+        New list after deduplication and sorting
     """
 
     merged_dict = {}
@@ -791,7 +790,7 @@ def merge_selected_sort(*selected_lists, period ='short', sort_key=None, reverse
 
     result = list(merged_dict.values())
 
-    # 排序
+    # Sorting
     if sort_key is not None:
         result.sort(
             key=lambda x: common.recursive_get(x.get(period), sort_key),
@@ -802,15 +801,15 @@ def merge_selected_sort(*selected_lists, period ='short', sort_key=None, reverse
 
 def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
     """
-    通用参数评估函数
-    label1/label2: 用于记录这两组分别代表什么，但在表格中显示为 Group 1/2
+    Generic parameter evaluation function.
+    label1/label2: description of what these two groups represent; shown as Group 1/2 in the table.
     """
     group_1_data = []
     group_2_data = []
 
-    # 1. 灵活分类逻辑
+    # 1. Flexible grouping logic
     for row in rows:
-        # 你可以根据需要修改这里的判断条件，函数整体是通用的
+        # You can customize the conditions here; the function is otherwise generic
         # vol = row["report"]["params"]["common"]["vol_multiplier_long_long"]
         # if vol == 1.9:
         #     group_1_data.append(row)
@@ -823,7 +822,7 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         elif holdbar == 20 and holdbar ==16:
             group_2_data.append(row)
 
-    # 2. 内部指标提取器
+    # 2. Internal metric extractor
     def extract_metrics(group_list):
         if not group_list: return None
         return {
@@ -837,13 +836,13 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
     g1_metrics = extract_metrics(group_1_data)
     g2_metrics = extract_metrics(group_2_data)
 
-    # 3. 构造对比表格
+    # 3. Build comparison table
     summary_rows = []
     for i, (m, label_desc) in enumerate([(g1_metrics, label1), (g2_metrics, label2)]):
         if m:
             summary_rows.append({
                 "Group": f"Group {i+1}",
-                "Desc": label_desc,  # 备注说明，方便你知道 Group1 是哪个
+                "Desc": label_desc,  # Description so you know what Group 1 represents
                 "Count": m["count"],
                 "Avg CAGR": f"{np.mean(m['cagr']):.2%}",
                 "Max CAGR": f"{np.max(m['cagr']):.2%}",
@@ -852,40 +851,40 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
                 "Avg Calmar": f"{np.mean(m['calmar']):.2f}",
                 "Max Calmar": f"{np.max(m['calmar']):.2%}",
                 "Avg Sharpe": f"{np.mean(m['sharpe']):.2f}",
-                "Avg MaxDD": f"{np.mean(m['max_dd']):.2f}%" # 修正回撤显示
+                "Avg MaxDD": f"{np.mean(m['max_dd']):.2f}%"  # Corrected drawdown display
             })
 
-    # 4. 完美对齐输出
+    # 4. Nicely aligned output
     if summary_rows:
-        pd.set_option('display.max_columns', None)      # 显示所有列
-        pd.set_option('display.expand_frame_repr', False) # 禁止自动换行（保持在一行内）
-        pd.set_option('display.max_colwidth', None)     # 不限制列宽
-        pd.set_option('display.width', 1000)            # 设置足够大的总宽度
+        pd.set_option('display.max_columns', None)       # Show all columns
+        pd.set_option('display.expand_frame_repr', False)  # Do not wrap lines (keep on one line)
+        pd.set_option('display.max_colwidth', None)      # No column width limit
+        pd.set_option('display.width', 1000)             # Set sufficiently wide display width
         pd.set_option('display.expand_frame_repr', True)
         df_final = pd.DataFrame(summary_rows).set_index("Group")
     
-        print("\n" + "="*120) # 稍微拉长分割线
-        print(f"📊 参数组对比评估 (Group 1: {label1} | Group 2: {label2})")
+        print("\n" + "="*120)  # Slightly longer separator line
+        print(f"📊 Parameter group comparison (Group 1: {label1} | Group 2: {label2})")
         print("="*120)
         
-        # 强制不换行打印
+        # Force single-line printing
         print(df_final.to_string(justify='center', index=True, line_width=1000))
         print("="*120)
         
-        # 5. 极简结论
+        # 5. Short conclusion
         cagr1 = np.mean(g1_metrics['cagr'])
         cagr2 = np.mean(g2_metrics['cagr'])
         winner = "Group 1" if cagr1 > cagr2 else "Group 2"
-        print(f"💡 结论预览: {winner} 在收益期望上表现更优 ({max(cagr1, cagr2):.2%})")
+        print(f"💡 Preview conclusion: {winner} has better expected return ({max(cagr1, cagr2):.2%})")
     else:
-        print("❌ 错误: 未能分类出有效数据，请检查输入 rows 的参数。")
+        print("❌ Error: failed to classify valid data; please check parameters in rows input.")
     exit()
 
 def filter_by_criteria(reports, period='short', **criteria):
     """
-    分步过滤函数：
-    - 顺序应用每个筛选条件
-    - 实时打印本步筛选后的存活数量及相对于上一步的留存比例
+    Step-wise filtering function:
+    - Apply each filter condition in sequence
+    - Print surviving count and retention ratio after each step
     """
     if not reports:
         return [], []
@@ -893,41 +892,41 @@ def filter_by_criteria(reports, period='short', **criteria):
     passed = reports
     
     for key, min_value in criteria.items():
-        # 跳过空值
+        # Skip empty criteria
         if min_value is None:
             continue
             
-        # 如果池子已经空了，直接记录后续结果为 0
+        # If pool is already empty, record 0 for subsequent steps
         if not passed:
             print(f"After screening {period} {key:<12} >= {min_value:>3}: 0, 0.00%")
             continue
 
         prev_len = len(passed)
         
-        # 1. 定位该指标在字典中的路径 (复用你现有的 find_key_path)
-        # 注意：这里基于当前 surviving 池子的第一个样本来找路径
+        # 1. Locate the path of this metric in the dict (reuse find_key_path)
+        # Note: path is found based on the first sample in the current surviving pool
         key_path = find_key_path(passed[0].get(period, {}), key)
         if key_path is None:
             print(f"⚠️ Warning: key '{key}' not found in {period} reports, skipping this filter.")
             continue
 
-        # 2. 执行本轮单项过滤
+        # 2. Apply this single filtering step
         step_passed = []
         for r in passed:
             period_data = r.get(period, {})
-            # 复用你现有的 get_value_by_path
+            # Reuse existing get_value_by_path
             current_value = get_value_by_path(period_data, key_path)
             
-            # 比较逻辑
+            # Comparison logic
             if current_value is not None and current_value >= min_value:
                 step_passed.append(r)
         
-        # 3. 更新当前池子并打印结果
+        # 3. Update pool and print result
         passed = step_passed
         curr_len = len(passed)
         ratio = (curr_len / prev_len * 100) if prev_len > 0 else 0
         
-        # 按照你要求的格式打印
+        # Print in the requested format
         print(f"After screening {period} {key:<12} >= {min_value:>3}: {curr_len}, {ratio:.2f}%")
     final_len = len(passed)
     filtered_count = initial_len - final_len
@@ -967,25 +966,25 @@ def filter_by_performance(reports, period= 'short', min_cagr=None, min_calmar=No
 def filter_by_rc_summary(
     reports,
     period= 'short',
-    # —— 生存性 / 尾部 ——
-    min_rc_es_05= None,          # 例如 > -0.8
-    min_rc_q05= None,            # 例如 > -0.5
+    # —— Survival / tail risk ——
+    min_rc_es_05= None,          # e.g. > -0.8
+    min_rc_q05= None,            # e.g. > -0.5
 
-    # —— 可持有性 / 连续性 ——
-    max_rc_longest_neg_run=None,  # 例如 < 300（天/窗口）
-    max_rc_neg_ratio= None,        # 例如 < 0.5
+    # —— Holdability / continuity ——
+    max_rc_longest_neg_run=None,  # e.g. < 300 (days/windows)
+    max_rc_neg_ratio= None,       # e.g. < 0.5
 
-    # —— 典型收益水平 ——
-    min_rc_median=None,         # 例如 > 0
-    min_rc_q25=None,            # 例如 > 0
+    # —— Typical return level ——
+    min_rc_median=None,          # e.g. > 0
+    min_rc_q25=None,             # e.g. > 0
 
-    # —— 稳定性 / 离散度 ——
-    max_rc_cv=None,             # 例如 < 3
-    max_rc_mad=None,            # 可选
+    # —— Stability / dispersion ——
+    max_rc_cv=None,              # e.g. < 3
+    max_rc_mad=None,             # optional
 ):
     """
     Filter reports based on rc_summary metrics.
-    目标：剔除结构性不稳定 / 不可持有的策略
+    Goal: remove structurally unstable or un-holdable strategies.
     """
 
     def ok(report):
@@ -993,7 +992,7 @@ def filter_by_rc_summary(
         if not rc:
             return False
 
-        # ---------- 生存性（尾部） ----------
+        # ---------- Survival (tail) ----------
         if min_rc_es_05 is not None:
             if rc.get("rc_es_05", -math.inf) < min_rc_es_05:
                 return False
@@ -1002,7 +1001,7 @@ def filter_by_rc_summary(
             if rc.get("rc_q05", -math.inf) < min_rc_q05:
                 return False
 
-        # ---------- 可持有性（长期折磨） ----------
+        # ---------- Holdability (long-term pain) ----------
         if max_rc_longest_neg_run is not None:
             if rc.get("rc_longest_neg_run", math.inf) > max_rc_longest_neg_run:
                 return False
@@ -1011,7 +1010,7 @@ def filter_by_rc_summary(
             if rc.get("rc_neg_ratio", 1.0) > max_rc_neg_ratio:
                 return False
 
-        # ---------- 典型收益水平 ----------
+        # ---------- Typical return level ----------
         if min_rc_median is not None:
             if rc.get("rc_median", -math.inf) < min_rc_median:
                 return False
@@ -1020,7 +1019,7 @@ def filter_by_rc_summary(
             if rc.get("rc_q25", -math.inf) < min_rc_q25:
                 return False
 
-        # ---------- 稳定性 ----------
+        # ---------- Stability ----------
         if max_rc_cv is not None:
             rc_cv = rc.get("rc_cv", math.inf)
             if not math.isnan(rc_cv) and rc_cv > max_rc_cv:
@@ -1058,10 +1057,10 @@ def filter_by_trades(reports, period= 'short', min_win_rate=35, min_daily_freq =
 
 def find_key_path(obj, target_key, path=None):
     """
-    递归查找 target_key 在嵌套对象中的路径。
-    返回一个路径列表，可以用来直接索引该值。
+    Recursively find the path of target_key in a nested object.
+    Returns a path list which can be used to directly index the value.
     
-    例如: find_key_path(report, "holdbar") 返回 ["params", "common", "holdbar"]
+    Example: find_key_path(report, "holdbar") returns ["params", "common", "holdbar"]
     """
     if path is None:
         path = []
@@ -1084,9 +1083,9 @@ def find_key_path(obj, target_key, path=None):
 
 def get_value_by_path(obj, path):
     """
-    使用路径列表直接获取对象中的值。
+    Get a value from an object using a path list.
     
-    例如: get_value_by_path(report, ["params", "common", "holdbar"])
+    Example: get_value_by_path(report, ["params", "common", "holdbar"])
     """
     current = obj
     try:
@@ -1099,40 +1098,40 @@ def get_value_by_path(obj, path):
 
 def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="cagr"):
     """
-    终极改造版：
-    1. 支持 list 类型的 target_key（自动进行排序、拼接、hash）。
-    2. 返回值增加 grouped_records，按组分好原始记录。
+    Final enhanced version:
+    1. Supports list-type target_key (auto sort, join, and hash).
+    2. Returns grouped_records to keep original records grouped.
     
     Returns:
-        analysis_results (list): 统计结果列表。
-        hash_map (dict): hash 值与原始 list 的对应关系。
-        grouped_records (dict): {hash_or_value: [original_records...]}。
+        analysis_results (list): list of aggregated statistics.
+        hash_map (dict): mapping from hash to original list.
+        grouped_records (dict): {hash_or_value: [original_records...]}.
     """
     from collections import defaultdict
     import numpy as np
 
     if not records:
-        print("❌ 报告列表为空")
+        print("❌ Report list is empty")
         return [], {}, {}
 
-    # 1. 定位 target_key 的路径
-    key_path = find_key_path(records[0], target_key)
+    # 1. Locate path for target_key
+    key_path = find_key_path(records[0][period], target_key)
     if key_path is None:
-        print(f"❌ 未找到任何 {target_key}")
+        print(f"❌ Could not find any {target_key}")
         return [], {}, {}
 
-    print(f"✓ 定位 {target_key} 的路径: {' -> '.join(map(str, key_path))}")
+    print(f"✓ Located path for {target_key}: {' -> '.join(map(str, key_path))}")
 
-    # 2. 按分组逻辑分拣 records
-    grouped_records = defaultdict(list) # 存储原始 record 分组
-    hash_map = {} # 存储 hash 到 list 的映射
+    # 2. Group records according to key
+    grouped_records = defaultdict(list)  # Store original record groups
+    hash_map = {}  # Map from hash to list value
 
     for report in records:
-        value = get_value_by_path(report, key_path)
+        value = get_value_by_path(report[period], key_path)
         if value is None:
             continue
 
-        # 处理 list 类型：排序、拼接、取 hash
+        # Handle list: sort, join, and hash
         if isinstance(value, list):
             key_str = ",".join(map(str, sorted(value)))
             current_key = hash(key_str)
@@ -1144,14 +1143,14 @@ def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="c
         grouped_records[current_key].append(report)
 
     if not grouped_records:
-        print(f"❌ 未找到任何有效的 {target_key}")
+        print(f"❌ No valid {target_key} found")
         return [], {}, {}
 
-    # 3. 统计每个分组的性能
+    # 3. Compute performance statistics per group
     analysis_results = []
     total_count = sum(len(v) for v in grouped_records.values())
 
-    # 按 key 排序以便稳定输出
+    # Sort by key for stable output
     for key in sorted(grouped_records.keys(), key=lambda x: str(x)):
         group_items = grouped_records[key]
         count = len(group_items)
@@ -1160,7 +1159,7 @@ def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="c
         calmar_list = []
         
         for report in group_items:
-            # 这里的 report 已经是分组后的原始 record
+            # Here report is already from the grouped original records
             p_report = report.get(period, report)
             perf = p_report.get("performance", {})
             metric = recursive_get(p_report, metric_key)
@@ -1171,12 +1170,12 @@ def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="c
             if calmar is not None:
                 calmar_list.append(calmar)
         
-        # 确定显示用的标签
+        # Label for display
         display_label = f"Hash:{str(key)[:8]}" if key in hash_map else key
 
         analysis_results.append({
-            "group_key": key,              # 用于从 grouped_records 中取数的键
-            "original_value": hash_map.get(key, key), # 原始 list 或数值
+            "group_key": key,              # Key for fetching from grouped_records
+            "original_value": hash_map.get(key, key),  # Original list or scalar value
             "display_key": display_label,
             "count": count,
             "percentage": (count / total_count) * 100,
@@ -1189,9 +1188,9 @@ def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="c
             f"med_{metric_key}": np.median(metric_list) if metric_list else None,
         })
 
-    # 4. 打印统计表格
+    # 4. Print table
     print("\n" + "="*110)
-    print(f"📊 {target_key} {period} 分析结果 (总共 {total_count} 个报告)")
+    print(f"📊 {target_key} {period} analysis (total {total_count} reports)")
     print("="*110)
     header = f"{'Value/Hash':<15} {'Count':<8} {'%':<6} {f'{metric_key.upper()}':<12} {'':<2}{'AVG':<6}{'Max':<6}{'Std':<6}{'Med':<6} {'Calmar:':<8}{'AVG':<6}{'MAX':<6}{'Med':<6}"
     print(header)
@@ -1207,28 +1206,28 @@ def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="c
 
 def analyze_feature_regimes(records, target_key="predict_num", period='short', metric_key="cagr"):
     """
-    专门用于分析不同特征配置列表对性能的影响
+    Specifically used to analyze how different feature configuration lists affect performance.
     """
     from collections import defaultdict
     import numpy as np
 
-    # 1. 定位路径
+    # 1. Locate path
     key_path = find_key_path(records[0], target_key)
     if key_path is None:
-        print(f"❌ 未找到键: {target_key}")
+        print(f"❌ Key not found: {target_key}")
         return
 
-    # 2. 按特征组合分组
+    # 2. Group by feature combinations
     groups = defaultdict(list)
     for report in records:
         value = get_value_by_path(report, key_path)
         if value is not None:
-            # ✨ 核心修正：将 list 转换为 string 以便作为 dict 的 key
-            # 这样 ['open', 'high'] 会变成 "open, high"
+            # ✨ Core fix: convert list to string so it can be used as a dict key
+            # For example, ['open', 'high'] becomes "open, high"
             key_repr = ", ".join(sorted(value)) if isinstance(value, list) else str(value)
             groups[key_repr].append(report)
 
-    # 3. 统计逻辑（复用你之前的统计代码）
+    # 3. Aggregation logic (reuse existing statistics code)
     analysis_results = []
     for key_repr, reports in groups.items():
         metrics = [recursive_get(r.get(period, r), metric_key) for r in reports]
@@ -1241,20 +1240,20 @@ def analyze_feature_regimes(records, target_key="predict_num", period='short', m
             "avg_calmar": np.mean(calmars) if calmars else 0
         })
 
-    # 4. 排序打印
-    print(f"\n📊 特征配置集 ({target_key}) 影响分析 - Period: {period}")
+    # 4. Sort and print
+    print(f"\n📊 Feature configuration set ({target_key}) impact analysis - Period: {period}")
     print("-" * 100)
     for res in sorted(analysis_results, key=lambda x: x['avg_metric'], reverse=True):
         print(f"Count: {res['count']:<4} | Avg {metric_key.upper()}: {res['avg_metric']:.2%} | Calmar: {res['avg_calmar']:.2f} | Features: {res['feature_set']}")
 
 def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="heatmap_combined.png"):
     """
-    生成 2x2 的热力图矩阵，包含：均值、中位数、标准差、最大值
+    Generate a 2x2 heatmap grid containing: mean, median, standard deviation, and maximum.
     """
     import seaborn as sns
     import matplotlib.pyplot as plt
 
-    # 1. 数据准备
+    # 1. Data preparation
     path1 = find_key_path(selected[0], var1_key)
     path2 = find_key_path(selected[0], var2_key)
     
@@ -1268,12 +1267,12 @@ def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="h
 
     df = pd.DataFrame(matrix_data)
     
-    # 2. 计算四种统计维度
-    # 使用 groupby 一次性聚合所有指标
+    # 2. Compute four statistical dimensions
+    # Use groupby to aggregate all metrics at once
     agg_df = df.groupby([var1_key, var2_key])["val"].agg(['mean', 'median', 'std', 'max']).reset_index()
 
-    # 3. 创建 2x2 画布
-    # 为了防止干扰全局背景，使用上下文管理器
+    # 3. Create 2x2 canvas
+    # Use context manager to avoid affecting global styling
     with sns.axes_style("white"):
         fig, axes = plt.subplots(2, 2, figsize=(20, 16))
         axes = axes.flatten()
@@ -1285,12 +1284,12 @@ def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="h
             'max': 'Max (Potential)'
         }
         
-        # 循环绘制四个子图
+        # Loop and plot four subplots
         for i, stat in enumerate(['mean', 'median', 'std', 'max']):
-            # 将当前指标转为透视表
+            # Convert current metric to pivot table
             pivot_df = agg_df.pivot(index=var1_key, columns=var2_key, values=stat)
             
-            # Std 通常用数值显示，收益类指标用百分比显示
+            # Std usually shown as raw value; return metrics shown as percentages
             fmt_str = ".2f" if stat == 'std' else ".1%"
             
             sns.heatmap(
@@ -1306,11 +1305,11 @@ def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="h
             axes[i].set_ylabel(var1_key)
 
     plt.suptitle(f"Parameter Sensitivity Analysis: {var1_key} vs {var2_key}", fontsize=18, y=0.98)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # 为总标题留出空间
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Leave space for overall title
     
     plt.savefig(save_path, dpi=200)
-    print(f"✅ 四合一热力图已保存至: {save_path}")
-    plt.close() # 及时释放内存
+    print(f"✅ Four-in-one heatmap saved to: {save_path}")
+    plt.close()  # Release memory promptly
 
 if __name__ == "__main__":
     main()

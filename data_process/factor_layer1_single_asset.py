@@ -1,17 +1,17 @@
 """
 factor_layer1_single_asset.py
 
-Layer-1（单资产时间序列）因子粗筛工具：
-- 不训练模型、不做完整回测
-- 主要回答：因子是否在“时间维度”上对未来收益有稳定信息（Time-series IC）
+Layer-1 (single-asset time-series) factor screening tool:
+- No model training, no full backtest
+- Primary question: does the factor contain stable information about future returns along the time axis (time-series IC)?
 
-单资产下的“IC”建议使用 rolling window 的时间相关：
+For a single asset, IC is best measured as rolling-window time correlation:
   roll_IC(t) = corr( factor_{t-window+1:t}, fwd_ret_{t-window+1:t} )
-并对 roll_IC 序列统计：均值、|均值|、t-stat、正值占比、分位数等。
+Then summarize the roll_IC series: mean, |mean|, t-stat, positive ratio, quantiles, etc.
 
-可选：按月/周切片相关（slice IC）与条件 IC（按趋势/波动分桶）。
+Optional: monthly/weekly sliced IC and conditional IC (bucketed by trend/volatility).
 
-依赖：numpy, pandas
+Dependencies: numpy, pandas
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ EPS = 1e-12
 # -------------------------
 
 def winsorize(s: pd.Series, p: Optional[float] = 0.005) -> pd.Series:
-    """两侧截断抑制极端值。p=None 表示不处理。用 np.nanpercentile 加速。"""
+    """Two-sided winsorization to suppress outliers. p=None disables it. Uses np.nanpercentile for speed."""
     if p is None or s.empty:
         return s
     arr = np.asarray(s.values, dtype=float)
@@ -58,7 +58,7 @@ def _align_xy(x: pd.Series, y: pd.Series, winsor_p: Optional[float]) -> Tuple[pd
 
 
 def _is_constant(s: pd.Series, tol: float = 1e-10) -> bool:
-    """常数或近常数（方差≈0）则 True，避免 corr 触发 ConstantInputWarning。"""
+    """Return True if series is constant/near-constant (var≈0) to avoid ConstantInputWarning in corr."""
     if s.empty or len(s) < 3:
         return True
     v = s.dropna()
@@ -76,7 +76,7 @@ def corr_xy(x: pd.Series, y: pd.Series, method: str = "spearman") -> float:
 
 
 def _safe_corr(x: pd.Series, y: pd.Series, method: str = "spearman") -> float:
-    """常数/NaN 安全的相关计算，避免 ConstantInputWarning / RuntimeWarning。"""
+    """Constant/NaN-safe correlation to avoid ConstantInputWarning / RuntimeWarning."""
     if len(x) < 3 or len(y) < 3:
         return np.nan
     if _is_constant(x) or _is_constant(y):
@@ -103,26 +103,26 @@ def t_stat_from_series(s: pd.Series) -> float:
 
 @dataclass
 class Layer1SingleAssetConfig:
-    # 主度量：Rank IC（spearman）更稳；你也可以改成 pearson
+    # Main metric: Rank IC (spearman) is usually more robust; you can switch to pearson if desired.
     method: str = "spearman"
     winsor_p: Optional[float] = 0.005
 
-    # rolling IC 参数（单资产的核心）
+    # Rolling IC settings (core for single-asset screening)
     rolling_window: int = 1000
     rolling_min_periods: int = 200
 
-    # 时间切片（可选）：用于观察“按月/周”是否稳定（ME=month end，pandas 2.0+）
+    # Time slicing (optional): check stability by month/week (ME=month end; pandas 2.0+)
     slice_freq: str = "ME"
     slice_min_samples: int = 100
 
-    # keep 的门槛（按你数据规模调）
-    min_abs_ic: float = 0.01              # 全样本 |IC|
-    min_roll_ic_abs_mean: float = 0.005   # rolling |IC| 的均值
-    min_roll_pos_ratio: float = 0.55      # rolling IC > 0 的比例
+    # Keep thresholds (tune for your data size)
+    min_abs_ic: float = 0.01              # full-sample |IC|
+    min_roll_ic_abs_mean: float = 0.005   # mean rolling |IC|
+    min_roll_pos_ratio: float = 0.55      # ratio of rolling IC > 0
     min_roll_same_sign_ratio: float = 0.55
-    min_roll_t: float = 1.0               # rolling IC 的 t-stat
+    min_roll_t: float = 1.0               # t-stat of rolling IC
 
-    # 并行：因子数多时可设为 >1
+    # Parallelism: set >1 when many factors exist
     n_jobs: int = 1
 
 
@@ -149,8 +149,8 @@ def rolling_time_ic(
     winsor_p: Optional[float] = 0.005,
 ) -> pd.Series:
     """
-    单资产：rolling window 的时间相关序列。
-    向量化实现：Spearman = rank 后 rolling Pearson，Pearson 直接用 rolling.corr。
+    Single-asset rolling time-correlation series.
+    Vectorized: Spearman = Pearson(rank(x), rank(y)); Pearson uses rolling.corr directly.
     """
     x, y = _align_xy(factor, fwd_ret, winsor_p)
     if len(x) == 0:
@@ -158,18 +158,18 @@ def rolling_time_ic(
     if _is_constant(x) or _is_constant(y):
         return pd.Series(np.nan, index=x.index, name=f"roll_ic_{method}_{window}")
 
-    # 确保 min_periods 至少 3（相关计算需要）
+    # Ensure min_periods >= 3 (needed for correlation)
     mp = max(int(min_periods), 3)
 
     if method == "spearman":
-        # Spearman = Pearson(rank(x), rank(y))，一次性 rank 后利用 pandas 向量化 rolling
+        # Spearman = Pearson(rank(x), rank(y)); rank once, then use pandas vectorized rolling corr
         x_work = x.rank(method="average")
         y_work = y.rank(method="average")
     else:
         x_work = x
         y_work = y
 
-    # 抑制 rolling 窗口内常数列导致的 ConstantInputWarning / RuntimeWarning
+    # Suppress ConstantInputWarning / RuntimeWarning from constant windows
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         try:
@@ -184,7 +184,7 @@ def rolling_time_ic(
 def rolling_ic_stats(roll_ic: pd.Series, ic_full: Optional[float] = None) -> Dict[str, float]:
     s = roll_ic.replace([np.inf, -np.inf], np.nan).dropna()
 
-    # same_sign_ratio：rolling IC 与 ic_full 同号比例
+    # same_sign_ratio: proportion of rolling IC sharing the same sign as ic_full
     same_sign_ratio = np.nan
     if ic_full is not None and (not np.isnan(ic_full)):
         ic_sign = np.sign(ic_full)
@@ -228,12 +228,12 @@ def sliced_ic(
     winsor_p: Optional[float] = 0.005,
     min_samples: int = 100,
 ) -> pd.Series:
-    """按月/周切片计算相关，用于观察“分阶段”是否稳定。"""
+    """Compute sliced correlations by month/week to assess phase-wise stability."""
     x, y = _align_xy(factor, fwd_ret, winsor_p)
     if len(x) == 0:
         return pd.Series(dtype=float)
 
-    # time_index 需与 factor 同长、同序；对齐到 x 的 index（_align_xy 可能 dropna）
+    # time_index must align with factor; reindex to x (since _align_xy may dropna)
     ti = pd.Series(np.asarray(time_index), index=range(len(time_index)))
     ti_aligned = ti.reindex(x.index)
     if ti_aligned.isna().any() or len(ti_aligned) != len(x):
@@ -259,7 +259,7 @@ def conditional_ic_by_sign(
     winsor_p: Optional[float] = 0.005,
     min_samples: int = 200,
 ) -> pd.DataFrame:
-    """条件变量按正/负两桶（适合以0为中性的状态变量）。"""
+    """Bucket conditional variable by sign (pos/neg), suitable for 0-centered state variables."""
     x, y = _align_xy(factor, fwd_ret, winsor_p)
     c = condition.reindex(x.index)
     df = pd.concat([x.rename("x"), y.rename("y"), c.rename("c")], axis=1).dropna()
@@ -284,7 +284,7 @@ def conditional_ic_by_quantile(
     winsor_p: Optional[float] = 0.005,
     min_samples: int = 200,
 ) -> pd.DataFrame:
-    """条件变量按分位数分桶（适合 RV_20 / volume_z 等）。"""
+    """Bucket conditional variable by quantiles, suitable for RV_20 / volume_z etc."""
     x, y = _align_xy(factor, fwd_ret, winsor_p)
     c = condition.reindex(x.index)
     df = pd.concat([x.rename("x"), y.rename("y"), c.rename("c")], axis=1).dropna()
@@ -313,7 +313,7 @@ def _screen_one_factor(
     conditions: Optional[Dict[str, Dict]],
     factors_index: pd.Index,
 ) -> Tuple[Dict, Dict[str, pd.DataFrame]]:
-    """单因子筛选，供并行调用。"""
+    """Single-factor screening (used by parallel execution)."""
     ic = full_sample_ic(fac, fwd, method=cfg.method, winsor_p=cfg.winsor_p)
     roll = rolling_time_ic(
         fac, fwd,
@@ -345,7 +345,7 @@ def _screen_one_factor(
         (np.isnan(rstats["roll_ic_t"]) or abs(rstats["roll_ic_t"] )>= cfg.min_roll_t)
     )
 
-    # same_sign_ratio>0.6 且 ic_full<0：负向稳定因子，标注 -1；其余为 1
+    # same_sign_ratio>0.6 and ic_full<0 => stable negative factor (ic_direction=-1); otherwise ic_direction=1
     ssr = rstats.get("roll_same_sign_ratio", np.nan)
     ic_dir = -1 if (
         (not np.isnan(ssr)) and (ssr > 0.6) and
@@ -400,15 +400,15 @@ def layer1_screen_single_asset(
     conditions: Optional[Dict[str, Dict]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Dict[str, pd.DataFrame]]]:
     """
-    返回：
-      - summary: 每个因子的全样本 IC + rolling IC 统计 + (可选)切片 IC + keep
+    Returns:
+      - summary: full-sample IC + rolling IC stats + (optional) sliced IC + keep flag per factor
       - cond_tables: {cond_name: {feature: DataFrame}}
 
-    time_index: 与 factors_df 等长、逐行对应的 DatetimeIndex，用于 sliced_ic 按月/周分组。
-      若使用 TimeSeriesWindowDataset，可通过 get_time_index_from_dataset(ds, df) 或
-      build_from_timeseries_window_dataset(..., df=df) 的第三返回值获取。传 None 则跳过 sliced_ic。
+    time_index: DatetimeIndex aligned with factors_df rows; used by sliced_ic for month/week grouping.
+      If using TimeSeriesWindowDataset, you can get it via get_time_index_from_dataset(ds, df) or
+      the third return value of build_from_timeseries_window_dataset(..., df=df). If None, sliced_ic is skipped.
 
-    conditions 示例：
+    Example conditions:
       {
         "trend_week": {"series": df["MA_WEEK_M_L"], "mode": "sign", "min_samples": 500},
         "vol": {"series": df["RV_20"], "mode": "quantile", "q": 5, "min_samples": 500},
@@ -419,7 +419,7 @@ def layer1_screen_single_asset(
     n_jobs = getattr(cfg, "n_jobs", 1) or 1
 
     if n_jobs > 1:
-        # 并行：ThreadPool（pandas/numpy 多释放 GIL，可加速）
+        # Parallel: ThreadPool (pandas/numpy often release GIL)
         rows, cond_tables = [], {}
         with ThreadPoolExecutor(max_workers=n_jobs) as ex:
             futures = {
@@ -449,14 +449,14 @@ def layer1_screen_single_asset(
 
 
 def get_selected_factors(summary: pd.DataFrame) -> List[str]:
-    """从 screening 结果中提取筛选通过的因子名列表，便于下游 pipeline 使用。"""
+    """Extract factor names that passed screening (for downstream pipelines)."""
     if "keep" not in summary.columns:
         return []
     return summary.loc[summary["keep"], "feature"].tolist()
 
 
 def load_selected_factors(path: str) -> List[str]:
-    """从 selected_factors.txt 加载筛选后的因子列表，供训练/GA 等下游使用。"""
+    """Load selected factor list from selected_factors.txt for training/GA pipelines."""
     if not os.path.exists(path):
         return []
     with open(path, "r", encoding="utf-8") as f:
@@ -469,8 +469,8 @@ def _build_conditions_safe(
     vol_col: str = None,
 ) -> Optional[Dict[str, Dict]]:
     """
-    安全构建 conditions：仅在对应列存在时加入。
-    vol_col 优先 RV_20，否则尝试 atr_14 / vol_regime_* 等。
+    Safely build conditions: only add entries when the referenced columns exist.
+    vol_col prefers RV_20; otherwise tries atr_14 / vol_regime_* etc.
     """
     conditions = {}
     if trend_col in factors_df.columns:
@@ -479,7 +479,7 @@ def _build_conditions_safe(
             "mode": "sign",
             "min_samples": 500,
         }
-    # 波动率代理：RV_20 可能不存在，用 atr_14 或第一个 atr_* / vol_regime_* 替代
+    # Volatility proxy: RV_20 may not exist; use atr_14 or the first atr_*/vol_regime_* found.
     vol_candidates = [vol_col] if vol_col else ["RV_20", "atr_14", "atr_16"]
     vol_candidates += [c for c in factors_df.columns if c.startswith("atr_") or c.startswith("vol_regime_")]
     for col in vol_candidates:
@@ -500,9 +500,9 @@ def _build_conditions_safe(
 
 def get_time_index_from_dataset(ds, df: pd.DataFrame) -> Optional[pd.DatetimeIndex]:
     """
-    从 TimeSeriesWindowDataset 和原始 df 构造 time_index。
-    用于 layer1_screen_single_asset 的 sliced_ic（按月/周观察因子稳定性）。
-    要求：df 为传入 Dataset 的原始 DataFrame，需含 open_time_ms_utc 或 open_time_date_utc。
+    Build time_index from TimeSeriesWindowDataset and the original df.
+    Used by layer1_screen_single_asset for sliced_ic (monthly/weekly stability checks).
+    df must be the DataFrame passed to the Dataset, containing open_time_ms_utc or open_time_date_utc.
     """
     if not hasattr(ds, "indices") or ds.indices is None:
         return None
@@ -511,7 +511,7 @@ def get_time_index_from_dataset(ds, df: pd.DataFrame) -> Optional[pd.DatetimeInd
         return None
     try:
         idx = np.asarray(ds.indices)
-        # indices 为原始 df 的 index 标签（每样本对应窗口最后一根 K 线的行）
+        # indices refer to rows in the original df (each sample maps to the last bar of the window)
         ts = df.loc[idx, time_col]
         if time_col == "open_time_ms_utc":
             return pd.to_datetime(ts, unit="ms", utc=True)
@@ -527,10 +527,10 @@ def build_from_timeseries_window_dataset(
     df: Optional[pd.DataFrame] = None,
 ) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.DatetimeIndex]]:
     """
-    适配 TimeSeriesWindowDataset：
+    Adapter for TimeSeriesWindowDataset:
       factors = ds.X[:, -1, :]
       fwd_ret = ds.returns
-    若传入 df（传入 Dataset 的原始 DataFrame），则同时返回 time_index 供 sliced_ic 使用。
+    If df (the Dataset's original DataFrame) is provided, also return time_index for sliced_ic.
     """
     X = ds.X
     R = ds.returns
@@ -559,7 +559,7 @@ def build_from_timeseries_window_dataset(
     return factors, fwd_ret, time_index
 
 def main():
-    # 1. 基础准备
+    # 1. Basic setup
     logger, _ = common.setup_session_logger(sub_folder='correlation_result')
     pre_task = common.BaseDefine()
     pre_task.interval = '15m'
@@ -573,13 +573,13 @@ def main():
     df = common.clean_data_quality_auto(df, logger)
     df = common.attach_attr(df, common.FEATURE_GROUP_LIST, para=pre_task)
     common.attach_label(df, pre_task)
-    # 确保 z_ret 存在
+    # Ensure z_ret exists
     if 'z_ret' not in df.columns:
-        logger.warning("df 中未找到 z_ret，将尝试计算。")
+        logger.warning("z_ret not found in df; attempting to compute it.")
         df['z_ret'] = df['close'].pct_change(pre_task.predict_num).shift(-pre_task.predict_num)
 
-    # 2. 构造特征列表
-    # 核心技巧：将 z_ret 暂时放入 feat_cols 参与 Dataset 窗口对齐，这样能拿到与特征同步的截面数据
+    # 2. Build feature list
+    # Trick: include z_ret temporarily for dataset alignment so we can extract synchronized cross-sections.
     all_cols = [c for c in df.columns if c not in data_loader.DROP_FEATURES]
     if 'z_ret' not in all_cols: all_cols.append('z_ret')
     
@@ -592,23 +592,23 @@ def main():
         stride=train_cfg.stride,
         use_cache=False
     )
-    # 1) 从 dataset 里取“单资产截面特征 + 未来收益”及 time_index
+    # 1) Extract cross-sectional factors + forward returns and time_index from dataset
     factors_df, fwd_ret, time_index = build_from_timeseries_window_dataset(
         ds,
         drop_cols=["z_ret"],
         df=df,
     )
 
-    # 2) 配置（可先用默认）
+    # 2) Config (defaults are ok to start)
     cfg = Layer1SingleAssetConfig(
         rolling_window=1000,
         rolling_min_periods=300,
     )
 
-    # 3) 条件 IC（安全构建：列存在才加入，避免 KeyError）
+    # 3) Conditional IC (safely built only when columns exist)
     conditions = _build_conditions_safe(factors_df)
 
-    # 4) 跑 Layer-1 因子筛选
+    # 4) Run layer-1 factor screening
     summary, cond_tables = layer1_screen_single_asset(
         factors_df=factors_df,
         fwd_ret=fwd_ret,
@@ -617,27 +617,27 @@ def main():
         conditions=conditions,
     )
 
-    # 5) 输出：保存 CSV + 打印筛选结果
+    # 5) Output: save CSV and print results
     out_dir = os.path.join(common.PERSISTENCE_DIR, "factor_layer1_result")
     os.makedirs(out_dir, exist_ok=True)
     summary_path = os.path.join(out_dir, "factor_screen_summary.csv")
     summary.to_csv(summary_path, index=False, encoding="utf-8")
-    logger.info(f"因子筛选结果已保存: {summary_path}")
+    logger.info(f"Factor screening results saved: {summary_path}")
 
     selected = get_selected_factors(summary)
-    logger.info(f"通过筛选的因子数: {len(selected)} / {len(summary)}")
+    logger.info(f"Factors kept: {len(selected)} / {len(summary)}")
     if selected:
-        logger.info(f"保留因子: {selected[:20]}{' ...' if len(selected) > 20 else ''}")
+        logger.info(f"Kept factors: {selected[:20]}{' ...' if len(selected) > 20 else ''}")
     else:
-        logger.warning("无因子通过筛选，可适当放宽 cfg 中的 min_* 阈值")
+        logger.warning("No factors passed screening. Consider relaxing min_* thresholds in cfg.")
 
-    # 保存筛选后因子列表，供 GA / 训练 pipeline 使用
+    # Save factor list for GA / training pipelines
     selected_path = os.path.join(out_dir, "selected_factors.txt")
     with open(selected_path, "w", encoding="utf-8") as f:
         f.write("\n".join(selected))
-    logger.info(f"筛选因子列表: {selected_path}")
+    logger.info(f"Selected factor list: {selected_path}")
 
-    print("\n📊 因子筛选 Top 15 (按 keep + ic_full_abs):")
+    print("\n📊 Factor screening top 15 (sorted by keep + ic_full_abs):")
     print(summary.head(15).to_string())
 if __name__ == "__main__":
     main()

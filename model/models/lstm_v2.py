@@ -13,15 +13,15 @@ LSTM1D_V2 — ML-Robust / Regularized Model (System Version)
 
 class LSTM1D_V2(BaseTimeSeriesModel):
     """
-    改进版双向 LSTM（V2）：
+    Improved bi-directional LSTM (V2):
     - BatchNorm + MLP Head
-    - 强正则化，适合 noisy / 小样本
+    - Strong regularization, suitable for noisy / small datasets
     """
 
     MODEL_TYPE = "lstm"
     MODEL_VERSION = 2
 
-    supports_lengths = False  # 与 V1 一致，只用 h_n
+    supports_lengths = False  # Same as V1: use h_n only
 
     def __init__(
         self,
@@ -38,7 +38,7 @@ class LSTM1D_V2(BaseTimeSeriesModel):
         if kwargs:
             print(f"[LSTM1D_V2] Ignored kwargs: {list(kwargs.keys())}")
 
-        # ===== 保存架构参数（meta 用）=====
+        # ===== Save architecture params (for meta) =====
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -58,12 +58,12 @@ class LSTM1D_V2(BaseTimeSeriesModel):
 
         lstm_out_dim = hidden_size * 2 if bidirectional else hidden_size
 
-        # ===== 强正则化分类头 =====
+        # ===== Strongly-regularized classifier head =====
         self.classifier = nn.Sequential(
             nn.Linear(lstm_out_dim, hidden_size),
-            nn.BatchNorm1d(hidden_size),   # 🔥 稳定分布
+            nn.BatchNorm1d(hidden_size),   # 🔥 Stabilize distribution
             nn.ReLU(),
-            nn.Dropout(p_drop),            # 🔥 强正则
+            nn.Dropout(p_drop),            # 🔥 Strong regularization
             nn.Linear(hidden_size, n_classes),
         )
 
@@ -105,7 +105,7 @@ class LSTM1D_V2(BaseTimeSeriesModel):
     def build_from_meta(cls, meta: dict, state: dict, device):
         """
         Rebuild model from meta + checkpoint.
-        推理阶段关闭 dropout。
+        Disable dropout for inference/backtest.
         """
         model = cls(
             input_size=meta["input_size"],
@@ -113,7 +113,7 @@ class LSTM1D_V2(BaseTimeSeriesModel):
             num_layers=meta["lstm_layers"],
             n_classes=len(meta["classes"]),
             bidirectional=meta["bidirectional"],
-            p_drop=0.0,   # 🔥 推理 / 回测时关闭正则
+            p_drop=0.0,   # 🔥 Disable regularization for inference/backtest
         )
 
         model.load_state_dict(state["state_dict"])

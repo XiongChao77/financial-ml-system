@@ -29,8 +29,9 @@ def ms_to_seconds(s):
 
 def get_base_interval_seconds(intervals: list[int]) -> int:
     """
-    输入: ['5m', '15m', '1h']
-    输出: 300 (秒)
+    Example:
+        Input:  ['5m', '15m', '1h'] in milliseconds
+        Output: 300 (seconds)
     """
     seconds_list = [ms_to_seconds(i) for i in intervals]
     # 计算所有秒数的最大公约数 (Greatest Common Divisor)
@@ -58,7 +59,7 @@ from typing import Dict, List
 
 @dataclass
 class WindowConfig:
-    # key 为 window size (int), value 为特征列表
+    # key is window size (int), value is feature list
     items: Dict[int, List[str]] = field(default_factory=dict)
     data_feed: Optional[BinanceDataFeed] = None
     factory: Optional[FeatureFactory] = None
@@ -73,21 +74,21 @@ class WindowConfig:
 
 @dataclass
 class IntervalConfig:
-    # key 为 interval (如 '5m'), value 为 WindowConfig 对象
+    # key is interval string (e.g. '5m'), value is WindowConfig
     intervals: Dict[str, WindowConfig] = field(default_factory=dict)
 
 @dataclass
 class SymbolRegistry:
-    # key 为 symbol (如 'BTCUSDT'), value 为 IntervalConfig 对象
+    # key is symbol (e.g. 'BTCUSDT'), value is IntervalConfig
     symbols: Dict[str, IntervalConfig] = field(default_factory=dict)
 
 @dataclass
 class TradingConfig:
-    # key 为 interval (如 '5m'), value 为 WindowConfig 对象
+    # key is trading type, value is SymbolRegistry
     trading_type: Dict[str, SymbolRegistry] = field(default_factory=dict)
 
 # ============================================================
-# 数据中心与推理机
+# Data center and inference engine
 # ============================================================
 class MasterController:
     def __init__(self, strategy_path,debug = True):
@@ -193,8 +194,8 @@ class MasterController:
                 atr=atr,
                 slow_atr=None, vol_regime=None
             )
-            strategy.brain.decide(state)
-            self.logger.info(f"🧠 {strategy.strategy_hash} {strategy.pre_para.symbol} Decided: Signal={pred} | Price={current_price}")
+            action = strategy.brain.decide(state)
+            self.logger.info(f"🧠 {strategy.strategy_hash} {strategy.pre_para.symbol} Decided: Signal={pred} | Price={current_price} | action {action.action}")
         except Exception as e:
             self.logger.error(f"Error in execute strategy {strategy.strategy_hash} {strategy.pre_para.symbol} {strategy.pre_para.interval}: {e}")
 

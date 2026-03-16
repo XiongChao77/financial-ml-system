@@ -10,16 +10,15 @@ from data_process import common
 
 def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine(), prep_output_dir =common.DATA_OUT_DIR ):
     file = os.path.join(common.PROJECT_DATA_DIR, para.trading_type ,f"{para.symbol}_{para.interval}.csv")
-    # 1. 获取周期字符串并转为毫秒
+    # 1. Convert interval string to milliseconds
     interval_ms = common.get_interval_ms(para.interval)
     
     df = pd.read_csv(file)
-    #成交量等为0的数据对价格不会有任何影响，因此去掉不会影响训练和测试;
-    #在真实场景下确实有成交量为0的数据.还是选择保留
-    #特征处理特别要主要成交量为0的情况。
+    # Rows with volume==0 typically have little impact on price; dropping them often won't hurt training/testing.
+    # In real feeds, volume==0 can exist; keep them by default.
+    # Feature processing must handle volume==0 explicitly.
     df = common.clean_data_quality_auto(df,logger)  
-    # 3. 将 interval_ms 传入 label 逻辑
-    # 这样 v2 逻辑就能根据实际的时间跨度来调整波动率计算窗口了
+    # 3. Pass interval_ms into labeling logic so it can adapt its volatility window to the real time span.
     label_col = 'label'
     function =1
     if function==0:
@@ -30,11 +29,11 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_sma_7_25_crossover_label(df, interval_ms=interval_ms)
     elif function==1 :
-        # 4. 执行分析
+        # 4. Run analysis
         from data_process.regime_discovery import LabelRegimeAnalyzer
         analyzer = LabelRegimeAnalyzer(df, interval_ms, para)
         
-        # 定义更精细的步长以捕捉梯度变化
+        # Define a finer grid to capture gradients
         vol_range = np.arange(0.5, 3.1, 0.1).round(1)   #not include 3.1
         stop_range = [0.1,0.15,0.2,0.25,0.3,0.35,0.4]#[10000]  #np.arange(100, 100.1, 0.1).round(1)   #not include 1.6
         
@@ -47,22 +46,22 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     else:
         def generate_strict_consensus_label(df, label_prefix='label_v'):
             """
-            Dissertation Logic: 极致严格的标签交集。
-            - 所有列均为 Positive -> Signal.POSITIVE (2)
-            - 所有列均为 Negative -> Signal.NEGATIVE (0)
-            - 所有列均为 Neutral  -> Signal.NEUTRAL (1)
-            - 其余所有情况（方向不一或由趋势转震荡） -> Signal.INVALID (-1)
+            Dissertation logic: extremely strict label consensus.
+            - All columns Positive -> Signal.POSITIVE (2)
+            - All columns Negative -> Signal.NEGATIVE (0)
+            - All columns Neutral  -> Signal.NEUTRAL (1)
+            - Otherwise (mixed directions or trend-to-range transitions) -> Signal.INVALID (-1)
             """
             label_cols = [c for c in df.columns if c.startswith(label_prefix)]
             if not label_cols:
                 return df
 
-            # 检查每一行是否所有标签列的值都完全相同
-            # .nunique(axis=1) == 1 表示这一行所有的 label_vXX 都指向同一个结果
+            # Check whether all label columns agree on each row.
+            # .nunique(axis=1) == 1 means all label_vXX columns point to the same outcome.
             is_unanimous = df[label_cols].nunique(axis=1) == 1
             df[label_col] = common.Signal.INVALID
             
-            # 只有达成“全体一致”的行，才继承它们共同的标签值 (0, 1, 或 2)
+            # Only rows with full consensus inherit the shared label value (0, 1, or 2).
             df.loc[is_unanimous, label_col] = df.loc[is_unanimous, label_cols[0]]
             
             return df
@@ -73,35 +72,35 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
             para.stop_multiplier_rate_short = None
             label_suffix = f"v{int(round(v_range * 10)):02d}"
             df = common.attach_label(df, para=para, label_col=f'label_{label_suffix}')
-                # 在你的循环结束后调用
+                # Call after the loop finishes
         df = generate_strict_consensus_label(df)
 
-    # ---------------- 统计输出 ----------------
+    # ---------------- Summary statistics ----------------
     start_time = df['open_time_date_utc'].iloc[0]
     end_time = df['open_time_date_utc'].iloc[-1]
     duration = pd.to_datetime(end_time) - pd.to_datetime(start_time)
-    logger.info(f"时间跨度: {start_time} 至 {end_time} (共计 {duration})")
+    logger.info(f"Time span: {start_time} -> {end_time} (total: {duration})")
     counts = df[label_col].value_counts().sort_index()
     proportions = df[label_col].value_counts(normalize=True).sort_index()
     
-    logger.info("\n=== 动态标签分布统计 ===")
-    logger.info(f"阈值已保存至列: 'threshold'")
-    logger.info(f"阈值范围: Min={df['threshold_long'].min():.4f}, Max={df['threshold_long'].max():.4f}, Mean={df['threshold_long'].mean():.4f}")
-    logger.info(f"阈值范围: Min={df['threshold_short'].min():.4f}, Max={df['threshold_short'].max():.4f}, Mean={df['threshold_short'].mean():.4f}")
+    logger.info("\n=== Dynamic label distribution summary ===")
+    logger.info("Thresholds are saved in columns: 'threshold_long' and 'threshold_short'")
+    logger.info(f"Long threshold range: Min={df['threshold_long'].min():.4f}, Max={df['threshold_long'].max():.4f}, Mean={df['threshold_long'].mean():.4f}")
+    logger.info(f"Short threshold range: Min={df['threshold_short'].min():.4f}, Max={df['threshold_short'].max():.4f}, Mean={df['threshold_short'].mean():.4f}")
     
     for label_val, cnt in counts.items():
-        label_name = "下跌" if label_val == 0 else ("上涨" if label_val == 2 else ("震荡" if label_val == 1 else "INVALID" ))
+        label_name = "Down" if label_val == 0 else ("Up" if label_val == 2 else ("Range" if label_val == 1 else "INVALID"))
         pct_val = proportions[label_val]
-        logger.info(f"Label {label_val} ({label_name}): {cnt} 个, 占比 {pct_val:.4%}")
+        logger.info(f"Label {label_val} ({label_name}): {cnt} rows, ratio {pct_val:.4%}")
     logger.info("==========================\n")
     
     # ---------------------------------------------------------
-    # 3. 划分数据并保存
+    # 3. Split and persist datasets
     # ---------------------------------------------------------
     split_ts = pd.to_datetime(df['open_time_date_utc'].iloc[-1]) - pd.DateOffset(months=6)
     train_df, test_df = df[df['open_time_date_utc'] < str(split_ts)], df[df['open_time_date_utc'] >= str(split_ts)]
 
-    # 统一写入 para.prep_output_dir（默认 common.DATA_OUT_DIR，batch 多进程时为独立目录）
+    # Write to prep_output_dir (default common.DATA_OUT_DIR; independent per batch worker)
     out_dir = prep_output_dir
     os.makedirs(out_dir, exist_ok=True)
     common.save_train_df_to_dir(train_df, out_dir)
@@ -112,9 +111,9 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     with open(meta_path, 'w', encoding='utf-8') as f:
         json.dump(safe_para, f, indent=4, ensure_ascii=False)
 
-    logger.info(f"✅ 数据处理完成！")
-    logger.info(f"📍 周期识别: {para.interval}")
-    logger.info(f"📍 配置已写入: {meta_path}")
+    logger.info("✅ Data preparation completed.")
+    logger.info(f"📍 Interval: {para.interval}")
+    logger.info(f"📍 Config written to: {meta_path}")
 
 
 if __name__ == "__main__":
@@ -127,18 +126,18 @@ if __name__ == "__main__":
     para.trading_type = "um"
     para.version = 0
 
-    # 窗口与预测参数
+    # Window and prediction parameters
     para.candlestick_num = 48
     para.predict_num = 24
 
-    # 波动率平滑参数
-    para.vol_ewma_span = 100  # 优先采用你赋值的 100
+    # Volatility smoothing parameter
+    para.vol_ewma_span = 100  # prefer the explicitly set value 100
 
-    # 做多 (Long) 标签参数
+    # Long-side label parameters
     para.vol_multiplier_long = 1.9
     para.stop_multiplier_rate_long = 0.2
 
-    # 做空 (Short) 标签参数
+    # Short-side label parameters
     para.vol_multiplier_short = 1.9
     para.stop_multiplier_rate_short = 0.2
     # para.candlestick_num =96

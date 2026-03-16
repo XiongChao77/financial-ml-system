@@ -20,14 +20,14 @@ class BaseTaskStrategy(ABC):
     def get_model_out_dim(self) -> int: pass
 
     def log_warmup_info(self, i, yb):
-        """可选：打印任务特定的 Batch 分布信息"""
-        pass # 默认不执行任何操作
+        """Optional: print task-specific batch distribution info."""
+        pass  # No-op by default
 
     def filter_data(self, X, y):
-        """可选：过滤数据集。默认返回全部。"""
+        """Optional: filter dataset. Default returns all."""
         return X, y
 
     @abstractmethod
     def call_model(self, model, xb, train_mode=True):
-        """根据任务类型决定如何调用 model 的 forward"""
+        """Call model.forward based on task type."""
         pass

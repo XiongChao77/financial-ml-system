@@ -5,41 +5,41 @@ import pandas as pd
 import time
 from typing import List, Dict, Any
 
-# 假设您的训练脚本路径
+# Training script path
 TRAIN_SCRIPT = 'model/cnn_timeseries_torch.py'
 
 # =======================================================
-# 1. 定义实验配置列表
+# 1. Define experiment configs
 # =======================================================
 EXPERIMENTS = [
-    # 实验 A: 当前稳定配置 (Batch Size 256)
+    # Experiment A: current stable config (Batch Size 256)
     {'name': 'Exp_A_BS256_D03', 'batch_size': 256, 'dropout': 0.3, 'lr': 3e-4, 'epochs': 25, 'comment': 'Base Config'},
     
-    # 实验 B: 减小 Batch Size (增加正则化/泛化能力)
+    # Experiment B: smaller batch size (more regularization/generalization)
     {'name': 'Exp_B_BS128_D03', 'batch_size': 128, 'dropout': 0.3, 'lr': 3e-4, 'epochs': 30, 'comment': 'Smaller Batch Size'},
     
-    # 实验 C: 增加正则化 (高 Dropout)
+    # Experiment C: higher regularization (higher dropout)
     {'name': 'Exp_C_BS256_D05', 'batch_size': 256, 'dropout': 0.5, 'lr': 3e-4, 'epochs': 30, 'comment': 'Higher Dropout'},
 ]
 
 # =======================================================
-# 2. 辅助函数：解析训练结果
+# 2. Helper: parse training metrics
 # =======================================================
 def parse_metrics(output: str) -> Dict[str, Any]:
-    """从训练输出中提取关键指标，如 Macro F1 和 Accuracy"""
+    """Extract key metrics from training output (e.g., Macro F1 and Accuracy)."""
     metrics = {'macro_f1': None, 'accuracy': None}
 
-    # 1. 提取 Macro F1 Score
+    # 1. Extract Macro F1
     f1_match = re.search(r'Test macro-F1:([\d\.]+)', output)
     if f1_match:
         metrics['macro_f1'] = float(f1_match.group(1))
 
-    # 2. 提取 Accuracy
+    # 2. Extract Accuracy
     acc_match = re.search(r'accuracy\s+([\d\.]+)', output)
     if acc_match:
         metrics['accuracy'] = float(acc_match.group(1))
 
-    # 3. 提取最终的 va_loss (作为早停性能指标)
+    # 3. Extract final va_loss (used as early-stopping indicator)
     va_loss_match = re.search(r'va_loss\s+([\d\.]+)\s+\|\s+va_macroF1\s+([\d\.]+)', output.split('Early stopping.')[0].split('\n')[-2])
     if va_loss_match:
         metrics['best_val_loss'] = float(va_loss_match.group(1))
@@ -47,7 +47,7 @@ def parse_metrics(output: str) -> Dict[str, Any]:
     return metrics
 
 # =======================================================
-# 3. 核心执行函数
+# 3. Core runner
 # =======================================================
 def run_experiment_suite(experiments: List[Dict[str, Any]]):
     results = []
@@ -60,7 +60,7 @@ def run_experiment_suite(experiments: List[Dict[str, Any]]):
         
         start_time = time.time()
         
-        # 构造命令行参数
+        # Build CLI args
         cmd = [
             'python', TRAIN_SCRIPT,
             f"--batch_size={config['batch_size']}",
@@ -70,14 +70,14 @@ def run_experiment_suite(experiments: List[Dict[str, Any]]):
         ]
         
         try:
-            # 执行训练脚本并捕获输出
+            # Run training script and capture output
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             output = result.stdout
             
-            # 解析结果
+            # Parse results
             metrics = parse_metrics(output)
             
-            # 记录结果
+            # Record results
             run_time = time.time() - start_time
             result_entry = {
                 'Experiment': config['name'],
@@ -95,16 +95,16 @@ def run_experiment_suite(experiments: List[Dict[str, Any]]):
             
         except subprocess.CalledProcessError as e:
             print(f"\n[ERROR] Experiment {config['name']} FAILED.")
-            print(f"Stdout:\n{e.stdout[-1000:]}") # 打印最后的 stdout 帮助调试
+            print(f"Stdout:\n{e.stdout[-1000:]}")  # Print tail stdout for debugging
             print(f"Stderr:\n{e.stderr}")
-            # 记录失败结果
+            # Record failure
             results.append({'Experiment': config['name'], 'Status': 'FAILED', 'Batch_Size': config['batch_size'], 'Dropout': config['dropout']})
             
         except FileNotFoundError:
              print(f"\n[FATAL ERROR] Training script not found at {TRAIN_SCRIPT}. Please check the path.")
              break
 
-    # 4. 保存最终结果
+    # 4. Save final results
     if results:
         df_results = pd.DataFrame(results)
         output_file = f"experiment_results_{int(time.time())}.csv"
@@ -113,7 +113,7 @@ def run_experiment_suite(experiments: List[Dict[str, Any]]):
 
 
 if __name__ == '__main__':
-    # 确保依赖库已安装 (pandas)
+    # Ensure dependency is installed (pandas)
     try:
         import pandas as pd
     except ImportError:

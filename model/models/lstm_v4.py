@@ -227,12 +227,12 @@ class LSTM1D_V4(BaseTimeSeriesModel):
 
     def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused=False) -> torch.Tensor:
         """
-         增加 return_fused 参数，支持直接输出三分类指令
+        Add return_fused support for directly outputting 3-class actions.
         """
         B, T, F = x.shape
         assert F == self.input_size
 
-        # ----- 基础骨干网络 (与 V4 原版一致) -----
+        # ----- Backbone (same as original V4) -----
         x = self.in_norm(x)
         x = self.in_proj(x)
         x = self.in_locked(x)
@@ -249,7 +249,7 @@ class LSTM1D_V4(BaseTimeSeriesModel):
 
         out = self.out_locked(out)
 
-        # ----- Readout 逻辑 -----
+        # ----- Readout logic -----
         if self.readout == "last":
             feat = self._readout_last(h_n)
         elif self.readout == "attn":
@@ -275,7 +275,7 @@ class LSTM1D_V4(BaseTimeSeriesModel):
 
         feat = self.norm(feat)
 
-        #  修改点 2：计算分层 Logits
+        # Change 2: compute hierarchical logits
         logits_trig = self.head_trigger(feat)    # [B, 2]
         logits_dir = self.head_direction(feat)  # [B, 2]
 
@@ -283,7 +283,7 @@ class LSTM1D_V4(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        #  修改点 3：固化的融合逻辑 (支持 predict)
+        # Change 3: fixed fusion logic (for predict)
         if return_fused:
             p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
             p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
@@ -293,7 +293,7 @@ class LSTM1D_V4(BaseTimeSeriesModel):
             p_short   = p_act * p_dir[:, 0]
             p_long    = p_act * p_dir[:, 1]
             
-            # 拼接成 3 分类顺序: [Short(0), Neutral(1), Long(2)]
+            # Order: [Short(0), Neutral(1), Long(2)]
             fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
             fused_preds = torch.argmax(fused_probs, dim=1)
             

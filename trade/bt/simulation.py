@@ -13,7 +13,7 @@ from typing import Optional
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..",'..'))
 
-# 引入自定义模块
+# Import project modules
 from data_process.common import *
 from data_process import common 
 from model import model_loader
@@ -48,14 +48,14 @@ class PandasDataWithPred(bt.feeds.PandasData):
 
 def log_parameters(params_obj, logger):
     """
-    自适应获取参数并按 4 个一组格式化打印
+    Inspect an arbitrary params object and log all attributes in groups of 4.
     """
-    # 1. 过滤掉 Python 内置的 __xx__ 属性和方法 (callable)
-    # 这样无论参数定义在 __init__ 内还是类级别都能获取到
+    # 1. Filter out Python internal __xx__ attributes and methods (callables).
+    #    This works whether parameters are defined in __init__ or on the class.
     all_keys = [k for k in dir(params_obj) 
                 if not k.startswith('__') and not callable(getattr(params_obj, k))]
     
-    # 2. 按照名称排序（可选，方便在日志中快速定位）
+    # 2. Optionally sort by name for easier inspection
     # all_keys.sort() 
 
     items_per_line = 4
@@ -63,8 +63,7 @@ def log_parameters(params_obj, logger):
     for i in range(0, len(all_keys), items_per_line):
         chunk_keys = all_keys[i : i + items_per_line]
         
-        # 3. 构造 "key: value" 字符串组
-        # 使用 getattr 安全获取值
+        # 3. Build \"key: value\" strings using getattr for safety
         para_parts = []
         for k in chunk_keys:
             val = getattr(params_obj, k)
@@ -72,7 +71,7 @@ def log_parameters(params_obj, logger):
             
         para_str = " | ".join(para_parts)
         
-        # 4. 打印，确保 "Para" 后面的空格与你的 SUMMARY/EXPOSURE 对齐
+        # 4. Log with a prefix aligned with SUMMARY/EXPOSURE sections
         logger(f"Para    | {para_str}")
 
 @dataclass
@@ -96,7 +95,7 @@ class StrategyPara:
     trade_risk: float = 0.4
     max_daily_loss_pct: float = 0.04
 
-#period: short/forward/long
+# period: short / forward / long
 def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
          device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'short'):
     logger.info(f"prep_output_dir:{prep_output_dir}, train_output_dir:{train_output_dir}")
@@ -105,11 +104,11 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
         recent_month = 2
         split_ts = pd.to_datetime(df['open_time_date_utc'].iloc[-1]) - pd.DateOffset(months=recent_month)
         if period == 'forward':
-            # 盘前测试：取最近 2 个月
+            # Forward test: use last 2 months
             df = df[df['open_time_date_utc'] >= str(split_ts)]
-            logger.info(f"🚀 Using forward period (Recent {recent_month} months) from {str(split_ts)[:10]}")
+            logger.info(f"🚀 Using forward period (recent {recent_month} months) from {str(split_ts)[:10]}")
         elif period == 'short':
-            # Short 测试：排除最近 2 个月
+            # Short test: exclude last 2 months
             df = df[df['open_time_date_utc'] < str(split_ts)]
             logger.info(f"📊 Using short period (Prior to {str(split_ts)[:10]})")
     else:

@@ -5,7 +5,7 @@ from model.models.model_base import BaseTimeSeriesModel
 
 
 # ============================================================
-# Positional Encoding (组件，不是模型)
+# Positional Encoding (component, not the model)
 # ============================================================
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000, dropout=0.1):
@@ -44,7 +44,7 @@ class Transformer1D_V1(BaseTimeSeriesModel):
     MODEL_TYPE = "transformer"
     MODEL_VERSION = 1
 
-    supports_lengths = False  # 当前实现不支持变长
+    supports_lengths = False  # Current implementation does not support variable lengths
 
     def __init__(
         self,
@@ -63,7 +63,7 @@ class Transformer1D_V1(BaseTimeSeriesModel):
         if kwargs:
             print(f"[Transformer1D_V1] Ignored kwargs: {list(kwargs.keys())}")
 
-        # ===== 保存架构参数（meta 用）=====
+        # ===== Save architecture params (for meta) =====
         self.input_size = input_size
         self.n_classes = n_classes
         self.d_model = d_model
@@ -139,7 +139,7 @@ class Transformer1D_V1(BaseTimeSeriesModel):
     def build_from_meta(cls, meta: dict, state: dict, device):
         """
         Rebuild model from meta + checkpoint.
-        推理阶段不会再启用 dropout 的随机性（eval 模式）。
+        In inference, dropout randomness is disabled (eval mode).
         """
         model = cls(
             input_size=meta["input_size"],

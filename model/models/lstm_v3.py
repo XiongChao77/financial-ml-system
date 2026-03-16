@@ -99,12 +99,12 @@ class LSTM1D_V3(BaseTimeSeriesModel):
         self.norm = nn.LayerNorm(feat_dim)
 
         if head == "linear":
-            # 任务 A: Trigger (是否有信号) -> [Hold, Action]
+            # Task A: Trigger (signal present?) -> [Hold, Action]
             self.head_trigger = nn.Sequential(
                 nn.Dropout(head_dropout),
                 nn.Linear(feat_dim, 2)
             )
-            # 任务 B: Direction (信号方向) -> [Short, Long]
+            # Task B: Direction (signal direction) -> [Short, Long]
             self.head_direction = nn.Sequential(
                 nn.Dropout(head_dropout),
                 nn.Linear(feat_dim, 2)
@@ -178,7 +178,7 @@ class LSTM1D_V3(BaseTimeSeriesModel):
 
         feat = self.norm(feat)
 
-        #  修改点 2：分别计算双头 Logits
+        # Change 2: compute dual-head logits separately
         logits_trig = self.head_trigger(feat)    # [B, 2]
         logits_dir = self.head_direction(feat)  # [B, 2]
 
@@ -186,13 +186,13 @@ class LSTM1D_V3(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        #  修改点 3：增加概率融合逻辑 (Hierarchical Fusion)
+        # Change 3: hierarchical probability fusion
         if return_fused:
-            # 计算各头概率 (Softmax)
+            # Compute per-head probabilities (softmax)
             p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
             p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
             
-            # 合成 3 类概率
+            # Compose 3-class probabilities
             # Class 1 (Neutral) = p_hold
             # Class 0 (Short)   = p_act * p_short_in_act
             # Class 2 (Long)    = p_act * p_long_in_act
@@ -201,7 +201,7 @@ class LSTM1D_V3(BaseTimeSeriesModel):
             p_short   = p_act * p_dir[:, 0]
             p_long    = p_act * p_dir[:, 1]
             
-            # 拼接顺序: [Short(0), Neutral(1), Long(2)]
+            # Order: [Short(0), Neutral(1), Long(2)]
             fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
             fused_preds = torch.argmax(fused_probs, dim=1)
             
