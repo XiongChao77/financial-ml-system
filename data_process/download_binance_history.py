@@ -12,13 +12,13 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import islice
 
-# 保持原有的 current_work_dir 逻辑
+# Keep the original current_work_dir logic
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir, '..'))
 try:
     from common import PROJECT_DATA_DIR
 except ImportError:
-    # 如果找不到 common 模块，默认使用当前目录下的 data 文件夹
+    # If common module isn't found, default to a local data folder
     PROJECT_DATA_DIR = os.path.join(current_work_dir, "data")
 
 # Configuration
@@ -36,7 +36,7 @@ OUTPUT_COLUMNS = [
     "taker_buy_base_volume", "taker_buy_quote_volume"
 ]
 
-# --- 辅助函数 (保持不变) ---
+# --- Helper functions (unchanged) ---
 def parse_date_to_ms(date_str: str) -> int:
     if not date_str: return 0
     for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
@@ -56,7 +56,7 @@ def interval_to_ms(interval: str) -> int:
 def ms_to_dt(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-# --- 频率限制控制器 (保持不变) ---
+# --- Rate limit guard (unchanged) ---
 class RateLimitGuard:
     def __init__(self):
         self.lock = threading.Lock()
@@ -69,7 +69,7 @@ class RateLimitGuard:
             if weight > SAFE_WEIGHT_LIMIT:
                 with self.lock:
                     if self.pause_event.is_set():
-                        print(f"\n⚠️ [RATE LIMIT] Weight {weight}/6000. Pausing 30s...")
+                        print(f"\n⚠️ [RATE LIMIT] Weight {weight}/6000. Pausing for 30s...")
                         self.pause_event.clear()
                         threading.Timer(30.0, self.resume).start()
         except: pass
@@ -81,7 +81,7 @@ class RateLimitGuard:
     def wait_if_needed(self):
         self.pause_event.wait()
 
-# --- 下载核心类 (保持不变) ---
+# --- Core downloader class (unchanged) ---
 class BinanceDownloader:
     def __init__(self, symbol, interval, out_dir):
         self.symbol = symbol.upper()
@@ -118,7 +118,7 @@ class BinanceDownloader:
     def download_range_generator(self, writer, start_ms, end_ms, desc="Downloading"):
         if start_ms >= end_ms: return
         
-        # 初始定位
+        # Initial positioning
         if start_ms == 0:
             _, data = self.fetch_chunk(0, end_ms)
             if not data: return
@@ -126,7 +126,7 @@ class BinanceDownloader:
             writer.writerows([self.format_kline_row(k) for k in data])
             if start_ms >= end_ms: return
 
-        # 分块任务生成
+        # Build chunk tasks
         chunk_tasks = []
         curr = start_ms
         while curr < end_ms:
@@ -134,7 +134,7 @@ class BinanceDownloader:
             chunk_tasks.append([curr, nxt])
             curr = nxt + self.interval_ms
 
-        # 批量执行
+        # Execute in batches
         for i in range(0, len(chunk_tasks), MAX_BATCH_SIZE):
             batch = chunk_tasks[i:i+MAX_BATCH_SIZE]
             batch_rows = []
@@ -144,7 +144,7 @@ class BinanceDownloader:
                     _, data = f.result()
                     if data: batch_rows.extend([self.format_kline_row(k) for k in data])
             
-            # 排序与去重
+            # Sort and de-duplicate
             batch_rows = sorted(list({tuple(r): r for r in batch_rows}.values()), key=lambda x: x[0])
             writer.writerows(batch_rows)
             print(f"      ... {desc} Progress: {min(100, (i+len(batch))/len(chunk_tasks)*100):.1f}%", end='\r')
@@ -163,7 +163,7 @@ class BinanceDownloader:
                 self.download_range_generator(writer, start_ms, now, desc="Initial")
             return
 
-        # 检查断档 (Gap Check)
+        # Gap check
         gaps, last_valid = [], None
         with open(self.csv_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f); next(reader)
@@ -193,13 +193,13 @@ class BinanceDownloader:
             shutil.move(temp_csv, self.csv_path)
             print(f"\n✨ {self.symbol}_{self.interval} done!")
 
-# --- 修改后的入口函数 ---
+# --- Entry point ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Binance Batch Downloader")
-    # 支持多个币种，用空格隔开
+    # Multiple symbols separated by spaces
     parser.add_argument("--symbols", nargs='+', default=["DOGEUSDT"], 
                         help="List of symbols: BTCUSDT ETHUSDT ...")    #BTCUSDT  ETHUSDT  DOGEUSDT SOLUSDT BNBUSDT TRXUSDT XRPUSDT  SUIUSDT ADAUSDT
-    # 支持多个时间间隔，用空格隔开
+    # Multiple intervals separated by spaces
     parser.add_argument("--intervals", nargs='+', default=["15m"], 
                         help="List of intervals: 1m 1h 1d ...")
     parser.add_argument("--dir", default=PROJECT_DATA_DIR)
@@ -210,7 +210,7 @@ if __name__ == "__main__":
     
     os.makedirs(args.dir, exist_ok=True)
 
-    # 嵌套循环处理配置列表
+    # Nested loops over the configuration lists
     total_tasks = len(args.symbols) * len(args.intervals)
     current_task = 0
 

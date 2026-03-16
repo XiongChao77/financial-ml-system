@@ -10,7 +10,7 @@ import seaborn as sns
 from pathlib import Path
 from scipy.ndimage import uniform_filter
 
-# --- 配置 ---
+# --- Configuration ---
 EPS = 1e-9
 
 def smart_format(x):
@@ -22,18 +22,18 @@ def smart_format(x):
         return f"{x:.3f}"
 
 def recursive_get(data, target_key):
-    # 1. 如果直接就是字典，先看当前层有没有
+    # 1. If it's a dict, first check current level
     if isinstance(data, dict):
         if target_key in data:
             return data[target_key]
         
-        # 2. 当前层没有，则“展开”字典，递归进入每一个 Value 查找
+        # 2. If not found, recursively search each value
         for k, v in data.items():
             res = recursive_get(v, target_key)
             if res is not None:
                 return res
                 
-    # 3. 如果遇到列表（量化回测中常见的参数组合列表），也“展开”它
+    # 3. If it's a list (common for backtest parameter combinations), recurse into each item
     elif isinstance(data, list):
         for item in data:
             res = recursive_get(item, target_key)
@@ -43,16 +43,16 @@ def recursive_get(data, target_key):
     return None
 
 def load_and_process(path: Path, period: str = 'short') -> pd.DataFrame:
-    """带调试输出的数据加载函数"""
+    """Data loading function with debug output"""
     try:
-        # 1. 检查文件是否存在
+        # 1. Check if file exists
         if not path.exists():
             print(f"❌ Error: File not found at {path}")
             return pd.DataFrame()
 
         df_raw = pd.read_json(path, lines=True)
         
-        # 2. 调试：打印原始列名
+        # 2. Debug: print raw column names
         print(f"\n--- Debug: {period.upper()} Period Parsing ---")
         print(f"Raw Columns Found: {df_raw.columns.tolist()}")
 
@@ -60,7 +60,7 @@ def load_and_process(path: Path, period: str = 'short') -> pd.DataFrame:
             print(f"❌ Error: Period '{period}' not in JSON columns!")
             return pd.DataFrame()
 
-        # 3. 调试：采样第一行数据结构
+        # 3. Debug: sample first row structure
         sample_row = df_raw[period].iloc[0]
         if isinstance(sample_row, dict):
             print(f"Sample keys in '{period}': {list(sample_row.keys())}")
@@ -85,10 +85,10 @@ def load_and_process(path: Path, period: str = 'short') -> pd.DataFrame:
                 }
                 return res
             except Exception as e:
-                # 只有在真正报错时才打印，避免刷屏
+                # Only print when there is a real error to avoid flooding logs
                 return None
 
-        # 4. 转换并过滤
+        # 4. Transform and filter
         processed_list = [item for item in df_raw.apply(extract_data, axis=1) if item]
         df_final = pd.DataFrame(processed_list)
         df_final = df_final[df_final["holdbar"] == 24]#[20, 24 ,28, 32,36]
@@ -97,13 +97,13 @@ def load_and_process(path: Path, period: str = 'short') -> pd.DataFrame:
         # 5. 调试：检查最终 DataFrame 内容
         if not df_final.empty:
             print(f"✅ Success: Loaded {len(df_final)} rows for {period}")
-            # 检查关键字段是否有全是 NaN 的情况
+            # Check if key fields are all NaN
             nan_counts = df_final[['flip_penalty', 'miss_penalty', 'cagr']].isna().sum()
             if nan_counts.any():
                 print(f"⚠️ Warning: Missing values found:\n{nan_counts}")
             print(f"Data Preview:\n{df_final[['flip_penalty', 'miss_penalty', 'cagr']].head(3)}")
         else:
-            print(f"❌ Error: DataFrame is empty after extraction. Check your key paths in recursive_get.")
+            print("❌ Error: DataFrame is empty after extraction. Check your key paths in recursive_get.")
 
         return df_final
 
@@ -115,15 +115,15 @@ def load_and_process(path: Path, period: str = 'short') -> pd.DataFrame:
 
 def calculate_robustness(pivot_df: pd.DataFrame):
     """
-    计算鲁棒性得分：当前格子与周围邻域的均值。
-    能够有效识别“参数高原”，避开“参数孤岛”。
+    Compute robustness score: mean of current cell and its neighborhood.
+    Helps identify parameter plateaus and avoid isolated spikes.
     """
     if pivot_df.empty:
         print("⚠️ Warning: Empty DataFrame passed to calculate_robustness.")
         return pd.DataFrame()
 
     data = pivot_df.values
-    # 使用 3x3 窗口进行平滑处理
+    # Use a 3x3 window for smoothing
     try:
         smoothed = uniform_filter(data, size=3, mode='constant', cval=np.nanmin(data))
         return pd.DataFrame(smoothed, index=pivot_df.index, columns=pivot_df.columns)
@@ -133,13 +133,13 @@ def calculate_robustness(pivot_df: pd.DataFrame):
 
 def plot_enhanced_heatmaps(df: pd.DataFrame, metric: str, outdir: Path, period: str = 'short'):
     """
-    为每个指标生成三个维度的热力图：Mean, Max, Robustness
+    Generate three heatmaps for each metric: Mean, Max, Robustness
     """
-    # 准备三种聚合数据
+    # Prepare three aggregated datasets
     p_mean = df.groupby(["flip_penalty", "miss_penalty"])[metric].mean().unstack()
     p_max  = df.groupby(["flip_penalty", "miss_penalty"])[metric].max().unstack()
     
-    # 如果数据全是 NaN，直接跳过绘制，避免报错
+    # If all data is NaN, skip plotting to avoid errors
     if p_mean.isna().all().all():
         print(f"⚠️ Skipping {metric} for {period}: All values are NaN.")
         return
@@ -152,11 +152,11 @@ def plot_enhanced_heatmaps(df: pd.DataFrame, metric: str, outdir: Path, period: 
         "robust": f"{metric.upper()} - Robustness"
     }
     
-    n_rows, n_cols = p_mean.shape   # 任意一个数据即可
+    n_rows, n_cols = p_mean.shape   # Any one dataset is enough
 
-    cell_size = 0.8  # 👈 每个格子的大小（英寸）
+    cell_size = 0.8  # 👈 Size of each cell (inches)
 
-    fig_width  = n_cols * cell_size * 3   # 因为有3张图
+    fig_width  = n_cols * cell_size * 3   # Three plots horizontally
     fig_height = n_rows * cell_size
 
     fig, axes = plt.subplots(1, 3, figsize=(fig_width, fig_height))
@@ -165,7 +165,7 @@ def plot_enhanced_heatmaps(df: pd.DataFrame, metric: str, outdir: Path, period: 
     sub_types = ["mean", "max", "robust"]
 
     for ax, data, stype in zip(axes, datasets, sub_types):
-        # 再次检查子集是否全为空
+        # Double-check subset is not entirely empty
         if data.isna().all().all():
             ax.set_title(f"{titles[stype]} (No Data)")
             continue
@@ -175,7 +175,7 @@ def plot_enhanced_heatmaps(df: pd.DataFrame, metric: str, outdir: Path, period: 
                     linewidths=0.5, cbar_kws={'shrink': 0.8},center=0,)
         ax.set_title(titles[stype], fontsize=14, fontweight='bold')
         
-        # --- 核心修复：只有在不是全 NaN 的情况下才计算 argmax ---
+        # --- Core fix: only compute argmax when not all values are NaN ---
         try:
             if not np.isnan(data.values).all():
                 max_idx = np.unravel_index(np.nanargmax(data.values), data.shape)
@@ -190,12 +190,12 @@ def plot_enhanced_heatmaps(df: pd.DataFrame, metric: str, outdir: Path, period: 
     plt.close()
 
 def save_detailed_stats(df: pd.DataFrame, outdir: Path, period: str = 'short'):
-    """生成更详细的统计 CSV
-    
+    """Generate detailed statistics CSV.
+
     Args:
-        df: 数据 DataFrame
-        outdir: 输出目录
-        period: 'short' 或 'long'
+        df: data DataFrame
+        outdir: output directory
+        period: 'short' or 'long'
     """
     for metric in ["cagr", "calmar"]:
         pivot = df.groupby(["flip_penalty", "miss_penalty"])[metric].mean().unstack()
@@ -206,10 +206,10 @@ def save_detailed_stats(df: pd.DataFrame, outdir: Path, period: str = 'short'):
         stats["min"]  = pivot.min(axis=1)
         stats["std"]  = pivot.std(axis=1)
         
-        # 稳定性系数：变异系数的倒数，越高越稳定
+        # Stability score: inverse of coefficient of variation, higher means more stable
         stats["stability_score"] = (stats["mean"].abs() / (stats["std"] + EPS))
         
-        # 找到最佳参数配套
+        # Find best parameter combination
         stats["best_candle_config"] = pivot.idxmax(axis=1)
         
         stats.sort_values("mean", ascending=False).to_csv(os.path.join(outdir, f"comprehensive_stats_{period}_{metric}.csv"))
@@ -221,26 +221,26 @@ def main():
     outdir = os.path.join(path.parent, 'heatmaps')
     os.makedirs(outdir, exist_ok=True)
 
-    # 处理 'short' 和 'long' 两个周期
+    # Process 'short' and 'long' periods
     for period in ['short', 'long']:
         print(f"\n📊 Processing {period.upper()} period...")
         df = load_and_process(path, period=period)
         if df.empty:
-            print(f"⚠️  No data found for {period} period")
+            print(f"⚠️ No data found for {period} period")
             continue
 
-        # 1. 绘制增强型热力图
+        # 1. Plot enhanced heatmaps
         for m in ["cagr", "calmar", "long_pnl", "long_win_rate", "short_pnl", "short_win_rate"]:
             plot_enhanced_heatmaps(df, m, outdir, period=period)
         
-        # 2. 保存详细统计
+        # 2. Save detailed statistics
         save_detailed_stats(df, outdir, period=period)
         
-        print(f"✨ {period.upper()} 期间的深度分析完成！")
+        print(f"✨ Deep analysis for {period.upper()} period completed!")
     
-    print(f"\n✨ 所有的深度分析图表已生成完毕！")
-    print(f"📂 报告路径: {outdir}")
-    print(f"💡 建议优先观察 'robust' 热力图中被蓝色虚线框出的区域，那是真正的参数‘高原’。")
+    print("\n✨ All deep analysis plots have been generated!")
+    print(f"📂 Report path: {outdir}")
+    print("💡 Suggestion: focus first on the regions outlined with blue dashed boxes in the 'robust' heatmap; they represent true parameter plateaus.")
 
 if __name__ == "__main__":
     main()

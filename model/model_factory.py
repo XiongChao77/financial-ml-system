@@ -3,7 +3,7 @@ from typing import Type, Tuple, Dict
 from model.models.model_base import BaseTimeSeriesModel
 
 # =============================
-# 显式 import 所有模型
+# Explicitly import all models
 # =============================
 from model.models.xgboost_model import XGBoostAdapter
 from model.models.tcn_v1 import TCN1D_V1
@@ -20,7 +20,7 @@ from model.models.transformer_v1 import Transformer1D_V1
 from model.models.transformer_v2 import Transformer1D_V2
 from model.models.transformer_v3 import Transformer1D_V3
 from model.models.fusion_wrapper import FusionWrapper
-# 后续新模型直接在这里加 import
+# Add new model imports here
 
 class ModelFactory:
     """
@@ -49,11 +49,11 @@ class ModelFactory:
         Transformer1D_V3,
     ]
 
-    # 内部索引
+    # Internal index
     _index: Dict[Tuple[str, int], Type[BaseTimeSeriesModel]] = {}
 
     # =============================
-    # 初始化索引（只做一次）
+    # Build index (only once)
     # =============================
     @classmethod
     def _build_index(cls):
@@ -74,7 +74,7 @@ class ModelFactory:
             cls._index[key] = model_cls
 
     # =============================
-    # 查询模型类
+    # Lookup model class
     # =============================
     @classmethod
     def get_model_class(cls, model_type: str, model_version: int):
@@ -90,7 +90,7 @@ class ModelFactory:
         return cls._index[key]
 
     # =============================
-    # 训练阶段构建
+    # Build for training
     # =============================
     @classmethod
     def build_for_training(
@@ -105,7 +105,7 @@ class ModelFactory:
         return model.to(device)
 
     # =============================
-    # 加载 checkpoint
+    # Load checkpoint
     # =============================
     @classmethod
     def load_from_checkpoint(
@@ -130,7 +130,7 @@ class ModelFactory:
         return model, meta
 
     # =============================
-    # 调试 / 可视化
+    # Debug / visualization
     # =============================
     @classmethod
     def list_models(cls):

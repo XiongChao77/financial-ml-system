@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-绘制标准高斯分布 N(0,1) 的 PDF 及其 1～3 阶导数。
+Plot the PDF of the standard Gaussian N(0,1) and its 1st–3rd derivatives.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -9,19 +9,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-# 标准正态 PDF: phi(x) = (1/sqrt(2*pi)) * exp(-x^2/2)
+# Standard normal PDF: phi(x) = (1/sqrt(2*pi)) * exp(-x^2/2)
 def gaussian_pdf(x):
     return np.exp(-0.5 * x**2) / np.sqrt(2 * np.pi)
 
-# 一阶导数: phi'(x) = -x * phi(x)
+# 1st derivative: phi'(x) = -x * phi(x)
 def gaussian_pdf_1st(x):
     return -x * gaussian_pdf(x)
 
-# 二阶导数: phi''(x) = (x^2 - 1) * phi(x)
+# 2nd derivative: phi''(x) = (x^2 - 1) * phi(x)
 def gaussian_pdf_2nd(x):
     return (x**2 - 1) * gaussian_pdf(x)
 
-# 三阶导数: phi'''(x) = -(x^3 - 3*x) * phi(x)
+# 3rd derivative: phi'''(x) = -(x^3 - 3*x) * phi(x)
 def gaussian_pdf_3rd(x):
     return -(x**3 - 3 * x) * gaussian_pdf(x)
 
@@ -74,9 +74,9 @@ def main():
     out_path = os.path.join(out_dir, "gaussian_and_derivatives.png")
     plt.savefig(out_path, bbox_inches="tight", dpi=150)
     plt.close()
-    print(f"✅ 已保存: {out_path}")
+    print(f"✅ Saved: {out_path}")
 
-    # 可选：一张图里画所有曲线，便于对比量纲
+    # Optional: overlay all curves for easier comparison of scales
     fig, ax = plt.subplots(1, 1, figsize=(9, 5))
     ax.plot(x, phi, "b-", lw=2, label=r"$\phi(x)$")
     ax.plot(x, d1, "green", lw=1.5, alpha=0.9, label=r"$\phi'(x)$")
@@ -92,7 +92,7 @@ def main():
     overlay_path = os.path.join(out_dir, "gaussian_and_derivatives_overlay.png")
     plt.savefig(overlay_path, bbox_inches="tight", dpi=150)
     plt.close()
-    print(f"✅ 已保存: {overlay_path}")
+    print(f"✅ Saved: {overlay_path}")
 
 
 if __name__ == "__main__":

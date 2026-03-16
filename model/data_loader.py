@@ -5,7 +5,7 @@ import torch,os,logging,hashlib
 from torch.utils.data import Dataset
 from data_process import common
 
-#number_of_trades 和vloume高度重合，统计相关性低,quote_asset_volume和vloume高度重合.
+# number_of_trades and volume are highly correlated; quote_asset_volume and volume are also highly correlated.
 #taker_buy_quote_volume--taker_buy_base_volume,
 DROP_FEATURES =['threshold_long', 'stop_threshold_long','threshold_short', 'stop_threshold_short', 'label', 'trend_strength', 'open_time_ms_utc', 'open_time_date_utc',
                  'close_time_ms_utc', 'ignore' ]
@@ -34,7 +34,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self.stride = stride
         self.window = window
         self.kline_interval_ms = kline_interval_ms
-        self.feature_cols = feature_cols  # 记录请求的特征列表
+        self.feature_cols = feature_cols  # Keep a copy of requested feature list
         self.label_col = label_col
         self.time_col = 'open_time_ms_utc'
         self.factory = common.FeatureFactory(self.kline_interval_ms)
@@ -51,10 +51,10 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         # --- 1. Load from Cache ---
         if use_cache and cache_path and os.path.exists(cache_path):
             if self._load_from_cache(cache_path):
-                self.logger.warning(f"🚀 参数匹配，成功从缓存加载: {cache_path}")
+                self.logger.warning(f"🚀 Parameters match, loaded from cache: {cache_path}")
                 return
             else:
-                self.logger.info("🔄 参数已变更或缓存失效，将重新处理原始数据...")
+                self.logger.info("🔄 Parameters changed or cache invalid, re-processing raw data...")
 
         # --- 2. Process Data ---
         if df is None or feature_cols is None:
@@ -85,7 +85,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             self._save_to_cache(cache_path)
 
     def _save_to_cache(self, path: str):
-        """保存处理后的数据及所有关键初始化参数"""
+        """Save processed data and all key initialization parameters."""
         data_to_save = {
             "X": self.X,
             "y": self.y,
@@ -93,7 +93,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             "indices": self.indices,
             "feature_names": self.feature_names,
             "feature_count": self.feature_count,
-            # 关键参数快照
+            # Key parameter snapshot
             "stride": self.stride,
             "window": self.window,
             "kline_interval_ms": self.kline_interval_ms,
@@ -103,21 +103,21 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             "interval": common.BaseDefine.interval,
         }
         torch.save(data_to_save, path)
-        self.logger.info(f"💾 数据处理完成，缓存已更新至: {path}")
+        self.logger.info(f"💾 Data processing done, cache updated: {path}")
 
     def _load_from_cache(self, path: str) -> bool:
-        """从磁盘加载并校验参数一致性"""
+        """Load from disk and validate parameter consistency."""
         try:
             checkpoint = torch.load(path, weights_only=False) 
             
-            # --- 严格参数比对逻辑 ---
-            # 1. 基础标量参数校验
+            # --- Strict parameter comparison ---
+            # 1. Basic scalar parameter validation
             mismatch_reasons = []
             self.returns = checkpoint.get("returns") 
             
-            # 容错处理：如果加载的是旧版没有 returns 的缓存
+            # Backward compatibility: older caches may not contain returns
             if self.returns is None:
-                self.logger.error("🚨 缓存中缺少 'returns' 数据！请删除缓存文件并重新生成。")
+                self.logger.error("🚨 Cache missing 'returns'! Please delete cache file and regenerate.")
                 return False
 
             if self.stride != checkpoint.get("stride"):
@@ -138,17 +138,17 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             if common.BaseDefine.interval != checkpoint.get("interval"):
                 mismatch_reasons.append(f"interval ({checkpoint.get('interval')} -> {common.BaseDefine.interval})")
 
-            # 2. 特征列表校验 (内容与顺序)
+            # 2. Feature list validation (content and order)
             cached_features = checkpoint.get("feature_cols", [])
             if self.feature_cols != cached_features:
-                mismatch_reasons.append("feature_cols (列表内容或顺序已变更)")
+                mismatch_reasons.append("feature_cols (list content or order changed)")
 
-            # 如果有任何不匹配，返回 False 触发重算
+            # If anything mismatches, return False to trigger recomputation
             if mismatch_reasons:
-                self.logger.warning(f"⚠️ 缓存参数不匹配: {', '.join(mismatch_reasons)}")
+                self.logger.warning(f"⚠️ Cache parameter mismatch: {', '.join(mismatch_reasons)}")
                 return False
                 
-            # 参数完全一致，执行赋值
+            # All parameters match; assign cached tensors
             self.X = checkpoint["X"]
             self.y = checkpoint["y"]
             self.indices = checkpoint["indices"]
@@ -157,7 +157,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             return True
 
         except Exception as e:
-            self.logger.error(f"❌ 缓存加载失败: {e}")
+            self.logger.error(f"❌ Cache load failed: {e}")
             return False
 
     # ----------------------------------------------------------------
@@ -166,15 +166,15 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
 
     def _prepare_data(self, df: pd.DataFrame, feature_cols: List[str], label_col: str):
         """
-        分两阶段清洗数据：
-        1. 剔除开头的冷启动 NaN (预期内)
-        2. 剔除中间和末尾的异常 NaN (风险项)
+        Clean data in two stages:
+        1. Remove initial cold-start NaNs (expected)
+        2. Remove abnormal NaNs in the middle or tail (risky)
         """
-        # --- 基础列筛选 ---
+        # --- Basic column selection ---
         clean_features = [c for c in feature_cols if c not in DROP_FEATURES]
         cols = clean_features + ([label_col] if label_col and label_col in df.columns else []) + [self.time_col]
         
-        #  核心改动：把 trend_strength 强制塞进 DataFrame 提取列表，但它不属于 clean_features
+        # Core change: always include trend_strength in extracted columns (but it's not part of clean_features)
         if 'trend_strength' in df.columns:
             if 'trend_strength' not in cols:
                 cols.append('trend_strength')
@@ -184,38 +184,38 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             df_work['orig_index'] = df.index
 
         total_rows = len(df_work)
-        self.logger.debug(f"📊 [Data Clean] 开始清洗数据，原始总行数: {total_rows}")
+        self.logger.debug(f"📊 [Data Clean] Start cleaning, total rows: {total_rows}")
 
-        # --- 第一部分：删除起始的冷启动 NaN ---
-        # 逻辑：找到第一行没有任何 NaN 的位置，删除它之前的所有行
+        # --- Part 1: remove initial cold-start NaNs ---
+        # Logic: find the first row with no NaNs, drop all rows before it
         is_valid_row = df_work.notna().all(axis=1)
         if is_valid_row.any():
-            first_valid_idx_label = is_valid_row.idxmax()  # 找到第一个全 True 的索引标签
-            first_valid_loc = df_work.index.get_loc(first_valid_idx_label) # 获取该标签的物理位置
+            first_valid_idx_label = is_valid_row.idxmax()  # First index label where all columns are valid
+            first_valid_loc = df_work.index.get_loc(first_valid_idx_label)  # Physical position for that label
             
             if first_valid_loc > 0:
                 df_work = df_work.iloc[first_valid_loc:].copy()
-                self.logger.debug(f"✂️ [Step 1] 剔除头部冷启动: {first_valid_loc} 行 (由于指标预热等原因)")
+                self.logger.debug(f"✂️ [Step 1] Dropped head cold-start: {first_valid_loc} rows (indicator warmup, etc.)")
             else:
-                self.logger.debug(f"✅ [Step 1] 无头部冷启动数据。")
+                self.logger.debug("✅ [Step 1] No head cold-start rows.")
         else:
-            raise RuntimeError("❌ [Data Clean] 错误：数据集中没有任何一行是完整的！请检查特征计算逻辑。")
+            raise RuntimeError("❌ [Data Clean] Error: no complete rows found! Please check feature computation logic.")
 
-        # --- 第二部分：删除中间或末尾的 NaN (异常空洞) ---
+        # --- Part 2: remove NaNs in the middle or tail (abnormal gaps) ---
         before_gap_clean = len(df_work)
-        df_work.dropna(inplace=True) # 此时剩下的都是中间或末尾的 NaN
+        df_work.dropna(inplace=True)  # Remaining NaNs are in the middle or tail
         after_gap_clean = len(df_work)
         
         gap_count = before_gap_clean - after_gap_clean
         if gap_count > 0:
-            # 中间空洞通常意味着数据源质量问题，建议用 WARNING 或 ERROR 级别
-            self.logger.error(f"🚨 [Step 2] 发现并剔除中间/末尾异常空洞: {gap_count} 行！请检查数据源完整性。")
+            # Middle gaps usually indicate data quality issues; keep as WARNING/ERROR
+            self.logger.error(f"🚨 [Step 2] Found and removed abnormal middle/tail gaps: {gap_count} rows! Please check data completeness.")
         else:
-            self.logger.debug(f"✅ [Step 2] 未发现中间空洞。")
+            self.logger.debug("✅ [Step 2] No middle gaps found.")
 
-        # --- 最终重置索引 ---
+        # --- Final index reset ---
         df_work.reset_index(drop=True, inplace=True)
-        self.logger.info(f"✨ [Data Clean] 清洗完成: {total_rows} -> {len(df_work)} 行 (总计剔除 {total_rows - len(df_work)} 行)")
+        self.logger.info(f"✨ [Data Clean] Done: {total_rows} -> {len(df_work)} rows (dropped {total_rows - len(df_work)} rows)")
 
         return df_work, clean_features
 
@@ -230,30 +230,30 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
 
     def _filter_and_align(self, df_work, X3d, time_windows, label_col):
         """
-        过滤逻辑增强：
-        1. 全局检查：窗口内总缺失不能超过 5 个 K 线。
-        2. 尾部检查：窗口内最后 10 个数据必须完全连续（零缺失）。
-        3. 标签对齐：支持 stride，并区分过滤原因。
+        Enhanced filtering logic:
+        1. Global check: total missing span within the window must be within tolerance.
+        2. Tail check: last N points in the window must be fully continuous (no gaps).
+        3. Label alignment: support stride and track filtering reasons.
         """
         original_count = len(X3d)
         has_label = (label_col is not None) and (label_col in df_work.columns)
         interval = self.kline_interval_ms
 
-        # --- A. 连续性掩码计算 ---
+        # --- A. Continuity mask computation ---
         
-        # 1. 全局跨度检查 (例如允许 5 个 K 线以内的空洞)
+        # 1. Global span check (e.g., allow limited gaps)
         global_actual_span = time_windows[:, -1] - time_windows[:, 0]
         global_ideal_span = (self.window - 1) * interval
-        # 这里你可以根据注释修改允许的阈值，目前设为 0 容忍
+        # You may tune tolerance here; currently 0 tolerance
         mask_global = (global_actual_span <= global_ideal_span) 
 
-        # 2. 严格的尾部检查 (最后 10 根 K 线)
+        # 2. Strict tail check (last N bars)
         check_tail_count = 2
         tail_actual_span = time_windows[:, -1] - time_windows[:, -(check_tail_count + 1)]
         tail_ideal_span = check_tail_count * interval
         mask_tail = (tail_actual_span <= tail_ideal_span)
 
-        # --- B. 标签有效性检查 ---
+        # --- B. Label validity check ---
         if has_label:
             raw_labels = df_work[label_col].values[self.window - 1 :: self.stride]
             labels_all = raw_labels[:original_count]
@@ -262,43 +262,43 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             labels_all = np.zeros(original_count)
             mask_label = np.ones(original_count, dtype=bool)
 
-        # --- C. 统计过滤原因 (分层统计) ---
-        # 1. 因为全局跨度不合格被踢除的
+        # --- C. Filter reason stats (hierarchical) ---
+        # 1. Failed due to global span
         fail_global = np.sum(~mask_global)
-        # 2. 全局合格但尾部不连续的
+        # 2. Global ok but tail not continuous
         fail_tail = np.sum(mask_global & ~mask_tail)
-        # 3. 时间校验合格但标签无效的
+        # 3. Time ok but label invalid
         fail_label = np.sum(mask_global & mask_tail & ~mask_label)
         
-        # 最终合并掩码
+        # Final combined mask
         final_mask = mask_global & mask_tail & mask_label
         final_count = np.sum(final_mask)
 
-        # --- D. 索引对齐 ---
+        # --- D. Index alignment ---
         final_indices = None
         if not self.is_live:
             raw_orig = df_work['orig_index'].values[self.window - 1 :: self.stride]
             final_indices = raw_orig[:original_count][final_mask]
 
-        # --- E. 详细审计打印 ---
-        self.logger.info(f"📊 数据过滤审计 [窗口长度: {self.window}]:")
-        self.logger.info(f"   - 原始窗口总数: {original_count}")
+        # --- E. Detailed audit logs ---
+        self.logger.info(f"📊 Data filter audit [window: {self.window}]:")
+        self.logger.info(f"   - Original window count: {original_count}")
         if fail_global > 0:
-            self.logger.warning(f"   - ❌ 丢弃 (全局跨度超限): {fail_global}")
+            self.logger.warning(f"   - ❌ Dropped (global span exceeded): {fail_global}")
         if fail_tail > 0:
-            self.logger.warning(f"   - ❌ 丢弃 (尾部10根不连续): {fail_tail}")
+            self.logger.warning(f"   - ❌ Dropped (tail not continuous): {fail_tail}")
         if fail_label > 0:
-            self.logger.warning(f"   - ❌ 丢弃 (标签无效/INVALID): {fail_label}")
-        self.logger.info(f"   - ✅ 最终保留数量: {final_count} ({final_count/original_count:.2%})")
+            self.logger.warning(f"   - ❌ Dropped (label invalid/INVALID): {fail_label}")
+        self.logger.info(f"   - ✅ Final kept: {final_count} ({final_count/original_count:.2%})")
     
         if 'trend_strength' in df_work.columns:
-            # 使用与标签一致的切片逻辑：从 window-1 开始按 stride 采样
+            # Use the same slicing as labels: start at window-1 and sample by stride
             aligned_returns = df_work['trend_strength'].values[self.window - 1 :: self.stride]
             df_work.drop(columns=['trend_strength'], inplace=True)
-            # 截取到与窗口数量一致
+            # Truncate to match window count
             self.returns = aligned_returns[:original_count][final_mask]
         else:
-            self.logger.warning("⚠️ df_work 中缺失 z_ret，回报率已设为 0")
+            self.logger.warning("⚠️ Missing trend_strength in df_work; returns set to 0")
             self.returns = np.zeros(final_count)
 
         return X3d[final_mask], labels_all[final_mask], final_indices
@@ -311,38 +311,38 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self.y = torch.from_numpy(y_filtered).long()
         self.returns = torch.from_numpy(self.returns).float()
         self.indices = final_indices
-        # --- 自动打印统计信息供 Review ---
+        # --- Auto-print stats for review ---
         if self.show_feature_distribution:
             self.print_feature_stats()
     # ----------------------------------------------------------------
-    # --- 调试与数据复核方法 ---
+    # --- Debugging and data review helpers ---
     # ----------------------------------------------------------------
 
     def print_feature_stats(self):
         """
-        打印所有特征的统计信息 (Mean, Std, Min, Max)，用于 review 归一化效果。
-        参考之前的逻辑，主要查看窗口最后一帧 (Last Step) 的分布。
+        Print statistics (Mean, Std, Min, Max) for all features to review normalization quality.
+        Following the previous logic, we mainly inspect the distribution of the last step in each window.
         """
         if self.X is None or self.X.shape[0] == 0:
-            self.logger.warning("⚠️ 没有数据可以进行统计复核。")
+            self.logger.warning("⚠️ No data available for stats review.")
             return
 
         num_features_in_data = self.X.shape[2]
         num_feature_names = len(self.feature_names)
 
         if num_features_in_data != num_feature_names:
-            msg = (f"❌ 维度不匹配！数据特征列数 ({num_features_in_data}) "
-                   f"与特征名称数量 ({num_feature_names}) 不一致。")
+            msg = (f"❌ Dimension mismatch! Feature columns in data ({num_features_in_data}) "
+                   f"do not match number of feature names ({num_feature_names}).")
             self.logger.critical(msg)
-            # 如果不一致，说明有特征（如 z_ret）误入，必须停止程序
+            # If mismatched, some unexpected feature slipped in; stop immediately
             raise RuntimeError(msg)
 
-        # 提取最后一帧数据 [Batch, Feature]
-        # X 的形状是 [N, Window, Feature]
+        # Extract last-step data [Batch, Feature]
+        # X shape: [N, Window, Feature]
         last_step_data = self.X[:, -1, :].numpy()
         
         self.logger.info("\n" + "="*90)
-        self.logger.info(f"📊 数据处理复核 (特征统计 - 最后一帧) | 样本数: {len(last_step_data)}")
+        self.logger.info(f"📊 Data processing review (feature stats - last step) | samples: {len(last_step_data)}")
         self.logger.info("-" * 90)
         self.logger.info(f"{'Feature Name':<35} | {'Mean':>10} | {'Std':>10} | {'Min':>10} | {'Max':>10}")
         self.logger.info("-" * 90)
@@ -354,7 +354,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             min_v  = np.min(feat_slice)
             max_v  = np.max(feat_slice)
             
-            # 使用简单的颜色或符号提醒异常值 (例如 std 远离 1 或 mean 远离 0)
+            # Simple marker for suspicious values (e.g., std far from 1 or mean far from 0)
             alert = " ⚠️" if abs(mean_v) > 0.1 or abs(std_v - 1.0) > 0.2 else ""
             
             self.logger.info(
@@ -370,25 +370,25 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         return self.X[i], self.y[i], self.returns[i]
 def should_regenerate_cache(cache_path, data_path, feature_file, data_cfg):
     """
-    通过校验文件修改时间和配置哈希，决定是否需要重新生成缓存。
+    Decide whether to regenerate cache by checking file modification times and a config hash.
     """
     if not os.path.exists(cache_path):
-        return True # 缓存不存在，必须生成
+        return True  # Cache does not exist; must generate
 
-    # 1. 检查文件修改时间 (mtime)
-    # 如果原始数据 CSV 或特征定义文件 feature.py 在缓存之后被修改过，则失效
+    # 1. Check modification time (mtime)
+    # If raw CSV or feature definition file was modified after cache, invalidate
     cache_mtime = os.path.getmtime(cache_path)
     if os.path.getmtime(data_path) > cache_mtime:
         return True
     if os.path.getmtime(feature_file) > cache_mtime:
         return True
 
-    # 2. 检查关键配置是否改变 (Hash 校验)
-    # 将影响数据生成的参数转为字符串并计算哈希
+    # 2. Check if critical config changed (hash check)
+    # Convert config affecting cache generation into a string and hash it
     config_str = f"{data_cfg.window}_{data_cfg.feature_cols}_{data_cfg.label_col}"
     current_hash = hashlib.md5(config_str.encode()).hexdigest()
     
-    # 这里建议在生成缓存时，顺便存一个 .hash 文件
+    # Suggestion: write a .hash file together when creating cache
     hash_path = cache_path + ".hash"
     if not os.path.exists(hash_path):
         return True

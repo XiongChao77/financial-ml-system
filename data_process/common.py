@@ -18,20 +18,20 @@ class Signal(IntEnum):
     POSITIVE  = 2
 
 eps = 1e-8
-# 波动率系数 (0.5 ~ 1.0 之间调整)
+# Volatility multiplier guidance (typically 0.5 ~ 1.0)
 '''
-乘数 (Multiplier),阈值位置,含义
-VOL_MULTIPLIER=1.0,1σ,约 31.8% 的价格变动会超出这个阈值（上下尾部）。
-VOL_MULTIPLIER=0.5,0.5σ,约 61.7% 的价格变动会超出这个阈值。信号数量适中。
-VOL_MULTIPLIER=1.5,1.5σ,仅约 13.4% 的价格变动会超出这个阈值。
-VOL_MULTIPLIER=2.0,2σ,仅约 4.6% 的价格变动会超出这个阈值。
+Multiplier, sigma threshold, interpretation
+VOL_MULTIPLIER=1.0, 1σ, ~31.8% of price moves exceed this threshold (two tails).
+VOL_MULTIPLIER=0.5, 0.5σ, ~61.7% of price moves exceed this threshold; moderate signal frequency.
+VOL_MULTIPLIER=1.5, 1.5σ, only ~13.4% of price moves exceed this threshold.
+VOL_MULTIPLIER=2.0, 2σ, only ~4.6% of price moves exceed this threshold.
 '''
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR)
 TEMPORARY_DIR = os.path.join(PROJECT_DIR, 'output')
 if platform.system().lower() != 'windows':
     os.makedirs('/dev/shm/quant', exist_ok=True)
-    if not os.path.islink(TEMPORARY_DIR):   os.symlink('/dev/shm/quant', TEMPORARY_DIR)  # Linux/Ubuntu 环境：直接映射到共享内存
+    if not os.path.islink(TEMPORARY_DIR):   os.symlink('/dev/shm/quant', TEMPORARY_DIR)  # Linux/Ubuntu: map temporary output to shared memory
 else:
     os.makedirs(TEMPORARY_DIR, exist_ok=True)
 PERSISTENCE_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'quant_output')
@@ -101,7 +101,7 @@ def load_test_df():
     else:
         return pd.read_feather(test_data_path)
 
-# ---------- 按目录读写（用于 batch 多进程：每个 preparation 独立目录） ----------
+# ---------- Per-directory read/write (for batch multiprocessing: each preparation uses its own directory) ----------
 def _data_path_in_dir(base_dir, name):
     return os.path.join(base_dir, name)
 
@@ -143,34 +143,34 @@ def get_data_config_path_in_dir(base_dir):
     return _data_path_in_dir(base_dir, "data_config_meta.json")
 
 def load_interval_ms_from_dir(base_dir) -> BaseDefine:
-    """从指定目录的 data_config_meta.json 读取 interval_ms，不依赖全局路径，适用于多进程。"""
+    """Load interval settings from data_config_meta.json under base_dir (no global paths; multiprocessing-friendly)."""
     config_path = get_data_config_path_in_dir(base_dir)
     if not os.path.exists(config_path):
-        raise RuntimeError(f"❌ 找不到配置文件: {config_path}")
+        raise RuntimeError(f"❌ Config file not found: {config_path}")
     with open(config_path, 'r', encoding='utf-8') as f:
         meta = json.load(f)
         para = BaseDefine(**meta)
     return para
 
 def attach_attr(df, feature_group_list, feature_conf_list = [], para = BaseDefine):
-    # 1. 基础处理
+    # 1. Basic preprocessing
     # df.drop('ignore', axis=1, inplace=True)
-    # --- 2. 指标计算 (生成所有原始、未缩放的特征列) ---
+    # --- 2. Indicator computation (generate raw, unscaled feature columns) ---
     # df = add_relative_features(df)
     kline_interval_ms = get_interval_ms(para.interval)
     return FeatureFactory(kline_interval_ms,feature_group_list, feature_conf_list).generate(df)
 
 def attach_label(df, para = BaseDefine, label_col = 'label'):
     """
-    基于路径依赖的非对称打标签逻辑
+    Path-dependent asymmetric labeling logic.
     """
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
     
-    # 1. 计算非对称动态阈值
+    # 1. Compute asymmetric dynamic thresholds
     df = calculate_thresholds(df, para)
 
-    # 2. 物理时间锚定 (保持不变)
+    # 2. Physical time anchoring (unchanged)
     interval_ms = get_interval_ms(para.interval)
     target_times = time_values + (para.predict_num * interval_ms)
     target_indices = np.searchsorted(time_values, target_times, side='left')
@@ -178,7 +178,7 @@ def attach_label(df, para = BaseDefine, label_col = 'label'):
     safe_idx = np.where(in_bounds, target_indices, 0)
     final_valid_mask = in_bounds & (time_values[safe_idx] == target_times)
 
-    # 3. 计算未来收益与极致波动 (保持不变)
+    # 3. Compute forward return and extreme moves (unchanged)
     future_close = np.where(final_valid_mask, df['close'].values[safe_idx], np.nan)
     pct_final = np.log(future_close / df['close'])
 
@@ -192,18 +192,18 @@ def attach_label(df, para = BaseDefine, label_col = 'label'):
     max_drawdown = (future_low_min - df['close']) / df['close']
     max_runup = (future_high_max - df['close']) / df['close']
 
-    # 4.  应用非对称逻辑
-    # 做多：用 Long 专属阈值
+    # 4. Apply asymmetric logic
+    # Long: use long-side thresholds
     cond_long = final_valid_mask & \
                 (pct_final > df['threshold_long']) & \
                 (max_drawdown > -df['stop_threshold_long'])
                 
-    # 做空：用 Short 专属阈值
+    # Short: use short-side thresholds
     cond_short = final_valid_mask & \
                  (pct_final < -df['threshold_short']) & \
                  (max_runup < df['stop_threshold_short'])
 
-    # 5. 生成结果
+    # 5. Build labels
     conditions = [~final_valid_mask, cond_short, cond_long]
     choices = [Signal.INVALID, Signal.NEGATIVE, Signal.POSITIVE ]
     df[label_col] = np.select(conditions, choices, default=Signal.NEUTRAL).astype(int)
@@ -215,21 +215,21 @@ def attach_label(df, para = BaseDefine, label_col = 'label'):
         np.abs(pct_final) / (df['threshold_short'] + eps)
     )
 
-    # 处理无效数据（物理时间越界的部分）
+    # Handle invalid rows (out-of-bounds in physical time)
     df.loc[~final_valid_mask, 'trend_strength'] = np.nan
     
     return df
 
 def calculate_thresholds(df, para=BaseDefine, **kwargs):
     """
-    使用 Rogers–Satchell + EWMA 计算动态波动率阈值
+    Compute dynamic volatility thresholds using Rogers–Satchell + EWMA.
     """
 
     required_cols = ['open', 'high', 'low', 'close']
     for col in required_cols:
-        assert col in df.columns, f"缺少 {col} 数据"
+        assert col in df.columns, f"Missing column: {col}"
 
-    # ===== 1️⃣ Rogers–Satchell 单期方差 =====
+    # ===== 1️⃣ Rogers–Satchell single-period variance =====
     log_ho = np.log(df['high'] / df['open'])
     log_hc = np.log(df['high'] / df['close'])
     log_lo = np.log(df['low'] / df['open'])
@@ -237,20 +237,20 @@ def calculate_thresholds(df, para=BaseDefine, **kwargs):
 
     rs_var = log_hc * log_ho + log_lc * log_lo
 
-    # 防止极端异常（理论上应为非负，数值误差可能导致微小负数）
+    # Guard against tiny negatives due to numeric errors (variance should be non-negative)
     rs_var = rs_var.clip(lower=0)
 
-    # ===== 2️⃣ EWMA 平滑方差 =====
+    # ===== 2️⃣ EWMA-smoothed variance =====
     span = para.vol_ewma_span
     ewma_var = rs_var.ewm(span=span, adjust=False).mean()
-    # 开方得到波动率
+    # Sqrt -> volatility
     ewma_vol = np.sqrt(ewma_var)
-    # ===== 3️⃣ 时间扩展到预测区间 =====
-    # 假设方差线性扩展
+    # ===== 3️⃣ Scale to the prediction horizon =====
+    # Assume variance scales linearly with time
     expected_vol = ewma_vol * np.sqrt(para.predict_num)
     df['expected_vol'] = expected_vol
 
-    # ===== 4️⃣ 非对称阈值 =====
+    # ===== 4️⃣ Asymmetric thresholds =====
     df['threshold_long'] = expected_vol * para.vol_multiplier_long
     df['threshold_short'] = expected_vol * para.vol_multiplier_short
 
@@ -291,22 +291,22 @@ def attach_triple_barrier_label(df,
                                  interval_ms,
                                  para = BaseDefine,):
     """
-    严苛版非对称 Triple Barrier 标签
+    Strict asymmetric triple-barrier labeling.
     """
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
     
-    # 1. 计算非对称动态阈值
+    # 1. Compute asymmetric dynamic thresholds
     df = calculate_thresholds(df, para)
 
-    # 2. 物理时间锚定
+    # 2. Physical time anchoring
     target_times = time_values + (para.predict_num * interval_ms)
     target_indices = np.searchsorted(time_values, target_times, side='left')
     in_bounds = target_indices < len(df)
     safe_idx = np.where(in_bounds, target_indices, 0)
     final_valid_mask = in_bounds & (time_values[safe_idx] == target_times)
 
-    # 3. 准备数据矩阵
+    # 3. Prepare future price matrices
     future_closes = np.column_stack([df['close'].shift(-i).values for i in range(1, para.predict_num + 1)])
     future_highs = np.column_stack([df['high'].shift(-i).values for i in range(1, para.predict_num + 1)])
     future_lows = np.column_stack([df['low'].shift(-i).values for i in range(1, para.predict_num + 1)])
@@ -314,7 +314,7 @@ def attach_triple_barrier_label(df,
     closes = df['close'].values
     labels = np.full(len(df), Signal.NEUTRAL, dtype=int)
 
-    # 4.  循环遍历 (分别使用对应的 Long/Short 阈值列)
+    # 4. Iterate (use the corresponding long/short threshold columns)
     for i in range(len(df) - para.predict_num):
         if not final_valid_mask[i]:
             labels[i] = Signal.INVALID
@@ -322,19 +322,19 @@ def attach_triple_barrier_label(df,
             
         curr_price = closes[i]
         
-        # --- 多头检测 (使用 _long 结尾的阈值) ---
+        # --- Long-side check (use *_long threshold columns) ---
         idx_long_tp = np.where(future_closes[i] >= curr_price * (1 + df['threshold_long'].iloc[i]))[0]
         idx_long_sl = np.where(future_lows[i] <= curr_price * (1 - df['stop_threshold_long'].iloc[i]))[0]
         first_l_tp = idx_long_tp[0] if len(idx_long_tp) > 0 else para.predict_num
         first_l_sl = idx_long_sl[0] if len(idx_long_sl) > 0 else para.predict_num
 
-        # --- 空头检测 (使用 _short 结尾的阈值) ---
+        # --- Short-side check (use *_short threshold columns) ---
         idx_short_tp = np.where(future_closes[i] <= curr_price * (1 - df['threshold_short'].iloc[i]))[0]
         idx_short_sl = np.where(future_highs[i] >= curr_price * (1 + df['stop_threshold_short'].iloc[i]))[0]
         first_s_tp = idx_short_tp[0] if len(idx_short_tp) > 0 else para.predict_num
         first_s_sl = idx_short_sl[0] if len(idx_short_sl) > 0 else para.predict_num
 
-        # 判定
+        # Decide label
         if first_l_tp < first_l_sl:
             labels[i] = Signal.POSITIVE 
         elif first_s_tp < first_s_sl:
@@ -348,36 +348,36 @@ def attach_macd_event_lifecycle_label(df,
                                 interval_ms,
                                 para = BaseDefine,):
     """
-    严格时间对齐版 MACD 生命周期标签 (自动匹配特征列名):
-    移除 min_threshold 逻辑。
+    Strict time-aligned MACD event lifecycle labels (auto-detect feature column names).
+    min_threshold logic removed.
     """
-    # --- 1. 自动匹配 MACD 特征列名 ---
+    # --- 1. Auto-detect MACD feature column names ---
     dif_cols = [c for c in df.columns if c.startswith('MACD_') and c.endswith('_DIF')]
     dea_cols = [c for c in df.columns if c.startswith('MACD_') and c.endswith('_DEA')]
     
     if not dif_cols or not dea_cols:
-        raise ValueError("❌ 未在 DataFrame 中探测到 MACD 特征列 (需以 _DIF 和 _DEA 结尾)")
+        raise ValueError("❌ MACD feature columns not found (expected suffixes: _DIF and _DEA)")
     
     dif_name = dif_cols[0]
     prefix = dif_name.replace('_DIF', '')
     dea_name = f"{prefix}_DEA"
     
     if dea_name not in df.columns:
-        raise ValueError(f"❌ 找不到与 {dif_name} 匹配 of {dea_name}")
+        raise ValueError(f"❌ Cannot find matching DEA column for {dif_name}: {dea_name}")
 
-    print(f"🔍 [MACD Match] 自动匹配到特征列: {dif_name} / {dea_name}")
+    print(f"🔍 [MACD Match] Auto-detected feature columns: {dif_name} / {dea_name}")
 
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
     
-    # 2. 识别所有交叉点
+    # 2. Identify crossover points
     dif = df[dif_name]
     dea = df[dea_name]
     cross_mask = (dif > dea) != (dif.shift(1) > dea.shift(1))
     cross_mask.iloc[0] = False
     event_indices = df.index[cross_mask].tolist()
     
-    # 3. 初始化与动态阈值
+    # 3. Initialize and compute dynamic thresholds
     df['label'] = Signal.INVALID
     df = calculate_thresholds(df, para)
     
@@ -387,7 +387,7 @@ def attach_macd_event_lifecycle_label(df,
     thresholds = df['threshold'].values
     sl_thresholds = df['stop_threshold'].values
 
-    # 4. 遍历交叉事件
+    # 4. Iterate crossover events
     for i in range(len(event_indices)):
         curr_idx = event_indices[i]
         if i + 1 >= len(event_indices):
@@ -396,7 +396,7 @@ def attach_macd_event_lifecycle_label(df,
             
         next_idx = event_indices[i+1]
         
-        # --- 时间对齐校验 ---
+        # --- Time alignment check ---
         expected_gap_ms = (next_idx - curr_idx) * interval_ms
         actual_gap_ms = time_values[next_idx] - time_values[curr_idx]
         
@@ -404,7 +404,7 @@ def attach_macd_event_lifecycle_label(df,
             df.at[curr_idx, 'label'] = Signal.INVALID
             continue
 
-        # --- 业务逻辑判定 ---
+        # --- Business logic ---
         is_long_event = dif.iloc[curr_idx] > dea.iloc[curr_idx]
         entry_price = closes[curr_idx]
         tp_target = thresholds[curr_idx]
@@ -432,18 +432,18 @@ def attach_boll_event_lifecycle_label(df,
                                 interval_ms,
                                 para = BaseDefine,):
     """
-    均值回归版 布林带生命周期标签：
-    移除 min_threshold 逻辑。
+    Mean-reversion Bollinger Band lifecycle labels.
+    min_threshold logic removed.
     """
     upper_cols = [c for c in df.columns if c.startswith('BOLL_UPPER_')]
     lower_cols = [c for c in df.columns if c.startswith('BOLL_LOWER_')]
     middle_cols = [c for c in df.columns if c.startswith('BOLL_MIDDLE_')]
     
     if not (upper_cols and lower_cols and middle_cols):
-        raise ValueError("❌ 未在 DataFrame 中探测到完整的 BOLL 特征列")
+        raise ValueError("❌ Incomplete BOLL feature columns detected")
     
     u_name, l_name, m_name = upper_cols[0], lower_cols[0], middle_cols[0]
-    print(f"🔍 [BOLL Match] 自动匹配到特征列: {u_name}, {l_name}, {m_name}")
+    print(f"🔍 [BOLL Match] Auto-detected feature columns: {u_name}, {l_name}, {m_name}")
 
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
@@ -453,7 +453,7 @@ def attach_boll_event_lifecycle_label(df,
     event_mask = long_trigger | short_trigger
     event_indices = df.index[event_mask].tolist()
     
-    # 3. 初始化与动态阈值
+    # 3. Initialize and compute dynamic thresholds
     df['label'] = Signal.INVALID
     df = calculate_thresholds(df, para)
     
@@ -464,7 +464,7 @@ def attach_boll_event_lifecycle_label(df,
     thresholds = df['threshold'].values
     sl_thresholds = df['stop_threshold'].values
 
-    # 4. 遍历事件
+    # 4. Iterate events
     for curr_idx in event_indices:
         is_long_event = long_trigger.iloc[curr_idx]
         entry_price = closes[curr_idx]
@@ -509,22 +509,22 @@ def _boll_audit(df, event_indices):
     total = len(event_indices)
     stats = df.loc[event_indices, 'label'].value_counts()
     print(f"\n📊 [BOLL Lifecycle Audit]")
-    print(f"  - 触发点总数: {total}")
-    print(f"  - POSITIVE  (2) 有效: {stats.get(Signal.POSITIVE , 0)} ({(stats.get(Signal.POSITIVE , 0)/total)*100:.2f}%)")
-    print(f"  - NEGATIVE (0) 有效: {stats.get(Signal.NEGATIVE, 0)} ({(stats.get(Signal.NEGATIVE, 0)/total)*100:.2f}%)")
-    print(f"  - NEUTRAL (1) 噪音: {stats.get(Signal.NEUTRAL, 0)}")
+    print(f"  - Total triggers: {total}")
+    print(f"  - POSITIVE  (2) valid: {stats.get(Signal.POSITIVE , 0)} ({(stats.get(Signal.POSITIVE , 0)/total)*100:.2f}%)")
+    print(f"  - NEGATIVE (0) valid: {stats.get(Signal.NEGATIVE, 0)} ({(stats.get(Signal.NEGATIVE, 0)/total)*100:.2f}%)")
+    print(f"  - NEUTRAL (1) noise: {stats.get(Signal.NEUTRAL, 0)}")
 
 def attach_sma_7_25_crossover_label(df, 
                                 interval_ms,para = BaseDefine,):
     """
-    指定 SMA 7/25 交叉生命周期标签：
-    移除 min_threshold 逻辑。
+    SMA 7/25 crossover lifecycle labels.
+    min_threshold logic removed.
     """
     fast_ma_name = "SMA_7B"
     slow_ma_name = "SMA_25B"
     
     if fast_ma_name not in df.columns or slow_ma_name not in df.columns:
-        raise ValueError(f"❌ 找不到均线列 {fast_ma_name} 或 {slow_ma_name}，请检查 FeatureMA 配置")
+        raise ValueError(f"❌ SMA columns not found: {fast_ma_name} or {slow_ma_name}. Please check FeatureMA configuration.")
 
     time_col = 'open_time_ms_utc'
     time_values = df[time_col].values
@@ -581,11 +581,11 @@ def attach_sma_7_25_crossover_label(df,
 
 
 def clean_data_quality_auto(df: pd.DataFrame, logger) -> pd.DataFrame:
-    logger.info("启动自动化数据质量扫描...")
+    logger.info("Starting automated data quality scan...")
     initial_count = len(df)
     na_rows = df.isna().any(axis=1).sum()
     if na_rows > 0:
-        logger.warning(f"检测到 {na_rows} 行数据包含空值 (NaN)，准备丢弃。")
+        logger.warning(f"Detected {na_rows} rows containing NaN values; dropping them.")
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     zero_mask = (df[numeric_cols] == 0).any(axis=1)
@@ -593,7 +593,7 @@ def clean_data_quality_auto(df: pd.DataFrame, logger) -> pd.DataFrame:
     
     if zero_rows > 0:
         zero_stats = (df[numeric_cols] == 0).sum()
-        logger.warning(f"检测到 {zero_rows} 行数据包含零值，分布如下:\n{zero_stats[zero_stats > 0]}")
+        logger.warning(f"Detected {zero_rows} rows containing zero values. Distribution:\n{zero_stats[zero_stats > 0]}")
 
     condition = df.isna().any(axis=1) | zero_mask
     df_cleaned = df[~condition].copy()
@@ -603,9 +603,9 @@ def clean_data_quality_auto(df: pd.DataFrame, logger) -> pd.DataFrame:
     dropped_count = initial_count - final_count
 
     if dropped_count > 0:
-        logger.info(f"✅ 清洗完毕: 原始 {initial_count} 行 -> 剩余 {final_count} 行 (丢弃了 {dropped_count} 行)")
+        logger.info(f"✅ Cleaning done: {initial_count} rows -> {final_count} rows (dropped {dropped_count})")
     else:
-        logger.info("✅ 扫描完毕: 未发现空值或零值，数据质量完美。")
+        logger.info("✅ Scan complete: no NaN or zero values found.")
 
     return df_cleaned
 
@@ -621,16 +621,16 @@ def float_range(start, end, step):
 @lru_cache(maxsize=1)
 def load_interval_ms(config_path = data_config_path):
     if not os.path.exists(config_path):
-        raise RuntimeError(f"❌ 找不到配置文件: {config_path}")
+        raise RuntimeError(f"❌ Config file not found: {config_path}")
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             meta = json.load(f)
         interval_ms = meta.get("interval_ms")
         if interval_ms is None:
-            raise RuntimeError(f"⚠️ 配置文件中缺失 'interval_ms' 字段！")
+            raise RuntimeError("⚠️ Missing 'interval_ms' field in config file!")
         return interval_ms
     except Exception as e:
-        raise RuntimeError(f"💥 读取 JSON 时发生意外错误: {e}")
+        raise RuntimeError(f"💥 Unexpected error while reading JSON: {e}")
 
 def setup_session_logger(sub_folder: str = None, log_file_path=None, symbol: str = BaseDefine.symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
     if log_file_path ==None:
@@ -675,10 +675,10 @@ def setup_session_logger(sub_folder: str = None, log_file_path=None, symbol: str
 
 def get_interval_from_filename(path: str) -> str:
     """
-    从路径中提取时间周期 (如 ETHUSDT_3m.csv -> 3m)
+    Extract interval string from a file path (e.g. ETHUSDT_3m.csv -> 3m).
     """
     filename = os.path.basename(path)
-    # 匹配 1s, 15s, 1m, 3m... 1M 等格式
+    # Match formats like 1s, 15s, 1m, 3m... 1M
     match = re.search(r'_(\d+[smhdwM])\.csv', filename)
     if match:
         return match.group(1)
@@ -686,20 +686,20 @@ def get_interval_from_filename(path: str) -> str:
 
 def get_interval_ms(interval_str: str) -> int:
     """
-    将周期字符串转换为毫秒数
-    支持: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+    Convert an interval string to milliseconds.
+    Supported: 1s, 15s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
     """
-    # 定义基础单位（毫秒）
+    # Base units in milliseconds
     units = {
         's': 1000,
         'm': 60 * 1000,
         'h': 60 * 60 * 1000,
         'd': 24 * 60 * 60 * 1000,
         'w': 7 * 24 * 60 * 60 * 1000,
-        'M': 30 * 24 * 60 * 60 * 1000  # 按照标准 30 天计算
+        'M': 30 * 24 * 60 * 60 * 1000  # Approximate month as 30 days
     }
     
-    # 使用正则表达式拆分数字和单位
+    # Split number and unit via regex
     match = re.match(r'(\d+)([smhdwM])', interval_str)
     if not match:
         return 0
@@ -728,7 +728,7 @@ def save_params(path, *, strategy, common, train):
 
 def build_dataclass(cls, data: dict):
     """
-    从 dict 构造 dataclass（支持嵌套 dataclass）
+    Build a dataclass from a dict (supports nested dataclasses).
     """
     if not is_dataclass(cls):
         raise TypeError(f"{cls} is not a dataclass")
@@ -740,7 +740,7 @@ def build_dataclass(cls, data: dict):
 
         val = data[f.name]
 
-        # 嵌套 dataclass
+        # Nested dataclass
         if is_dataclass(f.type) and isinstance(val, dict):
             kwargs[f.name] = build_dataclass(f.type, val)
         else:
@@ -768,10 +768,9 @@ def load_train_config(path, cls):
 
 def create_experiment_dir(base_dir, symbol, interval, now=None):
     """
-    创建目录：
-    base_dir / YYYY-MM-DD / SYMBOL_INTERVAL / HH_MM_SS
-
-    返回最终实验目录路径
+    Create experiment directory:
+        base_dir / SYMBOL_INTERVAL / YYYY-MM-DD / HH_MM_SS
+    Returns the final experiment directory path.
     """
     now = now or datetime.now()
 
@@ -788,4 +787,4 @@ def append_jsonl(path, obj):
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
         f.flush()
-        os.fsync(f.fileno())   # 可选，但推荐
+        os.fsync(f.fileno())   # Optional but recommended
