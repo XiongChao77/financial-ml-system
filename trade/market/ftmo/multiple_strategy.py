@@ -147,7 +147,6 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
                 vol_regime=msg["vol_regime"],
                 position_dir=PositionDir(curr_dir),
                 layers=curr_layers,
-                hold_bar_count = 0 ,
                 current_time=executor.get_server_time(),
                 account_balance=executor.get_account_equity(),
             )
