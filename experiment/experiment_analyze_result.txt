@@ -48,7 +48,7 @@ ETH 30m:
     candlestick_num 120 优于96
 
 DOGE_15m:
-    vol_multiplier_long [1.8, 1.9,2,2.1] 非常接近, 1.9的表现和鲁棒性略好些,l_cagr 1.9明显强于1.8
+    vol_multiplier_long [1.8, 1.9,2,2.1] 非常接近, 1.9的表现和鲁棒性略好些,l_cagr 1.9明显强于1.8. 1.9,2,2.1都表现不错
     batch_experiments/2026-02-12/DOGEUSDT_15m/10_29_58/reports.jsonl 
         candlestick_num 16>12>14>8>10>4>24>32
         predict_num: [4,6, 8,10, 12,16,24] holdbar: [2, 4 , 6 ,8, 10, 12,14,16,18,20,22,24,26,28,30,32,34,36,38,40]

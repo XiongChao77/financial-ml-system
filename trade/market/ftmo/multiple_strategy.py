@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 import argparse
 from multiprocessing import Process, Queue, Manager
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 current_work_dir = os.path.dirname(__file__)
@@ -90,7 +90,19 @@ class TradingConfig:
 # ============================================================
 # Data center and inference engine
 # ============================================================
-def strategy_worker(strategy_hash, strategy_type, path, pre_para, st_para, q):
+def get_bars_since_open(executor, pre_para:common.BaseDefine):
+    interval_ms = common.get_interval_ms(pre_para.interval)
+    open_time = executor.get_last_position_open_time()
+    if open_time is None:
+        return 0
+    now = datetime.now(timezone.utc)
+    open_ts = int(open_time.timestamp() * 1000)
+    now_ts = int(now.timestamp() * 1000)
+    elapsed_ms = max(0, now_ts  - open_ts)
+    bars = elapsed_ms // interval_ms
+    return int(bars)
+
+def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefine, st_para, q):
     logger, _ = common.setup_session_logger(
         sub_folder="worker", symbol=strategy_hash
     )
@@ -101,12 +113,13 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para, st_para, q):
         )
     else:
         executor = BybitExecutor(path, pre_para.symbol)
-
+    
     brain = FtmoBrain(
         executor,
         trade_risk=st_para.trade_risk,
         max_layers=1,
-        holdbar=st_para.holdbar,
+        max_hold_num=st_para.holdbar,
+        exist_hold_num= get_bars_since_open(executor,pre_para),
         allow_long=st_para.allow_long,
         allow_short=st_para.allow_short,
         thresh=st_para.thresh,

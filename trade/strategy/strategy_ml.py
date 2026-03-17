@@ -26,7 +26,6 @@ class MarketState:
 
     position_dir: PositionDir   #仓位方向
     layers: int
-    hold_bar_count:int
 
     #  用于风控审计的元数据
     current_time: datetime
@@ -55,7 +54,8 @@ class FtmoBrain(BrainBase):
         executor: BaseExecutor,
         trade_risk: float = 0.1,    # 单层风险比例 (10%)
         max_layers: int = 1,
-        holdbar: int = 16,
+        max_hold_num: int = 16,
+        exist_hold_num: int = 0,
         allow_long: bool = True,
         allow_short: bool = True,
         thresh: Optional[float] = None,
@@ -70,7 +70,7 @@ class FtmoBrain(BrainBase):
         self.executor = executor
         self.trade_risk = trade_risk
         self.max_layers = max_layers
-        self.max_hold_num = holdbar
+        self.max_hold_num = max_hold_num
         self.allow_long = allow_long
         self.allow_short = allow_short
         self.thresh = thresh
@@ -87,7 +87,7 @@ class FtmoBrain(BrainBase):
         self.is_halted_today = False
         
         # --- 统计指标 ---
-        self.bars_held = 0
+        self.bars_held = exist_hold_num
         self.all_durations = []
         self.current_trade_bars = 0
         self.current_signal_streak = 0
@@ -268,8 +268,7 @@ class FtmoBrain(BrainBase):
         """
         回测结束时的终局审计
         """
-        if False:
-            pass
+        if True:
             if self.current_trade_bars > 0:
                 self.all_durations.append(self.current_trade_bars)
             self.logger.info("=== 正在生成持仓时长分布报告 ===")
