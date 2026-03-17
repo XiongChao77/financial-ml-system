@@ -155,7 +155,7 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
 
             logger.info(
                 f"🧠 {strategy_hash} {pre_para.symbol} "
-                f"Signal={msg['signal']} Price={msg['price']} action={action.action}"
+                f"Signal={msg['signal']} Price={msg['price']} bars_held={brain.bars_held} action={action.action}"
             )
 
         except Exception as e:
