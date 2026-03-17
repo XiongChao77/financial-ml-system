@@ -102,7 +102,7 @@ class LiveBot:
             self.executor,
             trade_risk=self.strategy_para.trade_risk,
             max_layers=LiveConfig.max_layers,
-            holdbar=self.strategy_para.holdbar,
+            max_hold_num=self.strategy_para.holdbar,
             allow_long=self.strategy_para.allow_long,
             allow_short=self.strategy_para.allow_short,
             thresh=self.strategy_para.thresh,

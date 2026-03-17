@@ -1,6 +1,6 @@
 import MetaTrader5 as mt5
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from trade.strategy.base_executor import BaseExecutor
 from trade.strategy.strategy_ml import PositionDir
 
@@ -113,3 +113,25 @@ class MT5Executor(BaseExecutor):
                 # "type_filling": mt5.ORDER_FILLING_IOC,
             })
         self.logger.info(f"order close {self.magic}")
+
+    def get_last_position_open_time(self):
+        try:
+            positions = mt5.positions_get(symbol=self.symbol, magic=self.magic)
+            
+            # 没有持仓
+            if not positions:
+                return None
+            
+            pos = positions[0]
+            
+            # MT5 返回的是秒级时间戳（int）
+            open_time = pos.time
+            
+            if open_time is None or open_time == 0:
+                return None
+            
+            return datetime.fromtimestamp(open_time, tz=timezone.utc)
+
+        except Exception as e:
+            self.logger.error(f"Failed to get last position open time: {e}")
+            return None

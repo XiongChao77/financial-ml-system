@@ -156,3 +156,33 @@ class BybitExecutor(BaseExecutor):
                     )
         except Exception as e:
             self.logger.error(f"Close position exception: {e}")
+
+    def get_last_position_open_time(self):
+        try:
+            res = self.engine.http.get_positions(category="linear", symbol=self.symbol)
+            
+            if res.get('retCode') != 0:
+                return None
+            
+            pos_list = res['result']['list']
+            if not pos_list:
+                return None
+            
+            pos = pos_list[0]
+            size = float(pos.get('size', 0))
+            
+            # 没有持仓
+            if size == 0:
+                return None
+            
+            # Bybit V5 返回的是毫秒时间戳字符串
+            created_time = pos.get("createdTime")
+            
+            if not created_time:
+                return None
+            
+            return datetime.fromtimestamp(int(created_time) / 1000, tz=timezone.utc)
+
+        except Exception as e:
+            self.logger.error(f"Failed to get last position open time: {e}")
+            return None

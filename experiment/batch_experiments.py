@@ -978,6 +978,8 @@ def main():
         done_set = load_done_set(reports_path)
         task_spec = create_task_spec(logger, exp_dir, done_set)
     elif args.valid:
+        valid_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out')
+        shutil.rmtree(valid_save_dir,ignore_errors=True)
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         task_spec = _load_task_from_configs(selected_configs)
         n_prep, n_train, n_sim = _count_spec_tasks(task_spec)

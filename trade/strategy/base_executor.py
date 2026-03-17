@@ -16,3 +16,6 @@ class BaseExecutor:
     @abstractmethod
     def user_order(self, size, is_buy, stop_loss=None, take_profit=None):
         pass
+    @abstractmethod
+    def get_last_position_open_time(self):  #return UTC time
+        pass
