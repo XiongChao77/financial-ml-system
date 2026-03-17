@@ -43,7 +43,8 @@ class BtFtmoStrategy(BtExecutor):
             self,
             trade_risk=self.params.trade_risk,
             max_layers=self.params.max_layers,
-            holdbar=self.params.holdbar,
+            max_hold_num=self.params.holdbar,
+            exist_hold_num = 0,
             allow_long=self.params.allow_long,
             allow_short=self.params.allow_short,
             thresh=self.params.thresh,
@@ -185,7 +186,6 @@ class BtFtmoStrategy(BtExecutor):
             pred_prob=float(current_prob),
             position_dir=self.dir,
             layers=self.layers,
-            hold_bar_count = self.brain.bars_held,  #it's always correct in test
             current_time= self.data.datetime.datetime(0),
             account_balance=self.broker.getvalue(),
             atr=self.data.atr[0] if hasattr(self.data, 'atr') else 0.0,
