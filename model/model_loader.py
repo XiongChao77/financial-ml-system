@@ -144,7 +144,7 @@ class ModelHandler:
         :return: (df_out, stats) 
                  df_out includes full bars and columns like 'pred', 'pred_prob', 'net_score', etc.
         """
-        self.logger.info(f"Starting inference pipeline (Mode={'Live' if is_live else 'Backtest'}, diff_thresh={diff_thresh})...")
+        self.logger.debug(f"Starting inference pipeline (Mode={'Live' if is_live else 'Backtest'}, diff_thresh={diff_thresh})...")
         
         # 1. Prepare dataset: pass is_live to control index recording behavior
         ds = TimeSeriesWindowDataset(

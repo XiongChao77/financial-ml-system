@@ -46,7 +46,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             raise RuntimeError("atr_14 is used for strategy now , can't be normalize")
         if self.is_live == True:
             self.stride = 1
-        self.logger.info(f"Features num:{len(feature_cols)},: {feature_cols}")
+        self.logger.debug(f"Features num:{len(feature_cols)},: {feature_cols}")
 
         # --- 1. Load from Cache ---
         if use_cache and cache_path and os.path.exists(cache_path):
