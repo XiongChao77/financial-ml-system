@@ -159,30 +159,34 @@ class BybitExecutor(BaseExecutor):
 
     def get_last_position_open_time(self):
         try:
-            res = self.engine.http.get_positions(category="linear", symbol=self.symbol)
+            res = self.engine.http.get_executions(
+                category="linear",
+                symbol=self.symbol,
+                limit=50
+            )
             
-            if res.get('retCode') != 0:
+            if res.get("retCode") != 0:
                 return None
             
-            pos_list = res['result']['list']
-            if not pos_list:
+            executions = res["result"]["list"]
+            if not executions:
                 return None
             
-            pos = pos_list[0]
-            size = float(pos.get('size', 0))
-            
-            # 没有持仓
-            if size == 0:
+            # 当前持仓方向
+            pos_dir, _, _ = self.get_current_state()
+            if pos_dir == PositionDir.FLAT:
                 return None
             
-            # Bybit V5 返回的是毫秒时间戳字符串
-            created_time = pos.get("createdTime")
+            target_side = "Buy" if pos_dir == PositionDir.POSITIVE else "Sell"
             
-            if not created_time:
-                return None
+            # 找最近一笔“开仓方向”的成交
+            for exe in executions:
+                if exe["execType"] == "Trade" and exe["side"] == target_side:
+                    ts = int(exe["execTime"])
+                    return datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
             
-            return datetime.fromtimestamp(int(created_time) / 1000, tz=timezone.utc)
+            return None
 
         except Exception as e:
-            self.logger.error(f"Failed to get last position open time: {e}")
+            self.logger.error(f"Failed to get position open time: {e}")
             return None
