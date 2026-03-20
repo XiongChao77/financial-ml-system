@@ -142,7 +142,7 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
                 price=msg["price"],
                 signal=Signal(msg["signal"]),
                 pred_prob=msg["pred_prob"],
-                atr=msg["atr"],
+                atr_pct=msg["atr_pct"],
                 slow_atr=msg["slow_atr"],
                 vol_regime=msg["vol_regime"],
                 position_dir=PositionDir(curr_dir),
@@ -248,14 +248,14 @@ class MasterController:
                     window_items.last_candle_time = initial_df.iloc[-1]["open_time_date_utc"] if not initial_df.empty else None
                     self.logger.info(f"History Required: {window_items.min_bars_needed} bars")
 
-    def execute_strategy(self, strategy: StrategyHolder, current_price, pred, pred_prob, atr):
+    def execute_strategy(self, strategy: StrategyHolder, current_price, pred, pred_prob, atr_pct):
         try:
             strategy.queue.put({
                 "type": "signal",
                 "price": None if current_price is None else float(current_price),
                 "signal": int(pred),
                 "pred_prob": None if pred_prob is None else float(pred_prob),
-                "atr": None if atr is None else float(atr),
+                "atr_pct": None if atr_pct is None else float(atr_pct),
                 "slow_atr": None,
                 "vol_regime": None
             })
@@ -268,7 +268,7 @@ class MasterController:
         for window in i_config.items.keys():
             for hash_value,strategy in self.strategies.items():
                 if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.candlestick_num == window:
-                    self.execute_strategy(strategy,current_price=None,pred=Signal.INVALID,pred_prob=1,atr=None )
+                    self.execute_strategy(strategy,current_price=None,pred=Signal.INVALID,pred_prob=1,atr_pct=None )
 
     def sleep_until_next_tick(self,base_seconds: int):
         """
@@ -357,10 +357,10 @@ class MasterController:
                             for hash_value,strategy in self.strategies.items():
                                 if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.candlestick_num == window:
                                     try:
-                                        df_with_feature['stop_loss_atr'] = common.stop_loss_atr(df, strategy.st_para.holdbar)
+                                        df_with_feature['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, strategy.st_para.holdbar)
                                         df_pred, model_stats = strategy.model.predict_with_ds(ds,df_with_feature,is_live=True,diff_thresh = None)
                                         last_row = df_pred.iloc[-1]
-                                        self.execute_strategy(strategy, last_row["close"], last_row["pred"], last_row["pred_prob"], last_row['stop_loss_atr'])
+                                        self.execute_strategy(strategy, last_row["close"], last_row["pred"], last_row["pred_prob"], last_row['stop_loss_atr_pct'])
 
                                     except Exception as e:
                                         self.logger.error(f"Error in strategy work {strategy.pre_para.symbol}: {e}")

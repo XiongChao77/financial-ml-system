@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
 
 
-def stop_loss_atr(df: pd.DataFrame, length: int) -> pd.Series:
+def stop_loss_atr_pct(df: pd.DataFrame, length: int) -> pd.Series:
     length = int(length)
     if length < 2:
         length = 2
@@ -34,7 +34,7 @@ def stop_loss_atr(df: pd.DataFrame, length: int) -> pd.Series:
     atr = tr.ewm(alpha=1/length, adjust=False, min_periods=length).mean()
     return atr
 
-# df['stop_loss_atr'] = stop_loss_atr(df, length=round(A * T))
+# df['stop_loss_atr_pct'] = stop_loss_atr_pct(df, length=round(A * T))
 
 def _realized_vol_future(close: pd.Series, T: int) -> pd.Series:
     """
@@ -142,7 +142,7 @@ def plot_atr_ratio_hold_heatmap(
                 L = 2
 
             if L not in atr_cache:
-                atr_cache[L] = stop_loss_atr(df, L)
+                atr_cache[L] = stop_loss_atr_pct(df, L)
 
             x = atr_cache[L]
             y = future_map[T]

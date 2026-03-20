@@ -340,7 +340,7 @@ def basic_filter(all_results):
     print(f"After pre-screening short: {len(ps_results)}, {len(ps_results)/len(ps_results_0)*100:.2f}%")
     pf_results,unselected = filter_by_criteria(ps_results, period ='forward', cagr=0.2)
     print(f"After pre-screening forward: {len(pf_results)}, {len(pf_results)/len(ps_results)*100:.2f}%")
-    l_results,unselected = filter_by_criteria(pf_results, period ='long', cagr=0.2)
+    l_results,unselected = filter_by_criteria(pf_results, period ='long', cagr=0)
     print(f"After pre-screening long: {len(l_results)}, {len(l_results)/len(pf_results)*100:.2f}%")
     return l_results
 
@@ -607,9 +607,16 @@ def plot_in_batches(all_results, output_dir, batch_size=5):
 def main():
     exp_dir1 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-07','01_03_38')
     exp_dir2 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-09','17_33_35')
+    exp_dir5 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-18','02_38_16')
+    exp_dir7 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-18','13_16_48')
+    exp_dir9 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-19','01_15_14')
+    exp_dir13 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-20','00_30_58')
+    exp_dir10 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-03-19','11_00_31')
+    exp_dir11 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_1h','2026-03-19','11_32_26')
+    exp_dir12 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_1h','2026-03-19','11_53_49')
     exp_dir3 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','18_41_56')
     exp_dir4 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','20_17_30')
-    exp_dir_list = [exp_dir3,exp_dir4]
+    exp_dir_list = [exp_dir13]
     filter_report = None
     filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
@@ -639,7 +646,13 @@ def main():
         plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
         save_raw_reports(uin_records,output_dir, "filtered_raw_reports.jsonl")
         exit()
-    
+    analyze_holdbar(uin_records,target_key="stride",period ='long', metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="holdbar",period ='long', metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="candlestick_num",period ='long', metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="vol_ewma_span", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="predict_num", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="atr_sl_mult_long", period ='long',metric_key="cagr")
     # analyze_model_performance_correlation(uin_records)
     # analyze_model_metrics_by_decile(uin_records)
     # exit()
@@ -648,7 +661,8 @@ def main():
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
     # exit()
-    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="stride",period ='long', metric_key="cagr")
+    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="feature_conf_list",period ='long', metric_key="cagr")
+
     if symbol == 'DOGEUSDT' and interval=='15m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.3,rc_median = 0,rc_pos_ratio = 0.8,calmar = 1.3 ,daily_freq = 0.1,sharpe = 0.6)
         # Define all metrics of interest
@@ -669,7 +683,7 @@ def main():
             l_results = l_results + refined_data
         l_results = merge_selected(l_results)
         l_results = sorted(l_results, key=itemgetter("l_cagr"), reverse=True)
-        l_results,unselected = filter_by_criteria(l_results, period ='long', cagr=0.7,calmar = 1,sharpe = 1,rc_pos_ratio = 0.7,daily_freq = 0.1)
+        l_results,unselected = filter_by_criteria(l_results, period ='long', cagr=0.3,calmar = 0.5,sharpe = 0.5,rc_pos_ratio = 0.5,daily_freq = 0.1)
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.8)
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.6)
     if symbol == 'ETHUSDT' and interval=='15m':
@@ -691,14 +705,14 @@ def main():
     filter_hash_doge_15 = ['1df68cde','2c833b42','4e6d96d6','b4643441','b1d3aa34','358126fe','404b9edc','8918c3a8','652c9e37','d5eb8b05','6810b357','ef82f618','4e1bcd26','d81ee9ea','1351d037','d40a5588'
                            ,'f1fa2ba1','978a1afb','1870ccac','5290ee6d','d1062846','6d2b9fc9','c6943cca','b7a08817','2babf5c5','f7c92570','044c22f4','e7653d4c','9cc7065e',
                            '759a6e64','04c36e97','261d23d3','a1d96a57','ecf1eed1','ab31665b','c32333fc','4f9f4307','adff58e6','bbbeece4','b4b1d10f','781b9c01','7313dcfb',
-                           'c8d405bf','6483c804','493904fe','8c3c266b','a6270c43','a6ab4b8a','6d5327c1']
+                           'c8d405bf','6483c804','493904fe','8c3c266b','a6270c43','a6ab4b8a','6d5327c1',]
     keep_hash = [
         'f75e3f11', '1b5d9b3c', '63ee07fc', '0180b8fc',
         '903e836f', '2ced173e', 'b2f09163', '31a2c243', 
         'b0a375e7', '819999ca', 'fbd5e0ca', '3c9f67cc', 
         'e543670e', '1bc723b8'
     ]
-    filter_hash_eth_15 = ['943143f8', '21f9fce3', 'e4927150', '9a3f7676', '4afa85ac' ,'3163d070','ed96bd77','cc89356b']
+    filter_hash_eth_15 = ['943143f8', '21f9fce3', 'e4927150', '9a3f7676', '4afa85ac' ,'3163d070','ed96bd77','cc89356b','31854257']
     filter_set = set(filter_hash_doge_15 + filter_hash_eth_15)
     keep_set = set(keep_hash)
     selected = [
@@ -707,9 +721,7 @@ def main():
         # and h in keep_set
     ]
     print(f"🎯 hash fitler, {len(l_results)} -> {len(selected)}")
-    analyze_holdbar(selected,target_key="holdbar",period ='long', metric_key="cagr")
-    analyze_holdbar(selected,target_key="predict_num", period ='long',metric_key="cagr")
-    analyze_holdbar(selected,target_key="vol_multiplier_long", period ='long',metric_key="cagr")
+    stats, f_map, groups = analyze_holdbar(selected,target_key="feature_conf_list",period ='long', metric_key="cagr")
     show_performance(selected,output_dir,3)
     # exit()
     # stable_selected1 = filter_stable(rc_median_results)
