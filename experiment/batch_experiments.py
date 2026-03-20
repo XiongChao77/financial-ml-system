@@ -53,7 +53,7 @@ SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
 MAX_SIM = 4
-SYMBOL: str = "ETHUSDT"    #ETHUSDT DOGEUSDT
+SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
 INTERVAL: str = "15m"
 # -----------------------------------------------------------------------------
 # Path layout helpers
@@ -307,10 +307,10 @@ def construct_task_doge():
     from trade.bt import simulation
     preparation_task: List[Any] = []
 
-    for cn in [12]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
-        for pn in [16,24,40]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-            for vol_multiplier in [2,2.1,2.2]:#1.8,1.9,2
-                for vol_ewma_span in [80,88]:
+    for cn in [10,12]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
+        for pn in [4,8,16,24,32]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
+            for vol_multiplier in [1.8,1.9,2]:#1.8,1.9,2
+                for vol_ewma_span in [80]:
                     preparation_task.append(common.BaseDefine(
                             vol_ewma_span = vol_ewma_span,
                             candlestick_num=cn,
@@ -337,21 +337,33 @@ def construct_task_doge():
     #                     training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
     #                                                 flip_penalty = float(1.3),miss_penalty = float(1.7),false_trade = 1,
     #                                                 stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = lambda_dir,lambda_cost = lambda_cost))
+    to_remove_1 = ["open", "high",'low' ]
+    to_remove_2 = to_remove_1 + ['close','volume','number_of_trades','taker_buy_base_volume','taker_buy_quote_volume']
+    to_remove_3 = to_remove_1 + ['close','volume','taker_buy_base_volume','taker_buy_quote_volume']
+    to_remove_4 = to_remove_1 + ['close','taker_buy_base_volume','taker_buy_quote_volume']
+    to_remove_5 = to_remove_1 + ['taker_buy_base_volume','taker_buy_quote_volume']
+    feature_conf_list_1 = [f for f in train.feature_conf_list if f not in to_remove_1]
+    feature_conf_list_2 = [f for f in train.feature_conf_list if f not in to_remove_2]
+    feature_conf_list_3 = [f for f in train.feature_conf_list if f not in to_remove_3]
+    feature_conf_list_4 = [f for f in train.feature_conf_list if f not in to_remove_4]
+    feature_conf_list_5 = [f for f in train.feature_conf_list if f not in to_remove_5]
     for false_trade in [1]:
         for flip_penalty in np.arange(0.8, 1.7, 0.1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
             for miss_penalty in np.arange(0.5, 1.3, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
-                for stride in [2,4,8]: #2,4,8
+                for stride in [4]: #2,4,8
                     for bestf1 in [True]:
                         for loss_fun_version_v in [2]:
-                            training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
-                                                        flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
-                                                        stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0))
+                            for featrue_conf in [feature_conf_list_1]:
+                                training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
+                                                                       feature_conf_list= featrue_conf,
+                                                            flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
+                                                            stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0))
 
     simulation_task: List[Any] = []
 
-    for i in [30,32,36,38]: #16,24,30,32,36,40,44,48
+    for i in [12,16,24,32,40]: #16,24,30,32,36,40,44,48
         holdbar = i
-        for (atr_sl_mult_long, atr_sl_mult_short) in [(8,6),(6,6)]: #(6,5),(5,4)
+        for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5),(5,4)]: #(6,5),(5,4)
             simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
                                             stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04))
     return preparation_task, training_task, simulation_task
@@ -535,10 +547,10 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
             report = {'short':{}, 'long':{}, 'forward': {}, 'pass':False}
             report['short'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                 train_output_dir=train_output_dir, device="cpu", period='short' )["statistics"][1]
-            if report['short']["performance"]["cagr"] > 0.2 :
+            if report['short']["performance"]["cagr"] > 0 :
                 report['forward'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                     train_output_dir=train_output_dir, device="cpu", period='forward' )["statistics"][1]
-                if report['forward']["performance"]["cagr"] > 0.2 :
+                if report['forward']["performance"]["cagr"] > -1000 :
                     report['long'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                         train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
                     if report['long']["performance"]["cagr"] > 0 :

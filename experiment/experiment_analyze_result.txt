@@ -73,6 +73,14 @@ DOGE_15m:
     atr_sl_mult_long/atr_sl_mult_short 对参数弱敏感，最优是 (8,5)    依据 quant_output/batch_experiments/DOGEUSDT_15m/2026-02-21/22_58_48
     atr_sl_mult_short 6>5>4
     atr_sl_mult_long 3/10 可以丢弃
+    只是删除["open", "high",'low'] 这三项特征，表现有显著提升！
+
+    
+
+
+
+
+
 
 DOGE_5m:
     batch_experiments\2026-02-14\DOGEUSDT_5m\07_54_32 未完成

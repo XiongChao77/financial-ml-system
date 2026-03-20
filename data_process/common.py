@@ -44,7 +44,7 @@ class BaseDefine:
     # model / data
     vol_ewma_span: int  = 80
     candlestick_num: int = 32     # 160 best for LSTM
-    predict_num: int = 8
+    predict_num: int = 10000
     # risk / vol
     vol_multiplier_long: float = 1.7
     stop_multiplier_rate_long: Optional[float] = 0.2
@@ -54,7 +54,7 @@ class BaseDefine:
     symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
     interval: str = "15m"
     trading_type:str ='um'             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures)   
-    version:int = 0
+    version:float = 0.1
 
 log_level = logging.INFO
 

@@ -33,14 +33,14 @@ class PandasDataWithPred(bt.feeds.PandasData):
         "pred",
         "pred_prob",
         'label',
-        "atr",
+        "atr_pct",
         "slow_atr",
         "vol_regime",
     )
     params = (
         ("pred", -1),
         ("pred_prob", -1),
-        ("atr", -1),      # 自动匹配列名
+        ("atr_pct", -1),      # 自动匹配列名
         ("slow_atr", -1),      # 自动匹配列名
         ("vol_regime", -1),      # 自动匹配列名
         ("label", -1),
@@ -94,6 +94,7 @@ class StrategyPara:
     # risk
     trade_risk: float = 0.4
     max_daily_loss_pct: float = 0.04
+    decide_version : int = 0
 
 # period: short / forward / long
 def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
@@ -139,8 +140,8 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
             window=handler.window,
             is_live=False,
         )
-        df['stop_loss_atr'] = common.stop_loss_atr(df, para.holdbar)
-        atr_colum = 'stop_loss_atr'
+        df['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, para.holdbar)
+        atr_colum = 'stop_loss_atr_pct'
         df_with_pred, model_stats = handler.predict_with_ds(ds,df,is_live=False,diff_thresh = None)
         # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
         # exit()
@@ -185,6 +186,7 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
         take_profit = para.take_profit,
         trade_risk = para.trade_risk,
         max_daily_loss_pct = para.max_daily_loss_pct,
+        decide_version = para.decide_version,
     )
 
     data = PandasDataWithPred(
@@ -195,7 +197,7 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
         low="low",
         close="close",
         volume="volume",
-        atr = atr_colum,
+        atr_pct = atr_colum,
         # slow_atr = "atr_5000",
         # vol_regime = "vol_regime_100",
         label = "label",
