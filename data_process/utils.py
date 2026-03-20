@@ -10,7 +10,7 @@ import pandas as pd
 
 current_work_dir = os.path.dirname(__file__)
 
-def stop_loss_atr(df: pd.DataFrame, holdbar: int) -> pd.Series:
+def stop_loss_atr_pct(df: pd.DataFrame, holdbar: int) -> pd.Series:
     length = max(10, round(0.8 * holdbar))
     length = int(length)
     length = max(length, 2)

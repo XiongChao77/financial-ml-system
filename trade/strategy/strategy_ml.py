@@ -20,7 +20,7 @@ class MarketState:
     price: float
     signal: Signal
     pred_prob: float
-    atr: float              #  由 DataProvider 提供的当前 ATR
+    atr_pct: float              #  由 DataProvider 提供的当前 ATR
     slow_atr : float
     vol_regime: float
 
@@ -65,6 +65,7 @@ class FtmoBrain(BrainBase):
         stop_loss_short: float = 0.05,     # 做空止损百分比
         atr_sl_mult_long:float = 3,
         atr_sl_mult_short:float = 3,
+        decide_version: int = 0
     ):
         self.logger = logging.getLogger("trade")
         self.executor = executor
@@ -78,6 +79,9 @@ class FtmoBrain(BrainBase):
         self.stop_loss_short = stop_loss_short
         self.atr_sl_mult_long = atr_sl_mult_long
         self.atr_sl_mult_short = atr_sl_mult_short
+        self.pre_signal = Signal.NEUTRAL
+        self.pre_position_dir:PositionDir = PositionDir.FLAT
+        self.decide_version = decide_version
         
         # ---  风控状态管理 ---
         self.max_daily_loss_pct = max_daily_loss_pct
@@ -103,14 +107,19 @@ class FtmoBrain(BrainBase):
 
     def _calculate_dynamic_unit_pct(self, state: MarketState) -> float:
         """基于 ATR 计算理论仓位百分比"""
-        if state.atr <= 0:
+        if state.atr_pct <= 0:
             return 0.0
         # 基础海龟比例 (Risk / (2 * ATR_Pct))
-        atr_pct = state.atr / state.price
+        atr_pct = state.atr_pct / state.price
         raw_nominal_pct = self.trade_risk / (2.0 * atr_pct)
         return self.trade_risk
 
     def decide(self, state: MarketState) -> TradingAction:
+        if state.position_dir != self.pre_position_dir:
+            self.bars_held = 0
+            self.pre_position_dir = state.position_dir
+        elif state.position_dir != PositionDir.FLAT:
+            self.bars_held += 1
         # 1. 每日风险审计与熔断检查
         self._update_daily_equity(state.current_time, state.account_balance)
         if self.is_halted_today:
@@ -123,8 +132,7 @@ class FtmoBrain(BrainBase):
         if daily_loss_abs >= max_loss_allowed_abs:
             self.is_halted_today = True
             self.logger.warning(f"🚨 [MELTDOWN] 日亏损触及上限! 亏损率: {daily_loss_abs/self.day_start_equity:.2%}")
-            self.executor.user_close()
-            return TradingAction(ActionType.CLOSE)
+            return TradingAction(ActionType.HOLD)
 
         # 2. 信号预处理
         signal = state.signal
@@ -132,54 +140,67 @@ class FtmoBrain(BrainBase):
             signal = Signal.NEUTRAL
         if self.thresh is not None and state.pred_prob < self.thresh:
             signal = Signal.NEUTRAL
-
-        if signal != Signal.NEUTRAL:
-            self.current_signal_streak += 1
-            self.bars_held = 0 
+        
+        #only for record
+        if signal == self.pre_signal:
+            if signal != Signal.NEUTRAL:
+                self.current_signal_streak += 1 
         else:
-            if self.current_signal_streak > 0:
-                self.all_signal_streaks.append(self.current_signal_streak)
-            self.current_signal_streak = 0
-            self.bars_held += 1
+            if self.pre_signal != Signal.NEUTRAL:
+                if self.current_signal_streak > 0:
+                    self.all_signal_streaks.append(self.current_signal_streak)
+                self.current_signal_streak = 0
+            else:
+                self.current_signal_streak = 1
+            self.pre_signal = signal
 
-        # 4. 信号映射与出场逻辑
+        # trade action
         target_dir = PositionDir.FLAT
         if signal == Signal.POSITIVE  and self.allow_long:
             target_dir = PositionDir.POSITIVE 
         elif signal == Signal.NEGATIVE and self.allow_short:
             target_dir = PositionDir.NEGATIVE
         
+
         if state.position_dir != PositionDir.FLAT:
-            if self.bars_held < self.max_hold_num:
+            if target_dir == state.position_dir:
+                self.bars_held = 0
+            elif self.bars_held < self.max_hold_num:
                 target_dir = state.position_dir
-            else:
-                target_dir = PositionDir.FLAT
 
         action = TradingAction(ActionType.HOLD)
 
         #new order limit
         # if state.position_dir == PositionDir.FLAT and target_dir != PositionDir.FLAT:
-        #     if valid_number(state.atr) and valid_number(state.slow_atr):
-        #         # if state.atr/state.slow_atr < 0.7: 
+        #     if valid_number(state.atr_pct) and valid_number(state.slow_atr):
+        #         # if state.atr_pct/state.slow_atr < 0.7: 
         #         #     target_dir = PositionDir.FLAT
         #         if target_dir != PositionDir.FLAT and  state.slow_atr * math.sqrt(BaseDefine.predict_num) < 0.02:
         #             target_dir = PositionDir.FLAT
         #             self.logger.debug(f"filter signal {target_dir} by slow_atr:{state.slow_atr}")
             # if target_dir != PositionDir.FLAT and state.vol_regime < 1 :
             #     target_dir = PositionDir.FLAT
-            # if target_dir != PositionDir.FLAT and  state.atr * math.sqrt(BaseDefine.predict_num) < 0.02:
+            # if target_dir != PositionDir.FLAT and  state.atr_pct * math.sqrt(BaseDefine.predict_num) < 0.02:
             #     target_dir = PositionDir.FLAT
 
         if target_dir != PositionDir.FLAT:
             # 3. 计算下单参数
             # 使用 trade_risk 作为固定百分比，或切换回 _calculate_dynamic_unit_pct
             sl_pct = 0.05
-            if self.atr_sl_mult_long!=None and target_dir == PositionDir.POSITIVE  and state.atr > 0:
-                sl_pct = state.atr * self.atr_sl_mult_long
-            elif self.atr_sl_mult_short!=None and target_dir == PositionDir.NEGATIVE and state.atr > 0:
-                sl_pct = state.atr * self.atr_sl_mult_short
+            if self.atr_sl_mult_long!=None and target_dir == PositionDir.POSITIVE  and state.atr_pct > 0:
+                sl_pct = state.atr_pct * self.atr_sl_mult_long
+                self.logger.debug(f"atr_sl_mult_long sl_pct {sl_pct} ")
+            elif self.atr_sl_mult_short!=None and target_dir == PositionDir.NEGATIVE and state.atr_pct > 0:
+                sl_pct = state.atr_pct * self.atr_sl_mult_short
+                self.logger.debug(f"atr_sl_mult_short sl_pct {sl_pct} ")
             elif self.atr_sl_mult_long==None and  self.atr_sl_mult_short==None:
                 sl_pct = self.stop_loss_long if target_dir == PositionDir.POSITIVE  else self.stop_loss_short
+                self.logger.debug(f"stop_loss_long sl_pct {sl_pct} ")
+            else:
+                self.logger.warning(
+                    f"target_dir={target_dir}, atr_sl_mult_long={self.atr_sl_mult_long},atr_sl_mult_short={self.atr_sl_mult_short},state.atr_pct={state.atr_pct}, "
+                    f"stop_loss_long={self.stop_loss_long}, stop_loss_short={self.stop_loss_short}"
+                )
             
             if target_dir == PositionDir.FLAT or sl_pct <= 0:
                 final_order_qty = 0.0
@@ -199,7 +220,7 @@ class FtmoBrain(BrainBase):
         # 5. 执行决策逻辑 (封装订单信息)
         if state.position_dir == PositionDir.FLAT:
             if target_dir != PositionDir.FLAT:
-                self.current_trade_bars = 1
+                self.current_trade_bars = 0
                 action = TradingAction(
                     action=ActionType.OPEN,
                     target_dir=target_dir,
@@ -215,7 +236,7 @@ class FtmoBrain(BrainBase):
                 action = TradingAction(ActionType.CLOSE)
             elif target_dir != state.position_dir:
                 self.all_durations.append(self.current_trade_bars)
-                self.current_trade_bars = 1
+                self.current_trade_bars = 0
                 action = TradingAction(
                     action=ActionType.REVERSE,
                     target_dir=target_dir,

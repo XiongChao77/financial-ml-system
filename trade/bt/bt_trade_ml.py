@@ -21,6 +21,7 @@ class BtFtmoStrategy(BtExecutor):
         atr_sl_mult_long = 3,
         atr_sl_mult_short = 3,
         max_daily_loss_pct = 0.99,
+        decide_version = 0,
     )
 
     def __init__(self):
@@ -53,6 +54,7 @@ class BtFtmoStrategy(BtExecutor):
             atr_sl_mult_long = self.params.atr_sl_mult_long,
             atr_sl_mult_short = self.params.atr_sl_mult_short,
             max_daily_loss_pct = self.params.max_daily_loss_pct,
+            decide_version = self.params.decide_version,
         )
 
         self.max_margin_level = 0.0
@@ -188,7 +190,7 @@ class BtFtmoStrategy(BtExecutor):
             layers=self.layers,
             current_time= self.data.datetime.datetime(0),
             account_balance=self.broker.getvalue(),
-            atr=self.data.atr[0] if hasattr(self.data, 'atr') else 0.0,
+            atr_pct=self.data.atr_pct[0] if hasattr(self.data, 'atr_pct') else 0.0,
             slow_atr = self.data.slow_atr[0] if hasattr(self.data, 'slow_atr') else 0.0,
             vol_regime = self.data.vol_regime[0] if hasattr(self.data, 'vol_regime') else None,
         )
