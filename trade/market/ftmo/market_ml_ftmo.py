@@ -205,7 +205,7 @@ class LiveBot:
             layers= curr_layers,
             current_time= self.executor.get_server_time(),
             account_balance= self.executor.get_account_equity(),
-            atr= last_row["atr_14"],
+            atr_pct= last_row["atr_14"],
             slow_atr = None,
             vol_regime = None,
         )
