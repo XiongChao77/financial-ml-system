@@ -1,14 +1,17 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import os, sys
+import os, sys, logging
 
-from trade_simulation import simulation
+from trade.bt import simulation
+from data_process import common
 
 app = FastAPI()
-result = simulation.main()
+logger, _= common.setup_session_logger(sub_folder='backend',console_level= logging.INFO, file_level = logging.DEBUG)
+
+result = simulation.main(logger)
 candles = result["candles"]
 markers = result["markers"]
-statistics = result["statistics"]
+statistics = result["statistics"][0]  # full report
 
 # 允许跨域（前后端分离必需）
 app.add_middleware(

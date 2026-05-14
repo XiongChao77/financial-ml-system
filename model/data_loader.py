@@ -1,204 +1,412 @@
-# data_loader.py (新文件)
-from typing import List
+from typing import List,Optional,Tuple
 import numpy as np
 import pandas as pd
-import torch,os
+import torch,os,logging,hashlib
 from torch.utils.data import Dataset
-from data_process.common import *
+from data_process import common
 
-#number_of_trades 和vloume高度重合，统计相关性低,quote_asset_volume和vloume高度重合.
+# number_of_trades and volume are highly correlated; quote_asset_volume and volume are also highly correlated.
 #taker_buy_quote_volume--taker_buy_base_volume,
-DROP_FEATURES =['threshold','label', 'open_time_ms', 'open_time_utc', 'close_time_utc' ]
+DROP_FEATURES =['threshold_long', 'stop_threshold_long','threshold_short', 'stop_threshold_short', 'label', 'trend_strength', 'open_time_ms_utc', 'open_time_date_utc',
+                 'close_time_ms_utc', 'ignore' ]
 LOW_CORRELATION_FEATURES = ['number_of_trades','quote_asset_volume', 'taker_buy_quote_volume']
 
 # ====================================================================
 # --- 2. TimeSeriesWindowDataset CLASS ---
 # ====================================================================
-class TimeSeriesWindowDataset(Dataset):
+class TimeSeriesWindowDataset(torch.utils.data.Dataset):
     def __init__(
-        self, 
-        df: pd.DataFrame, 
-        feature_cols: List[str], 
-        label_col: str, 
-        window: int
+            self,
+            df: pd.DataFrame,
+            kline_interval_ms:int,
+            feature_cols,
+            label_col: str,
+            window: int,
+            stride: int = 1,
+            is_live: bool = False,
+            cache_path: Optional[str] = None,
+            use_cache: bool = False,
+            show_feature_distribution = True
     ):
-        # === 过滤逻辑：必须在提取 values 之前执行 ===
-        clean_feature_cols = [col for col in feature_cols if col not in DROP_FEATURES]
-        self.feature_names = clean_feature_cols
-        self.feature_count = len(clean_feature_cols)
+        self.logger = logging.getLogger("dataset")
+        self.is_live = is_live
+        self.show_feature_distribution = show_feature_distribution
+        self.stride = stride
+        self.window = window
+        self.kline_interval_ms = kline_interval_ms
+        self.feature_cols = feature_cols  # Keep a copy of requested feature list
+        self.label_col = label_col
+        self.time_col = 'open_time_ms_utc'
+        self.factory = common.FeatureFactory(self.kline_interval_ms)
+
+        missing = set(feature_cols) - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing features: {list(missing)}")
+        if 'atr_14' in feature_cols:
+            raise RuntimeError("atr_14 is used for strategy now , can't be normalize")
+        if self.is_live == True:
+            self.stride = 1
+        self.logger.debug(f"Features num:{len(feature_cols)},: {feature_cols}")
+
+        # --- 1. Load from Cache ---
+        if use_cache and cache_path and os.path.exists(cache_path):
+            if self._load_from_cache(cache_path):
+                self.logger.warning(f"🚀 Parameters match, loaded from cache: {cache_path}")
+                return
+            else:
+                self.logger.info("🔄 Parameters changed or cache invalid, re-processing raw data...")
+
+        # --- 2. Process Data ---
+        if df is None or feature_cols is None:
+            raise ValueError("Data and feature_cols must be provided if cache is not found.")
+
+        self.logger.info("⚙️ Cache not found or invalid. Processing raw data...")
         
-        # === 【修复 1】: 彻底清洗 NaN ===
-        # 这一步至关重要！任何技术指标产生的 NaN 都会导致训练崩溃
-        df_clean = df[clean_feature_cols + [label_col]].copy()
-        
-        # 检查是否有 NaN
-        nan_rows = df_clean[df_clean.isnull().any(axis=1)]
+        # A. Data Preparation & Audit
+        df_work, clean_features = self._prepare_data(df, feature_cols, label_col)
+        self.feature_names = clean_features
+        self.feature_count = len(clean_features)
+        cols_set = set(self.feature_cols)
+        unused = [f for f in self.factory.all_feature_list if f not in cols_set]    #keep order
+        self.logger.debug(f"feature unused: {unused}")
+        # B. Window Generation
+        X3d, time_windows = self._generate_windows(df_work)
 
-        if not nan_rows.empty:
-            print(f"Warning: Found {nan_rows.shape[0]} rows containing NaNs (Total NaNs: {df_clean.isnull().sum().sum()}).")
-            
-            # 【新增调试输出】打印前 5 行和后 5 行包含 NaN 的数据，或只打印后 10 行。
-            # 这里选择打印后 10 行，因为技术指标的 NaN 通常出现在时间序列的前端。
-            # print("\n--- Last 10 rows containing NaNs before dropping ---")
-            # print(nan_rows.tail(10).to_string())
-            # print("----------------------------------------------------\n")
-            
-            df_clean.dropna(inplace=True)
-            df_clean.reset_index(drop=True, inplace=True)
-            print(f"\n--- Data Length after Drop: {len(df_clean)}---")
-            if df_clean.empty:
-                 raise RuntimeError("Dataset became empty after dropping NaNs. Check TA windows.")
+        # C. Filter & Align (Continuity + Labels)
+        X_filtered, y_filtered, final_indices = self._filter_and_align(
+            df_work, X3d, time_windows, label_col
+        )
 
-        values = df_clean[clean_feature_cols].to_numpy(dtype=np.float32, copy=True)   # [N, F]
-        labels = df_clean[label_col].astype(int).to_numpy()                       # [N]
-        # === 过滤逻辑结束 ===
-        
-        # 1. 划分窗口 (Partitioning)
-        X3d = _as_strided_windows(values, window) # [M, T, F]
-        y_all = labels[window-1:]
-        
-        FeatureFactory(FEATURE_CONFIG).normalize(X3d , clean_feature_cols)
-        FeatureOrigin().normalize(X3d , clean_feature_cols)
+        # D. Finalize (Normalization & Tensor Conversion)
+        self._finalize_dataset(X_filtered, y_filtered, final_indices)
 
-        # 3. 转换为 PyTorch Tensor
-        self.X = torch.from_numpy(X3d)
-        self.y = torch.from_numpy(y_all)
+        # --- 3. Save to Cache ---
+        if use_cache and cache_path:
+            self._save_to_cache(cache_path)
 
-    def __len__(self): return self.X.shape[0]
-    def __getitem__(self, i): return self.X[i], self.y[i]
-
-    # ========== 【新增】 保存处理后数据的方法 ==========
-    def save_debug_data(self, output_dir: str):
-        """
-        将处理后的 Tensor 数据保存到文件，用于检查归一化结果。
-        1. debug_full_tensor.pt: 完整的 (M, T, F) 数据
-        2. debug_snapshot_last_step.csv: 每个窗口最后一个时间步的数据 (M, F) -> 最直观，用来查错
-        """
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-
-        print(f"\n[Debug] Saving processed data to {output_dir} ...")
-
-        # 1. 保存完整的 Tensor 数据
-        torch.save({
+    def _save_to_cache(self, path: str):
+        """Save processed data and all key initialization parameters."""
+        data_to_save = {
             "X": self.X,
             "y": self.y,
-            "features": self.feature_names
-        }, os.path.join(output_dir, "debug_full_tensor.pt"))
+            "returns": self.returns,
+            "indices": self.indices,
+            "feature_names": self.feature_names,
+            "feature_count": self.feature_count,
+            # Key parameter snapshot
+            "stride": self.stride,
+            "window": self.window,
+            "kline_interval_ms": self.kline_interval_ms,
+            "label_col": self.label_col,
+            "feature_cols": self.feature_cols,
+            "symbol": common.BaseDefine.symbol,
+            "interval": common.BaseDefine.interval,
+        }
+        torch.save(data_to_save, path)
+        self.logger.info(f"💾 Data processing done, cache updated: {path}")
 
-        # 2. 生成人类可读的 CSV (取每个窗口的最后一帧 t = window-1)
-        # 这代表了模型在做预测那个时刻看到的“归一化后”特征值
-        # 形状变换: [M, T, F] -> [M, F] (取 T的最后一个索引)
+    def _load_from_cache(self, path: str) -> bool:
+        """Load from disk and validate parameter consistency."""
+        try:
+            checkpoint = torch.load(path, weights_only=False) 
+            
+            # --- Strict parameter comparison ---
+            # 1. Basic scalar parameter validation
+            mismatch_reasons = []
+            self.returns = checkpoint.get("returns") 
+            
+            # Backward compatibility: older caches may not contain returns
+            if self.returns is None:
+                self.logger.error("🚨 Cache missing 'returns'! Please delete cache file and regenerate.")
+                return False
+
+            if self.stride != checkpoint.get("stride"):
+                mismatch_reasons.append(f"stride ({checkpoint.get('stride')} -> {self.stride})")
+            
+            if self.window != checkpoint.get("window"):
+                mismatch_reasons.append(f"window ({checkpoint.get('window')} -> {self.window})")
+            
+            if self.kline_interval_ms != checkpoint.get("kline_interval_ms"):
+                mismatch_reasons.append(f"interval ({checkpoint.get('kline_interval_ms')} -> {self.kline_interval_ms})")
+            
+            if self.label_col != checkpoint.get("label_col"):
+                mismatch_reasons.append(f"label_col ({checkpoint.get('label_col')} -> {self.label_col})")
+
+            if common.BaseDefine.symbol != checkpoint.get("symbol"):
+                mismatch_reasons.append(f"symbol ({checkpoint.get('symbol')} -> {common.BaseDefine.symbol})")
+
+            if common.BaseDefine.interval != checkpoint.get("interval"):
+                mismatch_reasons.append(f"interval ({checkpoint.get('interval')} -> {common.BaseDefine.interval})")
+
+            # 2. Feature list validation (content and order)
+            cached_features = checkpoint.get("feature_cols", [])
+            if self.feature_cols != cached_features:
+                mismatch_reasons.append("feature_cols (list content or order changed)")
+
+            # If anything mismatches, return False to trigger recomputation
+            if mismatch_reasons:
+                self.logger.warning(f"⚠️ Cache parameter mismatch: {', '.join(mismatch_reasons)}")
+                return False
+                
+            # All parameters match; assign cached tensors
+            self.X = checkpoint["X"]
+            self.y = checkpoint["y"]
+            self.indices = checkpoint["indices"]
+            self.feature_names = checkpoint["feature_names"]
+            self.feature_count = checkpoint["feature_count"]
+            return True
+
+        except Exception as e:
+            self.logger.error(f"❌ Cache load failed: {e}")
+            return False
+
+    # ----------------------------------------------------------------
+    # --- Internal Pipeline Methods ---
+    # ----------------------------------------------------------------
+
+    def _prepare_data(self, df: pd.DataFrame, feature_cols: List[str], label_col: str):
+        """
+        Clean data in two stages:
+        1. Remove initial cold-start NaNs (expected)
+        2. Remove abnormal NaNs in the middle or tail (risky)
+        """
+        # --- Basic column selection ---
+        clean_features = [c for c in feature_cols if c not in DROP_FEATURES]
+        cols = clean_features + ([label_col] if label_col and label_col in df.columns else []) + [self.time_col]
+        
+        # Core change: always include trend_strength in extracted columns (but it's not part of clean_features)
+        if 'trend_strength' in df.columns:
+            if 'trend_strength' not in cols:
+                cols.append('trend_strength')
+
+        df_work = df[cols].copy()
+        if not self.is_live:
+            df_work['orig_index'] = df.index
+
+        total_rows = len(df_work)
+        self.logger.debug(f"📊 [Data Clean] Start cleaning, total rows: {total_rows}")
+
+        # --- Part 1: remove initial cold-start NaNs ---
+        # Logic: find the first row with no NaNs, drop all rows before it
+        is_valid_row = df_work.notna().all(axis=1)
+        if is_valid_row.any():
+            first_valid_idx_label = is_valid_row.idxmax()  # First index label where all columns are valid
+            first_valid_loc = df_work.index.get_loc(first_valid_idx_label)  # Physical position for that label
+            
+            if first_valid_loc > 0:
+                df_work = df_work.iloc[first_valid_loc:].copy()
+                self.logger.debug(f"✂️ [Step 1] Dropped head cold-start: {first_valid_loc} rows (indicator warmup, etc.)")
+            else:
+                self.logger.debug("✅ [Step 1] No head cold-start rows.")
+        else:
+            raise RuntimeError("❌ [Data Clean] Error: no complete rows found! Please check feature computation logic.")
+
+        # --- Part 2: remove NaNs in the middle or tail (abnormal gaps) ---
+        before_gap_clean = len(df_work)
+        df_work.dropna(inplace=True)  # Remaining NaNs are in the middle or tail
+        after_gap_clean = len(df_work)
+        
+        gap_count = before_gap_clean - after_gap_clean
+        if gap_count > 0:
+            # Middle gaps usually indicate data quality issues; keep as WARNING/ERROR
+            self.logger.error(f"🚨 [Step 2] Found and removed abnormal middle/tail gaps: {gap_count} rows! Please check data completeness.")
+        else:
+            self.logger.debug("✅ [Step 2] No middle gaps found.")
+
+        # --- Final index reset ---
+        df_work.reset_index(drop=True, inplace=True)
+        self.logger.info(f"✨ [Data Clean] Done: {total_rows} -> {len(df_work)} rows (dropped {total_rows - len(df_work)} rows)")
+
+        return df_work, clean_features
+
+    def _generate_windows(self, df_work: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+        """Creates 3D windows using custom stride."""
+        values = df_work[self.feature_names].to_numpy(dtype=np.float32)
+        timestamps = df_work[self.time_col].to_numpy(dtype=np.int64)
+
+        X3d = _as_strided_windows(values, self.window, self.stride)
+        time_windows = _as_strided_windows(timestamps.reshape(-1, 1), self.window, self.stride).squeeze(-1)
+        return X3d, time_windows
+
+    def _filter_and_align(self, df_work, X3d, time_windows, label_col):
+        """
+        Enhanced filtering logic:
+        1. Global check: total missing span within the window must be within tolerance.
+        2. Tail check: last N points in the window must be fully continuous (no gaps).
+        3. Label alignment: support stride and track filtering reasons.
+        """
+        original_count = len(X3d)
+        has_label = (label_col is not None) and (label_col in df_work.columns)
+        interval = self.kline_interval_ms
+
+        # --- A. Continuity mask computation ---
+        
+        # 1. Global span check (e.g., allow limited gaps)
+        global_actual_span = time_windows[:, -1] - time_windows[:, 0]
+        global_ideal_span = (self.window - 1) * interval
+        # You may tune tolerance here; currently 0 tolerance
+        mask_global = (global_actual_span <= global_ideal_span) 
+
+        # 2. Strict tail check (last N bars)
+        check_tail_count = 2
+        tail_actual_span = time_windows[:, -1] - time_windows[:, -(check_tail_count + 1)]
+        tail_ideal_span = check_tail_count * interval
+        mask_tail = (tail_actual_span <= tail_ideal_span)
+
+        # --- B. Label validity check ---
+        if has_label:
+            raw_labels = df_work[label_col].values[self.window - 1 :: self.stride]
+            labels_all = raw_labels[:original_count]
+            mask_label = (labels_all != common.Signal.INVALID)
+        else:
+            labels_all = np.zeros(original_count)
+            mask_label = np.ones(original_count, dtype=bool)
+
+        # --- C. Filter reason stats (hierarchical) ---
+        # 1. Failed due to global span
+        fail_global = np.sum(~mask_global)
+        # 2. Global ok but tail not continuous
+        fail_tail = np.sum(mask_global & ~mask_tail)
+        # 3. Time ok but label invalid
+        fail_label = np.sum(mask_global & mask_tail & ~mask_label)
+        
+        # Final combined mask
+        final_mask = mask_global & mask_tail & mask_label
+        final_count = np.sum(final_mask)
+
+        # --- D. Index alignment ---
+        final_indices = None
+        if not self.is_live:
+            raw_orig = df_work['orig_index'].values[self.window - 1 :: self.stride]
+            final_indices = raw_orig[:original_count][final_mask]
+
+        # --- E. Detailed audit logs ---
+        self.logger.info(f"📊 Data filter audit [window: {self.window}]:")
+        self.logger.info(f"   - Original window count: {original_count}")
+        if fail_global > 0:
+            self.logger.warning(f"   - ❌ Dropped (global span exceeded): {fail_global}")
+        if fail_tail > 0:
+            self.logger.warning(f"   - ❌ Dropped (tail not continuous): {fail_tail}")
+        if fail_label > 0:
+            self.logger.warning(f"   - ❌ Dropped (label invalid/INVALID): {fail_label}")
+        self.logger.info(f"   - ✅ Final kept: {final_count} ({final_count/original_count:.2%})")
+    
+        if 'trend_strength' in df_work.columns:
+            # Use the same slicing as labels: start at window-1 and sample by stride
+            aligned_returns = df_work['trend_strength'].values[self.window - 1 :: self.stride]
+            df_work.drop(columns=['trend_strength'], inplace=True)
+            # Truncate to match window count
+            self.returns = aligned_returns[:original_count][final_mask]
+        else:
+            self.logger.warning("⚠️ Missing trend_strength in df_work; returns set to 0")
+            self.returns = np.zeros(final_count)
+
+        return X3d[final_mask], labels_all[final_mask], final_indices
+
+    def _finalize_dataset(self, X_filtered, y_filtered, final_indices):
+        """Normalization and conversion to Tensors."""
+        self.factory.normalize(X_filtered, self.feature_names)
+
+        self.X = torch.from_numpy(X_filtered)
+        self.y = torch.from_numpy(y_filtered).long()
+        self.returns = torch.from_numpy(self.returns).float()
+        self.indices = final_indices
+        # --- Auto-print stats for review ---
+        if self.show_feature_distribution:
+            self.print_feature_stats()
+    # ----------------------------------------------------------------
+    # --- Debugging and data review helpers ---
+    # ----------------------------------------------------------------
+
+    def print_feature_stats(self):
+        """
+        Print statistics (Mean, Std, Min, Max) for all features to review normalization quality.
+        Following the previous logic, we mainly inspect the distribution of the last step in each window.
+        """
+        if self.X is None or self.X.shape[0] == 0:
+            self.logger.warning("⚠️ No data available for stats review.")
+            return
+
+        num_features_in_data = self.X.shape[2]
+        num_feature_names = len(self.feature_names)
+
+        if num_features_in_data != num_feature_names:
+            msg = (f"❌ Dimension mismatch! Feature columns in data ({num_features_in_data}) "
+                   f"do not match number of feature names ({num_feature_names}).")
+            self.logger.critical(msg)
+            # If mismatched, some unexpected feature slipped in; stop immediately
+            raise RuntimeError(msg)
+
+        # Extract last-step data [Batch, Feature]
+        # X shape: [N, Window, Feature]
         last_step_data = self.X[:, -1, :].numpy()
         
-        df_debug = pd.DataFrame(last_step_data, columns=self.feature_names)
-        df_debug["label"] = self.y.numpy()
-        
-        csv_path = os.path.join(output_dir, "debug_snapshot_last_step.csv")
-        # **【关键修复】** 使用 float_format 确保输出足够的精度，避免 CSV 写入问题
-        df_debug.to_csv(csv_path, index_label="window_idx", float_format='%.6f')
-        
-        print(f"[Debug] Snapshot CSV saved: {csv_path}")
-        print(f"[Debug] Check this CSV to verify if values are in range [-3, 3] (approx).")
-        
-        # 3. 简单统计检查 (直接打印到控制台)
-        print("\n=== Data Statistics Check (Last Step) ===")
-        # 检查是否有 NaN
-        nan_count = np.isnan(last_step_data).sum()
-        print(f"Total NaNs in processed data: {nan_count}")
-        if nan_count > 0:
-            print("!!! WARNING: NaNs found in processed data. Check scaling logic! !!!")
-        
-        # 打印前几列的均值方差，确认是否接近 0 和 1
-        print(f"{'Feature':<25} | {'Mean':<10} | {'Std':<10} | {'Min':<10} | {'Max':<10}")
-        print("-" * 75)
-        for i, col in enumerate(self.feature_names):
-            # # 为了不刷屏，只打印前10个特征
-            # if i >= 10: 
-            #     print(f"... and {len(self.feature_names) - 10} more features")
-            #     break
-            col_data = last_step_data[:, i]
-            print(f"{col:<25} | {col_data.mean():.4f}     | {col_data.std():.4f}     | {col_data.min():.4f}     | {col_data.max():.4f}")
-        print("=========================================\n")
+        self.logger.info("\n" + "="*90)
+        self.logger.info(f"📊 Data processing review (feature stats - last step) | samples: {len(last_step_data)}")
+        self.logger.info("-" * 90)
+        self.logger.info(f"{'Feature Name':<35} | {'Mean':>10} | {'Std':>10} | {'Min':>10} | {'Max':>10}")
+        self.logger.info("-" * 90)
 
-    # ========== 【新增】 最终数据异常值检测方法 ==========
-    def inspect_final_data(self, clip_limit: float = 5.0):
-            """
-            检查最终的 self.X 数据中是否存在超出给定 Z-Score 限制的异常值。
-            打印 Nan/Inf 出现的位置，并按绝对值打印最大的 5 个异常值。
-            """
-            print(f"\n--- Starting Final Data Outlier Inspection (Limit: +/- {clip_limit:.1f}) ---")
+        for i, name in enumerate(self.feature_names):
+            feat_slice = last_step_data[:, i]
+            mean_v = np.mean(feat_slice)
+            std_v  = np.std(feat_slice)
+            min_v  = np.min(feat_slice)
+            max_v  = np.max(feat_slice)
             
-            # 转换为 NumPy 数组进行检查
-            X_np = self.X.numpy()
+            # Simple marker for suspicious values (e.g., std far from 1 or mean far from 0)
+            alert = " ⚠️" if abs(mean_v) > 0.1 or abs(std_v - 1.0) > 0.2 else ""
             
-            # 1. 检查 NaN 或 Inf
-            nan_or_inf_mask = np.isnan(X_np) | np.isinf(X_np)
-            if nan_or_inf_mask.any():
-                print("🚨 CRITICAL ERROR: Found NaN or Inf values in the final processed data (self.X).")
-                nan_loc = np.where(nan_or_inf_mask)
-                if nan_loc[0].size > 0:
-                    f_idx = nan_loc[2][0]
-                    print(f"  -> First NaN/Inf detected at Window: {nan_loc[0][0]}, Feature: {self.feature_names[f_idx]}")
-                
-            # 2. 检查 Z-Score Outliers (超过 ±clip_limit)
-            is_outlier = (X_np > clip_limit) | (X_np < -clip_limit)
-            outlier_locs = np.where(is_outlier)
-            
-            if outlier_locs[0].size > 0:
-                print(f"⚠️ WARNING: Found {outlier_locs[0].size} total outliers exceeding +/- {clip_limit:.1f}.")
-                
-                # --- 新增逻辑: 排序并打印最大的 5 个异常值 ---
-                
-                # 1. 提取所有异常值
-                # 使用 outlier_locs 数组作为索引，提取对应的值
-                outlier_values = X_np[outlier_locs]
-                
-                # 2. 获取按绝对值排序的索引 (降序)
-                sorted_indices = np.argsort(np.abs(outlier_values))[::-1]
-                
-                print(f"--- Top {min(5, sorted_indices.size)} Largest Outliers (by Magnitude) ---")
-                
-                # 3. 打印前 5 个最大异常值的位置
-                for i in range(min(5, sorted_indices.size)):
-                    
-                    # 获取在 outlier_locs 数组中的原始索引
-                    original_outlier_idx = sorted_indices[i] 
-                    
-                    # 使用原始索引获取三维坐标
-                    w_idx, t_idx, f_idx = (outlier_locs[0][original_outlier_idx],
-                                        outlier_locs[1][original_outlier_idx],
-                                        outlier_locs[2][original_outlier_idx])
-                    
-                    value = outlier_values[original_outlier_idx]
-                    feature_name = self.feature_names[f_idx]
-                    
-                    print(f"  [TOP {i+1}] Window: {w_idx:<5} | Bar: {t_idx:<3} | Feature: {feature_name:<20} | Value: {value:.4f}")
+            self.logger.info(
+                f"{name:<35} | {mean_v:10.4f} | {std_v:10.4f} | {min_v:10.4f} | {max_v}{alert}"
+            )
+        
+        self.logger.info("="*90 + "\n")
 
-            else:
-                print("✅ All data points are within the +/- limit. Data quality is good.")
-                
-            print("-" * 40)
+    def __len__(self):
+        return self.X.shape[0]
 
-def _as_strided_windows(a2d: np.ndarray, window: int, stride: int = 1) -> np.ndarray:
+    def __getitem__(self, i):
+        return self.X[i], self.y[i], self.returns[i]
+def should_regenerate_cache(cache_path, data_path, feature_file, data_cfg):
     """
-    Turn [N, F] into overlapping [M, T, F] with custom stride S.
-    M = (N - T) // S + 1
+    Decide whether to regenerate cache by checking file modification times and a config hash.
     """
-    S = max(1, int(stride)) # 确保步长至少为 1
-    N, F = a2d.shape
-    M = (N - window) // S + 1 # 计算新的样本数量 M
+    if not os.path.exists(cache_path):
+        return True  # Cache does not exist; must generate
+
+    # 1. Check modification time (mtime)
+    # If raw CSV or feature definition file was modified after cache, invalidate
+    cache_mtime = os.path.getmtime(cache_path)
+    if os.path.getmtime(data_path) > cache_mtime:
+        return True
+    if os.path.getmtime(feature_file) > cache_mtime:
+        return True
+
+    # 2. Check if critical config changed (hash check)
+    # Convert config affecting cache generation into a string and hash it
+    config_str = f"{data_cfg.window}_{data_cfg.feature_cols}_{data_cfg.label_col}"
+    current_hash = hashlib.md5(config_str.encode()).hexdigest()
     
-    if M <= 0:
-        raise ValueError(f"Data length {N} must be >= window {window}.")
+    # Suggestion: write a .hash file together when creating cache
+    hash_path = cache_path + ".hash"
+    if not os.path.exists(hash_path):
+        return True
+    
+    with open(hash_path, "r") as f:
+        old_hash = f.read().strip()
+    
+    return current_hash != old_hash
+    
+# --- Global Utility ---
+def _as_strided_windows(a2d: np.ndarray, window: int, stride: int = 1) -> np.ndarray:
+    S = max(1, int(stride))
+    N, F = a2d.shape
+    M = (N - window) // S + 1
+    if M <= 0: return np.empty((0, window, F))
     
     s0, s1 = a2d.strides
-    
-    # 关键修改：样本轴（第一个维度 M）的步长现在是 s0 * S
     view = np.lib.stride_tricks.as_strided(
-        a2d, 
-        shape=(M, window, F), 
-        strides=(s0 * S, s0, s1), # <--- 引入步长 S
-        writeable=False
+        a2d, shape=(M, window, F), strides=(s0 * S, s0, s1), writeable=False
     )
-    return view.copy()
+    return view# copy will happen in _filter_and_align X3d[final_mask]
