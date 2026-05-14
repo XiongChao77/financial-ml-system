@@ -1,1 +1,3 @@
-Quant\UI\quant-ui>npm run dev
+cd Quant\UI\quant-ui>
+npm install
+npm run dev
