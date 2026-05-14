@@ -127,7 +127,7 @@ if __name__ == "__main__":
     para.version = 0
 
     # Window and prediction parameters
-    para.candlestick_num = 48
+    para.seq_len = 48
     para.predict_num = 24
 
     # Volatility smoothing parameter
@@ -140,7 +140,7 @@ if __name__ == "__main__":
     # Short-side label parameters
     para.vol_multiplier_short = 1.9
     para.stop_multiplier_rate_short = 0.2
-    # para.candlestick_num =96
+    # para.seq_len =96
     # para.predict_num = 6
     # para.symbol = ''
     # para.trading_type = 'spot'

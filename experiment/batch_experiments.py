@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 
+from model import train_config
 from data_process import common, preparation
 from data_process.utils import (
     calc_params_hash,
@@ -307,18 +308,17 @@ def construct_task_doge():
     from trade.bt import simulation
     preparation_task: List[Any] = []
 
-    for cn in [10,12]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
-        for pn in [4,8,16,24,32]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-            for vol_multiplier in [1.8,1.9,2]:#1.8,1.9,2
+    for cn in [12]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
+        for pn in [4,8,16]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
+            for vol_multiplier in [5,6]:#1.8,1.9,2
                 for vol_ewma_span in [80]:
                     preparation_task.append(common.BaseDefine(
                             vol_ewma_span = vol_ewma_span,
-                            candlestick_num=cn,
                             predict_num=pn,
                             vol_multiplier_long=vol_multiplier,
-                            stop_multiplier_rate_long=0.2,
+                            stop_multiplier_rate_long=None,
                             vol_multiplier_short=vol_multiplier,
-                            stop_multiplier_rate_short=0.2,
+                            stop_multiplier_rate_short=None,
                             symbol=SYMBOL,   #ETHUSDT
                             interval=INTERVAL,
                             trading_type= 'um',
@@ -348,20 +348,23 @@ def construct_task_doge():
     feature_conf_list_4 = [f for f in train.feature_conf_list if f not in to_remove_4]
     feature_conf_list_5 = [f for f in train.feature_conf_list if f not in to_remove_5]
     for false_trade in [1]:
-        for flip_penalty in np.arange(0.8, 1.7, 0.1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
-            for miss_penalty in np.arange(0.5, 1.3, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
-                for stride in [4]: #2,4,8
-                    for bestf1 in [True]:
-                        for loss_fun_version_v in [2]:
-                            for featrue_conf in [feature_conf_list_1]:
-                                training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
-                                                                       feature_conf_list= featrue_conf,
-                                                            flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
-                                                            stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0))
+        for seq_len in [12,16,24,96,256]: #12,16,24,32
+            for flip_penalty in np.arange(0.8, 1.7, 1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
+                for miss_penalty in np.arange(0.5,2, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
+                    for stride in [4]: #2,4,8
+                        for bestf1 in [True]:
+                            for loss_fun_version in [2]:
+                                for featrue_conf in [train.feature_conf_list]:
+                                    train_conf = train.TrainConfig(seq_len = seq_len, use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version,
+                                                                        feature_conf_list= featrue_conf,
+                                                                flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
+                                                                stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0)
+                                    train_conf.model_cfg = train_config.ConvLSTMConfig(model_version= 1)
+                                    training_task.append(train_conf)
 
     simulation_task: List[Any] = []
 
-    for i in [12,16,24,32,40]: #16,24,30,32,36,40,44,48
+    for i in [4,8,12,16,24]: #16,24,30,32,36,40,44,48
         holdbar = i
         for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5),(5,4)]: #(6,5),(5,4)
             simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
@@ -379,7 +382,7 @@ def construct_task_eth():
                 for vol_ewma_span in [88]:
                     preparation_task.append(common.BaseDefine(
                             vol_ewma_span = vol_ewma_span,
-                            candlestick_num=cn,
+                            seq_len=cn,
                             predict_num=pn,
                             vol_multiplier_long=vol_multiplier,
                             stop_multiplier_rate_long=0.2,
@@ -510,7 +513,7 @@ def _train_task(
     try:
         pre_para = common.BaseDefine(**pre_params)
         t_cfg = _config_from_dict_train(train_params)
-        train.main(logger, train_cfg=t_cfg, pre_para=pre_para, prep_output_dir=prep_output_dir, save_dir=save_dir,experiment=True)
+        train.main(logger, train_task=train_config.TrainTask.SINGLE_MODEL_LONG_OVR ,train_cfg=t_cfg, prep_output_dir=prep_output_dir, save_dir=save_dir,experiment=True)
 
         # IMPORTANT: enqueue sims BEFORE reporting train_done (so main can safely send None after last train_done)
         for sim in sim_tasks:

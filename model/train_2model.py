@@ -4,7 +4,7 @@
 import os,copy
 import sys
 import json
-import logging,shutil
+import logging,shutil,time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -25,6 +25,7 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 from data_process import common
 from model.data_loader import TimeSeriesWindowDataset
+from model.train_config import *
 from model.model_factory import ModelFactory
 from model.models.fusion_wrapper import FusionWrapper
 # ==============================================================================
@@ -139,46 +140,6 @@ def format_report(report_dict):
     
     return "\n".join(lines)
 
-def analyze_confidence(subtask_name, probs, trues, save_dir, bins=20):
-    """
-    Generates a Confidence Distribution plot similar to the user's reference.
-    Compares 'Correct Preds' vs 'Wrong Preds' across max probability scores.
-    """
-    preds = np.argmax(probs, axis=1)
-    confidences = np.max(probs, axis=1)
-    
-    # Separate confidences based on correctness
-    correct_mask = (preds == trues)
-    conf_correct = confidences[correct_mask]
-    conf_wrong = confidences[~correct_mask]
-
-    # Create the figure
-    plt.figure(figsize=(10, 6))
-    sns.set_style("whitegrid", {'axes.grid': True, 'grid.linestyle': '--'})
-
-    # Plot Correct Predictions (Green)
-    if len(conf_correct) > 0:
-        sns.histplot(conf_correct, bins=bins, kde=True, color='green', 
-                     label='Correct Preds', stat="density", alpha=0.5, element="bars")
-    
-    # Plot Wrong Predictions (Red)
-    if len(conf_wrong) > 0:
-        sns.histplot(conf_wrong, bins=bins, kde=True, color='red', 
-                     label='Wrong Preds', stat="density", alpha=0.5, element="bars")
-
-    # Formatting to match the provided style
-    plt.title(f"Confidence Distribution: {subtask_name.upper()}", fontsize=14)
-    plt.xlabel("Max Probability (Confidence)", fontsize=12)
-    plt.ylabel("Density", fontsize=12)
-    plt.legend()
-    
-    # Save the plot
-    file_path = os.path.join(save_dir, f"diag_{subtask_name}_confidence.png")
-    plt.tight_layout()
-    plt.savefig(file_path)
-    plt.close()
-    
-    print(f"📊 Confidence diagnosis saved to: {file_path}")
 # ==============================================================================
 # 3. Label Processing Logic (The Core Difference)
 # ==============================================================================
@@ -214,32 +175,6 @@ def prepare_data_for_subtask(X_raw, y_raw, rb_raw, subtask_type: str):
 # ==============================================================================
 # 4. Generic Binary Training Engine
 # ==============================================================================
-def print_feature_importance(model, feature_names, logger, subtask_name, tag=""):
-    """
-    Extracts and prints weights from the FeatureSelector module.
-    """
-    if hasattr(model, 'feature_selector') and hasattr(model.feature_selector, 'importance_logits'):
-        logger.info(f"🔍 [Feature Importance] Analysis for {subtask_name.upper()}{(' ' + tag) if tag else ''}")
-
-        with torch.no_grad():
-            # keep consistent with FeatureSelector forward: sigmoid(logits / 0.1)
-            weights = torch.sigmoid(model.feature_selector.importance_logits / 0.1).cpu().numpy()
-
-        importance_map = sorted(zip(feature_names, weights), key=lambda x: x[1], reverse=True)
-
-        logger.info(f"{'Feature Name':<25} | {'Weight (Sigmoid)':<15}")
-        logger.info("-" * 45)
-        for name, weight in importance_map[:10]:
-            logger.info(f"{name:<25} | {weight:<15.4f}")
-
-        if len(importance_map) > 15:
-            logger.info("...")
-            for name, weight in importance_map[-5:]:
-                logger.info(f"{name:<25} | {weight:<15.4f}")
-        logger.info("-" * 45 + "\n")
-    else:
-        logger.info(f"ℹ️ Feature Selector is disabled for {subtask_name.upper()}.")
-
 def get_trigger_sampler(y, pos_ratio=0.3):
     """
     y: 0/1 trigger label
@@ -406,12 +341,6 @@ def train_binary_model(
     if best_state_f1 is not None:
         model.load_state_dict(best_state_f1)
 
-    # 报告与诊断
-    logger.info(f"\n{'#'*10} [{subtask_name.upper()}] FINAL REPORT {'#'*10}")
-    if best_val_trues is not None:
-        logger.info("\n" + format_report(classification_report(best_val_trues, best_val_preds, output_dict=True, zero_division=0)))
-        analyze_confidence(subtask_name, best_val_probs, best_val_trues, train_cfg.save_dir)
-
     return best_state_f1
 
 # ==============================================================================
@@ -505,8 +434,6 @@ def run_pipeline(feature_group_list, logger, train_cfg: TrainConfig):
         
         # Reload best state for fusion
         model.load_state_dict(best_state)
-        if train_cfg.model_cfg.use_feature_selector:
-            print_feature_importance(model, full_ds.feature_names, logger, task_name)
 
         model.eval()
         models[task_name] = model
@@ -533,75 +460,6 @@ def run_pipeline(feature_group_list, logger, train_cfg: TrainConfig):
             feature_group_list=feature_group_list,
             logger=logger
         )
-
-@torch.no_grad()
-def evaluate_fusion_trigger_direction(models, X, y_true, logger):
-    """
-    Logic: 
-    1. Trigger Model decides: Action vs Neutral.
-    2. IF Action: Direction Model decides Long vs Short.
-    3. ELSE: Neutral.
-    """
-    model_trig = models["trigger"]
-    model_dir = models["direction"]
-    
-    # 1. Trigger Inference
-    logits_trig = model_trig(X)
-    preds_trig = torch.argmax(logits_trig, dim=1).cpu().numpy() # 0:Neutral, 1:Action
-    
-    # 2. Direction Inference
-    logits_dir = model_dir(X)
-    preds_dir = torch.argmax(logits_dir, dim=1).cpu().numpy() # 0:Short, 1:Long
-    
-    # 3. Fuse
-    # Start with all Neutral (1)
-    final_preds = np.full_like(y_true, 1) 
-    
-    # Where Trigger says Action (1)
-    action_mask = (preds_trig == 1)
-    
-    # Map Direction outputs: 0->0(Short), 1->2(Long)
-    mapped_dir = np.where(preds_dir == 1, 2, 0)
-    
-    # Apply
-    final_preds[action_mask] = mapped_dir[action_mask]
-    
-    # Report
-    print_metrics(y_true, final_preds, logger, "Trigger + Direction Fusion")
-
-@torch.no_grad()
-def evaluate_fusion_ovr(models, X, y_true, logger):
-    """
-    Logic:
-    Long Model: 1=Long, 0=Others
-    Short Model: 1=Short, 0=Others
-    
-    Fusion:
-    - Long=1, Short=0 -> Long (2)
-    - Long=0, Short=1 -> Short (0)
-    - Long=0, Short=0 -> Neutral (1)
-    - Long=1, Short=1 -> Conflict (1, Neutral)
-    """
-    model_long = models["long_ovr"]
-    model_short = models["short_ovr"]
-    
-    # 1. Inference
-    preds_long = torch.argmax(model_long(X), dim=1).cpu().numpy()
-    preds_short = torch.argmax(model_short(X), dim=1).cpu().numpy()
-    
-    # 2. Fuse
-    final_preds = np.full_like(y_true, 1) # Default Neutral
-    
-    # Long Condition
-    long_mask = (preds_long == 1) & (preds_short == 0)
-    final_preds[long_mask] = 2
-    
-    # Short Condition
-    short_mask = (preds_short == 1) & (preds_long == 0)
-    final_preds[short_mask] = 0
-    
-    # Report
-    print_metrics(y_true, final_preds, logger, "Long-OVR + Short-OVR Fusion")
 
 def print_metrics(y_true, y_pred, logger, title):
     logger.info(f"\n📊 --- {title} ---")
@@ -645,7 +503,7 @@ def evaluate_and_save_pipeline(
     使用 FusionWrapper 确保推理逻辑的一致性。
     """
     # --- 1. 实例化推理包装器 (与 model_loader 加载逻辑一致) ---
-    fusion_model = FusionWrapper(models_dict, mode=train_cfg.pipeline_mode)
+    fusion_model = FusionWrapper(models_dict, task_type=train_cfg.pipeline_mode)
     fusion_model.to(device)
     fusion_model.eval()
 
@@ -714,62 +572,34 @@ def evaluate_and_save_pipeline(
         
     logger.info(f"🎉 Task description and models saved to: {save_dir}")
 
-def main(logger:logging.Logger):
-    if os.path.exists(common.TRAIN_OUT_DIR):
-        shutil.rmtree(common.TRAIN_OUT_DIR)
-    os.makedirs(common.TRAIN_OUT_DIR, exist_ok=True)
+def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDefine(), prep_output_dir = common.DATA_OUT_DIR, save_dir: str = common.TRAIN_OUT_DIR,experiment:bool = False):
+    os.makedirs(save_dir, exist_ok=True)
 
-    # Configure Features
-    feature_group_list = [
-        common.FCMA,
-        common.FCQavMa,
-        common.FCCandle,
-        common.FCOrigin,
-    ]
-    feature_group_list = [
-        # 1. 自定义的成交量爆发特征 (窗口 512，对比前 2 强)
-        # FCVolumeEvent, 
-
-        # 2. 价格趋势与指标类    FeatureMA > FeatureRsi/FeatureKdj/FeatureMACD   what happen to FeatureMACD??
-        # common.FCMACD,   # （12，26，9），（6，13，5）或（10，20，7）
-        common.FCMA,     # slope 值搭配使用
-        # common.FCRSI,
-        common.FCKDJ,
-
-        # # 价格通道类，2选1   FeatureKeltner >> FeatureBoll/FeatureDonchian
-        # common.FCDonchian, 
-        common.FCKeltner,
-        # common.FCBoll,
-
-        # # 3. 量能与成交活跃度类 FeatureQavMa > FeatureMFI/FeatureWAP > FeatureCFM  > FeaturePVT >FeatureVolMa
-        # # FCVolMa,
-        common.FCQavMa,
-        # common.FCOBV,    # 等于 FeaturePVT 丢掉幅度信息。不如 FeaturePVT，直接丢弃
-        common.FCPVT,    # 累积性变量，对短期预测作用小，不如动量
-        # common.FCWAP,
-        common.FCCFM,
-        # common.FCMFI,
-        # # FCATS,  # 负作用
-
-        # # 4. K线形态类
-        common.FCCandle,
-        common.FCOrigin,
-    ]
-
-    # Configure Training
-    cfg = TrainConfig()
+    # 根据 feature_conf_list 从全局 feature_direction_map 补充完整方向信息
+    feature_direction_map_filtered = {}
+    for feature_name in train_cfg.feature_conf_list:
+        # 从全局 feature_direction_map 中查找方向，如果找不到则默认为 1（正向）
+        direction = feature_direction_map.get(feature_name, 1)
+        feature_direction_map_filtered[feature_name] = direction
     
-    #  SET YOUR MODE HERE
-    # Option : "long_short_ovr"/long_short_ovr
-    cfg.pipeline_mode = "long_short_ovr"  # Change this to switch modes
+    logger.info(f"📋 Using {len(feature_direction_map_filtered)} features from feature_conf_list")
+
+    # 1. 数据配置
+    d_cfg = DataConfig()
+
+            # 0             1                   2                   3           4               5               6
+    m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig(), TCNConfig(), MambaConfig()][2]
+    # m_cfg.model_version = 1
     
-    # Run
-    run_pipeline(feature_group_list, logger, cfg)
+    logger.info(f"Training {m_cfg.model_type}...")
+    return run_training(feature_direction_map_filtered, logger, d_cfg, train_cfg, m_cfg, pre_para,prep_output_dir,save_dir,experiment)
 # ==============================================================================
 # 6. Main Entry
 # ==============================================================================
 
 if __name__ == "__main__":
-    # Setup Logger
-    logger, _ = common.setup_session_logger(sub_folder='train', file_level=logging.DEBUG)
+    logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
+    begin_time = time.time()
     main(logger)
+    end_time = time.time()
+    logger.info(f"Total training time: {(end_time - begin_time)} seconds")

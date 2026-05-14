@@ -36,206 +36,7 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from sklearn.utils.class_weight import compute_class_weight
 from model.data_loader import TimeSeriesWindowDataset
 from model.model_factory import ModelFactory
-
-# ==============================================================================
-# 1. 配置定义 (Configuration)
-# ==============================================================================
-
-feature_conf_list = [
-
-    # =========================
-    # Raw Market State
-    # =========================
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "number_of_trades",
-    "quote_asset_volume",
-    "taker_buy_base_volume",
-    "taker_buy_quote_volume",
-    # =========================
-    # 1) Trend / directional persistence: whether price has continuation
-    # =========================
-    "MA_WEEK_M_L",        # Long-term regime direction (core)
-    "PVT",                # Price-volume enhanced momentum
-    "dist_to_high_100",   # Breakout-style trend structure
-    "id_factor_100",
-    "id_factor_20",
-    "MFI_999",            # Extreme money flow
-    "MFI_99",
-    # =========================
-    # 2) Volatility regime: amplitude and risk environment
-    # =========================
-    "vol_gk_100",          # Long-term volatility
-    "vol_gk_14",           # Short-term volatility
-    "skew_100",
-    "kurt_100",            # Tail structure (extreme risk)
-    # "BOLL_BW_25",         # Decide after uplift testing
-    "RSI_14",              # Relative Strength Index (momentum/overheat; indirectly reflects volatility)
-    # =========================
-    # 3) Efficiency / market structure: trending vs ranging
-    # =========================
-    "er_126",              # Trend efficiency ratio (high-quality structure factor)
-    # =========================
-    # 4) Participation / liquidity: market activity
-    # =========================
-    "trade_density_14",    # Continuous participation intensity
-    "vol_event_flag_500",  # Extreme volume event (regime trigger)
-    # =========================
-    # 5) Order flow / imbalance: buy-vs-sell dominance
-    # =========================
-    "vpin_49",             # Mid-term order-flow imbalance
-    "vpin_14",             # Needs uplift testing
-    # =========================
-    # 6) Spatial / price position: where price sits within ranges/cost
-    # =========================
-    "poc_bias_600",        # Deviation from high-volume node (strong structural anchor)
-    "poc_bias_99",
-    "close_pos",           # Relative position within range
-    # =========================
-    # 7) Candlestick / path microstructure
-    # =========================
-    "upper_wick_pct",
-    "lower_wick_pct",
-]
-
-
-@dataclass
-class DataConfig:
-    label_col: str = "label"
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-
-@dataclass
-class LSTMConfig:
-    model_type: str = "lstm"
-    model_version: int = 4
-    hidden_size: int = 64
-    num_layers: int = 2
-    bidirectional: bool = True
-    lstm_dropout: float = 0.4
-    head_dropout: float = 0.2
-    p_drop: float = 0.3
-    readout: str = ['last' , 'meanmax' , 'attn', 'mix'][3]
-    head: str = ['linear' , 'mlp'][0]
-    in_locked_p: float = 0.05               # V4 locked dropout on inputs
-    out_locked_p: float = 0              # V4 locked dropout on LSTM outputs (before pooling)
-    input_norm: bool = True                # V4 LayerNorm on input features
-    input_proj_dim: int | None = None      # V4 optional projection before LSTM: a linear layer mapping raw feature dim (e.g. 48) to a new dim D (dim reduction)
-    logit_clip: float | None = None        # V4 
-
-@dataclass
-class TransformerConfig:
-    model_type: str = "transformer"
-    model_version: int = 3
-    d_model: int = 128
-    nhead: int = 8
-    num_layers: int = 4
-    dim_feedforward: int = 512
-    dropout: float = 0.3
-    attn_dropout: float = 0.1
-    drop_path: float = 0
-    in_locked_p: float = 0
-    max_len: Optional[int] = None
-    use_alibi: bool = True
-    pos_encoding: str = "none"
-    cls_token: bool = False
-    readout: str = "cls" #"cls" | "meanmax" | "attn" | "mix"
-    head: str = "linear"
-    ffn_type: str = "swiglu"
-
-@dataclass
-class ConvLSTMConfig:
-    model_type: str = "conv_lstm"
-    model_version: int = 3
-    d_model: int = 64
-    hidden_size = 64
-    conv_layers: int = 5
-    conv_kernel: int = 5
-    conv_dropout: float = 0.10
-    conv_dilations: str = ""
-    bidirectional: bool = True
-    lstm_dropout: float = 0.2
-    input_norm: bool = True
-    in_locked_p: float = 0.05
-    out_locked_p: float = 0.05
-    head_dropout: float = 0.2
-    readout: str = "mix"    # 'last'|'meanmax'|'attn'|'mix'
-    head: str = "linear"    # 'linear'|'mlp'
-    logit_clip: Optional[float] = None
-    p_drop: Optional[float] = None
-    task_proj_dim: int = 64
-    use_feature_weighting: bool = False
-
-@dataclass
-class TCNConfig:
-    model_type: str = "tcn"
-    model_version: int = 1
-    num_channels: list = field(default_factory=lambda: [64, 128, 256])
-    kernel_size: int = 3
-    dropout: float = 0.2
-    readout: str = "mix"
-    logit_clip: Optional[float] = None
-
-@dataclass
-class MambaConfig:
-    model_type: str = "mamba"
-    model_version: int = 1
-    d_model: int = 128
-    n_layers: int = 4
-    d_state: int = 16
-    expand: int = 2
-    dropout: float = 0.1
-    readout: str = "mix"  # 'last' | 'meanmax' | 'mix'
-    logit_clip: Optional[float] = None
-
-@dataclass
-class XGBoostConfig:
-    model_type: str = "xgboost"
-    model_version: int = 1
-    xgb_depth: int = 6
-    xgb_estimators: int = 100
-    learning_rate: float = 3e-4
-
-@dataclass
-class CNNConfig:
-    model_type: str = "cnn"
-    model_version: int = 1
-    p_drop: float = 0.3
-    tau: float = 16.0
-    use_tpool: bool = False
-
-@dataclass
-class TrainConfig:
-    model_cfg: ConvLSTMConfig = field(default_factory=ConvLSTMConfig)
-    data_cfg: DataConfig = field(default_factory=DataConfig)
-    feature_conf_list: List[str] = field(default_factory=lambda: feature_conf_list)
-    epochs: int = 100
-    batch_size: int = 256#256
-    lr: float = 3e-4
-    gate_lr: float = 3e-4
-    weight_decay: float = 5e-4
-    patience: int = 8
-    seed: int = 42
-    stride: int = 8
-    use_cache: bool = False
-    lambda_trig: float = 0.5
-    lambda_dir: float = 0.1  # Importance of long/short direction
-    lambda_main:float = 0.7
-    lambda_cost: float = 0.4  # Flip / missed trend / noisy trades
-    lambda_gate: float = 1e-3
-    mag_alpha: float = 0
-    mag_limit: float = 4.0
-    flip_penalty: float = 1.5
-    miss_penalty: float = 2
-    false_trade: float = 1
-    mag_warmup_epochs:int = 8
-    temperature:float = 2.0
-    best_f1 : bool = True
-    label_smoothing :float = 0.02
-    loss_fun_version : int = 4
+from model.train_config import *
 # ==============================================================================
 # 3. Core Logic
 # ==============================================================================
@@ -293,12 +94,477 @@ def apply_feature_direction(X: torch.Tensor, feature_names: List[str], direction
     
     return X
 
+def prepare_binary_data_for_task(X_raw, y_raw, rb_raw, train_task: TrainTask):
+    """
+    独立转换逻辑：不影响原始全量数据
+    """
+    if train_task == TrainTask.SINGLE_MODEL_TRIGGER:
+        y_new = (y_raw != 1).long()
+        return X_raw, y_new, rb_raw
+    if train_task == TrainTask.SINGLE_MODEL_DIR:
+        mask = (y_raw != 1) # 仅保留 Long(2) 和 Short(0)
+        X_filt = X_raw[mask]
+        y_filt = y_raw[mask]
+        rb_filt = rb_raw[mask] # <--- 核心修复：同步过滤收益率
+        # Map: 0(Short) -> 0, 2(Long) -> 1
+        y_new = (y_filt == 2).long()
+        return X_filt, y_new, rb_filt
+    if train_task == TrainTask.SINGLE_MODEL_TRIGGER:
+        # Trigger: 0(Short) & 2(Long) -> 1 (Action), 1(Neutral) -> 0 (Stay)
+        y_new = (y_raw != 1).long()
+        return X_raw, y_new, rb_raw
+        
+    elif train_task == TrainTask.SINGLE_MODEL_DIR:
+        # Direction: 仅保留 0(Short) 和 2(Long)
+        mask = (y_raw != 1)
+        # 0 -> 0 (Short), 2 -> 1 (Long)
+        y_new = torch.where(y_raw[mask] == 2, 1, 0).long()
+        return X_raw[mask], y_new, rb_raw[mask]
 
-def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg: TrainConfig, model_cfg, pre_para: common.BaseDefine,prep_output_dir:str, save_dir,experiment:bool):
+    elif train_task == TrainTask.SINGLE_MODEL_LONG_OVR:
+        # Long OvR: 2 -> 1, others -> 0
+        y_new = (y_raw == 2).long()
+        return X_raw, y_new, rb_raw
+
+    elif train_task == TrainTask.SINGLE_MODEL_SHORT_OVR:
+        # Short OvR: 0 -> 1, others -> 0
+        y_new = (y_raw == 0).long()
+        return X_raw, y_new, rb_raw
+    
+    return X_raw, y_raw, rb_raw
+
+def get_trigger_sampler(y, pos_ratio=0.3):
+    """
+    y: 0/1 trigger label
+    pos_ratio: 采样后 POS 在 batch 中的大致比例
+    """
+    y = np.asarray(y)
+    cnt_pos = (y == 1).sum()
+    cnt_neg = (y == 0).sum()
+
+    # 目标：pos_ratio : (1 - pos_ratio)
+    w_pos = pos_ratio / max(cnt_pos, 1)
+    w_neg = (1 - pos_ratio) / max(cnt_neg, 1)
+
+    weights = np.where(y == 1, w_pos, w_neg)
+    return WeightedRandomSampler(weights, len(weights), replacement=True)
+
+def compute_soft_binary_loss(logits, y_sub, rb, train_task: TrainTask, train_cfg: TrainConfig, device):
+    """
+    针对二分类子任务优化的软损失函数。
+    支持：TRIGGER(4), DIR(5), LONG_OVR(6), SHORT_OVR(7)
+    """
+    probs = torch.softmax(logits, dim=1)
+    p_neg, p_pos = probs[:, 0], probs[:, 1]
+    
+    # 1. 基础幅度权重 (行情越大，样本权重越高)
+    # 使用 log1p 压缩极值，避免单次大波动主导梯度
+    mag_weights = 1.0 + torch.log1p(train_cfg.mag_alpha * torch.abs(rb))
+    mag_weights = torch.clamp(mag_weights, max=train_cfg.mag_limit)
+
+    # 2. 任务特定的软化惩罚 (Penalty Logic)
+    penalty = torch.zeros_like(p_neg)
+    is_pos = (y_sub == 1) # 真实有信号/看多
+    is_neg = (y_sub == 0) # 真实无信号/看空
+
+    # 根据枚举类型分发惩罚逻辑
+    if train_task == TrainTask.SINGLE_MODEL_TRIGGER:
+        # 【触发任务】：核心是防止“踏空”。若真实有信号(1)但预测为无信号(0)的概率高，加重惩罚
+        penalty[is_pos] += p_neg[is_pos] * train_cfg.miss_penalty
+
+    elif train_task == TrainTask.SINGLE_MODEL_DIR:
+        # 【方向任务】：核心是防止“做反”。因为没有 Neutral，错即是反
+        # 真实看多(1)预测看空(0) 或 真实看空(0)预测看多(1) 都要惩罚
+        penalty[is_pos] += p_neg[is_pos] * train_cfg.flip_penalty
+        penalty[is_neg] += p_pos[is_neg] * train_cfg.flip_penalty
+
+    elif train_task in [TrainTask.SINGLE_MODEL_LONG_OVR, TrainTask.SINGLE_MODEL_SHORT_OVR]:
+        # 【OvR 任务】：针对特定趋势的捕捉，惩罚“错过”该特定趋势的情况
+        penalty[is_pos] += p_neg[is_pos] * train_cfg.miss_penalty
+
+    # 3. 最终权重融合与归一化
+    # 结合行情幅度和错误代价，并确保 Batch 内平均权重为 1
+    final_weights = mag_weights * (1.0 + penalty)
+    final_weights = final_weights / (final_weights.mean() + 1e-8)
+
+    # 4. 计算带权重的 NLL Loss
+    log_probs = torch.log_softmax(logits, dim=1)
+    # 从 log_probs 中提取对应真实标签 y_sub 的对数概率
+    loss_samples = -log_probs.gather(1, y_sub.unsqueeze(1)).squeeze()
+
+    return (loss_samples * final_weights).mean()
+
+def train_engine_binary(model, dl_tr, dl_va, optimizer, scheduler, device, logger, train_cfg, train_task:TrainTask):
+    """
+    专门适配二分类的轻量级引擎
+    """
+    best_val_loss, best_val_f1 = float("inf"), 0.0
+    best_state_loss, best_state_f1 = None, None
+    wait = 0
+
+    for epoch in range(1, train_cfg.epochs + 1):
+        model.train()
+        tr_loss, tr_total = 0.0, 0
+        
+        with tqdm(dl_tr, desc=f"Binary Ep {epoch}", ncols=100, leave=False) as pbar:
+            for xb, yb, rb in pbar:
+                xb, yb, rb = xb.to(device), yb.to(device), rb.to(device)
+                
+                optimizer.zero_grad(set_to_none=True)
+                logits = model(xb)
+                
+                # 调用你上传的软损失函数
+                loss = compute_soft_binary_loss(logits, yb, rb, train_task, train_cfg, device)
+                
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+
+                tr_loss += loss.item() * xb.size(0)
+                tr_total += xb.size(0)
+                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+        # --- 验证 (简单化处理) ---
+        model.eval()
+        va_loss_sum, all_preds, all_trues = 0.0, [], []
+        with torch.no_grad():
+            for xb, yb, rb in dl_va:
+                xb, yb, rb = xb.to(device), yb.to(device), rb.to(device)
+                logits = model(xb)
+                v_loss = compute_soft_binary_loss(logits, yb, rb, train_task, train_cfg, device)
+                va_loss_sum += v_loss.item() * xb.size(0)
+                all_preds.append(torch.argmax(logits, dim=1).cpu().numpy())
+                all_trues.append(yb.cpu().numpy())
+
+        avg_va_loss = va_loss_sum / max(1, len(dl_va.dataset))
+        y_true, y_pred = np.concatenate(all_trues), np.concatenate(all_preds)
+        va_f1 = f1_score(y_true, y_pred, average="macro")
+        
+        scheduler.step(avg_va_loss)
+        avg_tr_loss = tr_loss / max(1, tr_total)
+        logger.info(f"Epoch {epoch:03d} | tr_loss {avg_tr_loss:.4f} | va_loss {avg_va_loss:.4f} | va_macroF1 {va_f1:.4f}")
+
+        # 保存逻辑
+        if va_f1 > best_val_f1:
+            best_val_f1 = va_f1
+            best_state_f1 = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            wait = 0
+        elif avg_va_loss < best_val_loss:
+            best_val_loss = avg_va_loss
+            wait = 0
+        else:
+            wait += 1
+
+        if wait >= train_cfg.patience: break
+
+    return {"best_f1_state": best_state_f1, "f1_score": best_val_f1}
+
+def evaluate_and_save_binary_results(
+    results: dict,
+    model: nn.Module,
+    dl_te: DataLoader,
+    device: torch.device,
+    data_cfg: DataConfig,
+    train_cfg: TrainConfig,
+    full_ds: TimeSeriesWindowDataset,
+    feature_list: list[str],
+    train_task: TrainTask,
+    logger: logging.Logger,
+    save_dir: str
+):
+    """
+    专用的二分类评估函数：提供深度指标打印、模型存档及解释性分析。
+    适配任务：TRIGGER(4), DIR(5), LONG_OVR(6), SHORT_OVR(7)
+    """
+    # 1. 定义评估任务（Best F1 和 Best Loss 两个版本）
+    tasks = [
+        ("Best_F1", results.get("best_f1_state"), results.get("f1_score", 0)),
+        ("Best_Loss", results.get("best_loss_state"), results.get("loss_score", 0))
+    ]
+
+    final_metrics = {}
+
+    for suffix, state, val_score in tasks:
+        if state is None: continue
+            
+        # A. 加载模型与推理
+        model.load_state_dict(state)
+        model.eval()
+        
+        all_probs, all_preds, all_trues = [], [], []
+        test_loss_sum = 0.0
+        
+        with torch.no_grad():
+            for xb, yb, rb in dl_te:
+                xb, yb, rb = xb.to(device), yb.to(device), rb.to(device)
+                logits = model(xb)
+                
+                # 计算测试集 Loss (复用之前的二分类软损失)
+                loss = compute_soft_binary_loss(logits, yb, rb, train_task, train_cfg, device)
+                test_loss_sum += loss.item() * xb.size(0)
+                
+                probs = torch.softmax(logits, dim=1)
+                all_probs.append(probs.cpu().numpy())
+                all_preds.append(torch.argmax(logits, dim=1).cpu().numpy())
+                all_trues.append(yb.cpu().numpy())
+
+        probs_np = np.concatenate(all_probs)
+        preds_np = np.concatenate(all_preds)
+        trues_np = np.concatenate(all_trues)
+        test_loss = test_loss_sum / len(dl_te.dataset)
+
+        # B. 计算核心指标
+        # 注意：二分类通常关注 Signal(1) 的表现，但打印 macro avg 以对齐风格
+        report_dict = classification_report(trues_np, preds_np, output_dict=True, zero_division=0)
+        test_f1 = report_dict['macro avg']['f1-score']
+
+        logger.info(f"\n{'='*20} Evaluating Binary Model: {suffix} | Task: {train_task.name} {'='*20}")
+        
+        # 使用自定义格式打印报告 (假设你已有 format_custom_report，否则直接打印 report_dict)
+        logger.info(format_custom_report(report_dict))
+            
+        logger.info(f"Test macro-F1: {test_f1:.4f} | Test Loss: {test_loss:.4f}")
+
+        # C. 统计标签比例
+        counts = Counter(trues_np)
+        total = sum(counts.values())
+        prop_str = ", ".join([f"{int(c)}: {counts[c]/total:.2%}" for c in sorted(counts.keys())])
+        logger.info(f"[{suffix}] True label proportion (Test set): {prop_str}")
+
+        # D. 保存混淆矩阵 (CSV 格式)
+        cm = confusion_matrix(trues_np, preds_np)
+        unique_labels = sorted(np.unique(trues_np))
+        cm_df = pd.DataFrame(
+            cm, 
+            index=[f"true_{int(i)}" for i in unique_labels], 
+            columns=[f"pred_{int(i)}" for i in unique_labels]
+        )
+        cm_df.to_csv(os.path.join(save_dir, f"confmat_binary_{suffix.lower()}.csv"))
+
+        # E. 模型保存 (.pt)
+        pt_path = os.path.join(save_dir, f"model_{train_task.name.lower()}_{suffix.lower()}.pt")
+        save_state = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") else model.state_dict()
+        torch.save({
+            "state_dict": save_state,
+            "feature_list": feature_list,
+            "classes": [0, 1],
+            "channel": full_ds.feature_count,
+            "window": train_cfg.seq_len,
+            "feature_cols": full_ds.feature_names,
+            "label_col": data_cfg.label_col,
+            "val_score": val_score,
+            "test_f1": test_f1,
+            "train_task": train_task.value,
+            "version_type": suffix
+        }, pt_path)
+        
+        # F. 导出 Meta (.json)
+        meta = model.export_meta(
+            feature_cols=full_ds.feature_names,
+            label_col=data_cfg.label_col,
+            classes=[0, 1],
+            window=train_cfg.seq_len,
+            model_version_tag=suffix,
+        )
+        meta["binary_task_type"] = train_task.name # 注入任务标识
+        with open(os.path.join(save_dir, f"model_{train_task.name.lower()}_{suffix.lower()}_meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        final_metrics[suffix] = {
+            "test_f1": test_f1,
+            "test_loss": test_loss,
+            # 直接使用字符串 "1" 获取信号类的精确率和召回率
+            "precision_signal": report_dict.get('1', {}).get('precision', 0),
+            "recall_signal": report_dict.get('1', {}).get('recall', 0),
+        }
+
+        # G. 特征解释性分析 (仅在配置开启时)
+        if getattr(train_cfg.model_cfg, 'use_feature_weighting', False) or getattr(train_cfg.model_cfg, 'use_feature_selector', False):
+            try:
+                logger.info(f"🎨 Generating Interpretability Analysis for {suffix}...")
+                test_xb, test_yb, test_rb = next(iter(dl_te))
+                
+                # 1. 全局重要性
+                importance_df = analyze_feature_importance(
+                    model=model, batch_x=test_xb, 
+                    feature_names=full_ds.feature_names, device=device
+                )
+                importance_df.to_csv(os.path.join(save_dir, f"feat_imp_{train_task.name.lower()}_{suffix.lower()}.csv"), index=False)
+
+                # 2. 样本级贡献 (可视化 0/1 类别的样本)
+                analyze_sample_contribution_by_class(
+                    model=model, batch_x=test_xb, batch_y=test_yb, batch_r=test_rb,
+                    feature_names=full_ds.feature_names, device=device,
+                    top_k_per_class=3, save_dir=save_dir, suffix=f"{train_task.name}_{suffix}"
+                )
+            except Exception as e:
+                logger.error(f"⚠️ Interpretability analysis failed: {e}")
+
+    # H. 生成 Task Description 索引
+    primary_suffix = "Best_F1" if getattr(train_cfg, 'best_f1', True) else "Best_Loss"
+    task_desc = {
+        "task_type": train_task.name,
+        "timestamp": pd.Timestamp.now().isoformat(),
+        "models": {
+            "main": {
+                "model": f"model_{train_task.name.lower()}_{primary_suffix.lower()}.pt",
+                "meta": f"model_{train_task.name.lower()}_{primary_suffix.lower()}_meta.json"
+            }
+        }
+    }
+    
+    with open(os.path.join(save_dir, "task_description.json"), "w", encoding="utf-8") as f:
+        json.dump(task_desc, f, ensure_ascii=False, indent=2)
+        
+    logger.info(f"🎉 Binary task evaluation complete. Artifacts saved to: {save_dir}")
+    return final_metrics
+
+def diagnose_confidence_binary(results, model, dl_te, device, train_task, logger, save_dir):
+    """
+    专门适配二分类任务的置信度诊断函数。
+    支持：TRIGGER, DIR, LONG_OVR, SHORT_OVR
+    """
+    model.eval()
+    versions = [
+        ("Best_F1", results.get("best_f1_state")),
+        ("Best_Loss", results.get("best_loss_state"))
+    ]
+
+    # 根据任务类型定义标签
+    if train_task == TrainTask.SINGLE_MODEL_DIR:
+        class_names = {0: "Short (0)", 1: "Long (1)"}
+        colors = {0: "#26a69a", 1: "#ef5350"} # 绿/红
+    else:
+        class_names = {0: "Stay/Neg (0)", 1: "Signal/Pos (1)"}
+        colors = {0: "#78909c", 1: "#2196F3"} # 灰/蓝
+
+    plt.figure(figsize=(18, 8))
+
+    for i, (suffix, state) in enumerate(versions):
+        if state is None: continue
+        model.load_state_dict(state)
+        
+        all_probs, all_preds, all_trues = [], [], []
+
+        with torch.no_grad():
+            for xb, yb, _ in dl_te:
+                xb = xb.to(device)
+                logits = model(xb) 
+                probs = torch.softmax(logits, dim=1)
+                
+                all_probs.append(probs.cpu().numpy())
+                all_preds.append(torch.argmax(logits, dim=1).cpu().numpy())
+                all_trues.append(yb.cpu().numpy())
+
+        probs_np = np.concatenate(all_probs)
+        preds_np = np.concatenate(all_preds)
+        trues_np = np.concatenate(all_trues)
+
+        # 二分类置信度通常指预测类别的概率 (0.5 ~ 1.0)
+        confidences = np.max(probs_np, axis=1)
+        is_correct = (preds_np == trues_np)
+
+        # 分箱设置：从 0.5 到 1.0
+        bins = np.linspace(0.5, 1.0, 11)
+        bin_indices = np.digitize(confidences, bins) - 1
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+
+        ax1 = plt.subplot(1, 2, i+1)
+        
+        # 1. 绘制背景：样本分布 (左轴)
+        bin_counts = [np.sum(bin_indices == b) for b in range(len(bins)-1)]
+        ax1.bar(bin_centers, bin_counts, width=(bins[1]-bins[0])*0.8, 
+                color='#f5f5f5', label='Sample Density', edgecolor='#e0e0e0')
+        ax1.set_xlabel('Confidence (Max Probability)', fontsize=12)
+        ax1.set_ylabel('Sample Count', color='#9e9e9e')
+        ax1.tick_params(axis='y', labelcolor='#9e9e9e')
+
+        # 2. 绘制前景：准确率曲线 (右轴)
+        ax2 = ax1.twinx()
+        ax2.plot([0.5, 1.0], [0.5, 1.0], '--', color='#bdbdbd', alpha=0.8, label='Perfectly Calibrated')
+
+        for cls_val in [0, 1]:
+            cls_bin_accs = []
+            for b in range(len(bins) - 1):
+                # 筛选条件：置信度区间 + 真实标签
+                mask = (bin_indices == b) & (trues_np == cls_val)
+                count = np.sum(mask)
+                if count > 3: # 二分类样本集中度可能不同，阈值设为3
+                    acc = np.mean(is_correct[mask])
+                    cls_bin_accs.append(acc)
+                else:
+                    cls_bin_accs.append(None)
+
+            valid_x = [bin_centers[idx] for idx, val in enumerate(cls_bin_accs) if val is not None]
+            valid_y = [val for val in cls_bin_accs if val is not None]
+            
+            ax2.plot(valid_x, valid_y, marker='o', markersize=5, 
+                     linewidth=2, color=colors[cls_val], label=f"Acc: {class_names[cls_val]}")
+
+        ax2.set_ylabel('Accuracy', fontsize=12)
+        ax2.set_ylim(0, 1.05)
+        
+        plt.title(f"{train_task.name} Reliability: {suffix}", fontsize=14)
+        
+        # 合并图例
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=10)
+        ax1.grid(axis='y', linestyle=':', alpha=0.3)
+
+    plot_path = os.path.join(save_dir, f"diagnose_{train_task.name.lower()}.png")
+    plt.tight_layout()
+    plt.savefig(plot_path)
+    logger.info(f"📊 Binary reliability plot saved to: {plot_path}")
+    plt.close()
+
+def run_single_model_binary_task(train_task:TrainTask, full_ds, feature_list,train_cfg: TrainConfig, data_cfg, device, logger, save_dir, experiment):
+    """
+    全流程二分类 Runner：数据映射 -> 重切分 -> 独立训练 -> 评估
+    """
+    # 1. 标签映射与样本过滤
+    X_t, y_t, rb_t = prepare_binary_data_for_task(full_ds.X, full_ds.y, full_ds.returns, train_task)
+    
+    # 2. 重新进行时间序列切分
+    M = len(y_t)
+    tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
+    
+    ds_tr = SeqDataset(X_t[tr_rng[0]:tr_rng[1]], y_t[tr_rng[0]:tr_rng[1]], rb_t[tr_rng[0]:tr_rng[1]])
+    ds_va = SeqDataset(X_t[va_rng[0]:va_rng[1]], y_t[va_rng[0]:va_rng[1]], rb_t[va_rng[0]:va_rng[1]])
+    ds_te = SeqDataset(X_t[te_rng[0]:te_rng[1]], y_t[te_rng[0]:te_rng[1]], rb_t[te_rng[0]:te_rng[1]])
+
+    # 3. 专用采样器
+    sampler_tr = get_trigger_sampler(ds_tr.labels, pos_ratio=0.3)
+    dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, sampler=sampler_tr, shuffle=False)
+    dl_va = DataLoader(ds_va, batch_size=train_cfg.batch_size, shuffle=False)
+    dl_te = DataLoader(ds_te, batch_size=train_cfg.batch_size, shuffle=False)
+
+    # 4. 构建模型 (强制 n_classes=2)
+    model = ModelFactory.build_for_training(
+        device=device, input_size=full_ds.feature_count, n_classes=2, max_len = train_cfg.model_cfg.seq_len,
+        **asdict(train_cfg.model_cfg)
+    )
+
+    # 5. 调用独立引擎
+    optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5)
+
+    results = train_engine_binary(model, dl_tr, dl_va, optimizer, scheduler, device, logger, train_cfg, train_task)
+
+    # 6. 评估与保存
+    os.makedirs(save_dir, exist_ok=True)
+    final_metrics = evaluate_and_save_binary_results(results=results,model=model,dl_te=dl_te,device=device,data_cfg=data_cfg,train_cfg=train_cfg,
+        full_ds=full_ds,feature_list=feature_list, train_task=train_task, logger=logger,save_dir=save_dir)
+    
+    if experiment == False:
+        diagnose_confidence_binary(results, model, dl_te, device, train_task, logger, save_dir)
+    return final_metrics
+
+def run_training(train_task:TrainTask,feature_direction_map, logger: logging, data_cfg: DataConfig, train_cfg_1: TrainConfig, train_cfg_2: TrainConfig , prep_output_dir:str, save_dir:str,experiment:bool):
     # 0. Initialize environment
-    set_seed(train_cfg.seed)
+    set_seed(train_cfg_1.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Device: {device} | Model: {model_cfg.model_type} version: {model_cfg.model_version}")
+    logger.info(f"train_task:{train_task.name} | Device: {device} | Model: {train_cfg_1.model_cfg.model_type} version: {train_cfg_1.model_cfg.model_version}")
     if device.type == 'cuda':
         # Enable TensorFloat32 (TF32): 5090 throughput improves significantly
         torch.set_float32_matmul_precision('high')
@@ -306,12 +572,12 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
     df = common.load_train_df_from_dir(prep_output_dir)
     para = common.load_interval_ms_from_dir(prep_output_dir)
     kline_interval_ms = common.get_interval_ms(para.interval)
-    logger.info(f"Using TimeSeriesWindowDataset with window={pre_para.candlestick_num} Origin data len {len(df)}...")
+    logger.info(f"Using TimeSeriesWindowDataset with window={train_cfg_1.model_cfg.seq_len} Origin data len {len(df)}...")
 
     feature_list = list(feature_direction_map.keys())
     full_ds = TimeSeriesWindowDataset(
-        df=df, kline_interval_ms=kline_interval_ms, feature_cols=feature_list, label_col=data_cfg.label_col, window=pre_para.candlestick_num,
-        cache_path=os.path.join(save_dir,"train_cache.pt"), stride =train_cfg.stride, use_cache = train_cfg.use_cache, show_feature_distribution=True
+        df=df, kline_interval_ms=kline_interval_ms, feature_cols=feature_list, label_col=data_cfg.label_col, window=train_cfg_1.model_cfg.seq_len,
+        cache_path=os.path.join(save_dir,"train_cache.pt"), stride =train_cfg_1.stride, use_cache = train_cfg_1.use_cache, show_feature_distribution=True
     )
     logger.warning(f"📊 [Dataset Check] Final features used in training ({full_ds.feature_count}):"
                    f"{full_ds.feature_names}")
@@ -327,13 +593,10 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
 
     # VRAM preload optimization
     logger.info(f"Pre-loading entire dataset to {device}...")
-    full_ds.X = full_ds.X.to(device)
-    full_ds.y = full_ds.y.to(device)
-    full_ds.returns = full_ds.returns.to(device)  # Use .returns consistently (not .r)
-    logger.info("Data loaded to VRAM.")
+    full_ds.X, full_ds.y, full_ds.returns = full_ds.X.to(device), full_ds.y.to(device), full_ds.returns.to(device)
 
     M = len(full_ds)
-    logger.info(f"Total windows (M) = {M}, window = {pre_para.candlestick_num}")
+    logger.info(f"Total windows (M) = {M}, window = {train_cfg_1.model_cfg.seq_len}")
 
     # 2. Split data
     tr_rng, va_rng, te_rng = chrono_split_by_window_ends(M, data_cfg.train_ratio, data_cfg.val_ratio)
@@ -342,114 +605,88 @@ def run_training(feature_direction_map, logger: logging, data_cfg: DataConfig, t
     # More efficient alternative: just pass the sliced tensors
     ds_va = SeqDataset(full_ds.X[va_rng[0]:va_rng[1]], full_ds.y[va_rng[0]:va_rng[1]], full_ds.returns[va_rng[0]:va_rng[1]])
     ds_te = SeqDataset(full_ds.X[te_rng[0]:te_rng[1]], full_ds.y[te_rng[0]:te_rng[1]], full_ds.returns[te_rng[0]:te_rng[1]])
-    # 3. Compute weights
-    y_tr_np = full_ds.y[tr_rng[0]:tr_rng[1]].cpu().numpy()
-    classes = np.unique(y_tr_np)
-    # Inject balanced sampling logic
-    # Use get_balanced_sampler (Neutral 50%, Short 25%, Long 25%)
+
+    X_raw, y_raw, rb_raw = full_ds.X, full_ds.y, full_ds.returns
+    if train_task == TrainTask.SINGLE_MODEL_3CLASS:
+        return run_single_model_3class_task(
+            train_task, ds_tr, ds_va, ds_te, full_ds, feature_list,
+            train_cfg_1, data_cfg, device, logger, save_dir, experiment
+        )
+    elif train_task in [TrainTask.SINGLE_MODEL_TRIGGER, TrainTask.SINGLE_MODEL_DIR, 
+                        TrainTask.SINGLE_MODEL_LONG_OVR, TrainTask.SINGLE_MODEL_SHORT_OVR]:
+        # 使用新封装的二分类逻辑
+        return run_single_model_binary_task(train_task, full_ds, feature_list,train_cfg_1, data_cfg, device, logger, save_dir, experiment)
+    elif train_task == TrainTask.TRIGGER_DIR:
+        tri_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_TRIGGER.name)
+        run_single_model_binary_task(TrainTask.SINGLE_MODEL_TRIGGER, full_ds, feature_list,train_cfg_1, data_cfg, device, logger, tri_save_dir, experiment)
+        dir_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_DIR.name)
+        run_single_model_binary_task(TrainTask.SINGLE_MODEL_DIR, full_ds, feature_list,train_cfg_2, data_cfg, device, logger, dir_save_dir, experiment)
+
+    else:
+        raise ValueError(f"Unsupported train_task: {train_task.name}")
+
+def run_single_model_3class_task(
+    train_task:TrainTask, ds_tr, ds_va, ds_te, 
+    full_ds, feature_list,
+    train_cfg, data_cfg, 
+    device, logger, save_dir, experiment
+):
+    """
+    专门负责 3分类单模型 任务的训练全流程
+    """
+    # 1. 计算权重与采样器 (任务相关)
+    y_tr_np = ds_tr.y.cpu().numpy()
     sampler_tr = get_balanced_sampler(ds_tr) 
-    
+    classes = np.unique(y_tr_np)
     cw_balanced = compute_class_weight("balanced", classes=classes, y=y_tr_np)
     class_weights = torch.tensor(cw_balanced, dtype=torch.float32, device=device)
     logger.info(f"Class weights: {dict(zip(classes, cw_balanced))}")
 
-    # 4. DataLoader
-    dl_tr = DataLoader(
-        ds_tr, 
-        batch_size=train_cfg.batch_size, 
-        sampler=sampler_tr,      # 使用采样器替代 shuffle
-        shuffle=False,           # 使用 sampler 时必须设为 False
-        num_workers=0)
+    # 2. 构建 DataLoader
+    dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, sampler=sampler_tr, shuffle=False, num_workers=0)
     dl_va = DataLoader(ds_va, batch_size=train_cfg.batch_size, shuffle=False)
     dl_te = DataLoader(ds_te, batch_size=train_cfg.batch_size, shuffle=False)
 
-    # 5. 构建模型 (参数解包)
-    logger.info(f"Initializing model: type={model_cfg.model_type}, version={model_cfg.model_version}")
+    # 3. 构建模型
+    params = asdict(train_cfg.model_cfg)
+
+    model = ModelFactory.build_for_training(
+        max_len =train_cfg.model_cfg.seq_len ,device=device,input_size=full_ds.feature_count, n_classes=len(classes),
+        **params
+    )
+
+    # 4. 差异化学习率配置
+    gate_params = [p for n, p in model.named_parameters() if "feature_weighter" in n]
+    backbone_params = [p for n, p in model.named_parameters() if "feature_weighter" not in n]
     
-    params = asdict(model_cfg)
-    m_type = params.pop('model_type')
-    m_ver = params.pop('model_version')
-    
-    # 默认值修正 logic
-    if hasattr(model_cfg, 'max_len') and params['max_len'] is None:
-        params['max_len'] = pre_para.candlestick_num
+    param_groups = [{"params": backbone_params, "lr": train_cfg.lr}]
+    if gate_params:
+        logger.info(f"⚡ [Differential LR] Setting gate_lr: {train_cfg.gate_lr} for feature_weighter")
+        param_groups.append({"params": gate_params, "lr": train_cfg.gate_lr})
 
-    # 特殊处理 XGBoost
-    if m_type == 'xgboost':
-        logger.info(f'xgboost device:{device}')
-        model = ModelFactory.build_for_training(
-            model_type=m_type, model_version=m_ver, device=device,
-            input_size=full_ds.feature_count, n_classes=len(classes),
-            input_dim=pre_para.candlestick_num * full_ds.feature_count, window_size = pre_para.predict_num,
-            xgb_params=params
-        )
-    else:
-        model = ModelFactory.build_for_training(
-            model_type=m_type, model_version=m_ver, device=device,
-            input_size=full_ds.feature_count, n_classes=len(classes),
-            **params
-        )
-        # model = torch.compile(model)
-        # --- 核心修改：实现 gate_lr 差异化学习率 ---
-        # 1. 提取参数
-        gate_params = []
-        backbone_params = []
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=train_cfg.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=6)
 
-        for name, param in model.named_parameters():
-            if "feature_weighter" in name:
-                gate_params.append(param)
-            else:
-                backbone_params.append(param)
-
-        # 2. 构造参数组
-        # 主网络使用 train_cfg.lr (如 3e-4)
-        # 加权层使用 train_cfg.gate_lr (如 1e-2)
-        param_groups = [
-            {"params": backbone_params, "lr": train_cfg.lr},
-        ]
-        
-        if gate_params:
-            logger.info(f"⚡ [Differential LR] Setting gate_lr: {train_cfg.gate_lr} for feature_weighter")
-            param_groups.append({"params": gate_params, "lr": train_cfg.gate_lr})
-
-        # 3. 重新定义优化器
-        optimizer = torch.optim.AdamW(param_groups, weight_decay=train_cfg.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=6)
-
-    # 7. 调用封装好的训练引擎
+    # 5. 执行训练
     logger.info("🚀 Starting training engine...")
     mtl = MTLManager(device, train_cfg)
-    # 现有的 PyTorch 训练引擎
     results = train_engine(
-        model=model,
-        dl_tr=dl_tr,
-        dl_va=dl_va,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        device=device,
-        logger=logger,
-        train_cfg=train_cfg,
-        mtl_manager=mtl
+        model=model, dl_tr=dl_tr, dl_va=dl_va,
+        optimizer=optimizer, scheduler=scheduler,
+        device=device, logger=logger, train_cfg=train_cfg, mtl_manager=mtl
     )
-    # 8. 评估与保存 (调用新封装的评估函数)
+
+    # 6. 评估与诊断
     final_metrics = evaluate_and_save_results(
-        results=results,
-        model=model,
-        dl_te=dl_te,
-        device=device,
-        data_cfg=data_cfg,
-        train_cfg=train_cfg,
-        full_ds=full_ds,
-        feature_list = feature_list,
-        classes=classes,
-        logger=logger,
-        mtl_manager = mtl,
-        pre_para=pre_para,
-        save_dir = save_dir,
+        train_task, results=results, model=model, dl_te=dl_te,
+        device=device, data_cfg=data_cfg, train_cfg=train_cfg,
+        full_ds=full_ds, feature_list=feature_list,
+        classes=classes, logger=logger, mtl_manager=mtl, save_dir=save_dir
     )
-    if experiment==False:
-        diagnose_confidence(results, model=model,dl_te=dl_te, device=device,logger=logger,save_dir = save_dir)
-    # find_best_threshold(results, model=model,dl_te=dl_te, device=device,logger=logger)
+
+    if not experiment:
+        diagnose_confidence(results, model=model, dl_te=dl_te, device=device, logger=logger, save_dir=save_dir)
+
     return final_metrics
 # ==============================================================================
 # 4. 辅助函数
@@ -1062,6 +1299,7 @@ def train_engine(
     }
 
 def evaluate_and_save_results(
+    train_task:TrainTask,
     results: dict,
     model: nn.Module,
     dl_te: DataLoader,
@@ -1074,7 +1312,6 @@ def evaluate_and_save_results(
     classes: np.ndarray,
     logger: logging.Logger,
     mtl_manager: MTLManager,
-    pre_para:common.BaseDefine,
     save_dir:str
 ):
     """
@@ -1123,7 +1360,7 @@ def evaluate_and_save_results(
             "feature_list" : feature_list,
             "classes": classes.tolist(),
             "channel": full_ds.feature_count,
-            "window": pre_para.candlestick_num,
+            "window": train_cfg.model_cfg.seq_len,
             "feature_cols": full_ds.feature_names,
             "label_col": data_cfg.label_col,
             "val_score": val_score,
@@ -1135,7 +1372,7 @@ def evaluate_and_save_results(
             feature_cols=full_ds.feature_names,
             label_col=data_cfg.label_col,
             classes=classes.tolist(),
-            window=pre_para.candlestick_num,
+            window=train_cfg.model_cfg.seq_len,
             model_version_tag=suffix,
         )
         with open(os.path.join(save_dir, f"model_{suffix.lower()}_meta.json"), "w", encoding="utf-8") as f:
@@ -1152,7 +1389,7 @@ def evaluate_and_save_results(
             "overfit_gap": abs(val_score - test_f1)
         })
             
-        if train_cfg.model_cfg.use_feature_weighting:
+        if getattr(train_cfg.model_cfg,'use_feature_weighting', False):
             logger.info(f"🎨 Generating Interpretability Analysis for {suffix}...")
             
             # 从测试迭代器中取出一个样本 Batch 进行深入分析
@@ -1196,7 +1433,7 @@ def evaluate_and_save_results(
     primary_suffix = "Best_F1" if train_cfg.best_f1 == True else "Best_Loss"
     
     task_desc = {
-        "task_type": "single",
+        "task_type": train_task.name,
         "timestamp": pd.Timestamp.now().isoformat(),
         # 移除 common_config
         "models": {
@@ -1250,60 +1487,99 @@ import seaborn as sns
 
 def diagnose_confidence(results, model, dl_te, device, logger, save_dir):
     """
-    诊断模型预测的置信度分布。
-    分析模型是在“坚定地犯错”还是“犹豫地对”。
+    分类别诊断模型置信度与准确率的校准关系。
+    X轴: 置信度 (Max Probability)
+    Y轴: 分别绘制 Positive(2), Negative(0), Neutral(1) 的准确率曲线
     """
     model.eval()
     versions = [
-        ("Best_F1", results["best_f1_state"]),
-        ("Best_Loss", results["best_loss_state"])
+        ("Best_F1", results.get("best_f1_state")),
+        ("Best_Loss", results.get("best_loss_state"))
     ]
 
-    plt.figure(figsize=(15, 6))
+    # 定义类别映射与颜色
+    class_info = {
+        common.Signal.POSITIVE: {"label": "Positive (Buy)", "color": "#ef5350"}, # red
+        common.Signal.NEGATIVE: {"label": "Negative (Sell)", "color": "#26a69a"}, # green
+        common.Signal.NEUTRAL: {"label": "Neutral (Hold)", "color": "#78909c"}  # 灰色
+    }
+
+    plt.figure(figsize=(18, 8))
 
     for i, (suffix, state) in enumerate(versions):
         if state is None: continue
         model.load_state_dict(state)
         
-        all_probs = []
-        all_preds = []
-        all_trues = []
+        all_probs, all_preds, all_trues = [], [], []
 
         with torch.no_grad():
             for xb, yb, _ in dl_te:
                 xb = xb.to(device)
                 fused_preds, fused_probs = model(xb, return_fused=True) 
-                
                 all_probs.append(fused_probs.cpu().numpy())
                 all_preds.append(fused_preds.cpu().numpy())
                 all_trues.append(yb.cpu().numpy())
 
-        probs_np = np.concatenate(all_probs) # [N, 3]
+        probs_np = np.concatenate(all_probs)
         preds_np = np.concatenate(all_preds)
         trues_np = np.concatenate(all_trues)
 
-        # 提取模型对预测类别的“信心”（即最大概率值）
         confidences = np.max(probs_np, axis=1)
+        is_correct = (preds_np == trues_np)
+
+        # 分箱设置
+        bins = np.linspace(0.33, 1.0, 11)
+        bin_indices = np.digitize(confidences, bins) - 1
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+
+        ax1 = plt.subplot(1, 2, i+1)
         
-        # 区分：预测正确的信心 vs 预测错误的信心
-        correct_mask = (preds_np == trues_np)
-        conf_correct = confidences[correct_mask]
-        conf_wrong = confidences[~correct_mask]
+        # 1. 绘制背景：总样本分布 (左轴)
+        bin_counts = [np.sum(bin_indices == b) for b in range(len(bins)-1)]
+        ax1.bar(bin_centers, bin_counts, width=(bins[1]-bins[0])*0.8, 
+                color='#f5f5f5', label='Total Samples', edgecolor='#e0e0e0')
+        ax1.set_xlabel('Confidence (Max Probability)', fontsize=12)
+        ax1.set_ylabel('Sample Count', color='#9e9e9e')
+        ax1.tick_params(axis='y', labelcolor='#9e9e9e')
 
-        # 绘图
-        plt.subplot(1, 2, i+1)
-        sns.histplot(conf_correct, color="green", label="Correct Preds", kde=True, stat="density", alpha=0.5)
-        sns.histplot(conf_wrong, color="red", label="Wrong Preds", kde=True, stat="density", alpha=0.5)
-        plt.title(f"Confidence Distribution: {suffix}")
-        plt.xlabel("Max Probability (Confidence)")
-        plt.ylabel("Density")
-        plt.legend()
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        # 2. 绘制前景：分类别准确率 (右轴)
+        ax2 = ax1.twinx()
+        ax2.plot([0.33, 1.0], [0.33, 1.0], '--', color='#bdbdbd', alpha=0.8, label='Ideal')
 
-    plot_path = os.path.join(save_dir, "confidence_diagnosis.png")
+        for cls_val, info in class_info.items():
+            cls_bin_accs = []
+            for b in range(len(bins) - 1):
+                # 筛选条件：属于该置信度区间 且 真实标签为 cls_val
+                mask = (bin_indices == b) & (trues_np == cls_val)
+                count = np.sum(mask)
+                if count > 5: # 样本太少（少于5个）不画点，避免噪点干扰
+                    acc = np.mean(is_correct[mask])
+                    cls_bin_accs.append(acc)
+                else:
+                    cls_bin_accs.append(None)
+
+            # 过滤掉 None 值进行绘图
+            valid_x = [bin_centers[idx] for idx, val in enumerate(cls_bin_accs) if val is not None]
+            valid_y = [val for val in cls_bin_accs if val is not None]
+            
+            ax2.plot(valid_x, valid_y, marker='o', markersize=4, 
+                     linewidth=2, color=info['color'], label=info['label'])
+
+        ax2.set_ylabel('Accuracy per Class', fontsize=12)
+        ax2.set_ylim(0, 1.05)
+        
+        plt.title(f"Class-wise Reliability: {suffix}", fontsize=14)
+        
+        # 合并图例
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=10)
+        ax1.grid(axis='y', linestyle=':', alpha=0.3)
+
+    plot_path = os.path.join(save_dir, "class_wise_confidence.png")
     plt.tight_layout()
     plt.savefig(plot_path)
-    logger.info(f"📊 Confidence diagnosis plot saved to: {plot_path}")
+    logger.info(f"📈 Class-wise reliability plot saved to: {plot_path}")
     plt.close()
 
 def analyze_feature_importance(model, batch_x, feature_names, device='cuda', top_n=20):
@@ -1548,108 +1824,47 @@ def eval_epoch(model, loader, device, mtl_manager:MTLManager):
     # 返回增加了一个返回值：拼接后的收益率数组
     return tl/len(loader.dataset), np.concatenate(yt), np.concatenate(yp), np.concatenate(yr)
 
-# feature_direction_map: 特征名 -> ic_direction (1 正向 / -1 负向)
-# 训练前会对 direction=-1 的特征乘以 -1，使其与收益正相关
-feature_direction_map = {
-    "PVT": -1,
-    "BOLL_PB_25": -1,
-    "RSI_14": -1,
-    "close": -1,
-    "KELTNER_MIDDLE_14": -1,
-    "low": -1,
-    "MOM_20_RV20": -1,
-    "DONCHIAN_POS_20": -1,
-    "high": -1,
-    "OBV": -1,
-    "MOM_20_SKIP1": -1,
-    "KELTNER_UPPER_14": -1,
-    "open": -1,
-    "DONCHIAN_DIST_L_20": -1,
-    "DONCHIAN_DIST_U_20": 1,
-    "MACD_12_26_DIF_PCT": -1,
-    "MOM_20": -1,
-    "KELTNER_LOWER_14": -1,
-    "DONCHIAN_MIDDLE_20": -1,
-    "DONCHIAN_LOWER_20": -1,
-    "DONCHIAN_UPPER_20": -1,
-    "VWAP_7": -1,
-    "MFI_25": -1,
-    "MOM_10": -1,
-    "BOLL_MIDDLE_25": -1,
-    "dist_to_high_100": 1,
-    "KDJ_K": -1,
-    "MA_BAR_S_L": -1,
-    "KDJ_D": -1,
-    "BOLL_LOWER_25": -1,
-    "KDJ_J": -1,
-    "vpin_49": 1,
-    "MA_BAR_M_L": -1,
-    "MACD_12_26_HIST_PCT": -1,
-    "BOLL_BW_25": 1,
-    "poc_bias_49": -1,
-    "BOLL_UPPER_25": -1,
-    "MACD_12_26_DIF": -1,
-    "vpin_14": 1,
-    "MOM_60": -1,
-    "D_MA_DAY_S_L": -1,
-    "id_factor_20": -1,
-    "MACD_12_26_DEA": -1,
-    "MACD_12_26_SIG_DIST": -1,
-    "VWAP_Bias_7": -1,
-    "close_pos": -1,
-    "vol_parkinson_100": 1,
-    "vol_gk_100": 1,
-    "id_factor_100": -1,
-    "dist_to_high_20": 1,
-    "skew_20": 1,
-    "D_MA_BAR_S_L": -1,
-    "er_126": 1,
-    "imbalance_14": -1,
-    "CMF_25": 1,
-    "VWAP_BIAS": -1,
-    "MACD_12_26_HIST_ACCEL": -1,
-    "vol_gk_14": 1,
-    "hurst_126": 1,
-    "atr_14": 1,
-    "vol_parkinson_14": 1,
-    "body": 1,
-    "body_pct": 1,
-    "doji_score": 1,
-    "body_mom": 1,
-    "imbalance_49": 1,
-    "max_range": 1,
-    "kurt_100": 1,
-    "MACD_12_26_HIST": 1,
-    "skew_100": 1,
-    "Vol_Trend": 1,
-    "poc_bias_14": 1,
-    "upper_wick_pct": 1,
-    "VOL_ratio_14": 1,
-    "kurt_20": 1,
-    "ATS": 1,
-    "DONCHIAN_BW_20": 1,
-    "QAV_SLOPE_49": 1,
-    "lower_wick_pct": 1,
-    "hurst_14": 1,
-    "QAV_SURGE_49": 1,
-    "lower_wick": 1,
-    "vol_regime_14": 1,
-    "wick_bias": 1,
-    "trade_density_14": 1,
-    "er_14": 1,
-    "quote_asset_volume": 1,
-    "MA_DAY_S_L": 1,
-    "number_of_trades": 1,
-    "taker_buy_quote_volume": 1,
-    "MA_WEEK_M_L": -1,
-    "VOL_MA_14": 1,
-    "trade_density_49": 1,
-    "upper_wick": 1,
-    "volume": 1,
-    "taker_buy_base_volume": 1,
-}
+def fusion_long_short_ovr(logger: logging.Logger, long_train_output_dir:str, short_train_output_dir:str, save_dir:str):
+    task_type = TrainTask.LONG_SHORT_OVR.name
+    rel_long = os.path.relpath(long_train_output_dir, save_dir)
+    rel_short = os.path.relpath(short_train_output_dir, save_dir)
+    task_desc = {
+        "task_type": TrainTask.LONG_SHORT_OVR.name,
+        "timestamp": pd.Timestamp.now().isoformat(),
+        "models": {
+            "long_ovr": rel_long,
+            "short_ovr": rel_short,
+        }
+    }
+    
+    os.makedirs(save_dir, exist_ok=True)
+    with open(os.path.join(save_dir, "task_description.json"), "w", encoding="utf-8") as f:
+        json.dump(task_desc, f, ensure_ascii=False, indent=2)
 
-def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDefine(), prep_output_dir = common.DATA_OUT_DIR, save_dir: str = common.TRAIN_OUT_DIR,experiment:bool = False):
+    logger.info(f"🎉 {task_type} task complete. Artifacts saved to: {save_dir}")
+
+#it could be same model with different parameters
+def run_task_trade_direction(logger: logging.Logger, train_task: TrainTask, train_cfg_tri: TrainConfig,train_cfg_dir: TrainConfig, 
+                             prep_output_dir = common.DATA_OUT_DIR, save_dir: str = common.TRAIN_OUT_DIR,experiment:bool = False):
+    os.makedirs(save_dir, exist_ok=True)
+
+    if train_task != TrainTask.TRIGGER_DIR:
+        raise RuntimeError(f"train_task:{train_task.name} not compatible")
+    if train_cfg_tri.feature_conf_list != train_cfg_dir.feature_conf_list:
+        raise RuntimeError(f"different feature_conf_list not supported")
+    feature_direction_map_filtered = {}
+    for feature_name in train_cfg_tri.feature_conf_list:
+        # 从全局 feature_direction_map 中查找方向，如果找不到则默认为 1（正向）
+        direction = feature_direction_map.get(feature_name, 1)
+        feature_direction_map_filtered[feature_name] = direction
+    
+    logger.info(f"📋 Using {len(feature_direction_map_filtered)} features from feature_conf_list")
+
+    d_cfg = DataConfig()
+    
+    return run_training(train_task,feature_direction_map_filtered, logger, d_cfg, train_cfg_tri, train_cfg_dir, prep_output_dir,save_dir,experiment)
+
+def main(logger: logging.Logger,train_task:TrainTask, train_cfg=TrainConfig(), prep_output_dir = common.DATA_OUT_DIR, save_dir: str = common.TRAIN_OUT_DIR,experiment:bool = False):
     os.makedirs(save_dir, exist_ok=True)
 
     # 根据 feature_conf_list 从全局 feature_direction_map 补充完整方向信息
@@ -1659,17 +1874,11 @@ def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDe
         direction = feature_direction_map.get(feature_name, 1)
         feature_direction_map_filtered[feature_name] = direction
     
-    logger.info(f"📋 Using {len(feature_direction_map_filtered)} features from feature_conf_list")
+    logger.info(f"📋 Using model {train_cfg.model_type} {len(feature_direction_map_filtered)} features from feature_conf_list")
 
-    # 1. 数据配置
     d_cfg = DataConfig()
-
-            # 0             1                   2                   3           4               5               6
-    m_cfg = [LSTMConfig(), TransformerConfig(), ConvLSTMConfig(), CNNConfig(), XGBoostConfig(), TCNConfig(), MambaConfig()][2]
-    # m_cfg.model_version = 1
     
-    logger.info(f"Training {m_cfg.model_type}...")
-    return run_training(feature_direction_map_filtered, logger, d_cfg, train_cfg, m_cfg, pre_para,prep_output_dir,save_dir,experiment)
+    return run_training(train_task,feature_direction_map_filtered, logger, d_cfg, train_cfg, None, prep_output_dir,save_dir,experiment)
 # ==============================================================================
 # 5. 调用入口 (Main Entry)
 # ==============================================================================
@@ -1677,6 +1886,10 @@ def main(logger: logging.Logger, train_cfg=TrainConfig(), pre_para=common.BaseDe
 if __name__ == "__main__":
     logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
     begin_time = time.time()
-    main(logger)
+    save_dir =  os.path.join(common.TRAIN_OUT_DIR,train_task_config.name)
+    main(logger,train_task_config,SingleModelTrainConfig,save_dir = save_dir)
+    save_dir =  os.path.join(common.TRAIN_OUT_DIR)
+    # fusion_long_short_ovr(logger,r"/home/chao/work/Quant/output/train/SINGLE_MODEL_LONG_OVR", r"/home/chao/work/Quant/output/train/SINGLE_MODEL_SHORT_OVR",save_dir)
+    # run_task_trade_direction(logger, TrainTask.TRIGGER_DIR, SingleModelTrainConfig, SingleModelTrainConfig, save_dir = save_dir)
     end_time = time.time()
     logger.info(f"Total training time: {(end_time - begin_time)} seconds")

@@ -10,6 +10,7 @@ from typing import Optional
 from datetime import datetime
 from data_process.utils import *
 from data_process.feature import *
+from numba import njit
 
 class Signal(IntEnum):
     INVALID = -1
@@ -43,13 +44,12 @@ os.makedirs(DATA_OUT_DIR, exist_ok=True)
 class BaseDefine:
     # model / data
     vol_ewma_span: int  = 80
-    candlestick_num: int = 32     # 160 best for LSTM
-    predict_num: int = 10000
+    predict_num: int = 16
     # risk / vol
-    vol_multiplier_long: float = 1.7
-    stop_multiplier_rate_long: Optional[float] = 0.2
-    vol_multiplier_short: float = 1.7
-    stop_multiplier_rate_short: Optional[float] = 0.2
+    vol_multiplier_long: float = 1
+    stop_multiplier_rate_long: Optional[float] = None
+    vol_multiplier_short: float = 1
+    stop_multiplier_rate_short: Optional[float] = None
     # market
     symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
     interval: str = "15m"
@@ -248,6 +248,7 @@ def calculate_thresholds(df, para=BaseDefine, **kwargs):
     # ===== 3️⃣ Scale to the prediction horizon =====
     # Assume variance scales linearly with time
     expected_vol = ewma_vol * np.sqrt(para.predict_num)
+
     df['expected_vol'] = expected_vol
 
     # ===== 4️⃣ Asymmetric thresholds =====
@@ -287,63 +288,178 @@ def print_zret_statistics(df, label_col='label'):
         print(f"\nLabel {label}  count={len(sub)}")
         print(sub.describe(percentiles=[0.5,0.75,0.9,0.95,0.99]))
 
-def attach_triple_barrier_label(df, 
-                                 interval_ms,
-                                 para = BaseDefine,):
-    """
-    Strict asymmetric triple-barrier labeling.
-    """
-    time_col = 'open_time_ms_utc'
-    time_values = df[time_col].values
-    
-    # 1. Compute asymmetric dynamic thresholds
-    df = calculate_thresholds(df, para)
+@njit(cache=True)
+def fast_triple_barrier_kernel(close, high, low, thresholds, window):
+    n = len(close)
+    labels = np.ones(n, dtype=np.int32)        # 默认中性 (1)
+    reach_times = np.full(n, window, dtype=np.int32) 
 
-    # 2. Physical time anchoring
-    target_times = time_values + (para.predict_num * interval_ms)
-    target_indices = np.searchsorted(time_values, target_times, side='left')
-    in_bounds = target_indices < len(df)
-    safe_idx = np.where(in_bounds, target_indices, 0)
-    final_valid_mask = in_bounds & (time_values[safe_idx] == target_times)
+    l_tp_p = thresholds[:, 0]
+    l_sl_p = thresholds[:, 1]
+    s_tp_p = thresholds[:, 2]
+    s_sl_p = thresholds[:, 3]
 
-    # 3. Prepare future price matrices
-    future_closes = np.column_stack([df['close'].shift(-i).values for i in range(1, para.predict_num + 1)])
-    future_highs = np.column_stack([df['high'].shift(-i).values for i in range(1, para.predict_num + 1)])
-    future_lows = np.column_stack([df['low'].shift(-i).values for i in range(1, para.predict_num + 1)])
-    
-    closes = df['close'].values
-    labels = np.full(len(df), Signal.NEUTRAL, dtype=int)
-
-    # 4. Iterate (use the corresponding long/short threshold columns)
-    for i in range(len(df) - para.predict_num):
-        if not final_valid_mask[i]:
-            labels[i] = Signal.INVALID
-            continue
-            
-        curr_price = closes[i]
+    for i in range(n - window):
+        p0 = close[i]
         
-        # --- Long-side check (use *_long threshold columns) ---
-        idx_long_tp = np.where(future_closes[i] >= curr_price * (1 + df['threshold_long'].iloc[i]))[0]
-        idx_long_sl = np.where(future_lows[i] <= curr_price * (1 - df['stop_threshold_long'].iloc[i]))[0]
-        first_l_tp = idx_long_tp[0] if len(idx_long_tp) > 0 else para.predict_num
-        first_l_sl = idx_long_sl[0] if len(idx_long_sl) > 0 else para.predict_num
+        # 独立的价格屏障
+        l_tp = p0 * (1 + l_tp_p[i])
+        l_sl = p0 * (1 - l_sl_p[i])
+        s_tp = p0 * (1 - s_tp_p[i])
+        s_sl = p0 * (1 + s_sl_p[i])
+        
+        # 用来记录该样本是否在窗口内达成过目标
+        first_l_tp = window + 1
+        first_s_tp = window + 1
+        
+        # 用来标记该侧是否已经由于止损而“死亡”
+        l_active = True
+        s_active = True
 
-        # --- Short-side check (use *_short threshold columns) ---
-        idx_short_tp = np.where(future_closes[i] <= curr_price * (1 - df['threshold_short'].iloc[i]))[0]
-        idx_short_sl = np.where(future_highs[i] >= curr_price * (1 + df['stop_threshold_short'].iloc[i]))[0]
-        first_s_tp = idx_short_tp[0] if len(idx_short_tp) > 0 else para.predict_num
-        first_s_sl = idx_short_sl[0] if len(idx_short_sl) > 0 else para.predict_num
+        for j in range(1, window + 1):
+            curr_idx = i + j
+            h, l, c = high[curr_idx], low[curr_idx], close[curr_idx]
+            
+            # --- 多头路径判定 ---
+            if l_active:
+                if c >= l_tp:      # 先碰 TP
+                    first_l_tp = j
+                    l_active = False # 达成目标，不再更新
+                elif l <= l_sl:    # 先碰 SL
+                    l_active = False # 死亡
+            
+            # --- 空头路径判定 ---
+            if s_active:
+                if c <= s_tp:      # 先碰 TP
+                    first_s_tp = j
+                    s_active = False
+                elif h >= s_sl:    # 先碰 SL
+                    s_active = False
 
-        # Decide label
-        if first_l_tp < first_l_sl:
-            labels[i] = Signal.POSITIVE 
-        elif first_s_tp < first_s_sl:
-            labels[i] = Signal.NEGATIVE
+            # 如果多空都已经有了结果（无论是 TP 还是 SL），提前退出
+            if not l_active and not s_active:
+                break
 
-    df['label'] = labels
-    df.loc[~final_valid_mask, 'label'] = Signal.INVALID
+        # --- 最终决策 ---
+        # 只有在各自的路径中“获胜”（TP先于SL）才有资格参与比较
+        if first_l_tp <= window and first_l_tp < first_s_tp:
+            labels[i] = 2 # Signal.POSITIVE
+            reach_times[i] = first_l_tp
+        elif first_s_tp <= window and first_s_tp < first_l_tp:
+            labels[i] = 0 # Signal.NEGATIVE
+            reach_times[i] = first_s_tp
+        else:
+            labels[i] = 1 # Signal.NEUTRAL
+            # reach_times 保持默认值或设为第一次发生 SL 的时间
+            
+    return labels, reach_times
+
+def attach_triple_barrier_label(df, para=BaseDefine, label_col = 'label'):
+    # 1. 获取基础阈值
+    df = calculate_thresholds(df, para)
+    
+    # 2. 准备底层数据
+    close = df['close'].values.astype(np.float64)
+    high = df['high'].values.astype(np.float64)
+    low = df['low'].values.astype(np.float64)
+    
+    thresholds = np.column_stack([
+        df['threshold_long'].values,
+        df['stop_threshold_long'].values,
+        df['threshold_short'].values,
+        df['stop_threshold_short'].values
+    ]).astype(np.float64)
+    
+    window = int(para.predict_num)
+    
+    # 3. 调用 Numba 加速计算
+    labels, reach_times = fast_triple_barrier_kernel(
+        close, high, low, thresholds, window
+    )
+    
+    # 4. 写入结果
+    df[label_col] = labels
+    df['reach_time'] = reach_times
+    
+    # 5. 物理时间校验 (掩码处理)
+    # 确保在 predict_num 步之后的时间戳与物理时间对齐
+    interval_ms = get_interval_ms(para.interval)
+    time_values = df['open_time_ms_utc'].values
+    target_times = time_values + (window * interval_ms)
+    target_indices = np.searchsorted(time_values, target_times, side='left')
+    
+    in_bounds = target_indices < len(df)
+    time_match = np.zeros(len(df), dtype=np.bool_)
+    valid_idx = np.where(in_bounds)[0]
+    time_match[valid_idx] = (time_values[target_indices[valid_idx]] == target_times[valid_idx])
+    
+    # 处理无效行
+    df.loc[~time_match, label_col] = -1       # Signal.INVALID
+    df.loc[~time_match, 'reach_time'] = -1  # 无效到达时间
+    
     return df
 
+def print_label_performance_stats(df, para=BaseDefine):
+    """
+    打印标签分布及到达时间的深度统计信息
+    """
+    print("\n" + "="*20 + " 📊 Triple Barrier Statistics " + "="*20)
+    
+    # 1. 基础信息
+    total_len = len(df)
+    valid_df = df[df['label'] != -1].copy() # 排除 INVALID (-1)
+    predict_num = para.predict_num
+    
+    print(f"Total Samples: {total_len}")
+    print(f"Valid Samples: {len(valid_df)} ({(len(valid_df)/total_len)*100:.2f}%)")
+    print(f"Max Window (predict_num): {predict_num}")
+    print("-" * 50)
+
+    # 2. 标签分布统计
+    label_counts = valid_df['label'].value_counts().sort_index()
+    label_map = {0: "NEGATIVE (Short Win)", 1: "NEUTRAL (Time-out/SL)", 2: "POSITIVE (Long Win)"}
+    
+    print(f"{'Label Type':<25} | {'Count':<10} | {'Percentage':<10}")
+    for lbl, count in label_counts.items():
+        name = label_map.get(lbl, "Unknown")
+        pct = (count / len(valid_df)) * 100
+        print(f"{name:<25} | {count:<10} | {pct:>8.2f}%")
+    
+    print("-" * 50)
+
+    # 3. Reach Time 统计 (针对非中性标签)
+    print("⏱️ Reach Time Descriptive Statistics (Steps):")
+    
+    # 分组计算 reach_time 的描述性统计
+    stats = valid_df.groupby('label')['reach_time'].describe(
+        percentiles=[0.25, 0.5, 0.75, 0.9]
+    )
+    # 重命名索引方便阅读
+    stats.index = stats.index.map(label_map)
+    print(stats[['count', 'mean', 'min', '50%', '90%', 'max']])
+
+    # 4. 效率分析：快速触发 vs 慢速触发
+    print("\n🚀 Efficiency Analysis (Speed of Signal):")
+    for lbl in [0, 2]:
+        sub = valid_df[valid_df['label'] == lbl]
+        if len(sub) > 0:
+            name = label_map[lbl]
+            # 定义“快速触发”为在窗口前 25% 的时间内就达标
+            fast_threshold = predict_num * 0.25
+            fast_hits = len(sub[sub['reach_time'] <= fast_threshold])
+            fast_pct = (fast_hits / len(sub)) * 100
+            
+            # 定义“压哨触发”为在窗口最后 10% 的时间内才达标
+            slow_threshold = predict_num * 0.9
+            slow_hits = len(sub[sub['reach_time'] >= slow_threshold])
+            
+            print(f"[{name}]")
+            print(f"  - Fast Hits (<= {fast_threshold:.0f} steps): {fast_hits} ({fast_pct:.2f}%)")
+            print(f"  - Slow Hits (>= {slow_threshold:.0f} steps): {slow_hits} ({(slow_hits/len(sub))*100:.2f}%)")
+            print(f"  - Median Reach Time: {sub['reach_time'].median():.0f} steps")
+
+    print("="*60 + "\n")
+    
 def attach_macd_event_lifecycle_label(df, 
                                 interval_ms,
                                 para = BaseDefine,):

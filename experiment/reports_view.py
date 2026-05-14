@@ -610,13 +610,17 @@ def main():
     exp_dir5 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-18','02_38_16')
     exp_dir7 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-18','13_16_48')
     exp_dir9 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-19','01_15_14')
+    exp_dir_4_17 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-04-17','23_41_02')
     exp_dir13 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-20','00_30_58')
+    exp_dir16 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-04-19','09_07_32')
+    exp_dir10 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-03-19','11_00_31')
     exp_dir10 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-03-19','11_00_31')
     exp_dir11 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_1h','2026-03-19','11_32_26')
     exp_dir12 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_1h','2026-03-19','11_53_49')
+    exp_dir14 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_1h','2026-04-18','19_11_25')
     exp_dir3 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','18_41_56')
     exp_dir4 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','20_17_30')
-    exp_dir_list = [exp_dir13]
+    exp_dir_list = [exp_dir16]
     filter_report = None
     filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
@@ -638,9 +642,9 @@ def main():
     uin_records = merge_selected(rows)
     print(f"Total uint reports: {len(uin_records)}")
     if not filter_report:
-        analyze_holdbar(uin_records,target_key="candlestick_num", period ='short',metric_key="daily_freq")
+        analyze_holdbar(uin_records,target_key="seq_len", period ='short',metric_key="daily_freq")
         uin_records = basic_filter(uin_records)
-        analyze_holdbar(uin_records,target_key="candlestick_num", period ='long',metric_key="cagr")
+        analyze_holdbar(uin_records,target_key="seq_len", period ='long',metric_key="cagr")
         plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
         plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
         plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
@@ -648,7 +652,7 @@ def main():
         exit()
     analyze_holdbar(uin_records,target_key="stride",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="holdbar",period ='long', metric_key="cagr")
-    analyze_holdbar(uin_records,target_key="candlestick_num",period ='long', metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="seq_len",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="vol_ewma_span", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="predict_num", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='long',metric_key="cagr")
@@ -722,7 +726,7 @@ def main():
     ]
     print(f"🎯 hash fitler, {len(l_results)} -> {len(selected)}")
     stats, f_map, groups = analyze_holdbar(selected,target_key="feature_conf_list",period ='long', metric_key="cagr")
-    show_performance(selected,output_dir,3)
+    show_performance(sorted_selected1,output_dir,3)
     # exit()
     # stable_selected1 = filter_stable(rc_median_results)
     # print(f"-------------After filter_stable: {len(stable_selected1)} reports")

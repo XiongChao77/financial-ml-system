@@ -119,7 +119,7 @@ def get_market_anatomy(df):
 
 def analyze_label_distribution_by_params(
     df_raw,
-    candlestick_num,
+    seq_len,
     predict_num_list,
     vol_multiplier_list,
     stop_multiplier_rate_list,
@@ -138,7 +138,7 @@ def analyze_label_distribution_by_params(
 
                 common.attach_label(
                     df,
-                    candlestick_num=candlestick_num,
+                    seq_len=seq_len,
                     predict_num=predict_num,
                     vol_multiplier=vol_mul,
                     stop_multiplier_rate=stop_rate,
@@ -188,7 +188,7 @@ def run_label_sensitivity_analysis(df):
 
             common.attach_label(
                 df_tmp,
-                candlestick_num=common.BaseDefine.predict_num,
+                seq_len=common.BaseDefine.predict_num,
                 predict_num=common.BaseDefine.predict_num,
                 vol_multiplier=vol_mul,
                 stop_multiplier_rate=stop_rate,

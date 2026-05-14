@@ -217,7 +217,7 @@ def run_fixed_neutral_subsampling_experiment(
         kline_interval_ms=kline_interval_ms,
         feature_cols=train_cfg.feature_conf_list,
         label_col=label_cols[0],
-        window=pre_para.candlestick_num,
+        window=pre_para.seq_len,
         stride=train_cfg.stride,
         use_cache=False,
         show_feature_distribution=False,
