@@ -73,27 +73,90 @@ const clearRuler = () => {
 };
 
 // --- 统计面板渲染 ---
-function renderStats(stats) {
+function renderStats(statsArray) {
     const panel = document.getElementById("stats-panel");
     panel.innerHTML = "";
-    if (!stats) return;
+    if (!statsArray || !statsArray[1]) return;
 
-    const fields = [
-        { key: "gross_return", title: "总收益率", color: stats.gross_return.includes('-') ? 'loss' : 'win' },
-        { key: "win_rate", title: "胜率", color: "" },
-        { key: "sharpe", title: "夏普比率", color: "" },
-        { key: "max_drawdown", title: "最大回撤", color: "loss" },
-        { key: "total_trades", title: "交易次数", color: "" },
-        { key: "cagr", title: "年化收益", color: "" },
-        { key: "start_value", title: "初始资金", color: "" },
-        { key: "end_value", title: "最终资金", color: "win" },
+    const data = statsArray[1];
+
+    // Define sections and their corresponding fields in the 'report' structure
+    const config = [
+        {
+            group: "Performance",
+            fields: [
+                { key: "gross_return", title: "Total Return", path: "performance", isPct: true },
+                { key: "cagr", title: "CAGR", path: "performance", isPct: true },
+                { key: "sharpe", title: "Sharpe", path: "performance", isPct: false },
+                { key: "calmar", title: "Calmar", path: "performance", isPct: false },
+                { key: "end_value", title: "End Value", path: "performance", isCurrency: true }
+            ]
+        },
+        {
+            group: "Risk & Drawdown",
+            fields: [
+                { key: "max_dd_pct", title: "Max Drawdown %", path: "drawdown", isPct: true },
+                { key: "max_daily_dd", title: "Max Daily DD", path: "drawdown", isPct: true },
+                { key: "dd_5_pct_days", title: "Days > 5% DD", path: "drawdown", isPct: false },
+                { key: "max_hwm_duration_days", title: "Recovery Days", path: "drawdown", isPct: false }
+            ]
+        },
+        {
+            group: "Trades & Execution",
+            fields: [
+                { key: "total", title: "Total Trades", path: "trades", isPct: false },
+                { key: "win_rate", title: "Win Rate", path: "trades", isPct: true },
+                { key: "avg_cost", title: "Avg Cost", path: "trades", isPct: true },
+                { key: "daily_freq", title: "Daily Freq", path: "trades", isPct: false }
+            ]
+        },
+        {
+            group: "Exposure & Model",
+            fields: [
+                { key: "avg_pos", title: "Avg Exposure", path: "exposure", isPct: false },
+                { key: "accuracy", title: "Model Acc", path: "model_metrics", isPct: true },
+                { key: "f1_weighted", title: "F1 Weighted", path: "model_metrics", isPct: false }
+            ]
+        }
     ];
 
-    fields.forEach(item => {
-        const div = document.createElement("div");
-        div.className = "card";
-        div.innerHTML = `<h3>${item.title}</h3><p class="${item.color}">${stats[item.key]}</p>`;
-        panel.appendChild(div);
+    config.forEach(section => {
+        // Create Section Header
+        const sectionHeader = document.createElement("h2");
+        sectionHeader.className = "section-title";
+        sectionHeader.innerText = section.group;
+        panel.appendChild(sectionHeader);
+
+        const grid = document.createElement("div");
+        grid.className = "stats-grid";
+
+        section.fields.forEach(item => {
+            const val = data[item.path] ? data[item.path][item.key] : null;
+            if (val === null || val === undefined) return;
+
+            let displayValue = val;
+            let colorClass = "";
+
+            // Formatting Logic
+            if (item.isPct) {
+                displayValue = (val * 100).toFixed(2) + "%";
+            } else if (item.isCurrency) {
+                displayValue = "$" + parseFloat(val).toLocaleString(undefined, { minimumFractionDigits: 2 });
+            } else if (typeof val === 'number') {
+                displayValue = val % 1 === 0 ? val : val.toFixed(4);
+            }
+
+            // Coloring Logic
+            if (val < 0) colorClass = "loss";
+            if (val > 0 && (item.key === "gross_return" || item.key === "win_rate")) colorClass = "win";
+
+            const div = document.createElement("div");
+            div.className = "card";
+            div.innerHTML = `<h3>${item.title}</h3><p class="${colorClass}">${displayValue}</p>`;
+            grid.appendChild(div);
+        });
+
+        panel.appendChild(grid);
     });
 }
 
@@ -509,5 +572,29 @@ function updateChart(candles, markers, statistics) {
     }
 }
 
+// --- Add this to your main.js ---
+
+window.toggleStats = () => {
+    const panel = document.getElementById("stats-panel");
+    const btn = document.getElementById("performance-btn");
+    
+    // Toggle the hidden class
+    panel.classList.toggle('hidden');
+    
+    // Optional: Toggle button style to show state
+    btn.classList.toggle('active-toggle');
+
+    // Trigger a resize on the chart so it fills the newly available space
+    if (window.chart) {
+        const container = document.getElementById("chart-container");
+        // Use a slight timeout to ensure DOM layout has updated
+        setTimeout(() => {
+            window.chart.applyOptions({
+                width: container.clientWidth,
+                height: container.clientHeight
+            });
+        }, 50);
+    }
+};
 // 启动
 loadData();
