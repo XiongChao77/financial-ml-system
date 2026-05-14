@@ -1,0 +1,89 @@
+策略筛选优先级:
+    1.长期稳定性
+    2.rolling median 是否为正
+    2.最大连续亏损长度，最大回撤
+    3.short 和 forward盈亏情况
+
+考虑到资产的稳定性，虽然Doge币在回测中表现更好，但应该同时验证Doge/Eth的策略，实盘/回测的差异可能不同
+可固定的参数(只适用于同一个标的的同一周期，跨标的/周期无效):
+    seq_len/predict_num/vol_multiplier_long
+模型+策略筛选时必须带上止损，有没有止损之间的关联性很差，无法用不带止损的作为初筛
+
+predict_num > hold_bar 是正常现象。在趋势预测中信息可能集中在前半段。通过测试来防止过拟合
+市场信息有自己的时间尺度,模型有自己的可学习序列长度，有效预测只发生在两者重叠的区间
+compute_combined_loss_v2 >> v1 =v3
+ETHUSDT_15m
+    vol_multiplier_long 1.9 is obsvious far better than 1.7
+        ==============================================================================================================
+        📊 参数组对比评估 (Group 1: Vol 1.9 | Group 2: Vol 1.7)
+        ==============================================================================================================
+                    Desc       Count    Avg CAGR   Max CAGR   Min CAGR   Std CAGR  Avg Calmar Avg Sharpe Avg MaxDD 
+        Group                                                                                                        
+        Group 1      Vol 1.9     4286        0.57%    59.54%     -62.01%    0.1716       0.18       0.00     28.20%  
+        Group 2      Vol 1.7      500      -37.48%     8.71%     -65.31%    0.1458      -0.67      -0.09     53.04%  
+        ==============================================================================================================
+    predict_num == 20 and holdbar ==20 better than other in [12,16,20]*[12,16,20]
+    72 best in [72,80,88]
+
+    象限 A：高 miss_penalty + 中等 flip_penalty（稳健 / 高胜率 / 低频）
+        表现特征：
+        Calmar 高
+        CAGR 中等但稳定
+        👉 最适合：
+        实盘早期
+    象限 B：中 miss_penalty + 中 flip_penalty
+    （平衡型）
+    表现特征：
+    两个指标都还可以
+    参数扰动不敏感
+    没有极端行为
+    👉 最适合：
+    主力策略
+    长期跑
+    做组合基石
+
+    predict_num 16 is the best in 10~30 for DOGEUSDT 15m
+
+ETH 30m:
+    seq_len 120 优于96
+
+DOGE_15m:
+    vol_multiplier_long [1.8, 1.9,2,2.1] 非常接近, 1.9的表现和鲁棒性略好些,l_cagr 1.9明显强于1.8. 1.9,2,2.1都表现不错
+    batch_experiments/2026-02-12/DOGEUSDT_15m/10_29_58/reports.jsonl 
+        seq_len 16>12>14>8>10>4>24>32
+        predict_num: [4,6, 8,10, 12,16,24] holdbar: [2, 4 , 6 ,8, 10, 12,14,16,18,20,22,24,26,28,30,32,34,36,38,40]
+            predict_num 24>16>8>20>6>28>32,  >=32的参数很差，直接丢弃
+            表现不敏感，暂时不丢弃，可以探索更大的指 [6,8,12,16,20,24,28] 
+            hold_bar 呈现出明显的平台状 28-48 数值接近,30最高，[30-48最好]。 6及以下直接砍掉不用考虑,20及以下虽然为正也明显可砍. 进一步探索48以后的参数
+                20的平均Calmar爆炸性优于其它。看起来还可以进一步探索40之后的参数。
+            最优的是 predict_num 16 + holdbar 32，需要进一步测试
+            [12,16,24,28]
+    vol_ewma_span 88>120
+    batch_experiments\2026-02-13\DOGEUSDT_15m\11_55_18
+        predict_num 测试范围 [12,16,24,28] holdbar in [12, 16, 20, 24 ,28, 32,36,40]
+            最优的是 predict_num 12 16 + holdbar [20 - 36] 需要进一步测试. holdbar不宜太大，否则会放大beta
+    batch_experiments\2026-02-13\DOGEUSDT_15m\21_21_46
+        batch_size: int = 2048 模型的成交频率下降到0.2以下！ 256 最优 in [64,128,256,512,2048]
+                    
+    Frequence: 从实验来看，1附近比较合理。接近2就很难保持盈利。3之后几乎不可能
+    'batch_experiments', 'DOGEUSDT_15m'
+    stride 1>4>8>2 in [1,2,4,8]  !stride 1 得到的收益非常厚位，去掉rc_median<0后的表现不如 2/4/8，怀疑是更容易过拟合。
+        stride 2-8甚至更大还可以进一步探索. 这个参数拉开的差距太小，不建议贸然舍弃某个值
+        1/2 的Calmar明显更低。过拟合风险高。作为对比最大Calmar 1:1.56, 2: 1.89 4:3.28 8:3.29
+    atr_sl_mult_long/atr_sl_mult_short 对参数弱敏感，最优是 (8,5)    依据 quant_output/batch_experiments/DOGEUSDT_15m/2026-02-21/22_58_48
+    atr_sl_mult_short 6>5>4
+    atr_sl_mult_long 3/10 可以丢弃
+    只是删除["open", "high",'low'] 这三项特征，表现有显著提升！
+
+    
+
+
+
+
+
+
+DOGE_5m:
+    batch_experiments\2026-02-14\DOGEUSDT_5m\07_54_32 未完成
+        通过观察交易频率并未有明显提升，cagr/calmar 相比15m下降严重。除非重新模型/策略目标之前，否则无法适用
+
+        
