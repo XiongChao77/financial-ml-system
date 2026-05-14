@@ -19,7 +19,8 @@ from data_process import common
 from model import model_loader
 from model import data_loader
 from trade.bt import cus_analyzer, cus_comminfo, result_analyze
-from model import train_2head 
+from model import train_2head
+from model import train_config
 from trade.bt.bt_trade_ml import BtFtmoStrategy
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
 
@@ -80,7 +81,7 @@ class StrategyPara:
     allow_long: bool = True
     allow_short: bool = True
     # execution
-    holdbar: int = BaseDefine.predict_num          # 默认值，初始化时可覆盖
+    holdbar: int = common.BaseDefine.predict_num       # 默认值，初始化时可覆盖
     commission: float = 0.05   # 0.1 = 0.1%, can't be 0
     cash: float = 10000.0
     # signal
@@ -97,7 +98,7 @@ class StrategyPara:
     decide_version : int = 0
 
 # period: short / forward / long
-def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
+def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = os.path.join(common.TRAIN_OUT_DIR, train_config.train_task_config.name),
          device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'short'):
     logger.info(f"prep_output_dir:{prep_output_dir}, train_output_dir:{train_output_dir}")
     if period == 'short' or period == 'forward':
@@ -121,54 +122,48 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
     # -----------------------------------------------------------
     # 2. 封装的模型预测 (一行代码搞定加载和推理)
     # -----------------------------------------------------------
-    try:
-        # 使用 train_output_dir 作为模型目录（batch 实验时每个 training 独立目录，便于 training 与 simulation 对应）
-        tarin_out_path = train_output_dir
-        if not os.path.isabs(tarin_out_path):
-            tarin_out_path = os.path.join(PROJECT_DIR, tarin_out_path)
-        handler = model_loader.ModelHandler(tarin_out_path=tarin_out_path, device=device)  # Best_F1/Best_Loss
-        # # 执行预测，获取结果和指标
-        # df_with_pred, model_stats = handler.predict(df, kline_interval_ms=_interval_ms, is_live = False, diff_thresh = None,
-        #                                                cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
+    # 使用 train_output_dir 作为模型目录（batch 实验时每个 training 独立目录，便于 training 与 simulation 对应）
+    tarin_out_path = train_output_dir
+    if not os.path.isabs(tarin_out_path):
+        tarin_out_path = os.path.join(PROJECT_DIR, tarin_out_path)
+    handler = model_loader.ModelHandler(tarin_out_path=tarin_out_path, device=device)  # Best_F1/Best_Loss
+    # # 执行预测，获取结果和指标
+    # df_with_pred, model_stats = handler.predict(df, kline_interval_ms=_interval_ms, is_live = False, diff_thresh = None,
+    #                                                cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
 
-        # 1. 准备数据：传入 is_live 标志以控制索引记录逻辑
-        ds = data_loader.TimeSeriesWindowDataset(
-            df=df, 
-            kline_interval_ms = _interval_ms,
-            feature_cols=handler.feature_cols, 
-            label_col=handler.label_col, 
-            window=handler.window,
-            is_live=False,
-        )
-        df['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, para.holdbar)
-        atr_colum = 'stop_loss_atr_pct'
-        df_with_pred, model_stats = handler.predict_with_ds(ds,df,is_live=False,diff_thresh = None)
-        # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
-        # exit()
-        # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
-        # 2. 【核心修改】：寻找第一个有效预测的索引
-        # 这样可以跳过最开始特征还没算出来的“预热期”
-        # 但会保留中间因为时间不连续产生的 NaN “空洞”
-        first_valid_idx = df_with_pred['pred'].first_valid_index()
+    # 1. 准备数据：传入 is_live 标志以控制索引记录逻辑
+    ds = data_loader.TimeSeriesWindowDataset(
+        df=df, 
+        kline_interval_ms = _interval_ms,
+        feature_cols=handler.feature_cols, 
+        label_col=handler.label_col, 
+        window=handler.window,
+        is_live=False,
+    )
+    df['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, para.holdbar)
+    atr_colum = 'stop_loss_atr_pct'
+    df_with_pred, model_stats = handler.predict_with_ds(ds,df,is_live=False,diff_thresh = None)
+    # compare with random prediction (sanity check)
+    # df_with_pred['pred'] = np.random.choice([0, 1, 2], size=len(df_with_pred))
+    # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
+    # exit()
+    # 过滤掉没有预测结果的前面部分数据（用于 Backtrader）
+    # 2. 【核心修改】：寻找第一个有效预测的索引
+    # 这样可以跳过最开始特征还没算出来的“预热期”
+    # 但会保留中间因为时间不连续产生的 NaN “空洞”
+    first_valid_idx = df_with_pred['pred'].first_valid_index()
 
-        if first_valid_idx is not None:
-            # 从第一个信号开始，保留后续所有行（包含中间的 NaN）
-            df_with_pred = df_with_pred.loc[first_valid_idx:].copy()
-            logger.info(f"Backtest starts from first signal at {df_with_pred.index[0]}")
-        else:
-            logger.error("No valid predictions found in the entire dataset!")
-            sys.exit(1)
-
-        logger.info(
-            f"Backtest range: {df_with_pred['open_time_date_utc'].min()} to {df_with_pred['open_time_date_utc'].max()}"
-        )
-
-    except Exception as e:
-        logger.error(f"Model prediction failed: {e}")
-        import traceback
-
-        traceback.print_exc()
+    if first_valid_idx is not None:
+        # 从第一个信号开始，保留后续所有行（包含中间的 NaN）
+        df_with_pred = df_with_pred.loc[first_valid_idx:].copy()
+        logger.info(f"Backtest starts from first signal at {df_with_pred.index[0]}")
+    else:
+        logger.error("No valid predictions found in the entire dataset!")
         sys.exit(1)
+
+    logger.info(
+        f"Backtest range: {df_with_pred['open_time_date_utc'].min()} to {df_with_pred['open_time_date_utc'].max()}"
+    )
 
     # 4. Backtrader 执行
     cerebro = bt.Cerebro(runonce=False,cheat_on_open=True,maxcpus=1)
@@ -215,11 +210,10 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
     # cerebro.broker.set_coc(True)  #
 
     cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, compression=1, annualize=True, factor=365)
-    cerebro.addanalyzer(bt.analyzers.Returns, _name='returns' , tann=365)
+    cerebro.addanalyzer(btanalyzers.Returns, _name='returns' , tann=365)
     cerebro.addanalyzer(btanalyzers.DrawDown, _name="dd")
     cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(cus_analyzer.CusAnalyzer, _name="customize")
-    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="my_trades")
 
     logger.info("Starting Backtest...")
     results = cerebro.run()
@@ -243,15 +237,16 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
 
     markers = []
     for t in trade_logs:
+        # t["is_buy"] = t["is_buy"] == False
         markers.append(
             {
                 "time": t["dt"],
                 "price": t["price"],
-                "size": t["size"],
+                # "size": t["size"],
                 "position": "aboveBar" if t["is_buy"] else "belowBar",
                 "color": "green" if t["is_buy"] else "red",
                 "shape": "arrowUp" if t["is_buy"] else "arrowDown",
-                "text": ("BUY" if t["is_buy"] else "SELL") + f" @ {t['price']:.2f}",
+                "text": ("BUY" if t["is_buy"] else "SELL") + f"@ {t['price']:.2f}",
             }
         )
 
@@ -436,7 +431,6 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     dd = strat.analyzers.dd.get_analysis()
     trades = strat.analyzers.trades.get_analysis()
     sharpe = strat.analyzers.sharpe.get_analysis()
-    trade_analysis = strat.analyzers.my_trades.get_analysis()
     ret_analyzer = strat.analyzers.returns.get_analysis()
 
     # ----- 基础数值 -----
@@ -457,8 +451,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     rc_df = rolling_calmar(df,window_days=180, step_days=30 )
     rc_summary = summarize_rolling_calmar(rc_df)
 
-    lost_longest = trade_analysis.streak.lost.longest
-    won_longest = trade_analysis.streak.won.longest
+    lost_longest = trades.streak.lost.longest
+    won_longest = trades.streak.won.longest
     # --- 读取日内回撤数据 ---
     max_daily_dd = perf.get('max_daily_dd', 0.0) # 例如 -0.045
     max_daily_date = perf.get('max_daily_dd_date', 'N/A')
@@ -644,9 +638,9 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
         },
     }
 
-    common.dump_params_json(train_cfg,logger)
-    common.dump_params_json(para,logger)
-    common.dump_params_json(pre_para,logger)
+    # common.dump_params_json(train_cfg,logger)
+    # common.dump_params_json(para,logger)
+    # common.dump_params_json(pre_para,logger)
         
     # summary 输出
     logger.info("-" * 29 + f"PARAMS_HASH | {params_hash}"+"-" * 29)
@@ -718,8 +712,9 @@ if __name__ == "__main__":
     exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'batch_experiments'),common.BaseDefine.symbol, common.BaseDefine.interval)
     logger: logging.Logger
     logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
+    save_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.train_task_config.name)
     start_time = time.time()
-    report = main(logger)
+    report = main(logger,train_output_dir = save_dir)
     append_jsonl(
         os.path.join(exp_dir, "reports.jsonl"),
         report["statistics"][1]

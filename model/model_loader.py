@@ -1,4 +1,4 @@
-import os, sys, time, json
+import os, sys, time, json,hashlib
 import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report, f1_score, accuracy_score, precision_score, recall_score,confusion_matrix
@@ -9,39 +9,13 @@ from data_process.common import *
 from model.model_factory import ModelFactory
 from model.data_loader import TimeSeriesWindowDataset
 from model.models.fusion_wrapper import FusionWrapper
+from model.train_config import *
 # -----------------------------------------------------------------------------
 # Encapsulated Model Handler
 # -----------------------------------------------------------------------------
 # model_loader.py
 
-class ModelHandler:
-    def __init__(self,tarin_out_path , device, task_desc_path = None):
-        self.device = device
-        self.logger = logging.getLogger("trade")
-        
-        # 1. Read task index
-        if task_desc_path is None:
-            task_desc_path = os.path.join(tarin_out_path, "task_description.json")
-            
-        if not os.path.exists(task_desc_path):
-            raise FileNotFoundError(f"Task Description not found: {task_desc_path}")
-            
-        with open(task_desc_path, "r", encoding="utf-8") as f:
-            self.task_desc = json.load(f)
-            
-        self.task_type = self.task_desc.get("task_type", "single")
-        self.base_dir = os.path.dirname(task_desc_path)
-        
-        # 2. Initialize by task type
-        self.logger.info(f"🚀 Loading Task: {self.task_type.upper()}")
-        
-        if self.task_type == "single":
-            self._load_single_mode()
-        elif self.task_type in ["trigger_direction", "long_short_ovr"]:
-            self._load_pipeline_mode()
-        else:
-            raise ValueError(f"Unknown task type: {self.task_type}")
-
+class MetaConfig:
     def _init_config_from_meta(self, meta):
         """
         Extract dataset configuration from a meta dict.
@@ -60,7 +34,45 @@ class ModelHandler:
                 cls = globals()[class_name] 
                 self.feature_group_list.append(FeatureContainer(cls, **params))
 
-    def _load_single_mode(self):
+TASK_DESCRIPTION_FILENAME = "task_description.json"
+
+class ModelHandler(MetaConfig):
+    
+    def __init__(self,tarin_out_path , device, task_desc_path = None):
+        self.device = device
+        self.logger = logging.getLogger("trade")
+        
+        # 1. Read task index
+        if task_desc_path is None:
+            task_desc_path = os.path.join(tarin_out_path, TASK_DESCRIPTION_FILENAME)
+            
+        if not os.path.exists(task_desc_path):
+            raise FileNotFoundError(f"Task Description not found: {task_desc_path}")
+            
+        with open(task_desc_path, "r", encoding="utf-8") as f:
+            self.task_desc = json.load(f)
+            
+        self.task_type = self.task_desc.get("task_type", "single")
+        self.base_dir = os.path.dirname(task_desc_path)
+        self.sub_model_conf :dict[str,MetaConfig]= {}
+        
+        # 2. Initialize by task type
+        self.logger.info(f"🚀 Loading Task: {self.task_type.upper()}")
+        
+        if self.task_type == TrainTask.SINGLE_MODEL_3CLASS.name:
+            self._load_3class_mode()
+        elif self.task_type  ==TrainTask.TRIGGER_DIR.name:
+            raise RuntimeError(f"🔄 Detected pipeline mode. Sub-models: {list(self.task_desc['models'].keys())}")
+        elif self.task_type  ==TrainTask.LONG_SHORT_OVR.name:
+            self._load_long_short_ovr_mode()
+        elif self.task_type in [TrainTask.SINGLE_MODEL_LONG_OVR.name, TrainTask.SINGLE_MODEL_SHORT_OVR.name]:
+            self._load_binary_mode()
+        elif self.task_type in ["trigger_direction", "long_short_ovr"]:
+            self._load_pipeline_mode()
+        else:
+            raise ValueError(f"Unknown task type: {self.task_type}")
+
+    def _load_3class_mode(self):
         files = self.task_desc["models"]["main"]
         meta_path = os.path.join(self.base_dir, files["meta"])
         model_path = os.path.join(self.base_dir, files["model"])
@@ -77,6 +89,63 @@ class ModelHandler:
             meta_path=meta_path,
             device=self.device
         )
+        self.model.eval()
+
+    def _load_binary_mode(self):
+        files = self.task_desc["models"]["main"]
+        meta_path = os.path.join(self.base_dir, files["meta"])
+        model_path = os.path.join(self.base_dir, files["model"])
+        
+        # 1. Read meta and initialize configuration
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        self._init_config_from_meta(meta)
+        self.classes = meta["classes"]  # In single mode, use classes from meta directly
+
+        # 2. Load model
+        model, _ = ModelFactory.load_from_checkpoint(
+            model_path=model_path,
+            meta_path=meta_path,
+            device=self.device
+        )
+        model.eval()
+
+        # 3. Assemble wrapper
+        self.model = FusionWrapper({ self.task_type:model}, task_type=self.task_type)
+        self.model.to(self.device)
+        self.model.eval()
+
+    def _load_long_short_ovr_mode(self):
+        sub_models_map = self.task_desc["models"]
+        loaded_sub_models = {}
+        
+        # 2. Load all sub-models
+        for name, path in sub_models_map.items():
+            task_desc_dir = os.path.join(self.base_dir, path)
+            with open(os.path.join(task_desc_dir, TASK_DESCRIPTION_FILENAME), "r", encoding="utf-8") as f:
+                task_desc = json.load(f)
+            models = task_desc["models"]
+
+            sub_model_meta_path = os.path.join(task_desc_dir, models["main"]["meta"])
+            sub_model_model_path = os.path.join(task_desc_dir, models["main"]["model"])
+            with open(sub_model_meta_path, "r", encoding="utf-8") as f:
+                sub_model_meta = json.load(f)
+                self.sub_model_conf[name] = MetaConfig()
+                self.sub_model_conf[name]._init_config_from_meta(sub_model_meta)
+                self._init_config_from_meta(sub_model_meta)
+
+            self.logger.info(f"   🔄 Loading sub-model '{name}'...")
+            model, _ = ModelFactory.load_from_checkpoint(
+                model_path=sub_model_model_path,
+                meta_path=sub_model_meta_path,
+                device=self.device
+            )
+            model.eval()
+            loaded_sub_models[name] = model
+
+        # 3. Assemble wrapper
+        self.model = FusionWrapper(loaded_sub_models, task_type=self.task_type)
+        self.model.to(self.device)
         self.model.eval()
 
     def _load_pipeline_mode(self):
@@ -122,13 +191,12 @@ class ModelHandler:
             )
             model.eval()
             loaded_sub_models[name] = model
-            
+
         # 3. Assemble wrapper
-        self.model = FusionWrapper(loaded_sub_models, mode=self.task_type)
+        self.model = FusionWrapper(loaded_sub_models, task_type=self.task_type)
         self.model.to(self.device)
         self.model.eval()
         
-
     def predict(self, df, kline_interval_ms, is_live=True, batch_size=2048, diff_thresh=None, min_thresh=0.3, stride =1,
                    cache_path = '', use_cache= False):
         """
@@ -249,7 +317,6 @@ class ModelHandler:
     
     def predict_with_ds(self, ds, df, is_live=True, batch_size=2048, diff_thresh=None, min_thresh=0.3):
         self.logger.info(f"Starting inference pipeline (Mode={'Live' if is_live else 'Backtest'}, diff_thresh={diff_thresh})...")
-        
         # Check whether any valid windows were generated (may be dropped if too short or discontinuous)
         if len(ds) == 0:
             self.logger.warning("No valid windows generated after continuity check!")
@@ -333,6 +400,9 @@ class ModelHandler:
                 y_true = df_valid[self.label_col].values.astype(int)
                 y_pred = df_valid['pred'].values.astype(int)
                 stats = self.evaluate_performance(y_true, y_pred)
+                # self.logger.info("f1_score (macro): {:.4f}".format(stats.get("f1_macro", 0.0)))
+                self.logger.info("\n" + classification_report(y_true, y_pred, digits=4, zero_division=0))
+                self.logger.info(f"Label distribution (true): {stats.get('label_proportions_true', {})}")
         stats['feature_config'] = self.raw_config
         stats['feature_cols']   = self.feature_cols
         self.logger.info(f"Inference complete. Valid signals: {len(final_pred)}")
@@ -500,6 +570,14 @@ class ModelHandler:
         stats["label_distribution_true"] = {int(k): int(v) for k, v in zip(unique_t, cnt_t)}
         stats["label_distribution_pred"] = {int(k): int(v) for k, v in zip(unique_p, cnt_p)}
 
+        # 2. 核心修改：增加类别比例 (Proportions)
+        n_total_true = len(y_true)
+        if n_total_true > 0:
+            stats["label_proportions_true"] = {
+                int(k): float(v / n_total_true) for k, v in zip(unique_t, cnt_t)
+            }
+        else:
+            stats["label_proportions_true"] = {}
         # ===== Signal metrics (based on project's Signal definition) =====
         NEUTRAL = int(Signal.NEUTRAL)
         NEG = int(Signal.NEGATIVE)
@@ -533,3 +611,43 @@ class ModelHandler:
         stats = json_safe(stats)
 
         return stats
+
+    def construct_dataset(self, df, kline_interval_ms, is_live=True):
+        """
+        Construct dataset using the primary sub-model's configuration.
+        This is useful for external modules that want to reuse the same dataset logic.
+        """ 
+        # 这行代码直接替代你原来的 ds = [None, None] 和循环
+        ds = {}
+        for key, conf in self.sub_model_conf.items():
+            self.logger.info(f"Constructing dataset using sub-model '{key}' configuration...")
+            hash_value  = self.generate_config_hash(conf.feature_cols, conf.window)
+            self.logger.info(f"Dataset Config Hash (SHA256): {hash_value}")
+            if hash_value not in ds:
+                ds[hash_value] = TimeSeriesWindowDataset(
+                    df=df, 
+                    kline_interval_ms = kline_interval_ms,
+                    feature_cols=conf.feature_cols, 
+                    label_col=conf.label_col, 
+                    window=conf.window,
+                    is_live=is_live,
+                )
+        return ds
+
+    def generate_config_hash(feature_cols: list, window: int):
+        """
+        将特征列表和窗口大小融合，生成唯一的配置哈希
+        """
+        # 1. 构造一个包含所有核心信息的字典或元组
+        # 确保特征列表是有序的（如果模型输入依赖顺序）
+        config_dict = {
+            "features": feature_cols,
+            "window": window
+        }
+        
+        # 2. 序列化为稳定的 JSON 字符串
+        # sort_keys=True 非常关键，确保字典键的顺序不影响结果
+        config_str = json.dumps(config_dict, sort_keys=True).encode('utf-8')
+        
+        # 3. 计算 SHA256 (比 MD5 更安全，抗碰撞能力更强)
+        return hashlib.sha256(config_str).hexdigest()

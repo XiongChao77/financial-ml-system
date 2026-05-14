@@ -217,7 +217,7 @@ class MasterController:
             t_cfg = self.strategy_input.trading_type.setdefault(strategy.pre_para.trading_type, SymbolRegistry())
             s_cfg = t_cfg.symbols.setdefault(strategy.pre_para.symbol, IntervalConfig())
             w_cfg = s_cfg.intervals.setdefault(strategy.pre_para.interval, WindowConfig())
-            w_cfg.items[strategy.pre_para.candlestick_num] = self.feature_conf_list
+            w_cfg.items[strategy.pre_para.seq_len] = self.feature_conf_list
             if strategy.type == StrategyType.MT5:
                 pass
             elif strategy.type == StrategyType.BYBIT:
@@ -267,7 +267,7 @@ class MasterController:
     def run_invalid_signal(self,symbol:str,interval_str:str, i_config:WindowConfig):
         for window in i_config.items.keys():
             for hash_value,strategy in self.strategies.items():
-                if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.candlestick_num == window:
+                if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.seq_len == window:
                     self.execute_strategy(strategy,current_price=None,pred=Signal.INVALID,pred_prob=1,atr_pct=None )
 
     def sleep_until_next_tick(self,base_seconds: int):
@@ -355,7 +355,7 @@ class MasterController:
                                 show_feature_distribution = False,
                             )
                             for hash_value,strategy in self.strategies.items():
-                                if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.candlestick_num == window:
+                                if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.seq_len == window:
                                     try:
                                         df_with_feature['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, strategy.st_para.holdbar)
                                         df_pred, model_stats = strategy.model.predict_with_ds(ds,df_with_feature,is_live=True,diff_thresh = None)

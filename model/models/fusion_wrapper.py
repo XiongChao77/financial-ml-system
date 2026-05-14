@@ -1,25 +1,33 @@
 import torch
 import torch.nn as nn
+import os, sys
+current_work_dir = os.path.dirname(__file__) 
+sys.path.append(os.path.join(current_work_dir,'..','..'))
+from model.train_config import *
 
 class FusionWrapper(nn.Module):
     """
     Inference-only wrapper.
     It does not save/load weights (handled by sub-models); it only chains models during forward.
     """
-    def __init__(self, models_dict, mode):
+    def __init__(self, models_dict, task_type):
         super().__init__()
-        self.mode = mode
+        self.task_type = task_type
         # Use ModuleDict so sub-models switch together under eval(),
         # but we don't need to save this wrapper's state_dict
         self.models = nn.ModuleDict(models_dict)
 
     def forward(self, x, return_fused=True):
-        if self.mode == "trigger_direction":
+        if self.task_type == "trigger_direction":
             return self._forward_trigger_direction(x)
-        elif self.mode == "long_short_ovr":
+        elif self.task_type == "long_short_ovr":
             return self._forward_exclusive_filter(x)
+        elif self.task_type in [TrainTask.SINGLE_MODEL_LONG_OVR.name, TrainTask.SINGLE_MODEL_SHORT_OVR.name]:
+            return self._forward_one_side_long_short_ovr(x)
+        elif self.task_type == TrainTask.LONG_SHORT_OVR.name:
+            return self._forward_long_short_ovr(x)
         else:
-            raise ValueError(f"Unknown pipeline mode: {self.mode}")
+            raise ValueError(f"Unknown pipeline task_type: {self.task_type}")
 
     def _forward_trigger_direction(self, x):
         # 1. Trigger Inference
@@ -45,21 +53,43 @@ class FusionWrapper(nn.Module):
         
         return fused_logits, fused_probs
 
-    def _forward_long_short_ovr(self, x):
+    def _forward_one_side_long_short_ovr(self, x):
         # Long Model (1=Long)
+        logits = self.models[self.task_type](x)
+        probs = torch.softmax(logits, dim=1)
+
+        if self.task_type == TrainTask.SINGLE_MODEL_LONG_OVR.name:
+            probs_3 = torch.cat(
+                [torch.zeros_like(probs[:, :1]), probs],
+                dim=1
+            )
+        elif self.task_type == TrainTask.SINGLE_MODEL_SHORT_OVR.name:
+            probs_3 = torch.cat(
+                [probs[:, 1:2], probs[:, 0:1], torch.zeros_like(probs[:, :1])],
+                dim=1
+            )
+
+        preds = torch.argmax(probs_3, dim=1)
+
+        return preds, probs_3
+    
+    def _forward_long_short_ovr(self, x, mode="conservative"):
         logits_long = self.models["long_ovr"](x)
-        score_long = logits_long[:, 1]
+        probs_long = torch.softmax(logits_long, dim=1)
+        p_long = probs_long[:, 1]
 
-        # Short Model (1=Short)
         logits_short = self.models["short_ovr"](x)
-        score_short = logits_short[:, 1]
+        probs_short = torch.softmax(logits_short, dim=1)
+        p_short = probs_short[:, 1]
 
-        bias = 0  # Negative is more aggressive; positive is more conservative
-        score_neutral = torch.full_like(score_long, bias)
-        
-        fused_logits = torch.stack([score_short, score_neutral, score_long], dim=1)
+        if mode == "conservative":
+            fused_logits = self._fuse_conservative(p_long, p_short)
+        elif mode == "aggressive":
+            fused_logits = self._fuse_aggressive(p_long, p_short)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
         fused_probs = torch.softmax(fused_logits, dim=1)
-        
         return fused_logits, fused_probs
     
     def _forward_exclusive_filter(self, x):
@@ -108,3 +138,76 @@ class FusionWrapper(nn.Module):
         fused_probs = torch.softmax(fused_logits, dim=1)
         
         return fused_logits, fused_probs
+
+    def _fuse_conservative(self, p_long, p_short):
+        """
+        规则：
+            long only  → long
+            short only → short
+            其他（都不触发 / 都触发） → neutral
+        """
+        pred_long = p_long > 0.5
+        pred_short = p_short > 0.5
+
+        B = p_long.size(0)
+        device = p_long.device
+
+        fused_logits = torch.zeros(B, 3, device=device)
+
+        # 基础分数
+        fused_logits[:, 0] = p_short   # short
+        fused_logits[:, 2] = p_long    # long
+
+        # neutral bias
+        bias = 0.0
+        fused_logits[:, 1] = bias
+
+        # 只允许单边触发
+        mask_long = pred_long & (~pred_short)
+        mask_short = pred_short & (~pred_long)
+
+        # 其余 → neutral
+        neutral_mask = ~(mask_long | mask_short)
+
+        # 清掉冲突或无信号的方向
+        fused_logits[neutral_mask, 0] = 0
+        fused_logits[neutral_mask, 2] = 0
+
+        return fused_logits
+    
+    def _fuse_aggressive(self, p_long, p_short):
+        """
+        规则：
+            任意一边触发 → 给方向
+            两边都触发 → 概率大的胜出
+        """
+        pred_long = p_long > 0.5
+        pred_short = p_short > 0.5
+
+        B = p_long.size(0)
+        device = p_long.device
+
+        fused_logits = torch.zeros(B, 3, device=device)
+
+        # 基础分数
+        fused_logits[:, 0] = p_short
+        fused_logits[:, 2] = p_long
+
+        # neutral baseline
+        bias = 0.0
+        fused_logits[:, 1] = bias
+
+        # 两边都触发
+        both_mask = pred_long & pred_short
+
+        # short 赢
+        short_win = both_mask & (p_short > p_long)
+
+        # long 赢
+        long_win = both_mask & (p_long >= p_short)
+
+        # 抑制输的一方
+        fused_logits[short_win, 2] = 0
+        fused_logits[long_win, 0] = 0
+
+        return fused_logits
