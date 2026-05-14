@@ -114,6 +114,33 @@ class FtmoBrain(BrainBase):
         raw_nominal_pct = self.trade_risk / (2.0 * atr_pct)
         return self.trade_risk
 
+    def _calcelate_unit_pct(self, target_dir: PositionDir, state: MarketState, remaining_budget: float) -> tuple[float, float]:
+        # 3. 计算下单参数
+        # 使用 trade_risk 作为固定百分比，或切换回 _calculate_dynamic_unit_pct
+        sl_pct = 0.05
+        if self.atr_sl_mult_long!=None and target_dir == PositionDir.POSITIVE  and state.atr_pct > 0:
+            sl_pct = state.atr_pct * self.atr_sl_mult_long
+        elif self.atr_sl_mult_short!=None and target_dir == PositionDir.NEGATIVE and state.atr_pct > 0:
+            sl_pct = state.atr_pct * self.atr_sl_mult_short
+        elif self.atr_sl_mult_long==None and  self.atr_sl_mult_short==None:
+            sl_pct = self.stop_loss_long if target_dir == PositionDir.POSITIVE  else self.stop_loss_short
+        
+        if target_dir == PositionDir.FLAT or sl_pct <= 0:
+            final_order_qty = 0.0
+        else:
+            base_pct = self.trade_risk 
+            
+            intended_qty = (base_pct * state.account_balance) / state.price
+            
+            max_budget_qty = (remaining_budget * 0.8) / (state.price * sl_pct)
+            
+            # 最终取最小值
+            final_order_qty = min(intended_qty, max_budget_qty)
+            
+            if final_order_qty < intended_qty:
+                self.logger.debug(f"🛡️ [BUDGET CUT] 原始建议股数 {intended_qty:.4f} 因预算限制削减至 {final_order_qty:.4f}")
+        return final_order_qty , sl_pct
+
     def decide(self, state: MarketState) -> TradingAction:
         if state.position_dir != self.pre_position_dir:
             self.bars_held = 0
@@ -184,38 +211,7 @@ class FtmoBrain(BrainBase):
             #     target_dir = PositionDir.FLAT
 
         if target_dir != PositionDir.FLAT:
-            # 3. 计算下单参数
-            # 使用 trade_risk 作为固定百分比，或切换回 _calculate_dynamic_unit_pct
-            sl_pct = 0.05
-            if self.atr_sl_mult_long!=None and target_dir == PositionDir.POSITIVE  and state.atr_pct > 0:
-                sl_pct = state.atr_pct * self.atr_sl_mult_long
-                self.logger.debug(f"atr_sl_mult_long sl_pct {sl_pct} ")
-            elif self.atr_sl_mult_short!=None and target_dir == PositionDir.NEGATIVE and state.atr_pct > 0:
-                sl_pct = state.atr_pct * self.atr_sl_mult_short
-                self.logger.debug(f"atr_sl_mult_short sl_pct {sl_pct} ")
-            elif self.atr_sl_mult_long==None and  self.atr_sl_mult_short==None:
-                sl_pct = self.stop_loss_long if target_dir == PositionDir.POSITIVE  else self.stop_loss_short
-                self.logger.debug(f"stop_loss_long sl_pct {sl_pct} ")
-            else:
-                self.logger.warning(
-                    f"target_dir={target_dir}, atr_sl_mult_long={self.atr_sl_mult_long},atr_sl_mult_short={self.atr_sl_mult_short},state.atr_pct={state.atr_pct}, "
-                    f"stop_loss_long={self.stop_loss_long}, stop_loss_short={self.stop_loss_short}"
-                )
-            
-            if target_dir == PositionDir.FLAT or sl_pct <= 0:
-                final_order_qty = 0.0
-            else:
-                base_pct = self.trade_risk 
-                
-                intended_qty = (base_pct * state.account_balance) / state.price
-                
-                max_budget_qty = (remaining_budget * 0.8) / (state.price * sl_pct)
-                
-                # 最终取最小值
-                final_order_qty = min(intended_qty, max_budget_qty)
-                
-                if final_order_qty < intended_qty:
-                    self.logger.debug(f"🛡️ [BUDGET CUT] 原始建议股数 {intended_qty:.4f} 因预算限制削减至 {final_order_qty:.4f}")
+            final_order_qty , sl_pct = self._calcelate_unit_pct(target_dir, state, remaining_budget)
 
         # 5. 执行决策逻辑 (封装订单信息)
         if state.position_dir == PositionDir.FLAT:
@@ -309,29 +305,15 @@ class FtmoBrain(BrainBase):
             renewal_count = np.sum(durations > max_hold_num)
             renewal_rate = renewal_count / len(durations)
 
-            self.logger.info(f"\n" + "="*40)
-            self.logger.info(f"📊 持仓延续性审计报告")
-            self.logger.info(f"总计完成交易: {len(durations)} 笔")
-            self.logger.info(f"平均持仓时长: {avg_dur:.2f} 根 K 线")
-            self.logger.info(f"最长持仓时长: {max_dur} 根 K 线")
-            self.logger.info(f"信号续期次数: {renewal_count} (持仓 > {max_hold_num} bars)")
-            self.logger.info(f"有效续期比例: {renewal_rate:.2%}")
-            self.logger.info(f"="*40 + "\n")
-
+            self.logger.info(f"[Hold] n={len(durations)} avg={avg_dur:.1f} med={median_dur:.1f} max={max_dur} renew rate={renewal_rate:.1%}")
             # 打印分布直方图 (ASCII 简易版)
-            self.log_histogram(durations)
+            # self.log_histogram(durations)
 
             if self.all_signal_streaks:
-                streaks = np.array(self.all_signal_streaks)
-                self.logger.info(f"\n🎯 信号连击深度审计 (Consecutive Trend Signals)")
-                self.logger.info(f"平均连击长度: {np.mean(streaks):.2f} 根 K 线")
-                self.logger.info(f"最大连击长度: {np.max(streaks)} 根 K 线")
-                self.logger.info(f"单点爆发比例 (Length=1): {np.sum(streaks == 1) / len(streaks):.2%}")
-                
-                # 打印分布
-                counts, bins = np.histogram(streaks, bins=[1, 2, 5, 10, 20, 50, 100])
-                for i in range(len(counts)):
-                    self.logger.info(f"  连击区间 [{bins[i]:>2}-{bins[i+1]:>2}]: {counts[i]} 次")
+                s = np.array(self.all_signal_streaks)
+                self.logger.info(
+                    f"[Streak] n={len(s)} min={np.min(s)} avg={np.mean(s):.1f} med={np.median(s):.1f} p95={np.percentile(s,95):.1f} max={np.max(s)}"
+                )
 
     def log_histogram(self, data):
         """打印一个简单的控制台直方图，观察分布"""

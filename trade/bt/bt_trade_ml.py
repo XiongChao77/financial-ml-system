@@ -144,10 +144,10 @@ class BtFtmoStrategy(BtExecutor):
             y_pred = np.array(self.all_preds)
             
             self.logger.info("\n" + "🔍" + "="*25 + " Strategy Input Integrity Check " + "="*25)
-            self.logger.info("\n" + classification_report(y_true, y_pred, digits=4))
+            # self.logger.info("\n" + classification_report(y_true, y_pred, digits=4, zero_division=0))
             
             input_f1 = f1_score(y_true, y_pred, average='macro')
-            self.logger.info(f"📊 Final Input Macro-F1: {input_f1:.4f}")
+            self.logger.info(f"📊 Final Input Macro-F1 count by strategy: {input_f1:.4f}")
             self.logger.info("="*75 + "\n")
         self._print_audit_report()
         self.logger.info(f"🚩 回测结束 | 最大保证金占用: {self.max_margin_level:.2%}")

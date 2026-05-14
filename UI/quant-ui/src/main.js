@@ -14,6 +14,7 @@ let predSeries, labelSeries;
 let isMeasuring = false;  // 提升到全局
 let startPoint = null;    // 提升到全局
 let rulerRect, rulerLabel; // 提升到全局
+let equitySeries;
 // --- 暴露给 HTML 调用的切换函数 ---
 window.changeTimeframe = async (tf) => {
     // 1. UI 更新: 切换按钮激活状态
@@ -44,7 +45,7 @@ async function loadData(timeframe = "") {
         }
 
         renderStats(data.statistics);
-        updateChart(data.candles, data.markers); // 更新图表
+        updateChart(data.candles, data.markers, data.statistics); // 更新图表
 
         loadingEl.style.display = "none";
 
@@ -124,6 +125,19 @@ function initChart() {
     });
 
     markersApi = createSeriesMarkers(candleSeries);
+
+    equitySeries = chart.addSeries(LineSeries, {
+        color: '#2962FF',
+        lineWidth: 2,
+        priceScaleId: 'equity-scale',
+    });
+
+    chart.priceScale('equity-scale').applyOptions({
+        scaleMargins: {
+            top: 0.75,
+            bottom: 0.05,
+        },
+    });
 
     // 3. 【修正】正确添加成交量系列
     volumeSeries = chart.addSeries(HistogramSeries, {
@@ -211,7 +225,7 @@ function initChart() {
         // 计算距离右侧的距离
         const distFromRight = totalBars - parseFloat(this.value);
         // 跳转，关闭动画以保证跟手
-        chart.timeScale().scrollToPosition(distFromRight, false);
+        chart.timeScale().scrollToPosition(-distFromRight, false);
         isUpdatingSlider = false;
     };
 
@@ -398,7 +412,7 @@ function initChart() {
 }
 
 // --- 数据更新与渲染 ---
-function updateChart(candles, markers) {
+function updateChart(candles, markers, statistics) {
     if (!chart) initChart();
 
     // 1. 设置数据
@@ -477,6 +491,22 @@ function updateChart(candles, markers) {
     
     // 强制重置滚动位置到最右
     chart.timeScale().scrollToPosition(0, false);
+
+    // === 资金曲线 ===
+    try {
+        const dailyList = statistics?.[1]?.drawdown?.daily_loss_list;
+
+        if (dailyList && dailyList.length > 0) {
+            const equityData = dailyList.map(d => ({
+                time: Math.floor(new Date(d.date).getTime() / 1000),
+                value: d.equity
+            }));
+
+            equitySeries.setData(equityData);
+        }
+    } catch (e) {
+        console.error("Equity parse error:", e);
+    }
 }
 
 // 启动
