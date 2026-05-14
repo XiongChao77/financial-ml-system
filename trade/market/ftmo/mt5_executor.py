@@ -1,5 +1,5 @@
 import MetaTrader5 as mt5
-import logging
+import logging,time
 from datetime import datetime, timezone
 from trade.strategy.base_executor import BaseExecutor
 from trade.strategy.strategy_ml import PositionDir
@@ -48,55 +48,136 @@ class MT5Executor(BaseExecutor):
         server_time = datetime.fromtimestamp(tick.time)
         return server_time
 
-    def user_order(self, size, is_buy, stop_loss=None):
+    def user_order(self, size, is_buy, stop_loss=None, interval_ms=500):
+        """
+        size: Notional value in currency units
+        is_buy: Boolean, True for BUY, False for SELL
+        stop_loss: Percentage value (e.g., 0.02 for 2%)
+        interval_ms: Delay between split orders in milliseconds
+        """
         symbol_info = mt5.symbol_info(self.symbol)
         if symbol_info is None:
-            self.logger.error(f"❌ can't find symbol: {self.symbol} | {self.magic}")
+            self.logger.error(f"Symbol not found: {self.symbol}")
             return
 
-        # 1. 计算原始手数
-        raw_lots = float(size / symbol_info.trade_contract_size)
-        
-        # 2. 强制对齐步长 (解决 6.14 这种无效数值)
-        # 例如：step 为 0.1，则 6.14 会变成 6.1
-        lots = round(raw_lots / symbol_info.volume_step) * symbol_info.volume_step
-        
-        # 3. 限制在 [最小值, 最大值] 范围内 (解决 1K 这种越权数值)
-        lots = max(symbol_info.volume_min, min(symbol_info.volume_max, lots))
-        
-        # 4. 获取价格并对齐精度
+        # 1. Get benchmark price (first tick before execution)
         tick = mt5.symbol_info_tick(self.symbol)
-        if tick is None: return
-        
-        price = tick.ask if is_buy else tick.bid
-        sl_price = price * (1.0 - stop_loss) if is_buy else price * (1.0 + stop_loss)
-        
-        # 价格也要 round 到品种的小数位数
-        price = round(price, symbol_info.digits)
-        sl_price = round(sl_price, symbol_info.digits)
+        if tick is None:
+            self.logger.error("Failed to get initial tick")
+            return
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": self.symbol,
-            "volume": round(lots, 2), # 最终确保传给服务器的是干净的浮点数
-            "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
-            "price": price,
-            "sl": sl_price,
-            "magic": self.magic,
-            "comment": "Turtle_Live",
-            # "type_filling": mt5.ORDER_FILLING_IOC, # 如果还报错，尝试换成 ORDER_FILLING_FOK/ORDER_FILLING_IOC/ORDER_FILLING_RETURN
-        }
-        
-        res = mt5.order_send(request)
-        if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
-            err_msg = res.comment if res else "Unknown Error"
-            self.logger.error(f"order fail: {err_msg} | volume: {lots} | {self.magic}")
-            if res is None:
-                code, msg = mt5.last_error()
-                self.logger.error(f"order_send return None | last_error: {code} - {msg}")
-        else:
-            self.logger.info(f"order success Lots {lots} | {self.magic}")
+        benchmark_price = tick.ask if is_buy else tick.bid
+        benchmark_price = round(benchmark_price, symbol_info.digits)
 
+        # 2. Calculate total lots
+        total_raw_lots = float(size / symbol_info.trade_contract_size)
+        total_lots = round(total_raw_lots / symbol_info.volume_step) * symbol_info.volume_step
+        total_lots = round(total_lots, 2)
+
+        if total_lots < symbol_info.volume_min:
+            self.logger.warning(f"Total lots {total_lots} below minimum {symbol_info.volume_min}")
+            return
+
+        self.logger.info(
+            f"Start execution: total_lots={total_lots} | max_per_order={symbol_info.volume_max}"
+        )
+
+        remaining_lots = total_lots
+        order_count = 0
+
+        # 3. Execute split orders
+        while remaining_lots > 0:
+            current_batch_lots = min(remaining_lots, symbol_info.volume_max)
+
+            current_batch_lots = round(
+                round(current_batch_lots / symbol_info.volume_step) * symbol_info.volume_step,
+                2
+            )
+
+            if current_batch_lots < symbol_info.volume_min:
+                break
+
+            tick = mt5.symbol_info_tick(self.symbol)
+            if tick is None:
+                self.logger.error("Tick fetch failed, aborting")
+                break
+
+            price = tick.ask if is_buy else tick.bid
+            price = round(price, symbol_info.digits)
+
+            if stop_loss is not None:
+                sl_price = (
+                    price * (1.0 - stop_loss)
+                    if is_buy else price * (1.0 + stop_loss)
+                )
+                sl_price = round(sl_price, symbol_info.digits)
+            else:
+                sl_price = 0.0
+
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": self.symbol,
+                "volume": current_batch_lots,
+                "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
+                "price": price,
+                "sl": sl_price,
+                "magic": self.magic,
+                "comment": f"Split_Order_{order_count}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+
+            res = mt5.order_send(request)
+
+            if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+                err_msg = res.comment if res else "Order failed"
+                self.logger.error(f"Batch {order_count} failed: {err_msg}")
+                break
+
+            self.logger.info(
+                f"Batch {order_count} executed | lots={current_batch_lots} | req_price={price}"
+            )
+
+            remaining_lots -= current_batch_lots
+            remaining_lots = round(max(0.0, remaining_lots), 2)
+            order_count += 1
+
+            if remaining_lots > 0:
+                time.sleep(interval_ms / 1000.0)
+
+        # 4. Wait briefly to ensure position is updated
+        time.sleep(0.2)
+
+        # 5. Get current positions and compute weighted average price
+        positions = mt5.positions_get(symbol=self.symbol, magic=self.magic)
+
+        if not positions:
+            self.logger.error("No positions found after execution")
+            return
+
+        total_volume = 0.0
+        weighted_price_sum = 0.0
+
+        for p in positions:
+            total_volume += p.volume
+            weighted_price_sum += p.volume * p.price_open
+
+        if total_volume == 0:
+            self.logger.error("Total position volume is zero")
+            return
+
+        avg_price = weighted_price_sum / total_volume
+
+        # 6. Calculate slippage
+        slippage = (avg_price - benchmark_price) if is_buy else (benchmark_price - avg_price)
+        slippage_pct = slippage / benchmark_price
+
+        self.logger.info(
+            f"Execution finished: batches={order_count} | "
+            f"benchmark_price={benchmark_price} | avg_price={avg_price:.6f} | "
+            f"slippage={slippage_pct*100:.4f}%"
+        )
+        
     def user_close(self, **kwargs):
         """全平当前 Magic 订单"""
         positions = mt5.positions_get(symbol=self.symbol, magic=self.magic)

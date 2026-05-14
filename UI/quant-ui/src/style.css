@@ -151,3 +151,15 @@ h2 { margin: 0 0 10px 0; font-size: 22px; }
     z-index: 51;
     box-shadow: 0 2px 4px rgba(0,0,0,0.3);
 }
+
+/* Add this to your style.css */
+.hidden {
+    display: none !important;
+}
+
+/* Optional: style the toggle button specifically if you want it to look different */
+#performance-btn.active-toggle {
+    background: #e3f2fd;
+    border-color: #2196F3;
+    color: #2196F3;
+}

@@ -1,29 +1,30 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI 策略回测面板</title>
+    <title>AI Strategy Backtest Dashboard</title>
   </head>
   <body>
     <div id="app">
-      <h2>🤖 CNN 策略回测报告</h2>
+      <h2>🤖 CNN Strategy Backtest Report</h2>
 
-      <div class="dashboard" id="stats-panel">
-        <div class="card"><h3>加载中...</h3></div>
+      <div class="dashboard hidden" id="stats-panel">
+        <div class="card"><h3>Loading...</h3></div>
       </div>
 
       <div class="toolbar">
-          <span style="font-size: 14px; color: #666; margin-right: 10px;">时间周期:</span>
-          <button onclick="changeTimeframe('')" class="tf-btn active">原始(1M)</button>
-          <button onclick="changeTimeframe('1h')" class="tf-btn">1小时</button>
-          <button onclick="changeTimeframe('4h')" class="tf-btn">4小时</button>
-          <button onclick="changeTimeframe('1d')" class="tf-btn">日线</button>
+          <span style="font-size: 14px; color: #666; margin-right: 10px;">Timeframe:</span>
+          <button onclick="changeTimeframe('')" class="tf-btn active">Original (1M)</button>
+          <button onclick="changeTimeframe('1h')" class="tf-btn">1 Hour</button>
+          <button onclick="changeTimeframe('4h')" class="tf-btn">4 Hours</button>
+          <button onclick="changeTimeframe('1d')" class="tf-btn">Daily</button>
+          <button id="performance-btn" class="tf-btn" onclick="toggleStats()">📊 Performance</button>
       </div>
 
       <div id="chart-container"></div>
       
-      <div id="loading" style="display: none;">正在加载数据...</div>
+      <div id="loading" style="display: none;">Loading data...</div>
 
       <div class="scrollbar-container">
           <input type="range" id="time-scrollbar" min="0" step="1" value="0">
