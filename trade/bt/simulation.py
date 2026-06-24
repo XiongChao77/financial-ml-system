@@ -98,7 +98,7 @@ class StrategyPara:
     decide_version : int = 0
 
 # period: short / forward / long
-def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = os.path.join(common.TRAIN_OUT_DIR, train_config.train_task_config.name),
+def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = os.path.join(common.TRAIN_OUT_DIR, train_config.train_task_config),
          device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'short'):
     logger.info(f"prep_output_dir:{prep_output_dir}, train_output_dir:{train_output_dir}")
     if period == 'short' or period == 'forward':
@@ -712,7 +712,7 @@ if __name__ == "__main__":
     exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'batch_experiments'),common.BaseDefine.symbol, common.BaseDefine.interval)
     logger: logging.Logger
     logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
-    save_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.train_task_config.name)
+    save_dir = os.path.join(common.TRAIN_OUT_DIR)
     start_time = time.time()
     report = main(logger,train_output_dir = save_dir)
     append_jsonl(

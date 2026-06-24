@@ -46,9 +46,9 @@ class BaseDefine:
     vol_ewma_span: int  = 80
     predict_num: int = 16
     # risk / vol
-    vol_multiplier_long: float = 1
+    vol_multiplier_long: float = 1.7
     stop_multiplier_rate_long: Optional[float] = None
-    vol_multiplier_short: float = 1
+    vol_multiplier_short: float = 1.7
     stop_multiplier_rate_short: Optional[float] = None
     # market
     symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
