@@ -29,10 +29,11 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, Union, List, Dict
 from tqdm import tqdm
 from collections import Counter
+from pathlib import Path
 
 from torch.utils.data import WeightedRandomSampler, Dataset, DataLoader
 import torch.nn.functional as F
-from sklearn.metrics import classification_report, confusion_matrix, f1_score
+from sklearn.metrics import classification_report, confusion_matrix, f1_score,accuracy_score,balanced_accuracy_score,matthews_corrcoef
 from sklearn.utils.class_weight import compute_class_weight
 from model.data_loader import TimeSeriesWindowDataset
 from model.model_factory import ModelFactory
@@ -259,6 +260,94 @@ def train_engine_binary(model, dl_tr, dl_va, optimizer, scheduler, device, logge
 
     return {"best_f1_state": best_state_f1, "f1_score": best_val_f1}
 
+def build_binary_metrics(
+    trues_np,
+    preds_np,
+    probs_np,
+    test_loss: float,
+    report_dict: dict,
+):
+    labels = sorted(np.unique(np.concatenate([trues_np, preds_np])))
+
+    cm = confusion_matrix(trues_np, preds_np, labels=labels)
+
+    true_counts = Counter(trues_np)
+    pred_counts = Counter(preds_np)
+    total = len(trues_np)
+
+    per_class = {}
+
+    for cls in labels:
+        cls_str = str(int(cls))
+
+        base_rate = true_counts[cls] / total if total > 0 else 0.0
+        pred_ratio = pred_counts[cls] / total if total > 0 else 0.0
+
+        precision = report_dict.get(cls_str, {}).get("precision", 0.0)
+        recall = report_dict.get(cls_str, {}).get("recall", 0.0)
+        f1 = report_dict.get(cls_str, {}).get("f1-score", 0.0)
+        support = report_dict.get(cls_str, {}).get("support", 0)
+
+        precision_lift = precision / base_rate if base_rate > 0 else None
+        abs_uplift = precision - base_rate if base_rate > 0 else None
+
+        cls_pred_mask = preds_np == cls
+        if cls_pred_mask.any():
+            avg_confidence_when_pred = float(np.max(probs_np[cls_pred_mask], axis=1).mean())
+            avg_prob_for_class_when_pred = float(probs_np[cls_pred_mask, int(cls)].mean())
+        else:
+            avg_confidence_when_pred = None
+            avg_prob_for_class_when_pred = None
+
+        per_class[cls_str] = {
+            "f1": f1,
+            "recall": recall,
+            "precision": precision,
+            "precision_lift": precision_lift,
+            "abs_precision_uplift": abs_uplift,
+            "avg_confidence_when_pred": avg_confidence_when_pred,
+            "avg_prob_for_class_when_pred": avg_prob_for_class_when_pred,
+            "base_rate": base_rate,
+            "pred_ratio": pred_ratio,
+            "true_count": int(true_counts[cls]),
+            "pred_count": int(pred_counts[cls]),
+            "support": int(support),
+        }
+
+    metrics = {
+        "macro_f1": float(report_dict["macro avg"]["f1-score"]),
+        "macro_precision": float(report_dict["macro avg"]["precision"]),
+        "macro_recall": float(report_dict["macro avg"]["recall"]),
+        "test_loss": float(test_loss),
+        "accuracy": float(accuracy_score(trues_np, preds_np)),
+        "balanced_accuracy": float(balanced_accuracy_score(trues_np, preds_np)),
+        "weighted_f1": float(report_dict["weighted avg"]["f1-score"]),
+        "mcc": float(matthews_corrcoef(trues_np, preds_np)),
+        "sample_count": int(total),
+        "labels": [int(x) for x in labels],
+        "true_distribution": {
+            str(int(k)): {
+                "count": int(v),
+                "ratio": float(v / total),
+            }
+            for k, v in sorted(true_counts.items())
+        },
+        "pred_distribution": {
+            str(int(k)): {
+                "count": int(v),
+                "ratio": float(v / total),
+            }
+            for k, v in sorted(pred_counts.items())
+        },
+        "per_class": per_class,
+        "confusion_matrix": {
+            "labels": [int(x) for x in labels],
+            "matrix": cm.tolist(),
+        },
+    }
+
+    return metrics
+
 def evaluate_and_save_binary_results(
     results: dict,
     model: nn.Module,
@@ -318,7 +407,7 @@ def evaluate_and_save_binary_results(
         report_dict = classification_report(trues_np, preds_np, output_dict=True, zero_division=0)
         test_f1 = report_dict['macro avg']['f1-score']
 
-        logger.info(f"\n{'='*20} Evaluating Binary Model: {suffix} | Task: {train_task.name} {'='*20}")
+        logger.info(f"\n{'='*20} Evaluating Binary Model: {suffix} | Task: {train_task} {'='*20}")
         
         # 使用自定义格式打印报告 (假设你已有 format_custom_report，否则直接打印 report_dict)
         logger.info(format_custom_report(report_dict))
@@ -342,19 +431,19 @@ def evaluate_and_save_binary_results(
         cm_df.to_csv(os.path.join(save_dir, f"confmat_binary_{suffix.lower()}.csv"))
 
         # E. 模型保存 (.pt)
-        pt_path = os.path.join(save_dir, f"model_{train_task.name.lower()}_{suffix.lower()}.pt")
+        pt_path = os.path.join(save_dir, f"model_{train_task.lower()}_{suffix.lower()}.pt")
         save_state = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") else model.state_dict()
         torch.save({
             "state_dict": save_state,
             "feature_list": feature_list,
             "classes": [0, 1],
             "channel": full_ds.feature_count,
-            "window": train_cfg.seq_len,
+            "window": train_cfg.model_cfg.seq_len,
             "feature_cols": full_ds.feature_names,
             "label_col": data_cfg.label_col,
             "val_score": val_score,
             "test_f1": test_f1,
-            "train_task": train_task.value,
+            "train_task": train_task,
             "version_type": suffix
         }, pt_path)
         
@@ -363,21 +452,20 @@ def evaluate_and_save_binary_results(
             feature_cols=full_ds.feature_names,
             label_col=data_cfg.label_col,
             classes=[0, 1],
-            window=train_cfg.seq_len,
+            window=train_cfg.model_cfg.seq_len,
             model_version_tag=suffix,
         )
-        meta["binary_task_type"] = train_task.name # 注入任务标识
-        with open(os.path.join(save_dir, f"model_{train_task.name.lower()}_{suffix.lower()}_meta.json"), "w", encoding="utf-8") as f:
+        meta["binary_task_type"] = train_task # 注入任务标识
+        with open(os.path.join(save_dir, f"model_{train_task.lower()}_{suffix.lower()}_meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        final_metrics[suffix] = {
-            "test_f1": test_f1,
-            "test_loss": test_loss,
-            # 直接使用字符串 "1" 获取信号类的精确率和召回率
-            "precision_signal": report_dict.get('1', {}).get('precision', 0),
-            "recall_signal": report_dict.get('1', {}).get('recall', 0),
-        }
-
+        final_metrics[suffix] = build_binary_metrics(
+                                    trues_np=trues_np,
+                                    preds_np=preds_np,
+                                    probs_np=probs_np,
+                                    test_loss=test_loss,
+                                    report_dict=report_dict,
+                                )
         # G. 特征解释性分析 (仅在配置开启时)
         if getattr(train_cfg.model_cfg, 'use_feature_weighting', False) or getattr(train_cfg.model_cfg, 'use_feature_selector', False):
             try:
@@ -389,13 +477,13 @@ def evaluate_and_save_binary_results(
                     model=model, batch_x=test_xb, 
                     feature_names=full_ds.feature_names, device=device
                 )
-                importance_df.to_csv(os.path.join(save_dir, f"feat_imp_{train_task.name.lower()}_{suffix.lower()}.csv"), index=False)
+                importance_df.to_csv(os.path.join(save_dir, f"feat_imp_{train_task.lower()}_{suffix.lower()}.csv"), index=False)
 
                 # 2. 样本级贡献 (可视化 0/1 类别的样本)
                 analyze_sample_contribution_by_class(
                     model=model, batch_x=test_xb, batch_y=test_yb, batch_r=test_rb,
                     feature_names=full_ds.feature_names, device=device,
-                    top_k_per_class=3, save_dir=save_dir, suffix=f"{train_task.name}_{suffix}"
+                    top_k_per_class=3, save_dir=save_dir, suffix=f"{train_task}_{suffix}"
                 )
             except Exception as e:
                 logger.error(f"⚠️ Interpretability analysis failed: {e}")
@@ -403,12 +491,12 @@ def evaluate_and_save_binary_results(
     # H. 生成 Task Description 索引
     primary_suffix = "Best_F1" if getattr(train_cfg, 'best_f1', True) else "Best_Loss"
     task_desc = {
-        "task_type": train_task.name,
+        "task_type": train_task,
         "timestamp": pd.Timestamp.now().isoformat(),
         "models": {
             "main": {
-                "model": f"model_{train_task.name.lower()}_{primary_suffix.lower()}.pt",
-                "meta": f"model_{train_task.name.lower()}_{primary_suffix.lower()}_meta.json"
+                "model": f"model_{train_task.lower()}_{primary_suffix.lower()}.pt",
+                "meta": f"model_{train_task.lower()}_{primary_suffix.lower()}_meta.json"
             }
         }
     }
@@ -504,7 +592,7 @@ def diagnose_confidence_binary(results, model, dl_te, device, train_task, logger
         ax2.set_ylabel('Accuracy', fontsize=12)
         ax2.set_ylim(0, 1.05)
         
-        plt.title(f"{train_task.name} Reliability: {suffix}", fontsize=14)
+        plt.title(f"{train_task} Reliability: {suffix}", fontsize=14)
         
         # 合并图例
         lines1, labels1 = ax1.get_legend_handles_labels()
@@ -512,7 +600,7 @@ def diagnose_confidence_binary(results, model, dl_te, device, train_task, logger
         ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=10)
         ax1.grid(axis='y', linestyle=':', alpha=0.3)
 
-    plot_path = os.path.join(save_dir, f"diagnose_{train_task.name.lower()}.png")
+    plot_path = os.path.join(save_dir, f"diagnose_{train_task.lower()}.png")
     plt.tight_layout()
     plt.savefig(plot_path)
     logger.info(f"📊 Binary reliability plot saved to: {plot_path}")
@@ -542,6 +630,7 @@ def run_single_model_binary_task(train_task:TrainTask, full_ds, feature_list,tra
     # 4. 构建模型 (强制 n_classes=2)
     model = ModelFactory.build_for_training(
         device=device, input_size=full_ds.feature_count, n_classes=2, max_len = train_cfg.model_cfg.seq_len,
+        window = train_cfg.model_cfg.seq_len,
         **asdict(train_cfg.model_cfg)
     )
 
@@ -564,7 +653,9 @@ def run_training(train_task:TrainTask,feature_direction_map, logger: logging, da
     # 0. Initialize environment
     set_seed(train_cfg_1.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"train_task:{train_task.name} | Device: {device} | Model: {train_cfg_1.model_cfg.model_type} version: {train_cfg_1.model_cfg.model_version}")
+    logger.info(f"train_task:{train_task} | Device: {device} | Model: {train_cfg_1.model_cfg.model_type} version: {train_cfg_1.model_cfg.model_version}")
+    if train_cfg_2:
+        logger.info(f"train_task:{train_task} | Device: {device} | Model: {train_cfg_2.model_cfg.model_type} version: {train_cfg_2.model_cfg.model_version}")
     if device.type == 'cuda':
         # Enable TensorFloat32 (TF32): 5090 throughput improves significantly
         torch.set_float32_matmul_precision('high')
@@ -617,13 +708,13 @@ def run_training(train_task:TrainTask,feature_direction_map, logger: logging, da
         # 使用新封装的二分类逻辑
         return run_single_model_binary_task(train_task, full_ds, feature_list,train_cfg_1, data_cfg, device, logger, save_dir, experiment)
     elif train_task == TrainTask.TRIGGER_DIR:
-        tri_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_TRIGGER.name)
+        tri_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_TRIGGER)
         run_single_model_binary_task(TrainTask.SINGLE_MODEL_TRIGGER, full_ds, feature_list,train_cfg_1, data_cfg, device, logger, tri_save_dir, experiment)
-        dir_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_DIR.name)
+        dir_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_DIR)
         run_single_model_binary_task(TrainTask.SINGLE_MODEL_DIR, full_ds, feature_list,train_cfg_2, data_cfg, device, logger, dir_save_dir, experiment)
 
     else:
-        raise ValueError(f"Unsupported train_task: {train_task.name}")
+        raise ValueError(f"Unsupported train_task: {train_task}")
 
 def run_single_model_3class_task(
     train_task:TrainTask, ds_tr, ds_va, ds_te, 
@@ -652,6 +743,7 @@ def run_single_model_3class_task(
 
     model = ModelFactory.build_for_training(
         max_len =train_cfg.model_cfg.seq_len ,device=device,input_size=full_ds.feature_count, n_classes=len(classes),
+        window = train_cfg.model_cfg.seq_len,
         **params
     )
 
@@ -1343,6 +1435,7 @@ def evaluate_and_save_results(
 
         # 统计标签比例 (保留)
         counts = Counter(yt_true)
+        
         total = sum(counts.values())
         logger.info(f"[{suffix}] True label proportion (Test set): " + 
                     ", ".join([f"{c}: {counts[c]/total:.2%}" for c in sorted(counts.keys())]))
@@ -1433,7 +1526,7 @@ def evaluate_and_save_results(
     primary_suffix = "Best_F1" if train_cfg.best_f1 == True else "Best_Loss"
     
     task_desc = {
-        "task_type": train_task.name,
+        "task_type": train_task,
         "timestamp": pd.Timestamp.now().isoformat(),
         # 移除 common_config
         "models": {
@@ -1825,11 +1918,11 @@ def eval_epoch(model, loader, device, mtl_manager:MTLManager):
     return tl/len(loader.dataset), np.concatenate(yt), np.concatenate(yp), np.concatenate(yr)
 
 def fusion_long_short_ovr(logger: logging.Logger, long_train_output_dir:str, short_train_output_dir:str, save_dir:str):
-    task_type = TrainTask.LONG_SHORT_OVR.name
+    task_type = TrainTask.LONG_SHORT_OVR
     rel_long = os.path.relpath(long_train_output_dir, save_dir)
     rel_short = os.path.relpath(short_train_output_dir, save_dir)
     task_desc = {
-        "task_type": TrainTask.LONG_SHORT_OVR.name,
+        "task_type": TrainTask.LONG_SHORT_OVR,
         "timestamp": pd.Timestamp.now().isoformat(),
         "models": {
             "long_ovr": rel_long,
@@ -1843,15 +1936,54 @@ def fusion_long_short_ovr(logger: logging.Logger, long_train_output_dir:str, sho
 
     logger.info(f"🎉 {task_type} task complete. Artifacts saved to: {save_dir}")
 
+def copy_dir_if_different(src: str, dst: str, logger: logging.Logger):
+    src_path = Path(src).resolve()
+    dst_path = Path(dst).resolve()
+
+    if src_path == dst_path:
+        logger.info(f"Skip copy: source and target are the same path: {src_path}")
+        return
+
+    if dst_path.exists():
+        shutil.rmtree(dst_path)
+
+    shutil.copytree(src_path, dst_path)
+    logger.info(f"Copied directory: {src_path} -> {dst_path}")
+
+def fusion_trigger_dir(logger: logging.Logger, trigger_train_output_dir:str, dir_train_output_dir:str, save_dir:str):
+    task_type = TrainTask.TRIGGER_DIR
+    trigger_dir_save_dir = save_dir#os.path.join(save_dir,task_type)
+    os.makedirs(trigger_dir_save_dir, exist_ok=True)
+    
+    tri_new_dir = os.path.join(trigger_dir_save_dir, TrainTask.SINGLE_MODEL_TRIGGER)
+    dir_new_dir = os.path.join(trigger_dir_save_dir, TrainTask.SINGLE_MODEL_DIR)
+    copy_dir_if_different(src=trigger_train_output_dir, dst=tri_new_dir, logger=logger)
+    copy_dir_if_different(src=dir_train_output_dir, dst=dir_new_dir, logger=logger)
+    task_desc = {
+        "task_type": TrainTask.TRIGGER_DIR,
+        "timestamp": pd.Timestamp.now().isoformat(),
+        "models": {
+            "trigger": TrainTask.SINGLE_MODEL_TRIGGER,
+            "direction": TrainTask.SINGLE_MODEL_DIR,
+        }
+    }
+    
+    with open(os.path.join(trigger_dir_save_dir, "task_description.json"), "w", encoding="utf-8") as f:
+        json.dump(task_desc, f, ensure_ascii=False, indent=2)
+
+    logger.info(f"🎉 {task_type} task complete. Artifacts saved to: {trigger_dir_save_dir}")
+
 #it could be same model with different parameters
 def run_task_trade_direction(logger: logging.Logger, train_task: TrainTask, train_cfg_tri: TrainConfig,train_cfg_dir: TrainConfig, 
                              prep_output_dir = common.DATA_OUT_DIR, save_dir: str = common.TRAIN_OUT_DIR,experiment:bool = False):
     os.makedirs(save_dir, exist_ok=True)
 
     if train_task != TrainTask.TRIGGER_DIR:
-        raise RuntimeError(f"train_task:{train_task.name} not compatible")
+        raise RuntimeError(f"train_task:{train_task} not compatible")
     if train_cfg_tri.feature_conf_list != train_cfg_dir.feature_conf_list:
         raise RuntimeError(f"different feature_conf_list not supported")
+    if train_cfg_tri.model_cfg.seq_len != train_cfg_dir.model_cfg.seq_len:
+        raise RuntimeError(f"different seq_len not supported")
     feature_direction_map_filtered = {}
     for feature_name in train_cfg_tri.feature_conf_list:
         # 从全局 feature_direction_map 中查找方向，如果找不到则默认为 1（正向）
@@ -1874,7 +2006,7 @@ def main(logger: logging.Logger,train_task:TrainTask, train_cfg=TrainConfig(), p
         direction = feature_direction_map.get(feature_name, 1)
         feature_direction_map_filtered[feature_name] = direction
     
-    logger.info(f"📋 Using model {train_cfg.model_type} {len(feature_direction_map_filtered)} features from feature_conf_list")
+    logger.info(f"📋 Using model {train_cfg.model_cfg.model_type} {len(feature_direction_map_filtered)} features from feature_conf_list")
 
     d_cfg = DataConfig()
     
@@ -1886,10 +2018,14 @@ def main(logger: logging.Logger,train_task:TrainTask, train_cfg=TrainConfig(), p
 if __name__ == "__main__":
     logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
     begin_time = time.time()
-    save_dir =  os.path.join(common.TRAIN_OUT_DIR,train_task_config.name)
-    main(logger,train_task_config,SingleModelTrainConfig,save_dir = save_dir)
+    save_dir =  os.path.join(common.TRAIN_OUT_DIR,train_task_config)
+    main(logger,train_task_config,SingleModelTrigger,save_dir = save_dir)
     save_dir =  os.path.join(common.TRAIN_OUT_DIR)
     # fusion_long_short_ovr(logger,r"/home/chao/work/Quant/output/train/SINGLE_MODEL_LONG_OVR", r"/home/chao/work/Quant/output/train/SINGLE_MODEL_SHORT_OVR",save_dir)
-    # run_task_trade_direction(logger, TrainTask.TRIGGER_DIR, SingleModelTrainConfig, SingleModelTrainConfig, save_dir = save_dir)
+    # run_task_trade_direction(logger, TrainTask.TRIGGER_DIR, SingleModelTrigger, SingleModelDirection, save_dir = save_dir)
+    fusion_trigger_dir(logger,
+                       os.path.join(save_dir,TrainTask.SINGLE_MODEL_TRIGGER),
+                       os.path.join(save_dir,TrainTask.SINGLE_MODEL_DIR),
+                       save_dir)
     end_time = time.time()
     logger.info(f"Total training time: {(end_time - begin_time)} seconds")

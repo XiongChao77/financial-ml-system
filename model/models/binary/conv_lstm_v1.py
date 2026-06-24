@@ -132,7 +132,6 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
         logit_clip: float | None = None,
 
         # compatibility: allow pass-all params
-        p_drop: float | None = None,  # alias: if provided and explicit dropouts not set
         use_feature_selector = False,
         **kwargs,
     ):

@@ -59,13 +59,14 @@ class ModelHandler(MetaConfig):
         # 2. Initialize by task type
         self.logger.info(f"🚀 Loading Task: {self.task_type.upper()}")
         
-        if self.task_type == TrainTask.SINGLE_MODEL_3CLASS.name:
+        if self.task_type == TrainTask.SINGLE_MODEL_3CLASS:
             self._load_3class_mode()
-        elif self.task_type  ==TrainTask.TRIGGER_DIR.name:
-            raise RuntimeError(f"🔄 Detected pipeline mode. Sub-models: {list(self.task_desc['models'].keys())}")
-        elif self.task_type  ==TrainTask.LONG_SHORT_OVR.name:
+        elif self.task_type  ==TrainTask.TRIGGER_DIR:
             self._load_long_short_ovr_mode()
-        elif self.task_type in [TrainTask.SINGLE_MODEL_LONG_OVR.name, TrainTask.SINGLE_MODEL_SHORT_OVR.name]:
+            # raise RuntimeError(f"🔄 Detected pipeline mode. Sub-models: {list(self.task_desc['models'].keys())}")
+        elif self.task_type  ==TrainTask.LONG_SHORT_OVR:
+            self._load_long_short_ovr_mode()
+        elif self.task_type in [TrainTask.SINGLE_MODEL_LONG_OVR, TrainTask.SINGLE_MODEL_SHORT_OVR]:
             self._load_binary_mode()
         elif self.task_type in ["trigger_direction", "long_short_ovr"]:
             self._load_pipeline_mode()

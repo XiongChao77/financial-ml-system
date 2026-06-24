@@ -25,10 +25,6 @@ from queue import Empty
 from typing import Any, Dict, Iterable, List, Optional, Tuple,Set
 from collections import defaultdict
 import numpy as np
-try:
-    import psutil  # optional
-except ImportError:  # pragma: no cover
-    psutil = None
 
 # -----------------------------------------------------------------------------
 # Project imports
@@ -355,11 +351,11 @@ def construct_task_doge():
                         for bestf1 in [True]:
                             for loss_fun_version in [2]:
                                 for featrue_conf in [train.feature_conf_list]:
-                                    train_conf = train.TrainConfig(seq_len = seq_len, use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version,
+                                    train_conf = train.TrainConfig( use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version,
                                                                         feature_conf_list= featrue_conf,
                                                                 flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
                                                                 stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0)
-                                    train_conf.model_cfg = train_config.ConvLSTMConfig(model_version= 1)
+                                    train_conf.model_cfg = train_config.ConvLSTMConfig(seq_len = seq_len,model_version= 1)
                                     training_task.append(train_conf)
 
     simulation_task: List[Any] = []

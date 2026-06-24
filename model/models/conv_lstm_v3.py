@@ -169,7 +169,6 @@ class ConvLSTM1D_V3(BaseTimeSeriesModel):
         # [NEW] Task Projection
         task_proj_dim: int | None = 64,  # If None, defaults to feat_dim
         # compatibility: allow pass-all params
-        p_drop: float | None = None,  # alias: if provided and explicit dropouts not set，
         use_feature_weighting: bool = False,  # NEW: 是否启用样本级特征加权模块
         se_reduction: int = 4,  # NEW: InterpretabilityWeighting 的 reduction 参数
         temperature: float = 0.5,
@@ -182,15 +181,6 @@ class ConvLSTM1D_V3(BaseTimeSeriesModel):
 
         assert readout in {"last", "meanmax", "attn", "mix"}
         assert head in {"linear", "mlp"}
-
-        # p_drop alias (optional)
-        if p_drop is not None:
-            # only apply when user didn't explicitly set these
-            if conv_dropout == 0.10 and head_dropout == 0.2 and lstm_dropout == 0.2:
-                conv_dropout = float(p_drop)
-                head_dropout = float(p_drop)
-                lstm_dropout = float(p_drop)
-                print("[ConvLSTM1D_V3] p_drop is deprecated; mapped to conv/lstm/head dropout.")
 
         self.input_size = int(input_size)
         self.n_classes = int(n_classes)

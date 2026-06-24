@@ -12,7 +12,7 @@ class DataConfig:
 
 @dataclass
 class BaseModelConfig:
-    seq_len: int = 216
+    seq_len: int = 96
     model_type: str = "base"
     model_version: int = 1
 
@@ -58,7 +58,7 @@ class TransformerConfig(BaseModelConfig):
 
 @dataclass
 class ConvLSTMConfig(BaseModelConfig):
-    seq_len: int = 216     # 160 best for LSTM
+    seq_len: int = 160     # 160 best for LSTM
     model_type: str = "conv_lstm"
     model_version: int = 1
     d_model: int = 64
@@ -123,9 +123,8 @@ class CNNConfig(BaseModelConfig):
     use_tpool: bool = False
 
 @dataclass
-class TrainConfig(BaseModelConfig):
-    seq_len: int = 216     # 160 best for LSTM
-    model_cfg: ConvLSTMConfig = field(default_factory=ConvLSTMConfig)
+class TrainConfig:
+    model_cfg: BaseModelConfig = field(default_factory=ConvLSTMConfig)
     data_cfg: DataConfig = field(default_factory=DataConfig)
     feature_conf_list: List[str] = field(default_factory=lambda: feature_conf_list)
     epochs: int = 100
@@ -153,17 +152,27 @@ class TrainConfig(BaseModelConfig):
     best_f1 : bool = True
     label_smoothing :float = 0.02
     loss_fun_version : int = 4
+    train_compatibility:str = ''
 
-class TrainTask(IntEnum):
-    SINGLE_MODEL_3CLASS = 1
-    TRIGGER_DIR = 2 #require two train_cfg
-    LONG_SHORT_OVR = 3      #single data source ,kline_interval_ms,feature_cols,window is supported
+    def __post_init__(self):
+        self.train_compatibility =f"{str(self.model_cfg.seq_len)}_{str(self.stride)}_{str(hash(tuple(self.feature_conf_list)))}"
 
-    SINGLE_MODEL_TRIGGER  = 4 #can't run independly, need to be trained with direction head together to get trigger signal
-    SINGLE_MODEL_DIR  = 5
+@dataclass
+class LogisticConfig(BaseModelConfig):
+    seq_len: int = 96     # 160 best for LSTM
+    model_type: str = "logistic_regression"
+    model_version: int = 1
 
-    SINGLE_MODEL_LONG_OVR  = 6
-    SINGLE_MODEL_SHORT_OVR  = 7
+class TrainTask:
+    SINGLE_MODEL_3CLASS = "SINGLE_MODEL_3CLASS"
+    TRIGGER_DIR = "TRIGGER_DIR"
+    LONG_SHORT_OVR = "LONG_SHORT_OVR"
+
+    SINGLE_MODEL_TRIGGER = "SINGLE_MODEL_TRIGGER"
+    SINGLE_MODEL_DIR = "SINGLE_MODEL_DIR"
+
+    SINGLE_MODEL_LONG_OVR = "SINGLE_MODEL_LONG_OVR"
+    SINGLE_MODEL_SHORT_OVR = "SINGLE_MODEL_SHORT_OVR"
 
 # feature_direction_map: 特征名 -> ic_direction (1 正向 / -1 负向)
 # 训练前会对 direction=-1 的特征乘以 -1，使其与收益正相关
@@ -328,6 +337,9 @@ feature_conf_list = [
 
 # SingleModelTrainConfig = TrainConfig(model_cfg = ConvLSTMConfig(model_version= 3))
 # train_task_config = TrainTask.SINGLE_MODEL_3CLASS
-
-SingleModelTrainConfig = TrainConfig(model_cfg = ConvLSTMConfig(model_version= 1))
-train_task_config = TrainTask.SINGLE_MODEL_LONG_OVR
+# SingleModelTrainConfig = TrainConfig(model_cfg = LogisticConfig(model_version= 1))
+# SingleModelTrainConfig = TrainConfig(model_cfg = TransformerConfig(model_version= 1))
+seq_len = 128
+SingleModelTrigger = TrainConfig(model_cfg = TransformerConfig(model_version= 1,seq_len=seq_len))
+SingleModelDirection = TrainConfig(model_cfg = TransformerConfig(model_version= 1,seq_len=seq_len))
+train_task_config = TrainTask.SINGLE_MODEL_TRIGGER
