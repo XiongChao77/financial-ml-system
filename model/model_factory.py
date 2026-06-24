@@ -18,6 +18,7 @@ from model.models.conv_lstm_v3 import ConvLSTM1D_V3
 from model.models.cnn import CNN1D_V1
 from model.models.binary.transformer_v1 import Transformer1D_V1
 from model.models.binary.transformer_v2 import Transformer1D_V2
+from model.models.binary.logistic_regression import LogisticRegressionTS_V1
 from model.models.transformer_v3 import Transformer1D_V3
 from model.models.fusion_wrapper import FusionWrapper
 # Add new model imports here
@@ -47,6 +48,7 @@ class ModelFactory:
         Transformer1D_V1,
         Transformer1D_V2,
         Transformer1D_V3,
+        LogisticRegressionTS_V1,
     ]
 
     # Internal index

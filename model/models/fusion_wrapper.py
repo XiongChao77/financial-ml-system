@@ -18,13 +18,13 @@ class FusionWrapper(nn.Module):
         self.models = nn.ModuleDict(models_dict)
 
     def forward(self, x, return_fused=True):
-        if self.task_type == "trigger_direction":
+        if self.task_type == "trigger_direction" or self.task_type == TrainTask.TRIGGER_DIR:
             return self._forward_trigger_direction(x)
         elif self.task_type == "long_short_ovr":
             return self._forward_exclusive_filter(x)
-        elif self.task_type in [TrainTask.SINGLE_MODEL_LONG_OVR.name, TrainTask.SINGLE_MODEL_SHORT_OVR.name]:
+        elif self.task_type in [TrainTask.SINGLE_MODEL_LONG_OVR, TrainTask.SINGLE_MODEL_SHORT_OVR]:
             return self._forward_one_side_long_short_ovr(x)
-        elif self.task_type == TrainTask.LONG_SHORT_OVR.name:
+        elif self.task_type == TrainTask.LONG_SHORT_OVR:
             return self._forward_long_short_ovr(x)
         else:
             raise ValueError(f"Unknown pipeline task_type: {self.task_type}")
@@ -58,12 +58,12 @@ class FusionWrapper(nn.Module):
         logits = self.models[self.task_type](x)
         probs = torch.softmax(logits, dim=1)
 
-        if self.task_type == TrainTask.SINGLE_MODEL_LONG_OVR.name:
+        if self.task_type == TrainTask.SINGLE_MODEL_LONG_OVR:
             probs_3 = torch.cat(
                 [torch.zeros_like(probs[:, :1]), probs],
                 dim=1
             )
-        elif self.task_type == TrainTask.SINGLE_MODEL_SHORT_OVR.name:
+        elif self.task_type == TrainTask.SINGLE_MODEL_SHORT_OVR:
             probs_3 = torch.cat(
                 [probs[:, 1:2], probs[:, 0:1], torch.zeros_like(probs[:, :1])],
                 dim=1
