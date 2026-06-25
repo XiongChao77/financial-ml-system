@@ -18,6 +18,8 @@ from collections import defaultdict
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import traceback
 
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
@@ -38,7 +40,6 @@ SYMBOL = "DOGEUSDT"
 INTERVAL = "15m"
 
 QUICK_DS_CACHE = {}
-QUICK_DF_CACHE = None
 
 @dataclass
 class ModelRef:
@@ -118,27 +119,29 @@ def score_trigger(metrics: Dict[str, Any]) -> Tuple[float, str]:
     pos_precision = pos["precision"]
     mcc = best["mcc"]
 
-    score = (
-        0.40 * pos_f1
-        + 0.30 * pos_recall
-        + 0.20 * pos_precision
-        + 0.10 * mcc
-    )
+    # score = (
+    #     0.40 * pos_f1
+    #     + 0.30 * pos_recall
+    #     + 0.20 * pos_precision
+    #     + 0.10 * mcc
+    # )
+    score = pos_f1
 
-    return score, "0.40*pos_f1 + 0.30*pos_recall + 0.20*pos_precision + 0.10*mcc"
+    return score, "pos_f1"#"0.40*pos_f1 + 0.30*pos_recall + 0.20*pos_precision + 0.10*mcc"
 
 
 def score_direction(metrics: Dict[str, Any]) -> Tuple[float, str]:
     best = metrics["Best_F1"]
 
-    score = (
-        0.45 * best["mcc"]
-        + 0.30 * best["macro_f1"]
-        + 0.20 * best["balanced_accuracy"]
-        + 0.05 * best["accuracy"]
-    )
+    # score = (
+    #     0.45 * best["mcc"]
+    #     + 0.30 * best["macro_f1"]
+    #     + 0.20 * best["balanced_accuracy"]
+    #     + 0.05 * best["accuracy"]
+    # )
+    score = best["macro_f1"]
 
-    return score, "0.45*mcc + 0.30*macro_f1 + 0.20*balanced_accuracy + 0.05*accuracy"
+    return score, "macro_f1"#"0.45*mcc + 0.30*macro_f1 + 0.20*balanced_accuracy + 0.05*accuracy"
 
 
 def calc_score(task_type: str, metrics: Dict[str, Any]) -> Tuple[float, str]:
@@ -208,11 +211,73 @@ def select_fusion_pairs(
     logger: logging.Logger,
     registry: Dict[Tuple[str, str], Dict[str, List[ModelRef]]],
 ) -> List[FusionTask]:
+    
+    def select_representative_models(
+        models: List[ModelRef],
+        top_k: int = 5,
+        mid_k: int = 5,
+    ) -> List[ModelRef]:
+        """
+        每个模型架构内选择：
+        1. score 最高的 top_k
+        2. score 位于中间附近的 mid_k
+
+        分组依据：
+            model_type + model_version
+        """
+        selected: Dict[str, ModelRef] = {}
+
+        groups: Dict[Tuple[str, int], List[ModelRef]] = {}
+
+        for m in models:
+            key = (m.model_type, m.model_version)
+            groups.setdefault(key, []).append(m)
+
+        for _, group in groups.items():
+            group = sorted(group, key=lambda x: x.score, reverse=True)
+            n = len(group)
+
+            # top k
+            top_models = group[:top_k]
+
+            # middle k
+            mid = n // 2
+            half = mid_k // 2
+            start = max(0, mid - half)
+            end = min(n, start + mid_k)
+
+            # 如果靠近尾部导致数量不足，往前补
+            start = max(0, end - mid_k)
+
+            mid_models = group[start:end]
+
+            for m in top_models + mid_models:
+                selected[m.task_hash] = m
+
+        return list(selected.values())
+    
     fusion_tasks = []
 
     for (pre_key, compatibility), task_map in registry.items():
         triggers = task_map[TrainTask.SINGLE_MODEL_TRIGGER]
         dirs = task_map[TrainTask.SINGLE_MODEL_DIR]
+
+        # triggers = select_representative_models(
+        #     triggers,
+        #     top_k=3,
+        #     mid_k=2,
+        # )
+
+        # dirs = select_representative_models(
+        #     dirs,
+        #     top_k=3,
+        #     mid_k=2,
+        # )
+
+        logger.info(
+            f"pre={pre_key}, compat={compatibility}: "
+            f"selected triggers={len(triggers)}, selected dirs={len(dirs)}"
+        )
 
         for trigger_model in triggers:
             for dir_model in dirs:
@@ -283,12 +348,9 @@ def load_pred_df_for_quick_eval(
         device=device,
     )
 
-    global QUICK_DF_CACHE
     global QUICK_DS_CACHE
-    if QUICK_DF_CACHE is None:
-        QUICK_DF_CACHE = common.load_test_df_from_dir(prep_output_dir)
-        QUICK_DF_CACHE["open_time_date_utc"] = pd.to_datetime(QUICK_DF_CACHE["open_time_date_utc"], utc=True)
-    df = QUICK_DF_CACHE.copy()
+    df = common.load_test_df_from_dir(prep_output_dir)
+
     cache_key = (task.pre_key, task.train_compatibility)
     if cache_key not in QUICK_DS_CACHE :
         QUICK_DS_CACHE[cache_key] = data_loader.TimeSeriesWindowDataset(
@@ -501,7 +563,7 @@ def run_one_backtest(
                 train_output_dir=fusion_dir,
                 device=device,
                 period=period,
-            )
+            )["statistics"][1]
 
     elapsed = time.time() - t0
 
@@ -586,38 +648,47 @@ def load_done_fusion_hashes(reports_path: str) -> set[str]:
 
     return done
 
-def run_backtests(
-    logger: logging.Logger,
+def run_one_backtest_worker(
     sim_exp_dir: str,
-    fusion_tasks: List[FusionTask],
-    max_backtests: int,
-    period: str,
+    task: FusionTask,
     device: str,
-) -> None:
-    reports_path = os.path.join(sim_exp_dir, REPORTS_FILE)
+    torch_threads: int = 1,
+) -> Dict[str, Any]:
+    """
+    子进程执行单个回测任务。
 
-    done_fusion_hashes = load_done_fusion_hashes(reports_path)
+    注意：
+    1. 不传 logger 对象，因为 logger 不适合跨进程传递。
+    2. 每个子进程自己创建 logger。
+    3. reports.jsonl 由主进程统一写，避免并发写文件冲突。
+    """
 
-    if max_backtests > 0:
-        fusion_tasks = fusion_tasks[:max_backtests]
+    try:
+        # 限制每个进程内部的 PyTorch CPU 线程数
+        # 否则 workers * torch内部线程 会导致 CPU 过度竞争
+        if torch_threads > 0:
+            torch.set_num_threads(torch_threads)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass
 
-    total = len(fusion_tasks)
-    skipped = 0
-    completed = 0
+        worker_log_dir = os.path.join(sim_exp_dir, "worker_logs")
+        os.makedirs(worker_log_dir, exist_ok=True)
 
-    logger.info(
-        f"Backtest tasks: total={total}, already_done={len(done_fusion_hashes)}"
-    )
+        logger = logging.getLogger(f"worker_{os.getpid()}_{task.fusion_hash}")
+        logger.setLevel(logging.INFO)
+        logger.handlers = []
+        logger.propagate = False
 
-    for i, task in enumerate(fusion_tasks, start=1):
-        if task.fusion_hash in done_fusion_hashes:
-            skipped += 1
-            logger.info(
-                f"Skip backtest [{i}/{total}] fusion_hash={task.fusion_hash} already exists"
-            )
-            continue
+        log_path = os.path.join(worker_log_dir, f"{task.fusion_hash}.log")
+        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        )
+        logger.addHandler(file_handler)
 
-        logger.info(f"Backtest [{i}/{total}] fusion_hash={task.fusion_hash}")
+        logger.info(f"Worker start fusion_hash={task.fusion_hash}")
 
         result = run_one_backtest(
             logger=logger,
@@ -626,13 +697,141 @@ def run_backtests(
             device=device,
         )
 
-        append_jsonl(reports_path, result)
+        result["status"] = "ok"
+        return result
 
-        done_fusion_hashes.add(task.fusion_hash)
-        completed += 1
+    except Exception as e:
+        return {
+            "status": "error",
+            "fusion_hash": task.fusion_hash,
+            "pre_key": task.pre_key,
+            "train_compatibility": task.train_compatibility,
+            "device": device,
+            "error": repr(e),
+            "traceback": traceback.format_exc(),
+        }
+    
+def run_backtests(
+    logger: logging.Logger,
+    sim_exp_dir: str,
+    fusion_tasks: List[FusionTask],
+    max_backtests: int,
+    period: str,
+    device: str,
+    workers: int = 1,
+    torch_threads: int = 1,
+) -> None:
+    reports_path = os.path.join(sim_exp_dir, REPORTS_FILE)
+
+    done_fusion_hashes = load_done_fusion_hashes(reports_path)
+
+    if max_backtests > 0:
+        fusion_tasks = fusion_tasks[:max_backtests]
+
+    # 过滤已经完成的任务
+    pending_tasks = []
+    skipped = 0
+
+    for task in fusion_tasks:
+        if task.fusion_hash in done_fusion_hashes:
+            skipped += 1
+            continue
+        pending_tasks.append(task)
+
+    total = len(fusion_tasks)
+    pending = len(pending_tasks)
 
     logger.info(
-        f"Backtest finished: completed={completed}, skipped={skipped}, total={total}"
+        f"Backtest tasks: total={total}, pending={pending}, "
+        f"already_done={len(done_fusion_hashes)}, skipped={skipped}, "
+        f"workers={workers}, torch_threads={torch_threads}, device={device}"
+    )
+
+    if pending == 0:
+        logger.info("No pending backtest tasks.")
+        return
+
+    # 串行模式，方便 debug
+    if workers <= 1:
+        completed = 0
+        failed = 0
+
+        for i, task in enumerate(pending_tasks, start=1):
+            logger.info(f"Backtest [{i}/{pending}] fusion_hash={task.fusion_hash}")
+
+            result = run_one_backtest(
+                logger=logger,
+                sim_exp_dir=sim_exp_dir,
+                task=task,
+                device=device,
+            )
+
+            result["status"] = "ok"
+            append_jsonl(reports_path, result)
+
+            done_fusion_hashes.add(task.fusion_hash)
+            completed += 1
+
+        logger.info(
+            f"Backtest finished: completed={completed}, failed={failed}, "
+            f"skipped={skipped}, total={total}"
+        )
+        return
+
+    # 并行模式
+    completed = 0
+    failed = 0
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        future_to_task = {}
+
+        for task in pending_tasks:
+            future = executor.submit(
+                run_one_backtest_worker,
+                sim_exp_dir,
+                task,
+                device,
+                torch_threads,
+            )
+            future_to_task[future] = task
+
+        for idx, future in enumerate(as_completed(future_to_task), start=1):
+            task = future_to_task[future]
+
+            try:
+                result = future.result()
+            except Exception as e:
+                result = {
+                    "status": "error",
+                    "fusion_hash": task.fusion_hash,
+                    "pre_key": task.pre_key,
+                    "train_compatibility": task.train_compatibility,
+                    "device": device,
+                    "error": repr(e),
+                    "traceback": traceback.format_exc(),
+                }
+
+            # 只有主进程写 reports.jsonl，避免并发写冲突
+            append_jsonl(reports_path, result)
+
+            if result.get("status") == "ok":
+                completed += 1
+                done_fusion_hashes.add(task.fusion_hash)
+
+                logger.info(
+                    f"Done [{idx}/{pending}] fusion_hash={task.fusion_hash}, "
+                    f"elapsed={result.get('elapsed_sec', 0):.1f}s"
+                )
+            else:
+                failed += 1
+                logger.error(
+                    f"Failed [{idx}/{pending}] fusion_hash={task.fusion_hash}: "
+                    f"{result.get('error')}"
+                )
+
+    logger.info(
+        f"Backtest finished: completed={completed}, failed={failed}, "
+        f"skipped={skipped}, total={total}"
     )
 
 def main():
@@ -640,11 +839,13 @@ def main():
     parser.add_argument(
         "-s",
         "--simulation",
-        default="/home/chao/work/quant_output/batch_train/DOGEUSDT_15m/2026-06-24/11_54_09",
+        default="/home/chao/work/quant_output/batch_train/DOGEUSDT_30m/2026-06-25/04_09_15",
     )
     parser.add_argument("--max-backtests", type=int, default=0)
     parser.add_argument("--period", type=str, default="short")
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--torch-threads", type=int, default=2)
 
     args = parser.parse_args()
 
@@ -679,6 +880,8 @@ def main():
         max_backtests=args.max_backtests,
         period=args.period,
         device=args.device,
+        workers=args.workers,
+        torch_threads=args.torch_threads,
     )
 
     logger.info("batch_simulation completed.")
