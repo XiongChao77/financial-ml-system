@@ -1,127 +1,336 @@
-import { createChart, CandlestickSeries, HistogramSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'; 
+import { createChart, CandlestickSeries, HistogramSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts';
 import './style.css';
 
 const API_BASE = "http://100.90.15.23:8000/run_backtest";
 
-// --- 全局变量 ---
-let chart;         // 图表实例
-let candleSeries;  // K线序列实例
-let markersApi;    // 【新增】用于保存 Marker 控制器实例
-let totalBars = 0; // 当前数据的总条数
-let isUpdatingSlider = false; // 防抖锁
-let volumeSeries; // 【新增】全局变量
+let chart;
+let candleSeries;
+let markersApi;
+let totalBars = 0;
+let isUpdatingSlider = false;
+let volumeSeries;
 let predSeries, labelSeries;
-let isMeasuring = false;  // 提升到全局
-let startPoint = null;    // 提升到全局
-let rulerRect, rulerLabel; // 提升到全局
+let isMeasuring = false;
+let startPoint = null;
+let rulerRect, rulerLabel;
 let equitySeries;
-// --- 暴露给 HTML 调用的切换函数 ---
+
 window.changeTimeframe = async (tf) => {
-    // 1. UI 更新: 切换按钮激活状态
     document.querySelectorAll('.tf-btn').forEach(btn => btn.classList.remove('active'));
     event.target.classList.add('active');
 
-    // 2. 重新加载数据
     await loadData(tf);
 };
 
-// --- 数据加载逻辑 ---
 async function loadData(timeframe = "") {
     const loadingEl = document.getElementById("loading");
     loadingEl.style.display = "block";
-    loadingEl.innerText = "正在加载数据...";
+    loadingEl.innerText = "Loading Data...";
 
     try {
-        // 构建带参数的 URL
         const url = timeframe ? `${API_BASE}?tf=${timeframe}` : API_BASE;
-        
+
         const res = await fetch(url);
         const data = await res.json();
 
         if (data.error) {
-            alert("回测出错: " + data.error);
+            alert("Error in backtest: " + data.error);
             loadingEl.style.display = "none";
             return;
         }
 
         renderStats(data.statistics);
-        updateChart(data.candles, data.markers, data.statistics); // 更新图表
+        updateChart(data.candles, data.markers, data.statistics);
 
         loadingEl.style.display = "none";
 
     } catch (err) {
         console.error(err);
-        loadingEl.innerText = "连接服务器失败，请检查后端是否启动。";
+        loadingEl.innerText = "Connection to server failed. Please check if the backend is running.";
     }
 }
 
-// 在 initChart 内部定义这个重置函数
+// eg: getByPath(data, "params.strategy.commission")
+function getByPath(obj, path, defaultValue = null) {
+    if (!obj || !path) return defaultValue;
+
+    return path.split(".").reduce((cur, key) => {
+        if (cur !== null && cur !== undefined && cur[key] !== undefined && cur[key] !== null) {
+            return cur[key];
+        }
+        return defaultValue;
+    }, obj);
+}
+
+function formatStatValue(rawValue, item) {
+    if (rawValue === null || rawValue === undefined) return null;
+
+        if (item.type === "precision_base") {
+        const cls = String(item.classId);
+
+        const report = getByPath(item.rootData, `model_metrics.classification_report.${cls}`);
+        const trueDist = getByPath(item.rootData, "model_metrics.label_distribution_true");
+
+        if (!report || !trueDist) return null;
+
+        const precision = report.precision;
+
+        const total = Object.values(trueDist).reduce((sum, v) => sum + Number(v), 0);
+        const baseCount = Number(trueDist[cls] ?? 0);
+        const baseRate = total > 0 ? baseCount / total : null;
+
+        if (precision === null || precision === undefined || baseRate === null) return null;
+
+        return `${(precision * 100).toFixed(item.decimals ?? 2)}% : ${(baseRate * 100).toFixed(item.decimals ?? 2)}%`;
+    }
+
+    if (item.isPeriod) {
+        const start = rawValue?.start;
+        const end = rawValue?.end;
+
+        if (!start || !end) return null;
+
+        const startText = new Date(start).toLocaleDateString();
+        const endText = new Date(end).toLocaleDateString();
+
+        return `${startText} ~ ${endText}`;
+    }
+
+    if (item.isDateTime) {
+        const date = new Date(rawValue);
+        if (!Number.isNaN(date.getTime())) {
+            return date.toLocaleString();
+        }
+        return String(rawValue);
+    }
+
+    let val = rawValue;
+
+    if (typeof val === "string" && val.trim() !== "") {
+        const parsed = Number(val);
+        if (!Number.isNaN(parsed)) {
+            val = parsed;
+        }
+    }
+
+    if (typeof val !== "number") {
+        return String(val);
+    }
+
+    if (item.scale100) {
+        val = val * 100;
+    }
+
+    if (item.isCurrency) {
+        return "$" + val.toLocaleString(undefined, {
+            minimumFractionDigits: item.decimals ?? 2,
+            maximumFractionDigits: item.decimals ?? 2
+        });
+    }
+
+    const decimals = item.decimals ?? (val % 1 === 0 ? 0 : 4);
+    let text = val.toFixed(decimals);
+
+    if (item.showPercent) {
+        text += "%";
+    }
+
+    return text;
+}
+
 const clearRuler = () => {
     isMeasuring = false;
     startPoint = null;
-    
-    // 1. 隐藏元素
+
     rulerRect.style.display = 'none';
     rulerLabel.style.display = 'none';
-    
-    // 2. 【关键】清空物理尺寸，防止下次显示时“闪现”旧形状
+
     rulerRect.style.width = '0px';
     rulerRect.style.height = '0px';
     rulerLabel.innerHTML = '';
-    // 恢复图表滚动功能
+
     chart.applyOptions({ handleScroll: { pressedMouseMove: true } });
 };
 
-// --- 统计面板渲染 ---
 function renderStats(statsArray) {
     const panel = document.getElementById("stats-panel");
     panel.innerHTML = "";
+
     if (!statsArray || !statsArray[1]) return;
 
     const data = statsArray[1];
 
-    // Define sections and their corresponding fields in the 'report' structure
     const config = [
+        {
+            group: "Backtest Period",
+            fields: [
+                {
+                    key: "time",
+                    title: "Period",
+                    isPeriod: true,
+                    wide: true
+                }
+            ]
+        },
         {
             group: "Performance",
             fields: [
-                { key: "gross_return", title: "Total Return", path: "performance", isPct: true },
-                { key: "cagr", title: "CAGR", path: "performance", isPct: true },
-                { key: "sharpe", title: "Sharpe", path: "performance", isPct: false },
-                { key: "calmar", title: "Calmar", path: "performance", isPct: false },
-                { key: "end_value", title: "End Value", path: "performance", isCurrency: true }
+                {
+                    key: "performance.gross_return",
+                    title: "Total Return",
+                    scale100: true,
+                    showPercent: true,
+                    decimals: 2
+                },
+                {
+                    key: "performance.cagr",
+                    title: "CAGR",
+                    scale100: true,
+                    showPercent: true,
+                    decimals: 2
+                },
+                {
+                    key: "performance.sharpe",
+                    title: "Sharpe",
+                    decimals: 2
+                },
+                {
+                    key: "performance.calmar",
+                    title: "Calmar",
+                    decimals: 2
+                },
+                {
+                    key: "performance.end_value",
+                    title: "End Value",
+                    isCurrency: true,
+                    decimals: 2
+                }
             ]
         },
         {
             group: "Risk & Drawdown",
             fields: [
-                { key: "max_dd_pct", title: "Max Drawdown %", path: "drawdown", isPct: true },
-                { key: "max_daily_dd", title: "Max Daily DD", path: "drawdown", isPct: true },
-                { key: "dd_5_pct_days", title: "Days > 5% DD", path: "drawdown", isPct: false },
-                { key: "max_hwm_duration_days", title: "Recovery Days", path: "drawdown", isPct: false }
+                {
+                    key: "drawdown.max_dd_pct",
+                    title: "Max Drawdown %",
+                    scale100: false,
+                    showPercent: true,
+                    decimals: 2
+                },
+                {
+                    key: "drawdown.max_daily_dd",
+                    title: "Max Daily DD",
+                    scale100: true,
+                    showPercent: true,
+                    decimals: 2
+                },
+                {
+                    key: "drawdown.dd_5_pct_days",
+                    title: "Days > 5% DD",
+                    decimals: 0
+                },
+                {
+                    key: "drawdown.max_hwm_duration_days",
+                    title: "Max Recovery Days",
+                    decimals: 0
+                }
             ]
         },
         {
             group: "Trades & Execution",
             fields: [
-                { key: "total", title: "Total Trades", path: "trades", isPct: false },
-                { key: "win_rate", title: "Win Rate", path: "trades", isPct: true },
-                { key: "avg_cost", title: "Avg Cost", path: "trades", isPct: true },
-                { key: "daily_freq", title: "Daily Freq", path: "trades", isPct: false }
+                {
+                    key: "trades.total",
+                    title: "Total Trades",
+                    decimals: 0
+                },
+                {
+                    key: "trades.win_rate",
+                    title: "Win Rate",
+                    scale100: true,
+                    showPercent: true,
+                    decimals: 2
+                },
+                {
+                    key: "params.strategy.commission",
+                    title: "Commission",
+                    scale100: false,
+                    showPercent: true,
+                    decimals: 2
+                },
+                {
+                    key: "trades.long_pnl",
+                    title: "Long Return",
+                    scale100: false,
+                    suffix: "",
+                    decimals: 4
+                },
+                {
+                    key: "trades.short_pnl",
+                    title: "Short Return",
+                    scale100: false,
+                    suffix: "",
+                    decimals: 4
+                },
+                {
+                    key: "trades.daily_freq",
+                    title: "Daily Freq",
+                    decimals: 4
+                }
             ]
         },
         {
             group: "Exposure & Model",
             fields: [
-                { key: "avg_pos", title: "Avg Exposure", path: "exposure", isPct: false },
-                { key: "accuracy", title: "Model Acc", path: "model_metrics", isPct: true },
-                { key: "f1_weighted", title: "F1 Weighted", path: "model_metrics", isPct: false }
+                {
+                    key: "exposure.avg_pos",
+                    title: "Avg Exposure",
+                    scale100: true,
+                    showPercent: true,
+                    decimals: 4
+                },
+                {
+                    key: "model_metrics.accuracy",
+                    title: "Model Acc",
+                    scale100: true,
+                    showPercent: true,
+                    decimals: 2
+                },
+                {
+                    key: "model_metrics.f1_macro",
+                    title: "Macro F1",
+                    scale100: false,
+                    suffix: "",
+                    decimals: 4
+                },
+                {
+                    key: "model_metrics.f1_weighted",
+                    title: "F1 Weighted",
+                    scale100: false,
+                    suffix: "",
+                    decimals: 4
+                },
+                {
+                    key: "model_metrics.classification_report.0",
+                    title: "Short Presicion : Actual Rate",
+                    type: "precision_base",
+                    classId: 0,
+                    decimals: 2,
+                    wide: true
+                },
+                {
+                    key: "model_metrics.classification_report.2",
+                    title: "Long Presicion : Actual Rate",
+                    type: "precision_base",
+                    classId: 2,
+                    decimals: 2,
+                    wide: true
+                }
             ]
         }
     ];
 
     config.forEach(section => {
-        // Create Section Header
         const sectionHeader = document.createElement("h2");
         sectionHeader.className = "section-title";
         sectionHeader.innerText = section.group;
@@ -131,27 +340,38 @@ function renderStats(statsArray) {
         grid.className = "stats-grid";
 
         section.fields.forEach(item => {
-            const val = data[item.path] ? data[item.path][item.key] : null;
-            if (val === null || val === undefined) return;
+            const rawVal = getByPath(data, item.key);
 
-            let displayValue = val;
+            if (rawVal === null || rawVal === undefined) return;
+
+            const displayValue = formatStatValue(rawVal, { ...item, rootData: data });
+
             let colorClass = "";
 
-            // Formatting Logic
-            if (item.isPct) {
-                displayValue = (val * 100).toFixed(2) + "%";
-            } else if (item.isCurrency) {
-                displayValue = "$" + parseFloat(val).toLocaleString(undefined, { minimumFractionDigits: 2 });
-            } else if (typeof val === 'number') {
-                displayValue = val % 1 === 0 ? val : val.toFixed(4);
-            }
+            const numericVal = Number(rawVal);
 
-            // Coloring Logic
-            if (val < 0) colorClass = "loss";
-            if (val > 0 && (item.key === "gross_return" || item.key === "win_rate")) colorClass = "win";
+            if (!Number.isNaN(numericVal)) {
+                if (numericVal < 0) {
+                    colorClass = "loss";
+                }
+
+                if (
+                    numericVal > 0 &&
+                    (
+                        item.key === "performance.gross_return" ||
+                        item.key === "performance.cagr" ||
+                        item.key === "trades.win_rate"
+                    )
+                ) {
+                    colorClass = "win";
+                }
+            }
 
             const div = document.createElement("div");
             div.className = "card";
+            if (item.wide) {
+                div.classList.add("wide-card");
+            }
             div.innerHTML = `<h3>${item.title}</h3><p class="${colorClass}">${displayValue}</p>`;
             grid.appendChild(div);
         });
@@ -160,31 +380,36 @@ function renderStats(statsArray) {
     });
 }
 
-// --- 图表初始化 (只执行一次) ---
 function initChart() {
     const container = document.getElementById("chart-container");
-    container.innerHTML = ""; 
+    container.innerHTML = "";
 
     chart = createChart(container, {
         width: container.clientWidth,
         height: container.clientHeight,
-        layout: { background: { color: "#ffffff" }, textColor: "#333" },
-        grid: { vertLines: { color: "#f0f0f0" }, horzLines: { color: "#f0f0f0" } },
+        layout: {
+            background: { color: "#ffffff" },
+            textColor: "#333"
+        },
+        grid: {
+            vertLines: { color: "#f0f0f0" },
+            horzLines: { color: "#f0f0f0" }
+        },
         timeScale: {
             timeVisible: true,
             secondsVisible: false,
             borderColor: '#E1E1E1',
             barSpacing: 6,
-            // 【关键】允许无限缩小，查看数年数据
-            minBarSpacing: 0.005, 
+            minBarSpacing: 0.005
         },
     });
 
-    // 添加 K 线系列
-    candleSeries = chart.addSeries(CandlestickSeries, { 
-        upColor: "#26a69a", downColor: "#ef5350",
-        borderVisible: false, 
-        wickUpColor: "#26a69a", wickDownColor: "#ef5350",
+    candleSeries = chart.addSeries(CandlestickSeries, {
+        upColor: "#26a69a",
+        downColor: "#ef5350",
+        borderVisible: false,
+        wickUpColor: "#26a69a",
+        wickDownColor: "#ef5350",
     });
 
     markersApi = createSeriesMarkers(candleSeries);
@@ -202,14 +427,12 @@ function initChart() {
         },
     });
 
-    // 3. 【修正】正确添加成交量系列
     volumeSeries = chart.addSeries(HistogramSeries, {
         color: '#26a69a',
         priceFormat: { type: 'volume' },
-        priceScaleId: 'volume-scale', // 创建一个独立的坐标轴
+        priceScaleId: 'volume-scale',
     });
 
-    // 4. 设置成交量显示在底部 (占 20% 高度)
     chart.priceScale('volume-scale').applyOptions({
         scaleMargins: {
             top: 0.8,
@@ -217,102 +440,101 @@ function initChart() {
         },
     });
 
-    //label  {
-    // 1. 创建实际标签行 (Top Row)
     labelSeries = chart.addSeries(HistogramSeries, {
         title: 'Label',
         priceScaleId: 'label-scale',
     });
 
-    // 2. 创建预测结果行 (Bottom Row)
     predSeries = chart.addSeries(HistogramSeries, {
         title: 'Prediction',
         priceScaleId: 'pred-scale',
     });
 
-    // --- 【关键】修复报错：改用 autoscaleInfoProvider 锁定范围 ---
     const fixedRange = () => ({
-        priceRange: { minValue: 0, maxValue: 1 }, // 锁定高度为 1
+        priceRange: {
+            minValue: 0,
+            maxValue: 1
+        },
     });
 
-    // 配置第一行位置 (顶部 2% - 7%)
     chart.priceScale('label-scale').applyOptions({
-        scaleMargins: { top: 0.02, bottom: 0.93 },
+        scaleMargins: {
+            top: 0.02,
+            bottom: 0.93
+        },
     });
-    labelSeries.applyOptions({ autoscaleInfoProvider: fixedRange });
 
-    // 配置第二行位置 (顶部 8% - 13%)
+    labelSeries.applyOptions({
+        autoscaleInfoProvider: fixedRange
+    });
+
     chart.priceScale('pred-scale').applyOptions({
-        scaleMargins: { top: 0.08, bottom: 0.87 },
+        scaleMargins: {
+            top: 0.08,
+            bottom: 0.87
+        },
     });
-    predSeries.applyOptions({ autoscaleInfoProvider: fixedRange });
-    //label  }
 
+    predSeries.applyOptions({
+        autoscaleInfoProvider: fixedRange
+    });
+
+    window.chart = chart;
     window.volumeSeries = volumeSeries;
-    // 窗口大小自适应
+
     window.addEventListener("resize", () => {
-        chart.applyOptions({ 
+        chart.applyOptions({
             width: container.clientWidth,
             height: container.clientHeight
         });
     });
 
-    // --- 绑定图表拖动事件 -> 更新滑动条 ---
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
         if (isUpdatingSlider) return;
-        
-        // 简单的防抖，避免频繁操作 DOM
+
         requestAnimationFrame(() => {
             const slider = document.getElementById("time-scrollbar");
             if (!slider || totalBars === 0) return;
 
-            // scrollPosition() 返回距离最右侧的偏移量
-            // 0 = 最右边 (最新数据)
-            // positive = 向左偏移
             const position = chart.timeScale().scrollPosition();
-            
-            // 滑动条逻辑：最右边是 max (totalBars)
             const newVal = totalBars - position;
-            
-            // 只有差异较大时才更新，防止死循环
+
             if (Math.abs(slider.value - newVal) > 0.5) {
                 slider.value = newVal;
             }
         });
     });
 
-    // --- 绑定滑动条拖动事件 -> 更新图表 ---
     const slider = document.getElementById("time-scrollbar");
-    slider.oninput = function() {
+
+    slider.oninput = function () {
         isUpdatingSlider = true;
-        // 计算距离右侧的距离
+
         const distFromRight = totalBars - parseFloat(this.value);
-        // 跳转，关闭动画以保证跟手
         chart.timeScale().scrollToPosition(-distFromRight, false);
+
         isUpdatingSlider = false;
     };
 
-    // 在 initChart 函数内部添加
     const tooltip = document.createElement('div');
     tooltip.className = 'floating-tooltip';
     container.appendChild(tooltip);
 
     chart.subscribeCrosshairMove(param => {
-        // 如果鼠标移出图表或在空白区域
         if (
-            param.point === undefined || 
-            !param.time || 
-            param.point.x < 0 || 
-            param.point.x > container.clientWidth || 
-            param.point.y < 0 || 
+            param.point === undefined ||
+            !param.time ||
+            param.point.x < 0 ||
+            param.point.x > container.clientWidth ||
+            param.point.y < 0 ||
             param.point.y > container.clientHeight
         ) {
             tooltip.style.display = 'none';
             return;
         }
 
-        // 获取当前鼠标对应 K 线的数据
         const data = param.seriesData.get(candleSeries);
+
         if (!data) {
             tooltip.style.display = 'none';
             return;
@@ -320,25 +542,22 @@ function initChart() {
 
         tooltip.style.display = 'block';
 
-        // 计算涨跌幅
         const change = data.close - data.open;
         const changePercentage = (change / data.open * 100).toFixed(2);
         const colorClass = change >= 0 ? 'win' : 'loss';
         const sign = change >= 0 ? '+' : '';
 
-        // 填充内容
         tooltip.innerHTML = `
             <div style="font-weight: bold; margin-bottom: 4px;">${new Date(data.time * 1000).toLocaleString()}</div>
-            <div class="tooltip-row">开: ${data.open.toFixed(2)}</div>
-            <div class="tooltip-row">高: ${data.high.toFixed(2)}</div>
-            <div class="tooltip-row">低: ${data.low.toFixed(2)}</div>
-            <div class="tooltip-row">收: ${data.close.toFixed(2)}</div>
+            <div class="tooltip-row">Open: ${data.open.toFixed(2)}</div>
+            <div class="tooltip-row">High: ${data.high.toFixed(2)}</div>
+            <div class="tooltip-row">Low: ${data.low.toFixed(2)}</div>
+            <div class="tooltip-row">Colse: ${data.close.toFixed(2)}</div>
             <div class="tooltip-row ${colorClass}">
-                幅度: ${sign}${changePercentage}% (${sign}${change.toFixed(2)})
+                Range: ${sign}${changePercentage}% (${sign}${change.toFixed(2)})
             </div>
         `;
 
-        // 动态调整位置 (防止超出右边界)
         const tooltipWidth = 180;
         const tooltipHeight = 150;
         const x = param.point.x;
@@ -358,7 +577,6 @@ function initChart() {
         tooltip.style.top = top + 'px';
     });
 
-    // --- 【新增】测量工具 DOM 元素 ---
     rulerRect = document.createElement('div');
     rulerRect.className = 'ruler-rect';
     container.appendChild(rulerRect);
@@ -367,10 +585,7 @@ function initChart() {
     rulerLabel.className = 'ruler-label';
     container.appendChild(rulerLabel);
 
-
-    // --- 2. 鼠标按下事件 ---
     container.addEventListener('mousedown', (e) => {
-        // 如果没有按住 Shift，直接清除并退出
         if (!e.shiftKey) {
             clearRuler();
             return;
@@ -385,12 +600,19 @@ function initChart() {
 
         if (logicalIndex === null || price === null) return;
 
-        // 只有按住 Shift 时才执行以下逻辑
         isMeasuring = true;
-        startPoint = { logicalIndex, price, x, y };
+        startPoint = {
+            logicalIndex,
+            price,
+            x,
+            y
+        };
 
-        // 禁用图表滚动，避免测量时图形乱跑
-        chart.applyOptions({ handleScroll: { pressedMouseMove: false } });
+        chart.applyOptions({
+            handleScroll: {
+                pressedMouseMove: false
+            }
+        });
 
         rulerRect.style.display = 'block';
         rulerRect.style.width = '0px';
@@ -398,7 +620,6 @@ function initChart() {
         rulerLabel.style.display = 'block';
     });
 
-    // --- 3. 鼠标移动事件 ---
     container.addEventListener('mousemove', (e) => {
         if (!isMeasuring || !startPoint) return;
 
@@ -411,9 +632,8 @@ function initChart() {
 
         if (curLogicalIndex === null || curPrice === null) return;
 
-        // 1. 计算矩形位置
         const startXAtCurrentScale = chart.timeScale().logicalToCoordinate(startPoint.logicalIndex);
-        
+
         const rectLeft = Math.min(startXAtCurrentScale, curX);
         const rectTop = Math.min(startPoint.y, curY);
         const rectWidth = Math.abs(curX - startXAtCurrentScale);
@@ -424,21 +644,18 @@ function initChart() {
         rulerRect.style.width = `${rectWidth}px`;
         rulerRect.style.height = `${rectHeight}px`;
 
-        // 2. 【关键修改】计算标签位置：固定在矩形的右上方
-        // X 坐标：矩形左边缘 + 宽度 + 5px 偏移
-        // Y 坐标：矩形顶边缘 - 标签高度（约 40px）
         const labelX = rectLeft + rectWidth + 5;
-        const labelY = rectTop - 45; // 减去 45px 让它悬浮在矩形上方
+        const labelY = rectTop - 45;
 
         rulerLabel.style.left = `${labelX}px`;
         rulerLabel.style.top = `${labelY}px`;
 
-        // 3. 计算数据内容
         const barCount = Math.abs(Math.floor(curLogicalIndex) - Math.floor(startPoint.logicalIndex)) + 1;
         const priceDiff = curPrice - startPoint.price;
         const percentChange = ((priceDiff / startPoint.price) * 100).toFixed(2);
 
         const isUp = priceDiff >= 0;
+
         rulerRect.style.backgroundColor = isUp ? 'rgba(38, 166, 154, 0.2)' : 'rgba(239, 83, 80, 0.2)';
         rulerRect.style.borderColor = isUp ? '#26a69a' : '#ef5350';
 
@@ -446,27 +663,27 @@ function initChart() {
             <b style="color: ${isUp ? '#26a69a' : '#ef5350'}">
                 ${isUp ? '▲' : '▼'} ${percentChange}%
             </b><br>
-            价差: ${priceDiff.toFixed(2)}<br>
-            周期: ${barCount} 根 K 线
+            Vol: ${priceDiff.toFixed(2)}<br>
+            Bars: ${barCount}
         `;
     });
 
-    // --- 4. 鼠标松开事件 ---
     window.addEventListener('mouseup', () => {
         if (isMeasuring) {
             isMeasuring = false;
-            // 恢复图表滚动
-            chart.applyOptions({ handleScroll: { pressedMouseMove: true } });
+
+            chart.applyOptions({
+                handleScroll: {
+                    pressedMouseMove: true
+                }
+            });
         }
     });
 
-    // --- 5. 图表点击清除 ---
     chart.subscribeClick(() => {
-        // 普通点击（不带 Shift）直接清除
         clearRuler();
     });
 
-    // 监听键盘按下（可选）：如果用户按下 Esc 键也清除测量
     window.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
             clearRuler();
@@ -474,28 +691,24 @@ function initChart() {
     });
 }
 
-// --- 数据更新与渲染 ---
 function updateChart(candles, markers, statistics) {
     if (!chart) initChart();
 
-    // 1. 设置数据
     candleSeries.setData(candles);
 
-    // 2. 【新增】转换并设置成交量数据
     const volumeData = candles.map(c => ({
         time: c.time,
         value: c.volume,
-        // 涨绿跌红逻辑
         color: c.close >= c.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
     }));
+
     volumeSeries.setData(volumeData);
 
-    //label {
     const colors = {
-        POSITIVE : '#26a69a',    // 绿色 (2)
-        NEGATIVE: '#ef5350',   // 红色 (0)
-        NEUTRAL: '#b2b2b2', // 灰色 (1)
-        WARNING: '#ffff00'  // 【强调】黄色：预测与实际冲突
+        POSITIVE: '#26a69a',
+        NEGATIVE: '#ef5350',
+        NEUTRAL: '#b2b2b2',
+        WARNING: '#ffff00'
     };
 
     const labelData = [];
@@ -503,91 +716,74 @@ function updateChart(candles, markers, statistics) {
 
     for (let i = 0; i < candles.length; i++) {
         const c = candles[i];
-        const l = Math.round(c.label); // 实际
-        const p = Math.round(c.pred);  // 预测
-        const isCorrect = l === p;
+        const l = Math.round(c.label);
+        const p = Math.round(c.pred);
 
-        // 颜色映射函数
         const getSignalColor = (val) => {
-            if (val === 2) return colors.POSITIVE ;
+            if (val === 2) return colors.POSITIVE;
             if (val === 0) return colors.NEGATIVE;
             return colors.NEUTRAL;
         };
 
-        // 上行：显示实际状态
         labelData.push({
             time: c.time,
-            value: 1, // 固定高度
+            value: 1,
             color: getSignalColor(l)
         });
 
-        // 下行：显示预测状态，如果错误则变黄强调
         predData.push({
             time: c.time,
-            value: 1, // 固定高度
-            color: getSignalColor(p) 
+            value: 1,
+            color: getSignalColor(p)
         });
     }
 
     labelSeries.setData(labelData);
     predSeries.setData(predData);
-    //label }
 
-    // 2. 设置标记 (必须排序)
     if (markers && markers.length > 0) {
         markersApi.setMarkers(markers);
     } else {
         markersApi.setMarkers([]);
     }
 
-    // 3. 更新滑动条范围
     totalBars = candles.length;
+
     const slider = document.getElementById("time-scrollbar");
     slider.max = totalBars;
     slider.min = 0;
-    
-    // 默认跳转到最新数据
-    slider.value = totalBars; 
-    
-    // 自动适配视野
-    // chart.timeScale().fitContent();
-    
-    // 强制重置滚动位置到最右
+    slider.value = totalBars;
+
     chart.timeScale().scrollToPosition(0, false);
 
-    // === 资金曲线 ===
-    try {
-        const dailyList = statistics?.[1]?.drawdown?.daily_loss_list;
-
-        if (dailyList && dailyList.length > 0) {
-            const equityData = dailyList.map(d => ({
-                time: Math.floor(new Date(d.date).getTime() / 1000),
-                value: d.equity
-            }));
-
-            equitySeries.setData(equityData);
-        }
-    } catch (e) {
-        console.error("Equity parse error:", e);
-    }
+    // === Balance ===
+    // try {
+    //     const dailyList = statistics?.[1]?.drawdown?.daily_loss_list;
+    //
+    //     if (dailyList && dailyList.length > 0) {
+    //         const equityData = dailyList.map(d => ({
+    //             time: Math.floor(new Date(d.date).getTime() / 1000),
+    //             value: d.equity
+    //         }));
+    //
+    //         equitySeries.setData(equityData);
+    //     }
+    // } catch (e) {
+    //     console.error("Equity parse error:", e);
+    // }
 }
 
-// --- Add this to your main.js ---
-
+// --- Performance switch ---
 window.toggleStats = () => {
     const panel = document.getElementById("stats-panel");
     const btn = document.getElementById("performance-btn");
-    
-    // Toggle the hidden class
+
     panel.classList.toggle('hidden');
-    
-    // Optional: Toggle button style to show state
     btn.classList.toggle('active-toggle');
 
-    // Trigger a resize on the chart so it fills the newly available space
     if (window.chart) {
         const container = document.getElementById("chart-container");
-        // Use a slight timeout to ensure DOM layout has updated
+
         setTimeout(() => {
             window.chart.applyOptions({
                 width: container.clientWidth,
@@ -596,5 +792,5 @@ window.toggleStats = () => {
         }, 50);
     }
 };
-// 启动
+
 loadData();

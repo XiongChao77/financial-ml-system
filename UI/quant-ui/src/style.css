@@ -1,14 +1,13 @@
-/* 1. 基础设置 */
+/* 1. basic setting */
 html, body {
   height: 100%;
   margin: 0;
   padding: 0;
-  overflow: hidden; /* 禁止页面滚动 */
+  overflow: hidden; /* disable scroll */
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   background: #f0f2f5;
 }
 
-/* 2. Flex 布局容器 */
 #app {
   display: flex;
   flex-direction: column;
@@ -19,27 +18,60 @@ html, body {
 
 h2 { margin: 0 0 10px 0; font-size: 22px; }
 
-/* 3. 统计面板 */
 .dashboard {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   margin-bottom: 15px;
   flex-shrink: 0;
 }
+
+.section-title {
+  margin: 8px 0 4px 0;
+  font-size: 14px;
+  color: #555;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 160px);
+  gap: 12px;
+  justify-content: start;
+  align-items: stretch;
+}
+
 .card {
+  width: auto;
+  box-sizing: border-box;
   background: white;
   padding: 10px 15px;
   border-radius: 8px;
   box-shadow: 0 2px 5px rgba(0,0,0,0.05);
   text-align: center;
 }
-.card h3 { margin: 0 0 5px 0; font-size: 12px; color: #888; }
-.card p { margin: 0; font-size: 16px; font-weight: bold; color: #333; }
+
+.card.wide-card {
+  grid-column: span 2;
+}
+
+.card h3 {
+  margin: 0 0 5px 0;
+  font-size: 12px;
+  color: #888;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.card p {
+  margin: 0;
+  font-size: 16px;
+  font-weight: bold;
+  color: #333;
+  white-space: nowrap;
+}
 .win { color: #26a69a !important; }
 .loss { color: #ef5350 !important; }
 
-/* 4. 新增：工具栏样式 */
 .toolbar {
     margin-bottom: 10px;
     flex-shrink: 0;
@@ -63,13 +95,12 @@ h2 { margin: 0 0 10px 0; font-size: 22px; }
     border-color: #2196F3;
 }
 
-/* 5. 图表容器 */
 #chart-container {
-  flex: 1;              /* 自动占据剩余高度 */
+  flex: 1;
   min-height: 0;        
   width: 100%;
   background: white;
-  border-radius: 8px 8px 0 0; /* 下方直角连接滚动条 */
+  border-radius: 8px 8px 0 0;
   box-shadow: 0 -2px 10px rgba(0,0,0,0.05);
   position: relative;
 }
@@ -85,7 +116,7 @@ h2 { margin: 0 0 10px 0; font-size: 22px; }
     z-index: 100;
 }
 
-/* 6. 底部滚动条 */
+/* 6. Bottom scrollbar */
 .scrollbar-container {
     flex-shrink: 0;
     height: 30px;
@@ -102,7 +133,7 @@ h2 { margin: 0 0 10px 0; font-size: 22px; }
     cursor: pointer;
 }
 
-/* 悬浮窗样式 */
+/* floating */
 .floating-tooltip {
     width: 180px;
     height: auto;
@@ -124,20 +155,20 @@ h2 { margin: 0 0 10px 0; font-size: 22px; }
 }
 
 .tooltip-row { margin: 4px 0; }
-.win { color: #26a69a; } /* 涨 */
-.loss { color: #ef5350; } /* 跌 */
+.win { color: #26a69a; } /* Up */
+.loss { color: #ef5350; } /* Down */
 
-/* 测量矩形框 */
+/* Measure */
 .ruler-rect {
     position: absolute;
-    background-color: rgba(38, 166, 154, 0.2); /* 默认绿色调 */
+    background-color: rgba(38, 166, 154, 0.2); /* default:green */
     border: 1px dashed #26a69a;
     pointer-events: none;
     display: none;
     z-index: 50;
 }
 
-/* 测量数据标签 */
+/* Measure */
 .ruler-label {
     position: absolute;
     background-color: #333;
