@@ -1,0 +1,2 @@
+open_time_ms_utc,open_time_date_utc,open,high,low,close,volume,number_of_trades,close_time_ms_utc,quote_asset_volume,taker_buy_base_volume,taker_buy_quote_volume
+1594371600000,2020-07-10 09:00:00,0.003989,0.003989,0.00334,0.003735,600365408,22244,1594375199999,2258832.054829,286098571,1078366.055608

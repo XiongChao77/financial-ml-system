@@ -23,7 +23,7 @@ try:
 except ImportError:
     HSIC = None
 
-import model.train_2head as train
+import model.train as train
 
 # --- Global config ---
 HIGH_CORR_THRESHOLD = 0.80     

@@ -19,64 +19,16 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     df = common.clean_data_quality_auto(df,logger)  
     # 3. Pass interval_ms to label logic so it can adapt its volatility window to the real time span.
     label_col = 'label'
-    function =0
-    if function==0:
-        df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
-        # common.print_zret_statistics(df)
-        if para.label_type == 'FTHL':
-            df = common.attach_label(df, para=para,label_col = label_col)
-        elif para.label_type == 'TBM':
-            df = common.attach_triple_barrier_label(df, para=para,label_col = label_col)
-        # common.print_label_performance_stats(df, para)
+    df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
+    # common.print_zret_statistics(df)
+    if para.label_type == 'FTHL':
+        df = common.attach_label(df, para=para,label_col = label_col)
+    elif para.label_type == 'TBM':
+        df = common.attach_triple_barrier_label(df, para=para,label_col = label_col)
+    # common.print_label_performance_stats(df, para)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_sma_7_25_crossover_label(df, interval_ms=interval_ms)
-    elif function==1 :
-        # 4. Run analysis
-        from data_process.regime_discovery import LabelRegimeAnalyzer
-        analyzer = LabelRegimeAnalyzer(df, interval_ms, para)
-        
-        # Define a finer grid to capture gradients
-        vol_range = np.arange(0.5, 3.1, 0.05).round(2)   #not include 3.1
-        stop_range = [0.1,0.2, 0.3, 0.5,2,100]  #np.arange(100, 100.1, 0.1).round(1)   #not include 1.6
-        
-        analyzer.run_parameter_sweep(vol_range, stop_range, common.attach_label)
-        # analyzer.analyze_and_plot()
-        analyzer.plot_vol_vs_distribution()
-        analyzer.plot_null_hypothesis_comparison()
-        analyzer.plot_long_ratio_vs_vol_multiplier()
-        exit()
-    else:
-        def generate_strict_consensus_label(df, label_prefix='label_v'):
-            """
-            Dissertation logic: extremely strict label consensus.
-            - All columns Positive -> Signal.POSITIVE (2)
-            - All columns Negative -> Signal.NEGATIVE (0)
-            - All columns Neutral  -> Signal.NEUTRAL (1)
-            - Otherwise (mixed directions or trend-to-range transitions) -> Signal.INVALID (-1)
-            """
-            label_cols = [c for c in df.columns if c.startswith(label_prefix)]
-            if not label_cols:
-                return df
-
-            # Check whether all label columns agree on each row.
-            # .nunique(axis=1) == 1 means all label_vXX columns point to the same outcome.
-            is_unanimous = df[label_cols].nunique(axis=1) == 1
-            df[label_col] = common.Signal.INVALID
-            
-            # Only rows with full consensus inherit the shared label value (0, 1, or 2).
-            df.loc[is_unanimous, label_col] = df.loc[is_unanimous, label_cols[0]]
-            
-            return df
-        for v_range in np.arange(0.1, 3.1, 0.1).round(1):
-            para.vol_multiplier_long = v_range
-            para.stop_multiplier_rate_long = None
-            para.vol_multiplier_short = v_range
-            para.stop_multiplier_rate_short = None
-            label_suffix = f"v{int(round(v_range * 10)):02d}"
-            df = common.attach_label(df, para=para, label_col=f'label_{label_suffix}')
-            # Call after the loop finishes
-        df = generate_strict_consensus_label(df)
 
     # ---------------- Summary statistics ----------------
     start_time = df['open_time_date_utc'].iloc[0]

@@ -14,7 +14,7 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 
 from data_process import common, preparation
-from Quant.model import train_2head
+from model import train
 
 # ==============================================================================
 # 🧬 GA 核心参数配置 (语义化调优版)
@@ -50,7 +50,7 @@ def train_worker(result_queue, sub_config_list, data_cfg, train_cfg, model_cfg):
         worker_logger.setLevel(logging.WARNING)
         
         # 运行训练
-        metrics = train_2head.run_training(
+        metrics = train.run_training(
             sub_config_list, 
             worker_logger, 
             data_cfg, 
@@ -80,12 +80,12 @@ class GroupGAOptimizer:
         self.start_gen = 0
         
         # 配置文件初始化
-        self.data_cfg = train_2head.DataConfig()
-        self.train_cfg = train_2head.TrainConfig()
+        self.data_cfg = train.DataConfig()
+        self.train_cfg = train.TrainConfig()
         self.train_cfg.stride = 16
         self.train_cfg.epochs = 5      # GA 搜索时用较少 Epoch 快速验证
         self.train_cfg.use_cache = False # 必须关闭缓存，因为特征组合变了
-        self.model_cfg = train_2head.ConvLSTMConfig()
+        self.model_cfg = train.ConvLSTMConfig()
         
         # 存档路径
         self.checkpoint_path = os.path.join(common.TEMPORARY_DIR, "ga_checkpoint.pkl")

@@ -17,7 +17,7 @@ sys.path.append(os.path.join(current_work_dir, "..", '..' , '..'))
 from data_process import common
 from data_process.common import FeatureFactory
 from model import model_loader
-from model.train_2head import TrainConfig
+from model.train import TrainConfig
 from trade.strategy.strategy_ml import FtmoBrain, MarketState, PositionDir, ActionType, Signal
 from trade.market.ftmo import mt5_executor
 from trade.market.bybit.bybit_executor import BybitExecutor 

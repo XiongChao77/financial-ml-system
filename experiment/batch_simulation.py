@@ -28,7 +28,7 @@ import batch_train
 from data_process import common
 from data_process.utils import param_hash
 from trade.bt import simulation
-from model.train_2head import fusion_trigger_dir,TrainTask
+from model.train import fusion_trigger_dir,TrainTask
 from model import model_loader
 from model import data_loader
 

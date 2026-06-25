@@ -167,7 +167,7 @@ def _config_from_dict_train(train_params: Dict[str, Any]):
     Restore TrainConfig from dict stored in task spec.
     Intentionally ignores nested model_cfg/data_cfg dicts in spec (those fields are dataclasses).
     """
-    import model.train_2head as train
+    import model.train as train
 
     t_cfg = train.TrainConfig()
     for k, v in (train_params or {}).items():
@@ -307,7 +307,7 @@ def collect_param_sweep(task_spec):
     }
 
 def construct_task_doge():
-    import model.train_2head as train
+    import model.train as train
     preparation_task: List[Any] = []
 
     for pn in [16,24,32]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
@@ -365,7 +365,7 @@ def construct_task_doge():
     return preparation_task, training_task
 
 def construct_task_eth():
-    import model.train_2head as train
+    import model.train as train
     preparation_task: List[Any] = []
 
     for cn in [12,16]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
@@ -483,7 +483,7 @@ def _train_task(
 ):
     """Run a single train in its own process."""
     logger = _worker_logger(worker_log_file)
-    import model.train_2head as train
+    import model.train as train
 
     pre_h = item["pre_h"]
     tr_h = item["tr_h"]

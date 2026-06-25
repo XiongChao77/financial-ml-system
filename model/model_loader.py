@@ -48,6 +48,7 @@ class ModelHandler(MetaConfig):
             
         if not os.path.exists(task_desc_path):
             raise FileNotFoundError(f"Task Description not found: {task_desc_path}")
+        
             
         with open(task_desc_path, "r", encoding="utf-8") as f:
             self.task_desc = json.load(f)
@@ -57,7 +58,7 @@ class ModelHandler(MetaConfig):
         self.sub_model_conf :dict[str,MetaConfig]= {}
         
         # 2. Initialize by task type
-        self.logger.info(f"🚀 Loading Task: {self.task_type.upper()}")
+        self.logger.info(f"🚀 Loading Task: {self.task_type.upper()} from {task_desc_path}")
         
         if self.task_type == TrainTask.SINGLE_MODEL_3CLASS:
             self._load_3class_mode()

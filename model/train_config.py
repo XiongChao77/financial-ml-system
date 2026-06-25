@@ -340,6 +340,6 @@ feature_conf_list = [
 # SingleModelTrainConfig = TrainConfig(model_cfg = LogisticConfig(model_version= 1))
 # SingleModelTrainConfig = TrainConfig(model_cfg = TransformerConfig(model_version= 1))
 seq_len = 128
-SingleModelTrigger = TrainConfig(model_cfg = TransformerConfig(model_version= 1,seq_len=seq_len))
-SingleModelDirection = TrainConfig(model_cfg = TransformerConfig(model_version= 1,seq_len=seq_len))
+SingleModelTrigger = TrainConfig(model_cfg = ConvLSTMConfig(model_version= 1,seq_len=seq_len))
+SingleModelDirection = TrainConfig(model_cfg = LogisticConfig(model_version= 1,seq_len=seq_len))
 train_task_config = TrainTask.SINGLE_MODEL_TRIGGER

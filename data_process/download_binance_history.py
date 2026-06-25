@@ -15,11 +15,7 @@ from itertools import islice
 # Keep the original current_work_dir logic
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir, '..'))
-try:
-    from common import PROJECT_DATA_DIR
-except ImportError:
-    # If common module isn't found, default to a local data folder
-    PROJECT_DATA_DIR = os.path.join(current_work_dir, "data")
+PROJECT_DATA_DIR = os.path.join(current_work_dir, "data")
 
 # Configuration
 BASE_URL = "https://api.binance.com"
@@ -92,6 +88,7 @@ class BinanceDownloader:
         self.session = requests.Session()
         self.guard = RateLimitGuard()
         self.csv_path = os.path.join(out_dir, f"{self.symbol}_{self.interval}.csv")
+        print(f"output file path:{self.csv_path}")
 
     def fetch_chunk(self, start_time, end_ms):
         self.guard.wait_if_needed()
@@ -200,7 +197,7 @@ if __name__ == "__main__":
     parser.add_argument("--symbols", nargs='+', default=["DOGEUSDT"], 
                         help="List of symbols: BTCUSDT ETHUSDT ...")    #BTCUSDT  ETHUSDT  DOGEUSDT SOLUSDT BNBUSDT TRXUSDT XRPUSDT  SUIUSDT ADAUSDT
     # Multiple intervals separated by spaces
-    parser.add_argument("--intervals", nargs='+', default=["15m"], 
+    parser.add_argument("--intervals", nargs='+', default=["30m"], 
                         help="List of intervals: 1m 1h 1d ...")
     parser.add_argument("--dir", default=PROJECT_DATA_DIR)
     parser.add_argument("--update", action="store_true", default=True)

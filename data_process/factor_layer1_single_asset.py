@@ -25,7 +25,7 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir, '..'))
-import model.train_2head as train
+import model.train as train
 import data_process.common as common
 from model import data_loader
 EPS = 1e-12
