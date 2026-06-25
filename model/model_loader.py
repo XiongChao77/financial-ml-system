@@ -564,6 +564,32 @@ class ModelHandler(MetaConfig):
             "matrix": cm.tolist(),                  # list[list[int]]
         }
 
+        # ===== Precision lift vs base rate =====
+        precision_lift = {}
+
+        n_total_true = len(y_true)
+
+        for cls in labels:
+            cls_int = int(cls)
+
+            true_count = int(np.sum(y_true == cls))
+            base_rate = float(true_count / n_total_true) if n_total_true > 0 else 0.0
+
+            cls_key = str(cls_int)
+            cls_report = stats["classification_report"].get(cls_key, {})
+            precision = float(cls_report.get("precision", 0.0))
+
+            lift = precision / base_rate if base_rate > 0 else None
+
+            precision_lift[cls_int] = {
+                "precision": precision,
+                "base_rate": base_rate,
+                "lift": lift,
+                "lift_pct": float((lift - 1.0) * 100.0) if lift is not None else None,
+            }
+
+        stats["precision_lift"] = precision_lift
+        
         # ===== Distribution info =====
         unique_t, cnt_t = np.unique(y_true, return_counts=True)
         unique_p, cnt_p = np.unique(y_pred, return_counts=True)

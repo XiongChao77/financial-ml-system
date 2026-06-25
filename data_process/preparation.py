@@ -9,25 +9,24 @@ sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 
 def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine(), prep_output_dir =common.DATA_OUT_DIR ):
-    file = os.path.join(common.PROJECT_DATA_DIR, para.trading_type ,f"{para.symbol}_{para.interval}.csv")
+    file = os.path.join(common.PROJECT_DATA_DIR,para.market_category, para.data_source ,para.trading_type ,f"{para.symbol}_{para.interval}.csv")
     logger.info(f"using file :{file}")
     # 1. Convert interval string to milliseconds
     interval_ms = common.get_interval_ms(para.interval)
     
     # 2. Persist metadata for labeling and downstream model usage
     df = pd.read_csv(file)
-    # Rows with volume==0 typically have little impact on price, so dropping them often won't hurt training/testing.
-    # In real-world feeds, volume==0 can exist; we keep them by default.
-    # Feature engineering must explicitly handle volume==0 cases.
     df = common.clean_data_quality_auto(df,logger)  
     # 3. Pass interval_ms to label logic so it can adapt its volatility window to the real time span.
     label_col = 'label'
     function =0
     if function==0:
         df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
-        # common.attach_label(df, para=para,label_col = label_col)
         # common.print_zret_statistics(df)
-        df = common.attach_label(df, para=para,label_col = label_col)
+        if para.label_type == 'FTHL':
+            df = common.attach_label(df, para=para,label_col = label_col)
+        elif para.label_type == 'TBM':
+            df = common.attach_triple_barrier_label(df, para=para,label_col = label_col)
         # common.print_label_performance_stats(df, para)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
@@ -123,4 +122,4 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
 if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     logger, _ = common.setup_session_logger(sub_folder='data_process')
-    main(logger,common.FEATURE_GROUP_LIST)
+    main(logger,common.FEATURE_GROUP_LIST, para= common.DOGE_30m)

@@ -42,6 +42,9 @@ os.makedirs(DATA_OUT_DIR, exist_ok=True)
 
 @dataclass
 class BaseDefine:
+    #data source
+    market_category: str = "Cryptocurrency"   # cryptocurrency / Stock / Forex
+    data_source: str = "binance_public_data"                   # binance / yahoo / dukascopy
     # model / data
     vol_ewma_span: int  = 80
     predict_num: int = 16
@@ -51,15 +54,19 @@ class BaseDefine:
     vol_multiplier_short: float = 1.7
     stop_multiplier_rate_short: Optional[float] = None
     # market
-    symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT
-    interval: str = "15m"
-    trading_type:str ='um'             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures)   
+    symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT XAUUSD
+    interval: str = "30m"
+    trading_type:str ='um'             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures) 
+    label_type:str = 'FTHL' # TBM / FTHL
     version:float = 0.1
+
+DOGE_15m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="15m", trading_type='um', label_type = 'FTHL')
+DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='um', label_type = 'FTHL')
+XAU_15m = BaseDefine(market_category="Forex", data_source="dukascopy", symbol="XAUUSD", interval="15m", trading_type='spot', label_type = 'FTHL')
 
 log_level = logging.INFO
 
-PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData','Cryptocurrency','binance_public_data')
-origin_data_path = os.path.join(PROJECT_DATA_DIR, f"{BaseDefine.symbol}_{BaseDefine.interval}.csv")
+PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData')
 train_data_path = os.path.join(DATA_OUT_DIR, "train_data.csv")
 test_data_path  = os.path.join(DATA_OUT_DIR, "test_data.csv")
 data_config_path  = os.path.join(DATA_OUT_DIR, "data_config_meta.json")
@@ -69,37 +76,6 @@ EXPERIMENT_DIR = os.path.join(PROJECT_DATA_DIR, "experiment")
 os.makedirs(EXPERIMENT_DIR, exist_ok=True)
 
 CONF_DF = 'to_feather'#/'to_feather'/'to_csv'
-
-def save_train_df(df):
-    if os.path.exists(train_data_path):
-        os.remove(train_data_path)
-    if CONF_DF == 'to_csv':
-        df.to_csv(train_data_path, index=False, encoding="utf-8")
-    else:
-        df.columns = df.columns.astype(str)
-        df.to_feather(train_data_path)
-
-
-def load_train_df():
-    if CONF_DF == 'to_csv':
-        return pd.read_csv(train_data_path, encoding="utf-8")
-    else:
-        return pd.read_feather(train_data_path)
-
-def save_test_df(df):
-    if os.path.exists(test_data_path):
-        os.remove(test_data_path)
-    if CONF_DF == 'to_csv':
-        df.to_csv(test_data_path, index=False, encoding="utf-8")
-    else:
-        df.columns = df.columns.astype(str)
-        df.to_feather(test_data_path)
-
-def load_test_df():
-    if CONF_DF == 'to_csv':
-        return pd.read_csv(test_data_path, encoding="utf-8")
-    else:
-        return pd.read_feather(test_data_path)
 
 # ---------- Per-directory read/write (for batch multiprocessing: each preparation uses its own directory) ----------
 def _data_path_in_dir(base_dir, name):

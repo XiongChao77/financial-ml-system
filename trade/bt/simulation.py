@@ -451,8 +451,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     rc_df = rolling_calmar(df,window_days=180, step_days=30 )
     rc_summary = summarize_rolling_calmar(rc_df)
 
-    lost_longest = trades.streak.lost.longest
-    won_longest = trades.streak.won.longest
+    lost_longest = safe_get(trades, ["streak", "lost", "longest"], 0)
+    won_longest = safe_get(trades, ["streak", "won", "longest"], 0)
     # --- 读取日内回撤数据 ---
     max_daily_dd = perf.get('max_daily_dd', 0.0) # 例如 -0.045
     max_daily_date = perf.get('max_daily_dd_date', 'N/A')
@@ -480,7 +480,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     total_trades = safe_get(trades, ["total", "closed"], 0)
     total_won = safe_get(trades, ["won", "total"], 0)
     total_lost = safe_get(trades, ["lost", "total"], 0)
-    win_rate = (total_won / total_trades * 100) if total_trades > 0 else 0.0
+    win_rate = (total_won / total_trades) if total_trades > 0 else 0.0
 
     # 【修正1】Profit Factor 正确计算
     # PF = 总盈利金额 / 总亏损金额绝对值
@@ -508,8 +508,12 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     daily_trades = total_trades / total_days
 
     # 计算平均值 (*100 转为百分比)
-    avg_pct_gross = avg_pnl_gross /(avg_cost/2) * para.commission
-    avg_pct_net = avg_pnl_net / (avg_cost/2) * para.commission
+    if total_trades > 0 and abs(avg_cost) > 1e-12:
+        avg_pct_gross = avg_pnl_gross / (avg_cost / 2) * para.commission
+        avg_pct_net = avg_pnl_net / (avg_cost / 2) * para.commission
+    else:
+        avg_pct_gross = 0.0
+        avg_pct_net = 0.0
 
     # ============================================================
     # --- 1. 多头统计 (Long) ---
@@ -684,7 +688,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     logger.info(
         f"TRADES  | Total: {report['trades']['total']} "
         f"| Freq: {report['trades']['daily_freq']:.2f} trades/day "
-        f"| WinRate: {report['trades']['win_rate']:.2f}% "
+        f"| WinRate: {report['trades']['win_rate']*100:.2f}% "
         f"| lost_longest: {report['trades']['lost_longest']} "
         f"| won_longest: {report['trades']['won_longest']}"
     )
