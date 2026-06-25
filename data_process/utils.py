@@ -242,7 +242,7 @@ def config_from_dict_train(train_params: Dict):
     Restore TrainConfig from dict stored in task spec.
     Intentionally ignores nested model_cfg/data_cfg dicts in spec (those fields are dataclasses).
     """
-    import model.train_2head as train
+    import model.train as train
 
     t_cfg = train.TrainConfig()
     for k, v in (train_params or {}).items():

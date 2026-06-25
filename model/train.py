@@ -2018,11 +2018,11 @@ def main(logger: logging.Logger,train_task:TrainTask, train_cfg=TrainConfig(), p
 if __name__ == "__main__":
     logger, _ = common.setup_session_logger(sub_folder='train', file_level = logging.DEBUG)
     begin_time = time.time()
-    save_dir =  os.path.join(common.TRAIN_OUT_DIR,train_task_config)
-    main(logger,train_task_config,SingleModelTrigger,save_dir = save_dir)
+    # save_dir =  os.path.join(common.TRAIN_OUT_DIR,train_task_config)
+    # main(logger,train_task_config,SingleModelTrigger,save_dir = save_dir)
     save_dir =  os.path.join(common.TRAIN_OUT_DIR)
     # fusion_long_short_ovr(logger,r"/home/chao/work/Quant/output/train/SINGLE_MODEL_LONG_OVR", r"/home/chao/work/Quant/output/train/SINGLE_MODEL_SHORT_OVR",save_dir)
-    # run_task_trade_direction(logger, TrainTask.TRIGGER_DIR, SingleModelTrigger, SingleModelDirection, save_dir = save_dir)
+    run_task_trade_direction(logger, TrainTask.TRIGGER_DIR, SingleModelTrigger, SingleModelDirection, save_dir = save_dir)
     fusion_trigger_dir(logger,
                        os.path.join(save_dir,TrainTask.SINGLE_MODEL_TRIGGER),
                        os.path.join(save_dir,TrainTask.SINGLE_MODEL_DIR),
