@@ -209,3 +209,47 @@ def dump_params_json(obj, logger):
         raise TypeError(f"Unsupported config type: {type(obj)}")
 
     logger.info("Params | " + json.dumps(data, indent=2, ensure_ascii=False))
+
+def load_reports(path):
+    """
+    Read jsonl file line by line and skip malformed lines.
+    """
+    reports = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                reports.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return reports
+
+def make_model_cfg(d):
+    from model import train_config
+    from dataclasses import fields
+    model_type = d.get("model_type")
+
+    for cls in train_config.BaseModelConfig.__subclasses__():
+        obj = cls()
+        if obj.model_type == model_type:
+            valid_keys = {f.name for f in fields(cls)}
+            kwargs = {k: v for k, v in d.items() if k in valid_keys}
+            return cls(**kwargs)
+
+    raise ValueError(f"Unknown model_type: {model_type}")
+
+def config_from_dict_train(train_params: Dict):
+    """
+    Restore TrainConfig from dict stored in task spec.
+    Intentionally ignores nested model_cfg/data_cfg dicts in spec (those fields are dataclasses).
+    """
+    import model.train_2head as train
+
+    t_cfg = train.TrainConfig()
+    for k, v in (train_params or {}).items():
+        if k == "model_cfg" and isinstance(v, dict):
+            t_cfg.model_cfg = make_model_cfg(v)
+        elif k == "data_cfg" and isinstance(v, dict):
+            t_cfg.data_cfg = train.DataConfig(**v)
+        elif hasattr(t_cfg, k):
+            setattr(t_cfg, k, v)
+    return t_cfg
