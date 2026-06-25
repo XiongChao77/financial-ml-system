@@ -151,7 +151,7 @@ def _config_from_dict_train(train_params: Dict[str, Any]):
     Restore TrainConfig from dict stored in task spec.
     Intentionally ignores nested model_cfg/data_cfg dicts in spec (those fields are dataclasses).
     """
-    import model.train_2head as train
+    import model.train as train
 
     t_cfg = train.TrainConfig()
     for k, v in (train_params or {}).items():
@@ -300,7 +300,7 @@ def collect_param_sweep(task_spec):
     }
 
 def construct_task_doge():
-    import model.train_2head as train
+    import model.train as train
     from trade.bt import simulation
     preparation_task: List[Any] = []
 
@@ -368,7 +368,7 @@ def construct_task_doge():
     return preparation_task, training_task, simulation_task
 
 def construct_task_eth():
-    import model.train_2head as train
+    import model.train as train
     from trade.bt import simulation
     preparation_task: List[Any] = []
 
@@ -495,7 +495,7 @@ def _train_task(
 ):
     """Run a single train in its own process, then enqueue sims."""
     logger = _worker_logger(worker_log_file)
-    import model.train_2head as train
+    import model.train as train
 
     pre_h = item["pre_h"]
     tr_h = item["tr_h"]
@@ -913,7 +913,7 @@ def main():
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         records = common.load_selected_configs(selected_configs)  # just to validate file and format
         from trade.bt import simulation
-        import model.train_2head as train
+        import model.train as train
         exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "load_configs")
         os.makedirs(exp_dir, exist_ok=True)
         logger = _setup_root_logger(exp_dir)

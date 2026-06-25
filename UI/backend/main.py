@@ -12,27 +12,28 @@ from data_process import common
 app = FastAPI()
 logger, _= common.setup_session_logger(sub_folder='backend',console_level= logging.INFO, file_level = logging.DEBUG)
 
-report_file = r'/home/chao/work/quant_output/batch_train/DOGEUSDT_30m/2026-06-25/04_09_15/batch_simulation/report_view/selected_configs.jsonl'
-report = common.load_reports(report_file)
-simulation_result = report[0]['raw'].get("simulation", report)
-short = simulation_result.get("short", report)
-sim_params = short['params']['strategy']
-pre_params = short['params']['common']
-train_params = short['params']['train']
-fusion_dir = common.recursive_get(report, 'fusion_dir')
-prep_output_dir = common.recursive_get(report, 'prep_output_dir')
+# report_file = r'/home/chao/work/quant_output/batch_train/DOGEUSDT_30m/2026-06-25/04_09_15/batch_simulation/report_view/selected_configs.jsonl'
+# report = common.load_reports(report_file)
+# simulation_result = report[0]['raw'].get("simulation", report)
+# short = simulation_result.get("short", report)
+# sim_params = short['params']['strategy']
+# pre_params = short['params']['common']
+# train_params = short['params']['train']
+# fusion_dir = common.recursive_get(report, 'fusion_dir')
+# prep_output_dir = common.recursive_get(report, 'prep_output_dir')
+# result = simulation.main(
+#                 logger,
+#                 para=simulation.StrategyPara(**sim_params),
+#                 pre_para=common.BaseDefine(**pre_params),
+#                 train_cfg=common.config_from_dict_train(train_params),
+#                 prep_output_dir=prep_output_dir,
+#                 train_output_dir=fusion_dir,
+#                 device='cpu',
+#                 period='long',
+#             )
 
-# result = simulation.main(logger)
-result = simulation.main(
-                logger,
-                para=simulation.StrategyPara(**sim_params),
-                pre_para=common.BaseDefine(**pre_params),
-                train_cfg=common.config_from_dict_train(train_params),
-                prep_output_dir=prep_output_dir,
-                train_output_dir=fusion_dir,
-                device='cpu',
-                period='long',
-            )
+result = simulation.main(logger)
+
 candles = result["candles"]
 markers = result["markers"]
 statistics = result["statistics"][0]  # full report

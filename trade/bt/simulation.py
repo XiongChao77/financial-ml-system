@@ -19,7 +19,7 @@ from data_process import common
 from model import model_loader
 from model import data_loader
 from trade.bt import cus_analyzer, cus_comminfo, result_analyze
-from model import train_2head
+from model import train
 from model import train_config
 from trade.bt.bt_trade_ml import BtFtmoStrategy
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
@@ -98,7 +98,7 @@ class StrategyPara:
     decide_version : int = 0
 
 # period: short / forward / long
-def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train_2head.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = os.path.join(common.TRAIN_OUT_DIR, train_config.train_task_config),
+def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
          device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'short'):
     logger.info(f"prep_output_dir:{prep_output_dir}, train_output_dir:{train_output_dir}")
     if period == 'short' or period == 'forward':
@@ -419,7 +419,7 @@ def summarize_rolling_calmar(rc_df: pd.DataFrame) -> dict:
     return out
 
 
-def generate_backtest_report(logger,strat, model_stats, save_path, para:StrategyPara,pre_para:BaseDefine,train_cfg:train_2head.TrainConfig):
+def generate_backtest_report(logger,strat, model_stats, save_path, para:StrategyPara,pre_para:BaseDefine,train_cfg:train.TrainConfig):
     """
     修复版报告生成器：
     1. 修正 Profit Factor 计算公式 (Gross Won / Gross Lost)

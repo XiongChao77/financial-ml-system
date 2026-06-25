@@ -1,12 +1,9 @@
-# Quant Trading System
+# Machine Learning Trading System
 
 An end-to-end quantitative trading system built around market data processing, feature engineering, machine-learning signal generation, backtesting, risk control, and visualization.
 
 ## Overview
-
-This project is a quantitative trading system with a strong focus on AI/ML engineering. It is designed to explore how financial time-series data can be transformed into tradable signals and how those signals behave after they are passed through execution rules, holding logic, transaction costs, and risk controls.
-
-The core workflow includes:
+Core workflow includes:
 
 1. Downloading and preprocessing historical market data.
 2. Building relative, volatility-aware, and market-state-aware features.
@@ -16,17 +13,95 @@ The core workflow includes:
 6. Running backtests with fees, drawdown, position logic, and risk constraints.
 7. Visualizing model signals and strategy behavior through a local UI.
 
+## Running
+### 1. Data process
+Prepare market data for model training, including data cleaning, feature engineering, labeling, and dataset generation.
+```bash
+cd data_process
+python download_binance_history.py #data format example: data_process/data_format_example.csv
+python preparation.py   #data process and labeling
+```
+
+### 2. Train model
+Train machine learning models using the prepared datasets and save the trained models and evaluation results.
+```bash
+cd model    
+python train.py
+```
+
+### 3. Backtesting 
+Evaluate trained models with a realistic trading simulation and generate performance statistics.
+```bash
+cd trade/bt
+python simulation.py
+```
+
+### 4. Web UI:
+Launch the interactive dashboard for visualizing strategy performance, trading history, and market data.
+**Backend**
+```bash
+cd financial-ml-system 
+uvicorn UI.backend.main:app --host 0.0.0.0 --port 8000
+```
+**Frontend**
+```bash
+cd UI/quant-ui
+npm install
+npm run dev
+```
+
+**Performance metrics**
+<p align="left">
+<img src="figures/backtest_performance.png" alt="Performance metrics" width="800">
+</p>
+
+**trading details view**
+<p align="left">
+<img src="figures/trading_details.png" alt="Trading details view" width="800">
+</p>
+
+### 5. Batch Experiments
+Run large-scale experiments to compare different models, features, labeling methods, and trading strategies.
+```bash
+cd experiment
+python batch_train.py
+python batch_simulation.py
+```
+**Analyze Experiment Results**
+```bash
+python trigger_direction_report_view.py
+```
+**Key Strategy Indicators**
+
+| No. | Hash | CAGR | Sharpe | Calmar | Max DD | Daily Freq | Win Rate | RC Median | RC Pos Ratio | Max DD Days |
+|----:|------|-----:|-------:|--------:|-------:|-----------:|----------:|----------:|-------------:|------------:|
+| 0 | ee9d660c | 0.17 | 0.79 | 0.61 | 27.46 | 0.42 | 47.51 | 2.32 | 0.71 | 635 |
+| 1 | 28030410 | 0.16 | 0.66 | 0.48 | 34.52 | 0.71 | 48.33 | 0.99 | 0.65 | 730 |
+| 2 | 975ddee1 | 0.15 | 0.77 | 0.60 | 24.63 | 0.35 | 47.59 | 2.11 | 0.67 | 638 |
+| 3 | 12472346 | 0.12 | 0.82 | 0.59 | 20.81 | 0.33 | 50.92 | 1.28 | 0.73 | 591 |
+| 4 | d04cd4bc | 0.10 | 0.61 | 0.49 | 20.36 | 0.26 | 48.12 | 2.29 | 0.71 | 664 |
+| 5 | d38acaba | 0.09 | 0.53 | 0.31 | 28.17 | 0.34 | 48.11 | 1.11 | 0.65 | 892 |
+| 6 | 76fcc1a4 | 0.08 | 0.42 | 0.21 | 37.45 | 0.59 | 47.39 | 0.01 | 0.51 | 809 |
+| 7 | 02adabb7 | 0.08 | 0.58 | 0.48 | 16.56 | 0.28 | 50.22 | 0.65 | 0.55 | 427 |
+| 8 | 84e696b1 | 0.08 | 0.44 | 0.19 | 40.71 | 0.52 | 49.47 | 0.09 | 0.51 | 1133 |
+| 9 | 13233087 | 0.08 | 0.85 | 0.96 | 7.93 | 0.09 | 60.78 | 1.87 | 0.78 | 231 |
+
+**Equity Curve and Market Price**
+<p align="left">
+<img src="figures/strategy_view.png" alt="Equity Curve and Market Price" width="800">
+</p>
+
 ## Project Structure
 
 ```text
-Quant/
+
 ├── data_process/          # Data download, cleaning, feature construction, preprocessing
 ├── model/                 # Model training, evaluation, feature selection, experiment scripts
 │   ├── models/            # Model definitions
 │   └── tasks/             # Training and experiment task definitions
 ├── trade/                 # Backtesting, market interface, strategy execution logic
 │   ├── bt/                # Backtest-related modules
-│   ├── market/            # Market data / exchange interface logic
+│   ├── market/            # Market data / living trading interface
 │   └── strategy/          # Strategy rules, signal handling, position logic
 ├── experiment/            # Experiment comparison, reports, visualization, analysis scripts
 ├── UI/                    # Local UI for inspecting results and workflow outputs
@@ -118,8 +193,6 @@ Focus areas include:
 - Drawdown analysis.
 - Long/short separated performance analysis.
 
-The project treats backtesting as an engineering problem. Details such as timestamp alignment, prediction timing, fee assumptions, holding rules, and signal overwrite logic can completely change the result of an experiment.
-
 ### Local UI
 
 The repository includes a local UI for inspecting experiments and strategy behavior.
@@ -131,43 +204,6 @@ The UI is used to:
 - Inspect model signals.
 - Visualize whether signals match market movement.
 - Support faster iteration during model and strategy development.
-
-## Evaluation Philosophy
-
-A major lesson from this project is that better ML metrics do not always produce better trading results.
-
-The project uses standard classification metrics as diagnostic tools, but final strategy selection is based on metrics closer to trading objectives.
-
-### ML Metrics
-
-| Metric | Meaning |
-| --- | --- |
-| Precision | Among predicted positive samples, the proportion that is truly positive |
-| Recall | Among true positive samples, the proportion correctly predicted |
-| F1-score | Harmonic mean of precision and recall |
-| Accuracy | Overall proportion of correct predictions |
-| Macro Average | Equal-weighted average across classes |
-| Weighted Average | Class-size-weighted average across classes |
-
-### Trading-Oriented Metrics
-
-More important evaluation metrics include:
-
-- Total return.
-- Fee-adjusted return.
-- Maximum drawdown.
-- Sharpe ratio.
-- Profit factor.
-- Win rate.
-- Fee-adjusted win rate.
-- Average profit / average loss.
-- Trade count.
-- Average holding period.
-- Long/short separated returns.
-- Regime-specific performance.
-- Stability across assets and time windows.
-
-The long-term direction is to select parameters and models using return-like evaluation metrics instead of relying only on loss, F1, or recall.
 
 ## Validation Methods
 
@@ -192,112 +228,12 @@ If a parameter only works on one asset and fails everywhere else, it is likely o
 
 Signals can also be tested across different K-line periods to check whether they capture a robust market pattern or only fit one sampling interval.
 
-## Engineering Challenges Addressed
-
-This project contains several practical issues that often appear in AI-driven trading systems:
-
-- Model precision and recall can improve while backtest performance gets worse.
-- F1, accuracy, and recall may be negatively correlated with trading returns.
-- Weighted precision may be more useful than general classification metrics in some cases.
-- A model is not a strategy; signal generation and trade execution must be evaluated separately.
-- Labels based on fixed absolute thresholds can fail under changing volatility.
-- Volatility normalization is important for cross-asset and cross-regime adaptation.
-- If both upward and downward barriers are touched during a label window, the label may become ambiguous.
-- Wrong holding logic can accidentally produce good backtest results but fail in live-like conditions.
-- Long and short confidence should not be mixed without careful interpretation.
-- Index alignment bugs between prediction and label data can invalidate experiment results.
-
-## Current Development Focus
-
-- Designing loss functions closer to trading objectives.
-- Selecting parameters using return-like evaluation metrics instead of only F1 or loss.
-- Improving long/short separated modeling.
-- Improving volatility-normalized labels.
-- Reducing the gap between backtest results and live-like market behavior.
-- Improving position sizing and single-trade risk control.
-- Improving stop-loss logic and ATR reference periods.
-- Adding better process visualization for signal inspection.
-- Increasing data coverage and testing across assets.
-- Improving the local UI for faster iteration.
-
 ## Environment
-
+```bash
 Python >= 3.10
 pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4 pytorch-ignite  colorlog backtrader pyarrow numba GitPython ignite
-pip install MetaTrader5 pybit
-
-For the frontend UI:
-
-```bash
-cd UI/quant-ui
-npm install
+pip install MetaTrader5 pybit    # for live trading
 ```
-
-## Example Workflow
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/XiongChao77/Quant.git
-cd Quant
-```
-
-### 2. Download historical data
-
-```bash
-cd data_process
-python download_binance_history.py
-```
-
-### 3. Prepare data
-
-```bash
-cd ../model
-python preparation.py
-```
-
-### 4. Train model
-
-```bash
-python train_2model.py
-```
-
-Other experiment scripts may include:
-
-```bash
-python train_2head.py
-python train_experiments.py
-```
-
-### 5. Evaluate model
-
-```bash
-python evaluate_test_set.py
-```
-
-### 6. Run backtest / simulation
-
-```bash
-cd ../trade
-python simulation.py
-```
-
-### 7. Run local UI
-
-Backend:
-
-```bash
-cd ..
-uvicorn UI.backend.main:app --reload
-```
-
-Frontend:
-
-```bash
-cd UI/quant-ui
-npm run dev
-```
-
 > Some entry points may change as the system evolves.
 
 ## Technical Highlights

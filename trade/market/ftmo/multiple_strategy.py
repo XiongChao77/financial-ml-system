@@ -15,7 +15,7 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", '..' , '..'))
 
 from data_process import common
-from model.train_2head import TrainConfig
+from model.train import TrainConfig
 from trade.bt.simulation import StrategyPara
 from data_process.common import FeatureFactory
 from model.data_loader import TimeSeriesWindowDataset
