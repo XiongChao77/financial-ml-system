@@ -10,7 +10,9 @@ from model.models.tcn_v1 import TCN1D_V1
 from model.models.mamba_v1 import Mamba1D_V1
 from model.models.binary.lstm import LSTM1D_V1          
 from model.models.binary.lstm_v2 import LSTM1D_V2      # V2
+from model.models.binary.lstm_v5 import LSTM1D_V5      # V2
 from model.models.lstm_v3 import LSTM1D_V3      # V3  > V1 > V2
+from model.models.lstm_v4 import LSTM1D_V4      #
 from model.models.lstm_v4 import LSTM1D_V4      #
 from model.models.binary.conv_lstm_v1 import ConvLSTM1D_V1
 from model.models.conv_lstm_v2 import ConvLSTM1D_V2
@@ -38,6 +40,7 @@ class ModelFactory:
         Mamba1D_V1,
         LSTM1D_V1,
         LSTM1D_V2,
+        LSTM1D_V5,
         LSTM1D_V3,  #good
         LSTM1D_V4,  #good
         ConvLSTM1D_V1,

@@ -49,7 +49,7 @@ SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 2  # max concurrent train processes (each train runs in its own process)
 SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
-INTERVAL: str = "15m"
+INTERVAL: str = "30m"
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -310,21 +310,14 @@ def construct_task_doge():
     import model.train_2head as train
     preparation_task: List[Any] = []
 
-    for pn in [16]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-        for vol_multiplier in [1.7,1.8,1.9,2.0]:#1.8,1.9,2
+    for pn in [16,24,32]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
+        for vol_multiplier in [1.6,1.7,1.8]:#,1.8,1.9,2.0]:#1.8,1.9,2
             for vol_ewma_span in [80]:
                 preparation_task.append(common.BaseDefine(
-                        vol_ewma_span = vol_ewma_span,
-                        predict_num=pn,
-                        vol_multiplier_long=vol_multiplier,
-                        stop_multiplier_rate_long=None,
-                        vol_multiplier_short=vol_multiplier,
-                        stop_multiplier_rate_short=None,
-                        symbol=SYMBOL,   #ETHUSDT
-                        interval=INTERVAL,
-                        trading_type= 'um',
-                        version=0
-                    ))
+                        market_category = "Cryptocurrency", data_source = "binance_public_data",
+                        vol_ewma_span = vol_ewma_span, predict_num=pn,
+                        vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=None, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=None,
+                        symbol=SYMBOL,  interval=INTERVAL, trading_type= 'um', label_type = 'FTHL', version=0 ))
 
     training_task: Dict[str,List[train.TrainConfig]] = {train.TrainTask.SINGLE_MODEL_DIR:[],train.TrainTask.SINGLE_MODEL_TRIGGER:[]}
 
@@ -348,25 +341,25 @@ def construct_task_doge():
     feature_conf_list_3 = [f for f in train.feature_conf_list if f not in to_remove_3]
     feature_conf_list_4 = [f for f in train.feature_conf_list if f not in to_remove_4]
     feature_conf_list_5 = [f for f in train.feature_conf_list if f not in to_remove_5]
-    for seq_len in [96]:#in range(3*16,11*16,16): #12,16,24,32
+    for seq_len in [96,128,160]:#in range(3*16,11*16,16): #12,16,24,32
         for stride in [2]: #2,4,8
             for featrue_conf in [train.feature_conf_list]:
                 # compatibility seq_len_stride_featrue_conf
                 for model_cfg in [train_config.LogisticConfig(model_version= 1,seq_len=seq_len),
                                   train_config.ConvLSTMConfig(model_version= 1,seq_len=seq_len),
                                   train_config.LSTMConfig(model_version= 1,seq_len=seq_len),
-                                  train_config.LSTMConfig(model_version= 2,seq_len=seq_len),
-                                  train_config.TransformerConfig(model_version= 1,seq_len=seq_len),
+                                  train_config.LSTMConfig(model_version= 5,seq_len=seq_len),
+                                #   train_config.TransformerConfig(model_version= 1,seq_len=seq_len),
                                   train_config.TransformerConfig(model_version= 2,seq_len=seq_len)]:
-                    for miss_penalty in [2]:#np.arange(0.5,5, 0.5).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
-                        train_conf = train.TrainConfig(use_cache = False,epochs = 50, batch_size=256,
+                    for miss_penalty in [2,3,4]:#np.arange(0.5,5, 0.5).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
+                        train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
                                                         feature_conf_list= featrue_conf, model_cfg = model_cfg,
-                                                        miss_penalty = float(miss_penalty),stride = stride, patience = 8)
+                                                        miss_penalty = float(miss_penalty),stride = stride, patience = 5)
                         training_task[train.TrainTask.SINGLE_MODEL_TRIGGER].append(train_conf)
 
-                    train_conf = train.TrainConfig(use_cache = False,epochs = 50, batch_size=256,
+                    train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
                                                     feature_conf_list= featrue_conf, model_cfg = model_cfg,
-                                                    flip_penalty = float(1),stride = stride, patience = 8)
+                                                    flip_penalty = float(1),stride = stride, patience = 5)
                     training_task[train.TrainTask.SINGLE_MODEL_DIR].append(train_conf)
                         
     return preparation_task, training_task
@@ -588,6 +581,7 @@ def _setup_root_logger(exp_dir: str) -> logging.Logger:
 def main():
     parser = argparse.ArgumentParser(description="Batch experiments: prep -> train(with resume)")
     parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
+    parser.add_argument("-a", "--add", type=str, help="add more to exist expirement")
 
     args = parser.parse_args()
 
@@ -597,6 +591,11 @@ def main():
         if not os.path.exists(exp_dir):
             print(f"❌ Error: Resume directory not found: {exp_dir}")
             return
+    elif args.add:
+        exp_dir = os.path.join(common.PERSISTENCE_DIR, args.add)
+        if not os.path.exists(exp_dir):
+            print(f"❌ Error: add directory not found: {exp_dir}")
+            return 
     else:
         exp_dir = common.create_experiment_dir(
             os.path.join(common.PERSISTENCE_DIR, "batch_train"),
@@ -623,6 +622,9 @@ def main():
         logger.info(f"📥 Loaded from {exp_dir}")
         logger.info(f"📊 Total: {total_all} (prep={n_prep_total}, train={n_train_total})")
         logger.info(f"📊 Pending: {total_pending} (prep={n_prep}, train={n_train}), done: {total_all - total_pending}")
+    elif args.add:
+        done_set = load_done_set(reports_path)
+        task_spec = create_task_spec(logger, exp_dir, done_set)
     else:
         task_spec = create_task_spec(logger, exp_dir, None)
     if not task_spec:
