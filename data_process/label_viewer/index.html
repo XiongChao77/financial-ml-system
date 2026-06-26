@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Market Label Viewer</title>
+</head>
+
+<body>
+  <div id="app">
+    <h2>Market Label Viewer</h2>
+
+    <div class="toolbar">
+      <span id="file-info">Loading fixed CSV...</span>
+    </div>
+
+    <div class="legend">
+      <span class="legend-item short">Short / Negative: 0</span>
+      <span class="legend-item neutral">Neutral: 1</span>
+      <span class="legend-item long">Long / Positive: 2</span>
+      <span class="legend-item invalid">Invalid: -1</span>
+    </div>
+
+    <div id="chart-container"></div>
+
+    <div class="scrollbar-container">
+      <input type="range" id="time-scrollbar" min="0" step="1" value="0" />
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

@@ -21,6 +21,17 @@ cd data_process
 python download_binance_history.py #data format example: data_process/data_format_example.csv
 python preparation.py   #data process and labeling
 ```
+**Label Visualization (Optional)**
+An optional web-based tool for inspecting generated labels together with market price, thresholds, and other labeling details, making it easier to validate and debug the labeling process.
+Make sure `CONF_DF = 'to_csv'` in `data_process/common.py`.
+```bash
+cd data_process/label_viewer
+npm install
+npm run dev
+```
+<p align="left">
+<img src="figures/label_viewer.png" alt="Performance metrics" width="800">
+</p>
 
 ### 2. Train model
 Train machine learning models using the prepared datasets and save the trained models and evaluation results.

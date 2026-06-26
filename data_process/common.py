@@ -30,7 +30,7 @@ VOL_MULTIPLIER=2.0, 2σ, only ~4.6% of price moves exceed this threshold.
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR)
 TEMPORARY_DIR = os.path.join(PROJECT_DIR, 'output')
-if platform.system().lower() != 'windows':
+if False:#platform.system().lower() != 'windows':
     os.makedirs('/dev/shm/quant', exist_ok=True)
     if not os.path.islink(TEMPORARY_DIR):   os.symlink('/dev/shm/quant', TEMPORARY_DIR)  # Linux/Ubuntu: map temporary output to shared memory
 else:
@@ -39,6 +39,8 @@ PERSISTENCE_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'quant_output')
 os.makedirs(PERSISTENCE_DIR, exist_ok=True)
 DATA_OUT_DIR = os.path.join(TEMPORARY_DIR, "data")
 os.makedirs(DATA_OUT_DIR, exist_ok=True)
+LABEL_VIERER_PUBLICE_DIR = os.path.join(DATA_PROCESS_DIR,'label_viewer','public')   #for label_viewer
+if not os.path.islink(LABEL_VIERER_PUBLICE_DIR):   os.symlink(DATA_OUT_DIR, LABEL_VIERER_PUBLICE_DIR)
 
 @dataclass
 class BaseDefine:
@@ -47,7 +49,7 @@ class BaseDefine:
     data_source: str = "binance_public_data"                   # binance / yahoo / dukascopy
     # model / data
     vol_ewma_span: int  = 80
-    predict_num: int = 16
+    predict_num: int = 32
     # risk / vol
     vol_multiplier_long: float = 1.7
     stop_multiplier_rate_long: Optional[float] = None
@@ -61,7 +63,8 @@ class BaseDefine:
     version:float = 0.1
 
 DOGE_15m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="15m", trading_type='um', label_type = 'FTHL')
-DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='um', label_type = 'FTHL')
+DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='um', label_type = 'TBM',
+                      vol_ewma_span = 96, vol_multiplier_long=1, stop_multiplier_rate_long=None, vol_multiplier_short=1, stop_multiplier_rate_short=None)
 XAU_15m = BaseDefine(market_category="Forex", data_source="dukascopy", symbol="XAUUSD", interval="15m", trading_type='spot', label_type = 'FTHL')
 
 log_level = logging.INFO
@@ -75,11 +78,13 @@ os.makedirs(TRAIN_OUT_DIR, exist_ok=True)
 EXPERIMENT_DIR = os.path.join(PROJECT_DATA_DIR, "experiment")
 os.makedirs(EXPERIMENT_DIR, exist_ok=True)
 
-CONF_DF = 'to_feather'#/'to_feather'/'to_csv'
+CONF_DF = 'to_csv'#/'to_feather'/'to_csv'
 
 # ---------- Per-directory read/write (for batch multiprocessing: each preparation uses its own directory) ----------
 def _data_path_in_dir(base_dir, name):
     return os.path.join(base_dir, name)
+    
+    # return os.path.join('/home/chao/work/Quant/data_process/label_viewer/public', name)
 
 def save_train_df_to_dir(df, base_dir):
     os.makedirs(base_dir, exist_ok=True)

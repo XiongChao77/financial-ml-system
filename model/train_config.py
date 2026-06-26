@@ -106,12 +106,21 @@ class MambaConfig(BaseModelConfig):
 
 @dataclass
 class XGBoostConfig(BaseModelConfig):
-    seq_len: int = 216     # 160 best for LSTM
+    seq_len: int = 96
     model_type: str = "xgboost"
     model_version: int = 1
-    xgb_depth: int = 6
-    xgb_estimators: int = 100
-    learning_rate: float = 3e-4
+
+    xgb_depth: int = 4
+    xgb_estimators: int = 300
+    learning_rate: float = 0.03
+
+    subsample: float = 0.8
+    colsample_bytree: float = 0.8
+    reg_lambda: float = 1.0
+    reg_alpha: float = 0.0
+
+    tree_method: str = "gpu_hist"       # "hist"/"gpu_hist"  有 GPU 可改成 "gpu_hist"，取决于 xgboost 版本
+    eval_metric: str = "logloss"
 
 @dataclass
 class CNNConfig(BaseModelConfig):
@@ -144,8 +153,8 @@ class TrainConfig:
     mag_alpha: float = 0
     mag_limit: float = 4.0
     bias_lambda: float = 0.5
-    flip_penalty: float = 1.2
-    miss_penalty: float = 0.6
+    flip_penalty: float = 1
+    miss_penalty: float = 2
     false_trade: float = 1
     mag_warmup_epochs:int = 8
     temperature:float = 2.0
@@ -340,6 +349,6 @@ feature_conf_list = [
 # SingleModelTrainConfig = TrainConfig(model_cfg = LogisticConfig(model_version= 1))
 # SingleModelTrainConfig = TrainConfig(model_cfg = TransformerConfig(model_version= 1))
 seq_len = 128
-SingleModelTrigger = TrainConfig(model_cfg = ConvLSTMConfig(model_version= 1,seq_len=seq_len))
-SingleModelDirection = TrainConfig(model_cfg = LogisticConfig(model_version= 1,seq_len=seq_len))
+SingleModelTrigger = TrainConfig(model_cfg = TransformerConfig(model_version= 1,seq_len=seq_len))
+SingleModelDirection = TrainConfig(model_cfg = TransformerConfig(model_version= 1,seq_len=seq_len))
 train_task_config = TrainTask.SINGLE_MODEL_TRIGGER

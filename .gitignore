@@ -15,3 +15,6 @@ data_process/data/*
 output*
 *keys*
 launch.json
+#label_viewer
+node_modules
+data_process/label_viewer/public

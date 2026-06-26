@@ -6,6 +6,9 @@ import sys
 import json
 import logging
 import torch
+import joblib
+from xgboost import XGBClassifier
+from sklearn.metrics import log_loss
 # Path setup
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
@@ -102,7 +105,7 @@ def prepare_binary_data_for_task(X_raw, y_raw, rb_raw, train_task: TrainTask):
     if train_task == TrainTask.SINGLE_MODEL_TRIGGER:
         y_new = (y_raw != 1).long()
         return X_raw, y_new, rb_raw
-    if train_task == TrainTask.SINGLE_MODEL_DIR:
+    elif train_task == TrainTask.SINGLE_MODEL_DIR:
         mask = (y_raw != 1) # 仅保留 Long(2) 和 Short(0)
         X_filt = X_raw[mask]
         y_filt = y_raw[mask]
@@ -110,17 +113,6 @@ def prepare_binary_data_for_task(X_raw, y_raw, rb_raw, train_task: TrainTask):
         # Map: 0(Short) -> 0, 2(Long) -> 1
         y_new = (y_filt == 2).long()
         return X_filt, y_new, rb_filt
-    if train_task == TrainTask.SINGLE_MODEL_TRIGGER:
-        # Trigger: 0(Short) & 2(Long) -> 1 (Action), 1(Neutral) -> 0 (Stay)
-        y_new = (y_raw != 1).long()
-        return X_raw, y_new, rb_raw
-        
-    elif train_task == TrainTask.SINGLE_MODEL_DIR:
-        # Direction: 仅保留 0(Short) 和 2(Long)
-        mask = (y_raw != 1)
-        # 0 -> 0 (Short), 2 -> 1 (Long)
-        y_new = torch.where(y_raw[mask] == 2, 1, 0).long()
-        return X_raw[mask], y_new, rb_raw[mask]
 
     elif train_task == TrainTask.SINGLE_MODEL_LONG_OVR:
         # Long OvR: 2 -> 1, others -> 0
@@ -622,7 +614,10 @@ def run_single_model_binary_task(train_task:TrainTask, full_ds, feature_list,tra
     ds_te = SeqDataset(X_t[te_rng[0]:te_rng[1]], y_t[te_rng[0]:te_rng[1]], rb_t[te_rng[0]:te_rng[1]])
 
     # 3. 专用采样器
-    sampler_tr = get_trigger_sampler(ds_tr.labels, pos_ratio=0.3)
+    if train_task == TrainTask.SINGLE_MODEL_DIR:
+        sampler_tr = get_trigger_sampler(ds_tr.labels, pos_ratio=0.5)
+    else:
+        sampler_tr = get_trigger_sampler(ds_tr.labels, pos_ratio=0.3)
     dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, sampler=sampler_tr, shuffle=False)
     dl_va = DataLoader(ds_va, batch_size=train_cfg.batch_size, shuffle=False)
     dl_te = DataLoader(ds_te, batch_size=train_cfg.batch_size, shuffle=False)
@@ -709,8 +704,10 @@ def run_training(train_task:TrainTask,feature_direction_map, logger: logging, da
         return run_single_model_binary_task(train_task, full_ds, feature_list,train_cfg_1, data_cfg, device, logger, save_dir, experiment)
     elif train_task == TrainTask.TRIGGER_DIR:
         tri_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_TRIGGER)
+        set_seed(train_cfg_1.seed)
         run_single_model_binary_task(TrainTask.SINGLE_MODEL_TRIGGER, full_ds, feature_list,train_cfg_1, data_cfg, device, logger, tri_save_dir, experiment)
         dir_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_DIR)
+        set_seed(train_cfg_2.seed)
         run_single_model_binary_task(TrainTask.SINGLE_MODEL_DIR, full_ds, feature_list,train_cfg_2, data_cfg, device, logger, dir_save_dir, experiment)
 
     else:
