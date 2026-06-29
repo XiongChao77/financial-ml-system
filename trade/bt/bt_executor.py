@@ -9,8 +9,8 @@ from trade.strategy.base_executor import BaseExecutor
 
 class BtExecutor(BaseExecutor,bt.Strategy):
     params = dict(
-        stop_loss = 0.05,  # 5% 止损
-        take_profit = 0.50, # 10% 止盈 (可选)
+        stop_loss_pct = 0.05,  # 5% 止损
+        atr_tp = 0.50, # 10% 止盈 (可选)
         trade_risk = 1,
     )
 
@@ -21,14 +21,15 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         self.live_trades = []
         self.closed_pnl = []
 
-    def user_order(self, size, is_buy, stop_loss=None, take_profit=None):
-        self._open_bracket(abs(size), is_buy=is_buy, stop_loss=stop_loss, take_profit= take_profit)
+    def user_order(self, size, is_buy, stop_loss_pct=None, take_profit_pct=None):
+        self._open_bracket(abs(size), is_buy=is_buy, stop_loss_pct=stop_loss_pct, take_profit_pct= take_profit_pct)
 
     def user_close(self, size=None, **kwargs):
         self.logger.debug(f"user_close ammount :{size}")
         current_size = self.position.size
         if size is None or size >= current_size:
-            self.close(**kwargs) # 全平仓位
+            close_order = self.close(**kwargs)
+            close_order.addinfo(role="close", close_type="full")
             self._cancel_all_live_orders() # 辅助函数：取消所有挂单
             self.live_trades.clear() 
         else:
@@ -97,63 +98,127 @@ class BtExecutor(BaseExecutor,bt.Strategy):
         # 因为 trade_logs 是按单(order)记的，而这里是按回合(trade)记的。
         # 通常建议单独存一个 closed_trades 列表。
 
-    def _open_bracket(self, size, is_buy, stop_loss=None, take_profit=None):
+    def _open_bracket(self, size, is_buy, stop_loss_pct, take_profit_pct):
         """执行 Bracket 下单并记录返回值"""
         price = self.data.close[0]
-        if stop_loss is None:
-            actual_stop_loss = 0.99
-        else:
-            actual_stop_loss = stop_loss
-
         args = {}
+
         if is_buy:
-            stop_price = price * (1.0 - actual_stop_loss)
-            if take_profit == None: 
-                limit_price = None
-                args['limitexec'] = None
-            else:    limit_price = price * (1.0 + take_profit)
-            self.logger.debug(f"_open_bracket price:{price},size:{size} , stop_price{stop_price}, limit_price {limit_price}, actual_stop_loss:{actual_stop_loss}")
-            if limit_price != None:
-                self.logger.error(f"_open_bracket limit_price:{limit_price}")
-            # returns: [Main, Stop, Limit]
+            stop_price = price * (1.0 - stop_loss_pct)
+            limit_price = price * (1.0 + take_profit_pct)
+
+            self.logger.debug(
+                f"_open_bracket price:{price}, size:{size}, "
+                f"stop_price:{stop_price}, limit_price:{limit_price}, "
+                f"stop_loss_pct:{stop_loss_pct}"
+            )
+
             orders = self.buy_bracket(
-                size=size, 
-                price=price, 
-                stopprice=stop_price, 
+                size=size,
+                price=price,
+                stopprice=stop_price,
                 limitprice=limit_price,
                 exectype=bt.Order.Market,
                 **args
             )
-            # 记录到队列
+
+            main_order = orders[0]
+            stop_order = orders[1]
+            limit_order = orders[2] if len(orders) > 2 else None
+
+            main_order.addinfo(
+                role="open",
+                is_long=True,
+                entry_ref_price=price,
+                sl_price=stop_price,
+                tp_price=limit_price,
+                sl_pct=stop_loss_pct,
+                tp_pct=take_profit_pct,
+            )
+
+            stop_order.addinfo(
+                role="sl",
+                parent_ref=main_order.ref,
+                is_long=True,
+                entry_ref_price=price,
+                sl_price=stop_price,
+                sl_pct=stop_loss_pct,
+            )
+
+            if limit_order is not None:
+                limit_order.addinfo(
+                    role="tp",
+                    parent_ref=main_order.ref,
+                    is_long=True,
+                    entry_ref_price=price,
+                    tp_price=limit_price,
+                    tp_pct=take_profit_pct,
+                )
+
             self.live_trades.append({
-                'main': orders[0],  # 主单
-                'stop': orders[1],  # 止损单
-                'limit': orders[2], # 止盈单
-                'size': size
+                "main": main_order,
+                "stop": stop_order,
+                "limit": limit_order,
+                "size": size,
             })
-            
-        else: # Sell
-            stop_price = price * (1.0 + actual_stop_loss)
-            if take_profit == None: 
-                limit_price = None
-                args['limitexec'] = None
-            else:    limit_price = price * (1.0 - take_profit)
-            self.logger.debug(f"_open_bracket price:{price}, size:{size}, stop_price{stop_price}, limit_price {limit_price}, actual_stop_loss:{actual_stop_loss}")
-            if limit_price != None:
-                self.logger.error(f"_open_bracket limit_price:{limit_price}")
+
+        else:
+            stop_price = price * (1.0 + stop_loss_pct)
+            limit_price = price * (1.0 - take_profit_pct)
+
+            self.logger.debug(
+                f"_open_bracket price:{price}, size:{size}, "
+                f"stop_price:{stop_price}, limit_price:{limit_price}, "
+                f"stop_loss_pct:{stop_loss_pct}"
+            )
+
             orders = self.sell_bracket(
-                size=size, 
-                price=price, 
-                stopprice=stop_price, 
+                size=size,
+                price=price,
+                stopprice=stop_price,
                 limitprice=limit_price,
                 exectype=bt.Order.Market,
                 **args
             )
+
+            main_order = orders[0]
+            stop_order = orders[1]
+            limit_order = orders[2] if len(orders) > 2 else None
+
+            main_order.addinfo(
+                role="open",
+                is_long=False,
+                entry_ref_price=price,
+                sl_price=stop_price,
+                tp_price=limit_price,
+                sl_pct=stop_loss_pct,
+                tp_pct=take_profit_pct,
+            )
+
+            stop_order.addinfo(
+                role="sl",
+                parent_ref=main_order.ref,
+                is_long=False,
+                entry_ref_price=price,
+                sl_price=stop_price,
+                sl_pct=stop_loss_pct,
+            )
+
+            if limit_order is not None:
+                limit_order.addinfo(
+                    role="tp",
+                    parent_ref=main_order.ref,
+                    is_long=False,
+                    entry_ref_price=price,
+                    tp_price=limit_price,
+                    tp_pct=take_profit_pct,
+                )
+
             self.live_trades.append({
-                'main': orders[0],
-                'stop': orders[1],
-                'limit': orders[2],
-                'size': size
+                "main": main_order,
+                "stop": stop_order,
+                "limit": limit_order,
+                "size": size,
             })
 
     def _reduce_position_fifo(self, amount_needed, is_buy_close):

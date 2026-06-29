@@ -51,7 +51,7 @@ MAX_PREP = 1
 MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
 MAX_SIM = 4
 SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
-INTERVAL: str = "15m"
+INTERVAL: str = "30m"
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -303,23 +303,14 @@ def construct_task_doge():
     import model.train as train
     from trade.bt import simulation
     preparation_task: List[Any] = []
-
-    for cn in [12]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
-        for pn in [4,8,16]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-            for vol_multiplier in [5,6]:#1.8,1.9,2
-                for vol_ewma_span in [80]:
-                    preparation_task.append(common.BaseDefine(
-                            vol_ewma_span = vol_ewma_span,
-                            predict_num=pn,
-                            vol_multiplier_long=vol_multiplier,
-                            stop_multiplier_rate_long=None,
-                            vol_multiplier_short=vol_multiplier,
-                            stop_multiplier_rate_short=None,
-                            symbol=SYMBOL,   #ETHUSDT
-                            interval=INTERVAL,
-                            trading_type= 'um',
-                            version=0
-                        ))
+    for pn in [16,24,32]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
+        for vol_multiplier in [5,6]:#1.8,1.9,2
+            for vol_ewma_span in [80]:
+                preparation_task.append(common.BaseDefine(
+                        market_category = "Cryptocurrency", data_source = "binance_public_data",
+                        vol_ewma_span = vol_ewma_span, predict_num=pn,
+                        vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=None, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=None,
+                        symbol=SYMBOL,  interval=INTERVAL, trading_type= 'um', label_type = 'FTHL', version=0 ))
 
     training_task: List[train.TrainConfig] = []
 
@@ -363,8 +354,8 @@ def construct_task_doge():
     for i in [4,8,12,16,24]: #16,24,30,32,36,40,44,48
         holdbar = i
         for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
-                                            stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.04))
+            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,
+                                            atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,atr_tp=0.99,trade_risk=0.4,max_daily_loss_pct=0.04))
     return preparation_task, training_task, simulation_task
 
 def construct_task_eth():
@@ -407,8 +398,8 @@ def construct_task_eth():
     for i in [30,32,36,38,40,44]: #16,24,30,32,36,40,44,48
         holdbar = i
         for (atr_sl_mult_long, atr_sl_mult_short) in [(6,6),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,stop_loss_long=0.03,
-                                            stop_loss_short=0.015,atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,take_profit=0.99,trade_risk=0.4,max_daily_loss_pct=0.025))
+            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,
+                                            atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,atr_tp=0.99,trade_risk=0.4,max_daily_loss_pct=0.025))
     return preparation_task, training_task, simulation_task
 
 def create_task_spec(logger, exp_dir,done_set: set[str]):

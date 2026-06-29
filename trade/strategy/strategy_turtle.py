@@ -72,20 +72,20 @@ class TurtleBrain(BrainBase):
         
         return df
 
-    def _update_daily_equity(self, current_time: datetime, account_balance: float):
+    def _update_daily_equity(self, current_time: datetime, account_equity: float):
         current_date = current_time.date()
         if self.last_trade_date != current_date:
-            self.day_start_equity = account_balance
+            self.day_start_equity = account_equity
             self.last_trade_date = current_date
             self.is_halted_today = False
 
-    def decide(self, df: pd.DataFrame, current_time: datetime, account_balance: float, 
+    def decide(self, df: pd.DataFrame, current_time: datetime, account_equity: float, 
                curr_dir: PositionDir, curr_pos_size: float, last_entry_price: float) -> TradingAction:
         
         if len(df) < self.entry_period:
             return TradingAction(ActionType.HOLD)
 
-        self._update_daily_equity(current_time, account_balance)
+        self._update_daily_equity(current_time, account_equity)
         if curr_dir == PositionDir.FLAT:
             self.curr_layers = 0
 
@@ -93,7 +93,7 @@ class TurtleBrain(BrainBase):
             return TradingAction(ActionType.HOLD)
 
         # 1. 风险预算审计
-        daily_loss_abs = max(0, self.day_start_equity - account_balance)
+        daily_loss_abs = max(0, self.day_start_equity - account_equity)
         max_loss_allowed_abs = self.day_start_equity * self.max_daily_loss_pct
         remaining_budget = max_loss_allowed_abs - daily_loss_abs
 
@@ -115,15 +115,15 @@ class TurtleBrain(BrainBase):
         target_layers = (self.curr_layers + 1) if self.curr_layers < self.max_layers else self.max_layers
         
         # 根据风险公式计算单笔 Unit 大小
-        unit_size = (account_balance * self.risk_per_unit) / atr if atr > 0 else 0
+        unit_size = (account_equity * self.risk_per_unit) / atr if atr > 0 else 0
         # unit_size = unit_size*0.2
-        unit_pct = (unit_size * current_price) / account_balance
+        unit_pct = (unit_size * current_price) / account_equity
         # 3. 强制约束占比（如 50% 上限）
         if unit_pct > self.upper_limit:
             unit_pct = self.upper_limit
         # === 关键：同步更新实际下单的股数 ===
         unit_pct = unit_pct* self.unit_pct_scale
-        unit_size = (unit_pct * account_balance) / current_price
+        unit_size = (unit_pct * account_equity) / current_price
         # unit_pct = unit_pct*0.2
         
         # 目标总仓位名义价值
@@ -132,7 +132,7 @@ class TurtleBrain(BrainBase):
         # === 核心修正：止损逻辑数学脱节 ===
         # 公式：止损比例 <= 剩余预算 / 总名义价值
         # 增加 0.8 系数应对滑点，确保即使触发止损，今日亏损也不超 4.8%
-        max_sl_ratio = (remaining_budget / (total_target_pct * account_balance if total_target_pct > 0 else 1)) * 0.8
+        max_sl_ratio = (remaining_budget / (total_target_pct * account_equity if total_target_pct > 0 else 1)) * 0.8
         
         turtle_sl = (2.0 * atr) / current_price
         # 取两者最小值，确保安全第一

@@ -81,25 +81,24 @@ class StrategyPara:
     allow_long: bool = True
     allow_short: bool = True
     # execution
-    holdbar: int = common.BaseDefine.predict_num       # 默认值，初始化时可覆盖
+    holdbar: int = 48       # 默认值，初始化时可覆盖
     commission: float = 0.05   # 0.1 = 0.1%, can't be 0
-    cash: float = 10000.0
+    init_equity: float = 10000.0
     # signal
     thresh: Optional[float] = None
     # stop / take
-    stop_loss_long: float = 0.03
-    stop_loss_short: float = 0.015
-    atr_sl_mult_long: float = 8.0
-    atr_sl_mult_short: float = 5.0
-    take_profit: float = 0.99
+    atr_sl_mult_long: float = 4
+    atr_sl_mult_short: float = 4
+    atr_tp: float = 20
     # risk
-    trade_risk: float = 0.4
+    trade_risk: float = 0.01
     max_daily_loss_pct: float = 0.04
     decide_version : int = 0
 
 # period: short / forward / long
-def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),train_cfg= train.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
-         device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'short'):
+def main(logger:logging.Logger, para = StrategyPara(),train_cfg= train.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
+         device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'long'):
+    pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
     logger.info(f"prep_output_dir:{prep_output_dir}, train_output_dir:{train_output_dir}")
     if period == 'short' or period == 'forward':
         df = common.load_test_df_from_dir(prep_output_dir)
@@ -174,14 +173,13 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
         allow_short=para.allow_short,
         allow_long=para.allow_long,
         thresh=para.thresh,
-        stop_loss_long = para.stop_loss_long,
-        stop_loss_short = para.stop_loss_short,
         atr_sl_mult_long = para.atr_sl_mult_long,
         atr_sl_mult_short = para.atr_sl_mult_short,
-        take_profit = para.take_profit,
+        atr_tp = para.atr_tp,
         trade_risk = para.trade_risk,
         max_daily_loss_pct = para.max_daily_loss_pct,
         decide_version = para.decide_version,
+        init_equity = para.init_equity,
     )
 
     data = PandasDataWithPred(
@@ -203,7 +201,7 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
     )
 
     cerebro.adddata(data)
-    cerebro.broker.setcash(para.cash)
+    cerebro.broker.setcash(para.init_equity)
     cerebro.broker.addcommissioninfo(
         cus_comminfo.CommInfo_Cryptocurrency(commission=para.commission, leverage =10)
     )
@@ -225,8 +223,6 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
     # 封装统计数据 (合并回测数据和模型指标)
     statistics = generate_backtest_report(logger, strat, model_stats, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'), para=para,pre_para=pre_para,train_cfg=train_cfg)
 
-    trade_logs = cerebro.trade_logs
-
     # ========== 转 K线 JSON ==========
     candles = df_with_pred[["open_time_date_utc", "open", "high", "low", "close", "volume", "pred", "label"]].copy()
     candles["pred"] = candles["pred"].fillna(0.0)
@@ -235,22 +231,7 @@ def main(logger:logging.Logger, para = StrategyPara(), pre_para = BaseDefine(),t
     candles["time"] = candles["time"].apply(lambda dt: int(dt.timestamp()))
     candles_json = candles.to_dict(orient="records")
 
-    markers = []
-    for t in trade_logs:
-        # t["is_buy"] = t["is_buy"] == False
-        markers.append(
-            {
-                "time": t["dt"],
-                "price": t["price"],
-                # "size": t["size"],
-                "position": "aboveBar" if t["is_buy"] else "belowBar",
-                "color": "green" if t["is_buy"] else "red",
-                "shape": "arrowUp" if t["is_buy"] else "arrowDown",
-                "text": ("BUY" if t["is_buy"] else "SELL") + f"@ {t['price']:.2f}",
-            }
-        )
-
-    return {"candles": candles_json, "markers": markers, "statistics": statistics}
+    return {"candles": candles_json, "trade_logs": cerebro.trade_logs, "statistics": statistics}
 
 def build_daily_df(daily_stats):
     """Convert daily stats list (dict with 'date', 'dd_pct', 'equity') to DataFrame."""
@@ -713,12 +694,14 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     return (report_additional,report)
 
 if __name__ == "__main__":
-    exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'batch_experiments'),common.BaseDefine.symbol, common.BaseDefine.interval)
-    logger: logging.Logger
-    logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
-    save_dir = os.path.join(common.TRAIN_OUT_DIR)
+    train_output_dir = os.path.join(common.TRAIN_OUT_DIR)
     start_time = time.time()
-    report = main(logger,train_output_dir = save_dir)
+    pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
+    exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'simulation'),pre_para.symbol, pre_para.interval)
+    logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
+    para = StrategyPara()
+    para.holdbar = pre_para.predict_num
+    report = main(logger=logger, para=para, train_output_dir = train_output_dir)
     append_jsonl(
         os.path.join(exp_dir, "reports.jsonl"),
         report["statistics"][1]

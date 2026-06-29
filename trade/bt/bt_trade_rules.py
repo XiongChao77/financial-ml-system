@@ -73,7 +73,7 @@ class RulesStrategy(BtExecutor):
         self.brain.decide(
             df=df, 
             current_time=current_time, 
-            account_balance=self.broker.getvalue(),
+            account_equity=self.broker.getvalue(),
             curr_dir=curr_dir,
             curr_pos_qty=self.position.size,
         )

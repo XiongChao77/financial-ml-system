@@ -123,8 +123,6 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
         allow_long=st_para.allow_long,
         allow_short=st_para.allow_short,
         thresh=st_para.thresh,
-        stop_loss_long=st_para.stop_loss_long,
-        stop_loss_short=st_para.stop_loss_short,
         atr_sl_mult_long=st_para.atr_sl_mult_long,
         atr_sl_mult_short=st_para.atr_sl_mult_short,
         max_daily_loss_pct=st_para.max_daily_loss_pct,
@@ -148,7 +146,7 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
                 position_dir=PositionDir(curr_dir),
                 layers=curr_layers,
                 current_time=executor.get_server_time(),
-                account_balance=executor.get_account_equity(),
+                account_equity=executor.get_account_equity(),
             )
 
             action = brain.decide(state)

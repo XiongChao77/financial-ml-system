@@ -557,7 +557,6 @@ def run_one_backtest(
             sim_result[period] = simulation.main(
                 logger,
                 para=simulation.StrategyPara(),
-                pre_para=pre_para,
                 train_cfg=train_cfg,
                 prep_output_dir=prep_output_dir,
                 train_output_dir=fusion_dir,
@@ -839,12 +838,12 @@ def main():
     parser.add_argument(
         "-s",
         "--simulation",
-        default="/home/chao/work/quant_output/batch_train/DOGEUSDT_30m/2026-06-25/04_09_15",
+        default="/home/chao/work/quant_output/batch_train/DOGEUSDT_30m/2026-06-29/05_55_17",
     )
     parser.add_argument("--max-backtests", type=int, default=0)
     parser.add_argument("--period", type=str, default="short")
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--torch-threads", type=int, default=2)
 
     args = parser.parse_args()

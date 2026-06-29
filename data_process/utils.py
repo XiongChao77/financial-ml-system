@@ -179,26 +179,62 @@ def load_selected_configs(path):
                 continue
     return records
 
-def recursive_get(data, target_key):
-    # 1. If current node is a dict, check the current level first
+def recursive_get(data, target_key, default=None):
+    """
+    Supports two modes:
+
+    1. Dot path:
+       recursive_get(data, "long.params.common.predict_num")
+
+    2. Recursive key search:
+       recursive_get(data, "predict_num")
+    """
+
+    def get_by_path(obj, path):
+        cur = obj
+        for part in path.split("."):
+            if isinstance(cur, dict):
+                if part not in cur:
+                    return default
+                cur = cur[part]
+
+            elif isinstance(cur, list):
+                # support numeric index in path, e.g. "items.0.value"
+                if not part.isdigit():
+                    return default
+                idx = int(part)
+                if idx < 0 or idx >= len(cur):
+                    return default
+                cur = cur[idx]
+
+            else:
+                return default
+
+        return cur
+
+    # 1. If target_key is dot path, try exact path first
+    if isinstance(target_key, str) and "." in target_key:
+        value = get_by_path(data, target_key)
+        if value is not default:
+            return value
+
+    # 2. Original recursive key search
     if isinstance(data, dict):
         if target_key in data:
             return data[target_key]
-        
-        # 2. Not found -> search each value recursively
-        for k, v in data.items():
-            res = recursive_get(v, target_key)
-            if res is not None:
+
+        for _, v in data.items():
+            res = recursive_get(v, target_key, default=default)
+            if res is not default:
                 return res
-                
-    # 3. If current node is a list, search each item recursively
+
     elif isinstance(data, list):
         for item in data:
-            res = recursive_get(item, target_key)
-            if res is not None:
+            res = recursive_get(item, target_key, default=default)
+            if res is not default:
                 return res
-                
-    return None
+
+    return default
 
 def dump_params_json(obj, logger):
     if is_dataclass(obj):

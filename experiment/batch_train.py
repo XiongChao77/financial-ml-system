@@ -310,8 +310,8 @@ def construct_task_doge():
     import model.train as train
     preparation_task: List[Any] = []
 
-    for pn in [16,24,32]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-        for vol_multiplier in [1.6,1.7,1.8]:#,1.8,1.9,2.0]:#1.8,1.9,2
+    for pn in [20,24,28]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18] # 24 >16
+        for vol_multiplier in [1.6,1.8,2]:#,1.8,1.9,2.0]:#1.8,1.9,2
             for vol_ewma_span in [80]:
                 preparation_task.append(common.BaseDefine(
                         market_category = "Cryptocurrency", data_source = "binance_public_data",
@@ -341,17 +341,17 @@ def construct_task_doge():
     feature_conf_list_3 = [f for f in train.feature_conf_list if f not in to_remove_3]
     feature_conf_list_4 = [f for f in train.feature_conf_list if f not in to_remove_4]
     feature_conf_list_5 = [f for f in train.feature_conf_list if f not in to_remove_5]
-    for seq_len in [96,128,160]:#in range(3*16,11*16,16): #12,16,24,32
+    for seq_len in [16,96]:#in range(3*16,11*16,16): #12,16,24,32
         for stride in [2]: #2,4,8
             for featrue_conf in [train.feature_conf_list]:
                 # compatibility seq_len_stride_featrue_conf
                 for model_cfg in [train_config.LogisticConfig(model_version= 1,seq_len=seq_len),
                                   train_config.ConvLSTMConfig(model_version= 1,seq_len=seq_len),
+                                  #train_config.ConvLSTMConfig(model_version= 5,seq_len=seq_len), #bad
                                   train_config.LSTMConfig(model_version= 1,seq_len=seq_len),
-                                  train_config.LSTMConfig(model_version= 5,seq_len=seq_len),
                                 #   train_config.TransformerConfig(model_version= 1,seq_len=seq_len),
                                   train_config.TransformerConfig(model_version= 2,seq_len=seq_len)]:
-                    for miss_penalty in [2,3,4]:#np.arange(0.5,5, 0.5).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
+                    for miss_penalty in [2.5,3.5,4.5]:#np.arange(0.5,5, 0.5).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
                         train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
                                                         feature_conf_list= featrue_conf, model_cfg = model_cfg,
                                                         miss_penalty = float(miss_penalty),stride = stride, patience = 5)

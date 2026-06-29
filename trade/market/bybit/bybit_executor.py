@@ -77,62 +77,96 @@ class BybitExecutor(BaseExecutor):
     def get_server_time(self):
         return datetime.now(timezone.utc)
     
-    def user_order(self, size, is_buy, stop_loss=None):
-        """
-        Place an order.
-        size: base coin quantity
-        is_buy: direction
-        stop_loss: stop-loss ratio (e.g. 0.05 means 5%)
-        """
-        # 1. Align quantity to exchange precision
-        qty = round(float(size) / self.qty_step) * self.qty_step
-        qty = max(self.min_qty, qty)
-        qty_str = str(qty)
+def user_order(self, size, is_buy, stop_loss=None, take_profit=None):
+    """
+    Place an order.
 
-        # 2. Get current price for computing SL price.
-        # Note: this uses a market order, so entry_price ~= current ticker price.
-        tickers = self.engine.http.get_tickers(category="linear", symbol=self.symbol)
-        curr_price = float(tickers['result']['list'][0]['lastPrice'])
-        
-        # 3. Compute stop-loss price (Bybit expects a concrete price; Brain provides a ratio)
-        sl_price = 0.0
-        if stop_loss:
-            if is_buy:
-                raw_sl = curr_price * (1 - stop_loss)
-            else:
-                raw_sl = curr_price * (1 + stop_loss)
-            sl_price = round(raw_sl / self.tick_size) * self.tick_size
+    size: base coin quantity
+    is_buy: True = Buy/Long, False = Sell/Short
+    stop_loss: stop-loss ratio, e.g. 0.05 means 5%
+    take_profit: take-profit ratio, e.g. 0.10 means 10%
+    """
 
-        side = "Buy" if is_buy else "Sell"
-        self.logger.info(f"🐢 Placing order: {side} {qty_str} @ market | SL: {sl_price}")
+    # 1. Align quantity to exchange precision
+    qty = round(float(size) / self.qty_step) * self.qty_step
+    qty = max(self.min_qty, qty)
+    qty_str = str(qty)
 
-        try:
-            # 4. Place order via engine; include stopLoss when present.
-            # Market orders do not need a limit price.
-            order_params = {
-                "category": "linear",
-                "symbol": self.symbol,
-                "side": side,
-                "orderType": "Market",
-                "qty": qty_str,
-                "positionIdx": 0, # one-way position mode
-                "reduceOnly": False
-            }
-            
-            if sl_price > 0:
-                order_params["stopLoss"] = str(sl_price)
+    # 2. Get current price for computing SL/TP price.
+    # Note: this uses a market order, so entry_price ~= current ticker price.
+    tickers = self.engine.http.get_tickers(
+        category="linear",
+        symbol=self.symbol
+    )
+    curr_price = float(tickers["result"]["list"][0]["lastPrice"])
 
-            # HTTP placement is typically more reliable than ws_trade.place_order for this use case.
-            # This turtle strategy is not high-frequency, so HTTP is fine.
-            res = self.engine.http.place_order(**order_params)
-            
-            if res['retCode'] == 0:
-                self.logger.info(f"✅ Order placed successfully: ID {res['result']['orderId']}")
-            else:
-                self.logger.error(f"❌ Order failed: {res['retMsg']}")
-                
-        except Exception as e:
-            self.logger.error(f"Order exception: {e}")
+    # 3. Compute stop-loss / take-profit concrete prices.
+    # Bybit expects concrete price, while Brain provides ratios.
+    sl_price = 0.0
+    tp_price = 0.0
+
+    if stop_loss:
+        if is_buy:
+            raw_sl = curr_price * (1 - stop_loss)
+        else:
+            raw_sl = curr_price * (1 + stop_loss)
+
+        sl_price = round(raw_sl / self.tick_size) * self.tick_size
+
+    if take_profit:
+        if is_buy:
+            raw_tp = curr_price * (1 + take_profit)
+        else:
+            raw_tp = curr_price * (1 - take_profit)
+
+        tp_price = round(raw_tp / self.tick_size) * self.tick_size
+
+    side = "Buy" if is_buy else "Sell"
+
+    self.logger.info(
+        f"🐢 Placing order: {side} {qty_str} @ market | "
+        f"SL: {sl_price} | TP: {tp_price}"
+    )
+
+    try:
+        # 4. Place order via engine.
+        # Market orders do not need a limit price.
+        order_params = {
+            "category": "linear",
+            "symbol": self.symbol,
+            "side": side,
+            "orderType": "Market",
+            "qty": qty_str,
+            "positionIdx": 0,  # one-way position mode
+            "reduceOnly": False,
+        }
+
+        if sl_price > 0:
+            order_params["stopLoss"] = str(sl_price)
+
+        if tp_price > 0:
+            order_params["takeProfit"] = str(tp_price)
+
+        # Optional but often recommended:
+        # Use MarkPrice to reduce wick-trigger noise.
+        # If you prefer LastPrice, remove these two lines.
+        if sl_price > 0:
+            order_params["slTriggerBy"] = "MarkPrice"
+
+        if tp_price > 0:
+            order_params["tpTriggerBy"] = "MarkPrice"
+
+        res = self.engine.http.place_order(**order_params)
+
+        if res["retCode"] == 0:
+            self.logger.info(
+                f"✅ Order placed successfully: ID {res['result']['orderId']}"
+            )
+        else:
+            self.logger.error(f"❌ Order failed: {res['retMsg']}")
+
+    except Exception as e:
+        self.logger.error(f"Order exception: {e}")
 
     def user_close(self):
         """Close all open positions for this symbol."""

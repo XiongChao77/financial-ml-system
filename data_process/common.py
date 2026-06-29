@@ -59,13 +59,15 @@ class BaseDefine:
     symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT XAUUSD
     interval: str = "30m"
     trading_type:str ='um'             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures) 
-    label_type:str = 'FTHL' # TBM / FTHL
+    label_type:str = 'FTHL' # TBM / FTHL / "TBM_TREND"
     version:float = 0.1
 
 DOGE_15m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="15m", trading_type='um', label_type = 'FTHL')
-DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='um', label_type = 'TBM',
-                      vol_ewma_span = 96, vol_multiplier_long=1, stop_multiplier_rate_long=None, vol_multiplier_short=1, stop_multiplier_rate_short=None)
-XAU_15m = BaseDefine(market_category="Forex", data_source="dukascopy", symbol="XAUUSD", interval="15m", trading_type='spot', label_type = 'FTHL')
+DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='um'
+                      , label_type = 'FTHL',
+                      predict_num = 16,
+                      vol_ewma_span = 96, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
+XAU_15m = BaseDefine(market_category="Forex", data_source="dukascopy", symbol="XAUUSD", interval="15m", trading_type='spot', label_type = 'TBM')
 
 log_level = logging.INFO
 
@@ -123,7 +125,7 @@ def load_test_df_from_dir(base_dir):
 def get_data_config_path_in_dir(base_dir):
     return _data_path_in_dir(base_dir, "data_config_meta.json")
 
-def load_interval_ms_from_dir(base_dir) -> BaseDefine:
+def load_pre_params_from_dir(base_dir) -> BaseDefine:
     """Load interval settings from data_config_meta.json under base_dir (no global paths; multiprocessing-friendly)."""
     config_path = get_data_config_path_in_dir(base_dir)
     if not os.path.exists(config_path):
@@ -378,6 +380,263 @@ def attach_triple_barrier_label(df, para=BaseDefine, label_col = 'label'):
     df.loc[~time_match, label_col] = -1       # Signal.INVALID
     df.loc[~time_match, 'reach_time'] = -1  # 无效到达时间
     
+    return df
+
+@njit(cache=True)
+def fast_triple_barrier_trend_kernel(
+    close,
+    high,
+    low,
+    thresholds,
+    window,
+    conflict_policy=0,
+):
+    """
+    Triple Barrier Trend Label Kernel.
+
+    Difference from normal Triple Barrier:
+    - For each anchor point i, search path i+1 ... i+window.
+    - If anchor i independently hits POSITIVE/NEGATIVE at step j,
+      then assign the same trend label to [i, i+j].
+    - Labels propagated from a previous anchor do NOT create new anchors.
+      Only the current i's own triple-barrier result can propagate further.
+
+    conflict_policy:
+        0 = first anchor wins.
+            If a point was already labeled by an earlier trend segment,
+            do not overwrite it.
+        1 = last anchor wins.
+            Later independent anchors can overwrite existing propagated labels.
+
+    Returns:
+        trend_labels:
+            Final trend-expanded labels.
+        anchor_labels:
+            Raw triple-barrier labels at each anchor i before propagation.
+        anchor_reach_times:
+            Reach time of the raw anchor.
+        trend_source_idx:
+            Which anchor assigned the final trend label.
+            -1 means no trend source.
+    """
+    n = len(close)
+
+    # final expanded label
+    trend_labels = np.ones(n, dtype=np.int32)  # default NEUTRAL = 1
+
+    # raw anchor result, not propagated
+    anchor_labels = np.ones(n, dtype=np.int32)  # default NEUTRAL = 1
+    anchor_reach_times = np.full(n, window, dtype=np.int32)
+
+    # source index of propagated trend label
+    trend_source_idx = np.full(n, -1, dtype=np.int32)
+
+    l_tp_p = thresholds[:, 0]
+    l_sl_p = thresholds[:, 1]
+    s_tp_p = thresholds[:, 2]
+    s_sl_p = thresholds[:, 3]
+
+    for i in range(n - window):
+        p0 = close[i]
+
+        # Long-side barriers
+        l_tp = p0 * (1.0 + l_tp_p[i])
+        l_sl = p0 * (1.0 - l_sl_p[i])
+
+        # Short-side barriers
+        s_tp = p0 * (1.0 - s_tp_p[i])
+        s_sl = p0 * (1.0 + s_sl_p[i])
+
+        first_l_tp = window + 1
+        first_s_tp = window + 1
+
+        l_active = True
+        s_active = True
+
+        # ===== 1. Raw triple barrier path search =====
+        for j in range(1, window + 1):
+            curr_idx = i + j
+
+            h = high[curr_idx]
+            l = low[curr_idx]
+            c = close[curr_idx]
+
+            # Long path
+            if l_active:
+                if c >= l_tp:
+                    first_l_tp = j
+                    l_active = False
+                elif l <= l_sl:
+                    l_active = False
+
+            # Short path
+            if s_active:
+                if c <= s_tp:
+                    first_s_tp = j
+                    s_active = False
+                elif h >= s_sl:
+                    s_active = False
+
+            if not l_active and not s_active:
+                break
+
+        # ===== 2. Decide raw anchor label =====
+        out_label = 1
+        reach_time = window
+
+        if first_l_tp <= window and first_l_tp < first_s_tp:
+            out_label = 2      # POSITIVE
+            reach_time = first_l_tp
+
+        elif first_s_tp <= window and first_s_tp < first_l_tp:
+            out_label = 0      # NEGATIVE
+            reach_time = first_s_tp
+
+        else:
+            out_label = 1      # NEUTRAL
+            reach_time = window
+
+        anchor_labels[i] = out_label
+        anchor_reach_times[i] = reach_time
+
+        # ===== 3. Trend propagation =====
+        # Only POSITIVE / NEGATIVE anchors can propagate.
+        # Propagated labels themselves do not create new anchors.
+        if out_label == 0 or out_label == 2:
+            end_idx = i + reach_time
+            if end_idx >= n:
+                end_idx = n - 1
+
+            for k in range(i, end_idx + 1):
+                if conflict_policy == 0:
+                    # first anchor wins
+                    if trend_source_idx[k] == -1:
+                        trend_labels[k] = out_label
+                        trend_source_idx[k] = i
+                else:
+                    # last anchor wins
+                    trend_labels[k] = out_label
+                    trend_source_idx[k] = i
+
+    return trend_labels, anchor_labels, anchor_reach_times, trend_source_idx
+
+def attach_triple_barrier_trend_label(
+    df,
+    para=BaseDefine,
+    label_col="label",
+    conflict_policy="first",
+):
+    """
+    Attach Triple Barrier Trend labels.
+
+    This label is different from normal triple barrier:
+
+    Normal TBM:
+        label[i] only describes whether point i itself hits TP/SL
+        within predict_num bars.
+
+    Trend TBM:
+        if point A independently hits POSITIVE/NEGATIVE at time B,
+        then labels A...B are assigned the same direction.
+
+    Important:
+        A propagated label at time B does NOT become a new signal source.
+        Only B's own independent triple-barrier result can propagate further.
+
+    conflict_policy:
+        "first":
+            Earlier trend segment has priority.
+            This preserves the statement: once A->B is judged as one trend,
+            labels from A to B stay the same.
+        "last":
+            Later independent anchors can overwrite earlier propagated labels.
+            This is more reactive, but less strict.
+    """
+
+    df = df.copy()
+
+    # 1. Calculate thresholds using the same logic as normal TBM
+    df = calculate_thresholds(df, para)
+
+    close = df["close"].values.astype(np.float64)
+    high = df["high"].values.astype(np.float64)
+    low = df["low"].values.astype(np.float64)
+
+    thresholds = np.column_stack([
+        df["threshold_long"].values,
+        df["stop_threshold_long"].values,
+        df["threshold_short"].values,
+        df["stop_threshold_short"].values,
+    ]).astype(np.float64)
+
+    window = int(para.predict_num)
+
+    if conflict_policy == "first":
+        conflict_code = 0
+    elif conflict_policy == "last":
+        conflict_code = 1
+    else:
+        raise ValueError(
+            f"Unsupported conflict_policy={conflict_policy}. "
+            "Use 'first' or 'last'."
+        )
+
+    # 2. Run trend kernel
+    trend_labels, anchor_labels, anchor_reach_times, trend_source_idx = (
+        fast_triple_barrier_trend_kernel(
+            close=close,
+            high=high,
+            low=low,
+            thresholds=thresholds,
+            window=window,
+            conflict_policy=conflict_code,
+        )
+    )
+
+    # 3. Physical time alignment check
+    interval_ms = get_interval_ms(para.interval)
+    time_values = df["open_time_ms_utc"].values
+
+    target_times = time_values + (window * interval_ms)
+    target_indices = np.searchsorted(time_values, target_times, side="left")
+
+    in_bounds = target_indices < len(df)
+
+    time_match = np.zeros(len(df), dtype=np.bool_)
+    valid_idx = np.where(in_bounds)[0]
+    time_match[valid_idx] = (
+        time_values[target_indices[valid_idx]] == target_times[valid_idx]
+    )
+
+    # 4. Apply invalid mask
+    trend_labels[~time_match] = int(Signal.INVALID)
+    anchor_labels[~time_match] = int(Signal.INVALID)
+    anchor_reach_times[~time_match] = -1
+    trend_source_idx[~time_match] = -1
+
+    # 5. Save output columns
+    df[label_col] = trend_labels.astype(int)
+
+    # raw independent TBM result before trend propagation
+    df["tb_anchor_label"] = anchor_labels.astype(int)
+    df["tb_anchor_reach_time"] = anchor_reach_times.astype(int)
+
+    # propagated trend source
+    df["trend_source_idx"] = trend_source_idx.astype(int)
+
+    # True means this row itself independently triggered TBM direction.
+    df["is_tb_anchor"] = (
+        (df["tb_anchor_label"] == int(Signal.POSITIVE)) |
+        (df["tb_anchor_label"] == int(Signal.NEGATIVE))
+    )
+
+    # True means this row's final label comes from a previous anchor,
+    # not from itself.
+    df["is_trend_propagated"] = (
+        (df["trend_source_idx"] >= 0) &
+        (df["trend_source_idx"] != np.arange(len(df)))
+    )
+
     return df
 
 def print_label_performance_stats(df, para=BaseDefine):
@@ -729,7 +988,7 @@ def load_interval_ms(config_path = data_config_path):
     except Exception as e:
         raise RuntimeError(f"💥 Unexpected error while reading JSON: {e}")
 
-def setup_session_logger(sub_folder: str = None, log_file_path=None, symbol: str = BaseDefine.symbol, console_level: int = logging.INFO, file_level: int = logging.INFO):
+def setup_session_logger(sub_folder: str = None, log_file_path=None, symbol: str = BaseDefine.symbol, console_level: int = logging.INFO, file_level: int = logging.INFO)  -> tuple[logging.Logger, str]:
     if log_file_path ==None:
         assert sub_folder!=None
         log_dir = os.path.join(PERSISTENCE_DIR,'log', sub_folder)

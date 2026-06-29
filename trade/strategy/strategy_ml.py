@@ -29,7 +29,7 @@ class MarketState:
 
     #  用于风控审计的元数据
     current_time: datetime
-    account_balance: float
+    account_equity: float
 
 @dataclass
 class TradingAction:
@@ -41,7 +41,8 @@ class TradingAction:
     target_layers: int = 0
     #  新增字段以支持 user_order 接口
     order_qty: float = 0.0
-    stop_loss: float = 0.0
+    stop_loss_pct: float = 0.0
+    take_profit_pct: float = 0.0
 
 # ============================================================
 # FtmoBrain：强化风控与动态仓位版
@@ -52,7 +53,8 @@ class FtmoBrain(BrainBase):
     def __init__(
         self,
         executor: BaseExecutor,
-        trade_risk: float = 0.1,    # 单层风险比例 (10%)
+        init_equity :float,
+        trade_risk: float = 0.01,    # 单层风险比例 (10%)
         max_layers: int = 1,
         max_hold_num: int = 16,
         exist_hold_num: int = 0,
@@ -61,24 +63,23 @@ class FtmoBrain(BrainBase):
         thresh: Optional[float] = None,
         #  仿照 RulesBrain 新增的参数
         max_daily_loss_pct: float = 0.5, # 日内熔断阈值 (3.5%)
-        stop_loss_long: float = 0.05,      # 做多止损百分比
-        stop_loss_short: float = 0.05,     # 做空止损百分比
         atr_sl_mult_long:float = 3,
         atr_sl_mult_short:float = 3,
+        atr_tp:float = 5,
         decide_version: int = 0
     ):
         self.logger = logging.getLogger("trade")
         self.executor = executor
+        self.init_equity = init_equity
         self.trade_risk = trade_risk
         self.max_layers = max_layers
         self.max_hold_num = max_hold_num
         self.allow_long = allow_long
         self.allow_short = allow_short
         self.thresh = thresh
-        self.stop_loss_long = stop_loss_long
-        self.stop_loss_short = stop_loss_short
         self.atr_sl_mult_long = atr_sl_mult_long
         self.atr_sl_mult_short = atr_sl_mult_short
+        self.atr_tp = atr_tp
         self.pre_signal = Signal.NEUTRAL
         self.pre_position_dir:PositionDir = PositionDir.FLAT
         self.decide_version = decide_version
@@ -97,11 +98,11 @@ class FtmoBrain(BrainBase):
         self.current_signal_streak = 0
         self.all_signal_streaks = []
 
-    def _update_daily_equity(self, current_time: datetime, account_balance: float):
+    def _update_daily_equity(self, current_time: datetime, account_equity: float):
         """日内净值更新与熔断重置"""
         current_date = current_time.date()
         if self.last_trade_date != current_date:
-            self.day_start_equity = account_balance
+            self.day_start_equity = account_equity
             self.last_trade_date = current_date
             self.is_halted_today = False
 
@@ -114,32 +115,27 @@ class FtmoBrain(BrainBase):
         raw_nominal_pct = self.trade_risk / (2.0 * atr_pct)
         return self.trade_risk
 
-    def _calcelate_unit_pct(self, target_dir: PositionDir, state: MarketState, remaining_budget: float) -> tuple[float, float]:
+    def _calculate_unit_pct(self, target_dir: PositionDir, state: MarketState, remaining_risk_budget: float) -> tuple[float, float, float]:
         # 3. 计算下单参数
         # 使用 trade_risk 作为固定百分比，或切换回 _calculate_dynamic_unit_pct
-        sl_pct = 0.05
-        if self.atr_sl_mult_long!=None and target_dir == PositionDir.POSITIVE  and state.atr_pct > 0:
+        if target_dir == PositionDir.POSITIVE:
             sl_pct = state.atr_pct * self.atr_sl_mult_long
-        elif self.atr_sl_mult_short!=None and target_dir == PositionDir.NEGATIVE and state.atr_pct > 0:
+            tp_pct = state.atr_pct * self.atr_tp
+            intended_qty = (self.trade_risk *self.init_equity) / (state.price * sl_pct)
+            max_risk_qty  = (remaining_risk_budget * 0.8) / (state.price * sl_pct)
+        elif target_dir == PositionDir.NEGATIVE:
             sl_pct = state.atr_pct * self.atr_sl_mult_short
-        elif self.atr_sl_mult_long==None and  self.atr_sl_mult_short==None:
-            sl_pct = self.stop_loss_long if target_dir == PositionDir.POSITIVE  else self.stop_loss_short
-        
-        if target_dir == PositionDir.FLAT or sl_pct <= 0:
-            final_order_qty = 0.0
+            tp_pct = state.atr_pct * self.atr_tp
+            intended_qty = (self.trade_risk *self.init_equity) / (state.price * sl_pct)
+            max_risk_qty  = (remaining_risk_budget * 0.8) / (state.price * sl_pct)
         else:
-            base_pct = self.trade_risk 
-            
-            intended_qty = (base_pct * state.account_balance) / state.price
-            
-            max_budget_qty = (remaining_budget * 0.8) / (state.price * sl_pct)
-            
-            # 最终取最小值
-            final_order_qty = min(intended_qty, max_budget_qty)
-            
-            if final_order_qty < intended_qty:
-                self.logger.debug(f"🛡️ [BUDGET CUT] 原始建议股数 {intended_qty:.4f} 因预算限制削减至 {final_order_qty:.4f}")
-        return final_order_qty , sl_pct
+            return 0,0,0
+
+        final_order_qty = min(intended_qty, max_risk_qty )
+        
+        if final_order_qty < intended_qty:
+            self.logger.debug(f"🛡️ [BUDGET CUT] 原始建议Quantity {intended_qty:.4f} 因预算限制削减至 {final_order_qty:.4f}")
+        return final_order_qty , sl_pct,tp_pct
 
     def decide(self, state: MarketState) -> TradingAction:
         if state.position_dir != self.pre_position_dir:
@@ -148,15 +144,17 @@ class FtmoBrain(BrainBase):
         elif state.position_dir != PositionDir.FLAT:
             self.bars_held += 1
         # 1. 每日风险审计与熔断检查
-        self._update_daily_equity(state.current_time, state.account_balance)
+        self._update_daily_equity(state.current_time, state.account_equity)
         if self.is_halted_today:
             return TradingAction(ActionType.HOLD)
 
-        daily_loss_abs = max(0.0, self.day_start_equity - state.account_balance)
-        max_loss_allowed_abs = self.day_start_equity * self.max_daily_loss_pct
-        remaining_budget = max(0.0, max_loss_allowed_abs - daily_loss_abs)
+        daily_loss_abs = max(0.0, self.day_start_equity - state.account_equity)
+        daily_max_loss_allowed_abs = self.day_start_equity * self.max_daily_loss_pct
+        # total_max_loss_allowed_abs = self.init_equity * self.max_daily_loss_pct
+        remaining_risk_budget = max(0.0, daily_max_loss_allowed_abs - daily_loss_abs)
 
-        if daily_loss_abs >= max_loss_allowed_abs:
+
+        if daily_loss_abs >= daily_max_loss_allowed_abs:
             self.is_halted_today = True
             self.logger.warning(f"🚨 [MELTDOWN] 日亏损触及上限! 亏损率: {daily_loss_abs/self.day_start_equity:.2%}")
             return TradingAction(ActionType.HOLD)
@@ -191,7 +189,7 @@ class FtmoBrain(BrainBase):
 
         if state.position_dir != PositionDir.FLAT:
             if target_dir == state.position_dir:
-                self.bars_held = 0
+                pass# self.bars_held = 0
             elif self.bars_held < self.max_hold_num:
                 target_dir = state.position_dir
 
@@ -211,7 +209,7 @@ class FtmoBrain(BrainBase):
             #     target_dir = PositionDir.FLAT
 
         if target_dir != PositionDir.FLAT:
-            final_order_qty , sl_pct = self._calcelate_unit_pct(target_dir, state, remaining_budget)
+            final_order_qty , sl_pct, tp_pct = self._calculate_unit_pct(target_dir, state, remaining_risk_budget)
 
         # 5. 执行决策逻辑 (封装订单信息)
         if state.position_dir == PositionDir.FLAT:
@@ -222,7 +220,8 @@ class FtmoBrain(BrainBase):
                     target_dir=target_dir,
                     target_layers=1,
                     order_qty=final_order_qty,
-                    stop_loss=sl_pct
+                    stop_loss_pct=sl_pct,
+                    take_profit_pct=tp_pct,
                 )
         else:
             self.current_trade_bars += 1
@@ -238,7 +237,8 @@ class FtmoBrain(BrainBase):
                     target_dir=target_dir,
                     target_layers=1,
                     order_qty=final_order_qty,
-                    stop_loss=sl_pct
+                    stop_loss_pct=sl_pct,
+                    take_profit_pct=tp_pct,
                 )
             elif state.layers < self.max_layers and signal != Signal.NEUTRAL:
                 new_layers = state.layers + 1
@@ -247,7 +247,8 @@ class FtmoBrain(BrainBase):
                     target_dir=state.position_dir,
                     target_layers=new_layers,
                     order_qty=final_order_qty,
-                    stop_loss=sl_pct
+                    stop_loss_pct=sl_pct,
+                    take_profit_pct=tp_pct,
                 )
 
         self.execute_action(action)
@@ -271,13 +272,13 @@ class FtmoBrain(BrainBase):
             # 反手时先平掉当前所有仓位
             self.executor.user_close()
             # 然后开立新方向的第一层仓位
-            self.executor.user_order(action.order_qty, is_buy=is_buy, stop_loss=action.stop_loss)
+            self.executor.user_order(action.order_qty, is_buy=is_buy, stop_loss_pct=action.stop_loss_pct, take_profit_pct=action.take_profit_pct)
             self.dir = action.target_dir
             self.layers = 1
             
         elif action.action in (ActionType.OPEN, ActionType.PYRAMID):
             # 开仓或加仓均直接下单
-            self.executor.user_order(action.order_qty, is_buy=is_buy, stop_loss=action.stop_loss)
+            self.executor.user_order(action.order_qty, is_buy=is_buy, stop_loss_pct=action.stop_loss_pct, take_profit_pct=action.take_profit_pct)
             self.dir = action.target_dir
             self.layers = action.target_layers
 
