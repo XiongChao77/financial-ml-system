@@ -39,11 +39,9 @@ class LiveConfig:
     thresh: float =None#0.5#None#0.45
     commission = 0.05   # 0.1 = 0.1%  .can't be 0
     cash = 10000
-    stop_loss_long = 0.03  # 0-1
-    stop_loss_short = 0.015  # 0-1
     atr_sl_mult_long = 5 #2.5
     atr_sl_mult_short = 2.5 #2.5
-    take_profit = 0.99 #止盈. 0 - n倍
+    atr_tp = 0.99 #止盈. 0 - n倍
     trade_risk = 0.5     #0-1
     max_daily_loss_pct = 0.025
 
@@ -93,8 +91,6 @@ class LiveBot:
             allow_long=LiveConfig.allow_long,
             allow_short=LiveConfig.allow_short,
             thresh=LiveConfig.thresh,
-            stop_loss_long = LiveConfig.stop_loss_long,
-            stop_loss_short = LiveConfig.stop_loss_short,
             atr_sl_mult_long = LiveConfig.atr_sl_mult_long,
             atr_sl_mult_short = LiveConfig.atr_sl_mult_short,
             max_daily_loss_pct = LiveConfig.max_daily_loss_pct,
@@ -195,7 +191,7 @@ class LiveBot:
             position_dir= curr_dir,
             layers= curr_layers,
             current_time= self.executor.get_server_time(),
-            account_balance= self.executor.get_account_equity(),
+            account_equity= self.executor.get_account_equity(),
             atr_pct= last_row["atr_14"],
             slow_atr = None,
             vol_regime = None,

@@ -14,7 +14,7 @@ class BaseExecutor:
     def user_close(self, size=None, **kwargs):
         pass
     @abstractmethod
-    def user_order(self, size, is_buy, stop_loss=None, take_profit=None):
+    def user_order(self, size, is_buy, stop_loss_pct=None, take_profit_pct=None):
         pass
     @abstractmethod
     def get_last_position_open_time(self):  #return UTC time

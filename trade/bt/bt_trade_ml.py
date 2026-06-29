@@ -10,16 +10,16 @@ class BtFtmoStrategy(BtExecutor):
     params = dict(
         predict_num = None,
         holdbar=1,
+        init_equity = 0,
         trade_risk=0.98,  # 每次加仓 10% 总资金. 0-1
         max_layers=1,  # 最大加仓层数
         allow_short=True,
         allow_long=True,
         thresh=None,  # 置信度阈值
         stop_loss = 1,
-        stop_loss_long = 0.05,
-        stop_loss_short = 0.05,
         atr_sl_mult_long = 3,
         atr_sl_mult_short = 3,
+        atr_tp = 5,
         max_daily_loss_pct = 0.99,
         decide_version = 0,
     )
@@ -42,6 +42,7 @@ class BtFtmoStrategy(BtExecutor):
         self.params.trade_risk = self.params.trade_risk
         self.brain = FtmoBrain(
             self,
+            init_equity = self.params.init_equity,
             trade_risk=self.params.trade_risk,
             max_layers=self.params.max_layers,
             max_hold_num=self.params.holdbar,
@@ -49,10 +50,9 @@ class BtFtmoStrategy(BtExecutor):
             allow_long=self.params.allow_long,
             allow_short=self.params.allow_short,
             thresh=self.params.thresh,
-            stop_loss_long = self.params.stop_loss_long,
-            stop_loss_short = self.params.stop_loss_short,
             atr_sl_mult_long = self.params.atr_sl_mult_long,
             atr_sl_mult_short = self.params.atr_sl_mult_short,
+            atr_tp = self.params.atr_tp,
             max_daily_loss_pct = self.params.max_daily_loss_pct,
             decide_version = self.params.decide_version,
         )
@@ -64,16 +64,21 @@ class BtFtmoStrategy(BtExecutor):
         if order.status in [order.Submitted, order.Accepted]:
             return
         if order.status in [order.Completed]:
+            role = order.info.get("role", None)
+            sl_pct = order.info.get("sl_pct", None)
+            tp_pct = order.info.get("tp_pct", None)
+            sl_price = order.info.get("sl_price", None)
+            tp_price = order.info.get("tp_price", None)
             if order.exectype == bt.Order.Market:
-                order_type_name = "🟢 开仓/平仓 (市价单)"
+                order_type = "🟢 Open/Close(Taker)"
             elif order.exectype == bt.Order.Limit:
-                order_type_name = "💰 止盈成交 (限价单)"
+                order_type = "💰 Tp(Limit)"
                 self.debug_limitation(order)
             elif order.exectype == bt.Order.Stop:
-                order_type_name = "🛑 止损成交 (止损单)"
+                order_type = "🛑 Sl(Limit)"
                 self.debug_limitation(order)
             elif order.exectype == bt.Order.StopTrail:
-                order_type_name = "📉 移动止损成交 (追踪单)"
+                order_type = "📉 StopTrail"
                 self.debug_limitation(order)
             if order.isbuy():
                 self.logger.debug(
@@ -93,6 +98,12 @@ class BtFtmoStrategy(BtExecutor):
                 "price": order.executed.price,
                 "size": order.executed.size,
                 "is_buy": order.isbuy(),
+                "order_type":order_type,
+                "role":role,
+                "sl_pct":sl_pct,
+                "tp_pct":tp_pct,
+                "sl_price":sl_price,
+                "tp_price":tp_price,
             }
             self.trade_logs.append(record)
 
@@ -189,7 +200,7 @@ class BtFtmoStrategy(BtExecutor):
             position_dir=self.dir,
             layers=self.layers,
             current_time= self.data.datetime.datetime(0),
-            account_balance=self.broker.getvalue(),
+            account_equity=self.broker.getvalue(),
             atr_pct=self.data.atr_pct[0] if hasattr(self.data, 'atr_pct') else 0.0,
             slow_atr = self.data.slow_atr[0] if hasattr(self.data, 'slow_atr') else 0.0,
             vol_regime = self.data.vol_regime[0] if hasattr(self.data, 'vol_regime') else None,

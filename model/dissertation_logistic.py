@@ -201,7 +201,7 @@ def run_fixed_neutral_subsampling_experiment(
 
     df = common.load_train_df_from_dir(prep_output_dir)
     if pre_para is None:
-        pre_para = common.load_interval_ms_from_dir(prep_output_dir)
+        pre_para = common.load_pre_params_from_dir(prep_output_dir)
         logger.info(f"load pre_para from {prep_output_dir}")
     kline_interval_ms = common.get_interval_ms(pre_para.interval)
 

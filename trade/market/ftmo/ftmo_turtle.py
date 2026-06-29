@@ -107,7 +107,7 @@ class TurtleLiveBot:
         self.brain.decide(
             df=df,
             current_time=pd.to_datetime(current_candle_time),
-            account_balance=equity,
+            account_equity=equity,
             curr_dir=curr_dir,
             curr_pos_size=curr_pos_size_pct, # 关键：告诉大脑我们现在有没有仓
             last_entry_price=last_price

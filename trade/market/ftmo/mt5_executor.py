@@ -48,11 +48,12 @@ class MT5Executor(BaseExecutor):
         server_time = datetime.fromtimestamp(tick.time)
         return server_time
 
-    def user_order(self, size, is_buy, stop_loss=None, interval_ms=500):
+    def user_order(self, size, is_buy, stop_loss=None, take_profit=None, interval_ms=500):
         """
         size: Notional value in currency units
         is_buy: Boolean, True for BUY, False for SELL
-        stop_loss: Percentage value (e.g., 0.02 for 2%)
+        stop_loss: Percentage value, e.g. 0.02 for 2%
+        take_profit: Percentage value, e.g. 0.04 for 4%
         interval_ms: Delay between split orders in milliseconds
         """
         symbol_info = mt5.symbol_info(self.symbol)
@@ -60,7 +61,7 @@ class MT5Executor(BaseExecutor):
             self.logger.error(f"Symbol not found: {self.symbol}")
             return
 
-        # 1. Get benchmark price (first tick before execution)
+        # 1. Get benchmark price
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             self.logger.error("Failed to get initial tick")
@@ -105,6 +106,7 @@ class MT5Executor(BaseExecutor):
             price = tick.ask if is_buy else tick.bid
             price = round(price, symbol_info.digits)
 
+            # Stop Loss
             if stop_loss is not None:
                 sl_price = (
                     price * (1.0 - stop_loss)
@@ -114,6 +116,16 @@ class MT5Executor(BaseExecutor):
             else:
                 sl_price = 0.0
 
+            # Take Profit
+            if take_profit is not None:
+                tp_price = (
+                    price * (1.0 + take_profit)
+                    if is_buy else price * (1.0 - take_profit)
+                )
+                tp_price = round(tp_price, symbol_info.digits)
+            else:
+                tp_price = 0.0
+
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": self.symbol,
@@ -121,6 +133,7 @@ class MT5Executor(BaseExecutor):
                 "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
                 "price": price,
                 "sl": sl_price,
+                "tp": tp_price,
                 "magic": self.magic,
                 "comment": f"Split_Order_{order_count}",
                 "type_time": mt5.ORDER_TIME_GTC,
@@ -135,7 +148,9 @@ class MT5Executor(BaseExecutor):
                 break
 
             self.logger.info(
-                f"Batch {order_count} executed | lots={current_batch_lots} | req_price={price}"
+                f"Batch {order_count} executed | "
+                f"lots={current_batch_lots} | req_price={price} | "
+                f"SL={sl_price} | TP={tp_price}"
             )
 
             remaining_lots -= current_batch_lots
@@ -175,7 +190,7 @@ class MT5Executor(BaseExecutor):
         self.logger.info(
             f"Execution finished: batches={order_count} | "
             f"benchmark_price={benchmark_price} | avg_price={avg_price:.6f} | "
-            f"slippage={slippage_pct*100:.4f}%"
+            f"slippage={slippage_pct * 100:.4f}%"
         )
         
     def user_close(self, **kwargs):

@@ -160,7 +160,7 @@ class BybitTurtleBot:
         self.brain.decide(
             df=df,
             current_time=pd.to_datetime(datetime.now()), # 或使用 server time
-            account_balance=equity,
+            account_equity=equity,
             curr_dir=curr_dir,
             curr_pos_size=curr_pos_size_pct,
             last_entry_price=last_price
