@@ -656,7 +656,7 @@ def run_training(train_task:TrainTask,feature_direction_map, logger: logging, da
         torch.set_float32_matmul_precision('high')
 
     df = common.load_train_df_from_dir(prep_output_dir)
-    para = common.load_interval_ms_from_dir(prep_output_dir)
+    para = common.load_pre_params_from_dir(prep_output_dir)
     kline_interval_ms = common.get_interval_ms(para.interval)
     logger.info(f"Using TimeSeriesWindowDataset with window={train_cfg_1.model_cfg.seq_len} Origin data len {len(df)}...")
 
@@ -694,6 +694,7 @@ def run_training(train_task:TrainTask,feature_direction_map, logger: logging, da
 
     X_raw, y_raw, rb_raw = full_ds.X, full_ds.y, full_ds.returns
     if train_task == TrainTask.SINGLE_MODEL_3CLASS:
+        shutil.copy2(common.get_data_config_path_in_dir(prep_output_dir),save_dir)
         return run_single_model_3class_task(
             train_task, ds_tr, ds_va, ds_te, full_ds, feature_list,
             train_cfg_1, data_cfg, device, logger, save_dir, experiment
@@ -701,13 +702,16 @@ def run_training(train_task:TrainTask,feature_direction_map, logger: logging, da
     elif train_task in [TrainTask.SINGLE_MODEL_TRIGGER, TrainTask.SINGLE_MODEL_DIR, 
                         TrainTask.SINGLE_MODEL_LONG_OVR, TrainTask.SINGLE_MODEL_SHORT_OVR]:
         # 使用新封装的二分类逻辑
+        shutil.copy2(common.get_data_config_path_in_dir(prep_output_dir),save_dir)
         return run_single_model_binary_task(train_task, full_ds, feature_list,train_cfg_1, data_cfg, device, logger, save_dir, experiment)
     elif train_task == TrainTask.TRIGGER_DIR:
         tri_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_TRIGGER)
         set_seed(train_cfg_1.seed)
+        shutil.copy2(common.get_data_config_path_in_dir(prep_output_dir),tri_save_dir)
         run_single_model_binary_task(TrainTask.SINGLE_MODEL_TRIGGER, full_ds, feature_list,train_cfg_1, data_cfg, device, logger, tri_save_dir, experiment)
         dir_save_dir = os.path.join(save_dir, TrainTask.SINGLE_MODEL_DIR)
         set_seed(train_cfg_2.seed)
+        shutil.copy2(common.get_data_config_path_in_dir(prep_output_dir),dir_save_dir)
         run_single_model_binary_task(TrainTask.SINGLE_MODEL_DIR, full_ds, feature_list,train_cfg_2, data_cfg, device, logger, dir_save_dir, experiment)
 
     else:
@@ -1968,6 +1972,7 @@ def fusion_trigger_dir(logger: logging.Logger, trigger_train_output_dir:str, dir
     with open(os.path.join(trigger_dir_save_dir, "task_description.json"), "w", encoding="utf-8") as f:
         json.dump(task_desc, f, ensure_ascii=False, indent=2)
 
+    shutil.copy2(common.get_data_config_path_in_dir(trigger_train_output_dir),trigger_dir_save_dir)
     logger.info(f"🎉 {task_type} task complete. Artifacts saved to: {trigger_dir_save_dir}")
 
 #it could be same model with different parameters

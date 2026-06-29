@@ -43,7 +43,7 @@ class StrategyPara:
         self.commission = 0.1   # 0.1 = 0.1%  .can't be 0
         self.cash = 10000
         self.stop_loss = 2  # should be 1-10   stop_loss = self.data.stop_threshold[0]*self.params.stop_loss
-        self.take_profit = 0.99 #止盈. 0 - n倍
+        self.atr_tp = 0.99 #止盈. 0 - n倍
         self.trade_risk = 0.1     #0-1
 
 

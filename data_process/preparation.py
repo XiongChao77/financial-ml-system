@@ -8,6 +8,70 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 
+def check_open_equals_prev_close(
+    df: pd.DataFrame,
+    logger: logging.Logger,
+    open_col: str = "open",
+    close_col: str = "close",
+    time_col: str = "open_time_date_utc",
+    tolerance: float = 1e-10
+) -> tuple[int, int, float]:
+    """
+    Check whether current candle open equals previous candle close.
+
+    Returns:
+        mismatch_count: number of rows where open != previous close
+        total_checked: number of comparable rows, normally len(df) - 1
+        mismatch_ratio: mismatch_count / total_checked
+    """
+
+    if open_col not in df.columns or close_col not in df.columns:
+        logger.warning(
+            f"Missing columns for open/prev_close check: "
+            f"{open_col=}, {close_col=}"
+        )
+        return 0, 0, 0.0
+
+    if len(df) <= 1:
+        logger.warning("Not enough rows to check open == previous close.")
+        return 0, 0, 0.0
+
+    curr_open = df[open_col].astype(float)
+    prev_close = df[close_col].shift(1).astype(float)
+
+    # 第一行没有前一根K线，所以排除
+    valid_mask = prev_close.notna()
+
+    # 用 tolerance 避免浮点精度误差
+    mismatch_mask = valid_mask & ((curr_open - prev_close).abs() > tolerance)
+
+    mismatch_count = int(mismatch_mask.sum())
+    total_checked = int(valid_mask.sum())
+    mismatch_ratio = mismatch_count / total_checked if total_checked > 0 else 0.0
+
+    logger.info("\n=== Open vs Previous Close Check ===")
+    logger.info(f"Total checked rows: {total_checked}")
+    logger.info(f"Mismatch count: {mismatch_count}")
+    logger.info(f"Mismatch ratio: {mismatch_ratio:.4%}")
+
+    if mismatch_count > 0:
+        sample_cols = [open_col, close_col]
+        if time_col in df.columns:
+            sample_cols = [time_col, open_col, close_col]
+
+        sample_df = df.loc[mismatch_mask, sample_cols].head(10).copy()
+        sample_df["prev_close"] = prev_close.loc[mismatch_mask].head(10).values
+        sample_df["diff"] = (
+            sample_df[open_col].astype(float) - sample_df["prev_close"].astype(float)
+        )
+
+        logger.info("First mismatched samples:")
+        logger.info(f"\n{sample_df}")
+
+    logger.info("====================================\n")
+
+    return mismatch_count, total_checked, mismatch_ratio
+
 def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine(), prep_output_dir =common.DATA_OUT_DIR ):
     file = os.path.join(common.PROJECT_DATA_DIR,para.market_category, para.data_source ,para.trading_type ,f"{para.symbol}_{para.interval}.csv")
     logger.info(f"using file :{file}")
@@ -16,6 +80,8 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     
     # 2. Persist metadata for labeling and downstream model usage
     df = pd.read_csv(file)
+    if para.market_category == 'Cryptocurrency':
+        check_open_equals_prev_close(df, logger)
     df = common.clean_data_quality_auto(df,logger)  
     # 3. Pass interval_ms to label logic so it can adapt its volatility window to the real time span.
     label_col = 'label'
@@ -25,6 +91,8 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
         df = common.attach_label(df, para=para,label_col = label_col)
     elif para.label_type == 'TBM':
         df = common.attach_triple_barrier_label(df, para=para,label_col = label_col)
+    elif para.label_type == 'TBM_TREND':
+        df = common.attach_triple_barrier_trend_label(df, para=para,label_col = label_col)
     # common.print_label_performance_stats(df, para)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)

@@ -96,7 +96,7 @@ class TurtleStrategy(BtExecutor):
         self.brain.decide(
             df=df, 
             current_time=current_time, 
-            account_balance=account_equity,
+            account_equity=account_equity,
             curr_dir=curr_dir,
             curr_pos_size=curr_pos_size,
             last_entry_price = last_entry_price,

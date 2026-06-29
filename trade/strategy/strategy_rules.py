@@ -54,25 +54,25 @@ class RulesBrain(BrainBase):
         df['atr'] = atr_vals
         return df
 
-    def _update_daily_equity(self, current_time: datetime, account_balance: float):
+    def _update_daily_equity(self, current_time: datetime, account_equity: float):
         """日内净值更新与熔断重置"""
         current_date = current_time.date()
         if self.last_trade_date != current_date:
-            self.day_start_equity = account_balance
+            self.day_start_equity = account_equity
             self.last_trade_date = current_date
             self.is_halted_today = False
 
-    def decide(self, df: pd.DataFrame, current_time: datetime, account_balance: float, 
+    def decide(self, df: pd.DataFrame, current_time: datetime, account_equity: float, 
                curr_dir: PositionDir, curr_pos_qty: float) -> TradingAction:
         
         if len(df) < self.entry_period: return TradingAction(ActionType.HOLD)
 
         # 1. 每日风险审计与熔断机制 (Sync from TurtleBrain)
-        self._update_daily_equity(current_time, account_balance)
+        self._update_daily_equity(current_time, account_equity)
         if self.is_halted_today:
             return TradingAction(ActionType.HOLD)
 
-        daily_loss_abs = max(0.0, self.day_start_equity - account_balance)
+        daily_loss_abs = max(0.0, self.day_start_equity - account_equity)
         max_loss_allowed_abs = self.day_start_equity * self.max_daily_loss_pct
         remaining_budget = max_loss_allowed_abs - daily_loss_abs
 
@@ -108,20 +108,20 @@ class RulesBrain(BrainBase):
         # Unit Shares = (Balance * Risk) / (2 * ATR)
         if atr <= 0: return TradingAction(ActionType.HOLD)
         
-        raw_unit_shares = (account_balance * self.risk_per_trade) / (2.0 * atr)
+        raw_unit_shares = (account_equity * self.risk_per_trade) / (2.0 * atr)
         
         # 名义价值约束 (Nominal Value Constraint)
-        unit_nominal_pct = (raw_unit_shares * current_price) / account_balance
+        unit_nominal_pct = (raw_unit_shares * current_price) / account_equity
         if unit_nominal_pct > self.upper_limit:
             unit_nominal_pct = self.upper_limit
         
         # 最终执行股数 (应用 scale)
-        final_unit_shares = (unit_nominal_pct * account_balance * self.unit_pct_scale) / current_price
+        final_unit_shares = (unit_nominal_pct * account_equity * self.unit_pct_scale) / current_price
         
         # 预算约束止损 (Budget-Constrained Stop Loss)
         # 计算加仓后预估的总仓位名义价值占比
         target_layers = min(self.curr_layers + 1, self.max_layers)
-        total_nominal_val = (unit_nominal_pct * self.unit_pct_scale) * target_layers * account_balance
+        total_nominal_val = (unit_nominal_pct * self.unit_pct_scale) * target_layers * account_equity
         
         # 基于剩余日内预算计算出的最大允许止损比例 (0.8 为滑点安全系数)
         max_sl_ratio = (remaining_budget / total_nominal_val) * 0.8 if total_nominal_val > 0 else 0.05
