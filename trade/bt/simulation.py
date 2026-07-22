@@ -37,6 +37,7 @@ class PandasDataWithPred(bt.feeds.PandasData):
         "atr_pct",
         "slow_atr",
         "vol_regime",
+        "bars_to_close",
     )
     params = (
         ("pred", -1),
@@ -45,6 +46,7 @@ class PandasDataWithPred(bt.feeds.PandasData):
         ("slow_atr", -1),      # 自动匹配列名
         ("vol_regime", -1),      # 自动匹配列名
         ("label", -1),
+        ("bars_to_close", -1),
     )
 
 def log_parameters(params_obj, logger):
@@ -82,14 +84,14 @@ class StrategyPara:
     allow_short: bool = True
     # execution
     holdbar: int = 48       # 默认值，初始化时可覆盖
-    commission: float = 0.05   # 0.1 = 0.1%, can't be 0
+    commission: float = 0.05   # cryptocurrency： 0.05. 0.1 = 0.1%, can't be 0   XAU: comission:0.0007, spread: 0.02
     init_equity: float = 10000.0
     # signal
     thresh: Optional[float] = None
     # stop / take
     atr_sl_mult_long: float = 4
     atr_sl_mult_short: float = 4
-    atr_tp: float = 20
+    atr_tp: float = 100
     # risk
     trade_risk: float = 0.01
     max_daily_loss_pct: float = 0.04
@@ -194,6 +196,7 @@ def main(logger:logging.Logger, para = StrategyPara(),train_cfg= train.TrainConf
         # slow_atr = "atr_5000",
         # vol_regime = "vol_regime_100",
         label = "label",
+        bars_to_close = "bars_to_close",
         openinterest=-1,
         nocase=True,
         # fromdate=datetime(2023, 10, 1),

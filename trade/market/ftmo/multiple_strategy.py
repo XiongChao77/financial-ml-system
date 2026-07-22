@@ -118,7 +118,7 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
         executor,
         trade_risk=st_para.trade_risk,
         max_layers=1,
-        max_hold_num=st_para.holdbar,
+        min_hold_num=st_para.holdbar,
         exist_hold_num= get_bars_since_open(executor,pre_para),
         allow_long=st_para.allow_long,
         allow_short=st_para.allow_short,

@@ -1,5 +1,5 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
-import os, sys, time, json, math
+import os, sys, time, json, math, argparse
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -12,7 +12,7 @@ import copy
 from data_process.common import *
 from data_process import common 
 
-REPORTS_FILE = "reports.jsonl"
+REPORTS_FILE = "sim_reports.jsonl"
 
 def iter_reports_jsonl(root_list):
     """
@@ -28,93 +28,99 @@ def extract_row(report, src_path):
     """
     Extract key fields from a single report.
     """
-    fusion_hash = report.get("fusion_hash", report)
-    fusion_dir = report.get("fusion_dir", report)
-    trigger = report.get("trigger", report)
-    direction = report.get("direction", report)
-    signal_return = report.get("signal_return", report)
-    signal_avg_return = signal_return['0'].get("signal_avg_return", report)
-    signal_count = signal_return['0'].get("signal_count", report)
-    simulation = report.get("simulation", report)
-    short = simulation.get("short", report)  # Support both separated short/long storage and merged formats
-    long = simulation.get("long", report)
-    forward = simulation.get("forward", report)
-    perf = short.get("performance", {})
-    params = short.get("params", {})
-    common = params.get("common", {})
-    long_perf = long.get("performance", {})
-    long_params = long.get("params", {})
-    long_common = long_params.get("common", {})
-    forward_perf = forward.get("performance", {})
-    triger_metrics = report["trigger"]["metrics"]
-    direction_metrics = report["direction"]["metrics"]
-    triger_macro_f1 = triger_metrics["Best_F1"]["macro_f1"]
-    triger_macro_precision = triger_metrics.get("macro_precision", 0)
-    triger_accuracy = triger_metrics.get("accuracy", 0)
-    triger_macro_recall = triger_metrics.get("macro_recall", 0)
-    direction_macro_f1 = direction_metrics["Best_F1"]["macro_f1"]
-    directionmacro_precision = direction_metrics.get("macro_precision", 0)
-    directionaccuracy = direction_metrics.get("accuracy", 0)
-    directionmacro_recall = direction_metrics.get("macro_recall", 0)
-    trigger_pos_lift = triger_metrics["Best_F1"]["per_class"]["1"]["precision_lift"]
-    lift_long = (report["direction"]["metrics"]["Best_F1"]["per_class"]['1']["precision_lift"])
-    lift_short = (report["direction"]["metrics"]["Best_F1"]["per_class"]["0"]["precision_lift"])
+    rows = []
+    for simulation in report['simulation'].values():
+        fusion_hash = report.get("fusion_hash", report)
+        fusion_dir = report.get("fusion_dir", report)
+        trigger = report.get("trigger", report)
+        direction = report.get("direction", report)
+        signal_return = report.get("signal_return", report)
+        signal_avg_return = signal_return['0'].get("signal_avg_return", report)
+        signal_count = signal_return['0'].get("signal_count", report)
+        short = simulation.get("short", report)  # Support both separated short/long storage and merged formats
+        long = simulation.get("long", report)
+        forward = simulation.get("forward", report)
+        perf = short.get("performance", {})
+        params = short.get("params", {})
+        common = params.get("common", {})
+        long_perf = long.get("performance", {})
+        long_params = long.get("params", {})
+        long_common = long_params.get("common", {})
+        forward_perf = forward.get("performance", {})
+        triger_metrics = report["trigger"]["metrics"]
+        direction_metrics = report["direction"]["metrics"]
+        triger_macro_f1 = triger_metrics["Best_F1"]["macro_f1"]
+        triger_macro_precision = triger_metrics.get("macro_precision", 0)
+        triger_accuracy = triger_metrics.get("accuracy", 0)
+        triger_macro_recall = triger_metrics.get("macro_recall", 0)
+        direction_macro_f1 = direction_metrics["Best_F1"]["macro_f1"]
+        directionmacro_precision = direction_metrics.get("macro_precision", 0)
+        directionaccuracy = direction_metrics.get("accuracy", 0)
+        directionmacro_recall = direction_metrics.get("macro_recall", 0)
+        trigger_pos_lift = triger_metrics["Best_F1"]["per_class"]["1"]["precision_lift"]
+        lift_long = (report["direction"]["metrics"]["Best_F1"]["per_class"]['1']["precision_lift"])
+        lift_short = (report["direction"]["metrics"]["Best_F1"]["per_class"]["0"]["precision_lift"])
 
-    return {
-        "signal_avg_return":signal_avg_return,
-        "signal_count":signal_count,
-        "cagr": perf.get("cagr"),
-        "calmar": perf.get("calmar"),
-        "daily_freq" : short.get("trades", {}).get("daily_freq"),
-        "l_cagr": long_perf.get("cagr"),
-        "l_calmar": long_perf.get("calmar"),
-        "l_daily_freq" : long.get("trades", {}).get("daily_freq"),
-        "l_win_rate" : long.get("trades", {}).get("win_rate"),
-        "l_avg_pct_gross" : long.get("trades", {}).get("avg_pct_gross"),
-        "l_sharpe" : long_perf.get("sharpe"),
-        "f_cagr": forward_perf.get("cagr"),
-        "f_calmar": forward_perf.get("calmar"),
-        "f_daily_freq" : forward.get("trades", {}).get("daily_freq"),
-        "hash": params.get('hash',0),
-        "path": src_path,
-        "short" : short,
-        "long": long,
-        "forward": report.get("forward", report),
-        "fusion_hash":fusion_hash,
-        "fusion_dir":fusion_dir,
-        "trigger":trigger,
-        "direction":direction,
+        rows.append({
+            "signal_avg_return":signal_avg_return,
+            "signal_count":signal_count,
+            "cagr": perf.get("cagr"),
+            "calmar": perf.get("calmar"),
+            "daily_freq" : short.get("trades", {}).get("daily_freq"),
+            "l_cagr": long_perf.get("cagr"),
+            "l_calmar": long_perf.get("calmar"),
+            "l_daily_freq" : long.get("trades", {}).get("daily_freq"),
+            "l_win_rate" : long.get("trades", {}).get("win_rate"),
+            "l_avg_pct_gross" : long.get("trades", {}).get("avg_pct_gross"),
+            "l_sharpe" : long_perf.get("sharpe"),
+            "f_cagr": forward_perf.get("cagr"),
+            "f_calmar": forward_perf.get("calmar"),
+            "f_daily_freq" : forward.get("trades", {}).get("daily_freq"),
+            "hash": params.get('hash',0),
+            "path": src_path,
+            "short" : short,
+            "long": long,
+            "forward": report.get("forward", report),
+            "fusion_hash":fusion_hash,
+            "fusion_dir":fusion_dir,
+            "trigger":trigger,
+            "direction":direction,
 
-        "triger_macro_f1":triger_macro_f1,
-        "triger_macro_precision":triger_macro_precision,
-        "triger_accuracy":triger_accuracy,
-        "triger_macro_recall":triger_macro_recall,
-        "direction_macro_f1":direction_macro_f1,
-        "directionmacro_precision":directionmacro_precision,
-        "directionaccuracy":directionaccuracy,
-        "directionmacro_recall":directionmacro_recall,
+            "triger_macro_f1":triger_macro_f1,
+            "triger_macro_precision":triger_macro_precision,
+            "triger_accuracy":triger_accuracy,
+            "triger_macro_recall":triger_macro_recall,
+            "direction_macro_f1":direction_macro_f1,
+            "directionmacro_precision":directionmacro_precision,
+            "directionaccuracy":directionaccuracy,
+            "directionmacro_recall":directionmacro_recall,
 
-        "trigger_pos_lift":trigger_pos_lift,
-        "lift_long":lift_long ,
-        "lift_short": lift_short,
-        "raw" : report,
-    }
+            "trigger_pos_lift":trigger_pos_lift,
+            "lift_long":lift_long ,
+            "lift_short": lift_short,
+            "raw" : report,
+        })
+    return rows
 
 def plot_model_param_heatmaps(
     records,
     output_dir,
+    x_input = 'vol_multiplier',
+    y_input = 'seq_len',
     metric="l_cagr",
     side="trigger",      # "trigger" or "direction"
     agg="best",          # "best", "mean", "top10_mean"
     top_pct=0.10,
+    higher_is_better = True,
+    max_unique_values=15,  # auto-bin an axis if it has more unique values than this
 ):
     """
-    Plot predict_num x miss_penalty heatmaps for each model class,
+    Plot vol_multiplier x seq_len heatmaps for each model class,
     then combine all model heatmaps into one large figure.
 
     side:
-        "trigger"   -> use trigger model class and trigger miss_penalty
-        "direction" -> use direction model class and direction miss_penalty
+        "trigger"   -> use trigger model class and trigger seq_len
+        "direction" -> use direction model class and direction seq_len
     """
 
     os.makedirs(output_dir, exist_ok=True)
@@ -129,40 +135,70 @@ def plot_model_param_heatmaps(
         model_type = model_info.get("model_type")
         model_version = model_info.get("model_version")
 
-        train_params = model_info.get("train_params", {})
-        model_cfg = train_params.get("model_cfg", {})
-
         model_class = f"{model_type}_v{model_version}"
-        miss_penalty =  common.recursive_get(model_info,"miss_penalty")
 
-        # predict_num 来自 common params
-        predict_num = common.recursive_get(model_info, "predict_num")
+        def get_conf(key):
+            para_meters_map = {
+            "vol_multiplier":common.recursive_get(r, "vol_multiplier_long"),
+            "miss_penalty":common.recursive_get(r, "miss_penalty"),
+            "seq_len":common.recursive_get(r, "seq_len"),
+            "stride":common.recursive_get(r, "stride"),
+            "predict_num":common.recursive_get(r, "predict_num"),
+            "holdbar":common.recursive_get(r, "holdbar"),
+            "atr_sl_mult_long":common.recursive_get(r, "atr_sl_mult_long"),
+            "atr_tp":common.recursive_get(r, "atr_tp"),
+            }
+            if key in para_meters_map:
+                return para_meters_map[key]
+            else:
+                return common.recursive_get(r, key)
 
-        value = _safe_float(r.get(metric))
+        x_input_value = get_conf(x_input)
+        y_input_value =  get_conf(y_input)
+
+        value = _safe_float(common.recursive_get(r['long'],metric))
 
         rows.append({
             "model_class": model_class,
-            "predict_num": predict_num,
-            "miss_penalty": miss_penalty,
+            x_input: x_input_value,
+            y_input: y_input_value,
             metric: value,
         })
 
     df = pd.DataFrame(rows)
-    df = df.dropna(subset=["model_class", "predict_num", "miss_penalty", metric])
+    df = df.dropna(subset=["model_class", x_input, y_input, metric])
 
     if df.empty:
         print(f"[WARN] no valid rows for {side} {metric}")
         return None
 
-    df["predict_num"] = df["predict_num"]
-    df["miss_penalty"] = df["miss_penalty"]
+    def _maybe_bin(series, n_bins):
+        """
+        If a hyperparameter axis has too many unique values (common for
+        continuous params sampled by random search, e.g. miss_penalty),
+        bucket it into n_bins ranges so the heatmap stays readable.
+        Falls back to the original values untouched if there aren't
+        enough unique values to bother binning.
+        """
+        n_unique = series.nunique()
+        if n_unique <= max_unique_values:
+            return series
+        try:
+            binned = pd.qcut(series, q=n_bins, duplicates="drop")
+        except ValueError:
+            return series
+        # Use the midpoint of each bin as a numeric, sortable label.
+        return binned.apply(lambda iv: round((iv.left + iv.right) / 2, 3))
+
+    df[x_input] = _maybe_bin(df[x_input], max_unique_values)
+    df[y_input] = _maybe_bin(df[y_input], max_unique_values)
 
     raw_csv = os.path.join(
         output_dir,
         f"model_param_heatmap_raw_{side}_{metric}_{agg}.csv"
     )
     df.to_csv(raw_csv, index=False)
-    print(f"[SAVE] {raw_csv}")
+    # print(f"[SAVE] {raw_csv}")
 
     model_classes = sorted(df["model_class"].unique())
 
@@ -171,10 +207,13 @@ def plot_model_param_heatmaps(
     for model_class in model_classes:
         sub = df[df["model_class"] == model_class]
 
-        grouped = sub.groupby(["predict_num", "miss_penalty"])[metric]
+        grouped = sub.groupby([x_input, y_input], observed=True)[metric]
 
         if agg == "best":
-            summary = grouped.max().reset_index(name="value")
+            if higher_is_better == True:
+                summary = grouped.max().reset_index(name="value")
+            else:
+                summary = grouped.min().reset_index(name="value")
         elif agg == "mean":
             summary = grouped.mean().reset_index(name="value")
         elif agg == "top10_mean":
@@ -182,15 +221,15 @@ def plot_model_param_heatmaps(
                 lambda x: _top_pct_mean(
                     x,
                     pct=top_pct,
-                    higher_is_better=True,
+                    higher_is_better=higher_is_better,
                 )
             ).reset_index(name="value")
         else:
             raise ValueError(f"unsupported agg: {agg}")
 
         pivot = summary.pivot(
-            index="predict_num",
-            columns="miss_penalty",
+            index=x_input,
+            columns=y_input,
             values="value",
         )
 
@@ -202,7 +241,7 @@ def plot_model_param_heatmaps(
         #     pivot,
         #     output_dir,
         #     f"heatmap_{side}_{model_class}_{metric}_by_predict_seq_{agg}.png",
-        #     f"{side} {model_class} | {metric} {agg} by predict_num x miss_penalty",
+        #     f"{side} {model_class} | {metric} {agg} by {x_input} x {y_input}",
         #     fmt=".2f",
         #     cmap="RdYlGn",
         # )
@@ -225,8 +264,26 @@ def plot_model_param_heatmaps(
     ncols = min(3, n)
     nrows = int(math.ceil(n / ncols))
 
-    fig_width = 5.0 * ncols + 0.8
-    fig_height = 4.2 * nrows
+    # Size the figure/cells based on how many rows & columns actually appear
+    # in the pivots (unique x_input / y_input values), not just the number
+    # of subplots. Previously the figure had a fixed width regardless of
+    # column count, so wide pivots (e.g. many unique miss_penalty values)
+    # got squeezed into unreadable slivers with overlapping annotations.
+    max_rows_in_pivot = max((p.shape[0] for p in pivots.values()), default=1)
+    max_cols_in_pivot = max((p.shape[1] for p in pivots.values()), default=1)
+
+    cell_w = 0.55  # inches per column
+    cell_h = 0.42  # inches per row
+
+    subplot_width = max(4.0, max_cols_in_pivot * cell_w)
+    subplot_height = max(3.5, max_rows_in_pivot * cell_h) + 1.0  # room for title/labels/ticks
+
+    fig_width = subplot_width * ncols + 0.8
+    fig_height = subplot_height * nrows
+
+    # Shrink annotation font as cells get narrower/shorter so text stays
+    # inside each cell instead of overlapping neighboring cells.
+    annot_fontsize = max(5, min(10, min(cell_w, cell_h) * 16))
 
     fig = plt.figure(figsize=(fig_width, fig_height))
 
@@ -234,8 +291,8 @@ def plot_model_param_heatmaps(
         nrows=nrows,
         ncols=ncols + 1,
         width_ratios=[1] * ncols + [0.05],
-        wspace=0.25,
-        hspace=0.35,
+        wspace=0.35,
+        hspace=0.55,
     )
 
     axes = []
@@ -260,11 +317,15 @@ def plot_model_param_heatmaps(
             linewidths=0.4,
             linecolor="white",
             cbar=False,
+            annot_kws={"size": annot_fontsize},
+            square=False,
         )
 
         ax.set_title(model_class)
-        ax.set_xlabel("miss_penalty")
-        ax.set_ylabel("predict_num")
+        ax.set_xlabel(y_input)
+        ax.set_ylabel(x_input)
+        ax.tick_params(axis="x", labelrotation=90, labelsize=max(6, annot_fontsize))
+        ax.tick_params(axis="y", labelrotation=0, labelsize=max(6, annot_fontsize))
 
     # colorbar 只放在最右边，跨所有行
     cbar_ax = fig.add_subplot(gs[:, -1])
@@ -279,13 +340,13 @@ def plot_model_param_heatmaps(
     cbar.set_label(metric)
 
     fig.suptitle(
-        f"{side} models | {metric} ({agg}) by predict_num x miss_penalty",
+        f"{side} models | {metric} ({agg}) by {x_input} x {y_input}",
         fontsize=14,
     )
 
     combined_path = os.path.join(
         output_dir,
-        f"heatmap_all_{side}_models_{metric}_by_predict_seq_{agg}.png"
+        f"heatmap_all_{side}_models_{metric}_by_{x_input}_x_{y_input}_{agg}.png"
     )
 
     fig.savefig(combined_path, dpi=200, bbox_inches="tight")
@@ -345,6 +406,8 @@ def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.
     )
     
     price_df = pd.read_csv(price_file)
+    if 'open_time_date_utc' not in price_df.columns:
+        price_df['open_time_date_utc'] = pd.to_datetime(price_df['open_time_ms_utc'], unit='ms', utc=True)
     price_df['open_time_date_utc'] = pd.to_datetime(price_df['open_time_date_utc'])
     price_df.set_index('open_time_date_utc', inplace=True)
     price_series = price_df['close'].sort_index()
@@ -435,7 +498,7 @@ def _model_axis_label(model_info, prefix=""):
 
     IMPORTANT:
     Only model_type + model_version define the model category.
-    task_hash / score / miss_penalty / stride / penalties / feature params are
+    task_hash / score / seq_len / stride / penalties / feature params are
     different training instances under the same category, so they must NOT
     appear in the axis label.
     """
@@ -602,7 +665,7 @@ def performance_compare_trigger(
 
         higher_is_better = metric not in lower_is_better_metrics
 
-        grouped = metric_df.groupby(["trigger_model", "direction_model"], dropna=False)[metric]
+        grouped = metric_df.groupby(["trigger_model", "direction_model"], dropna=False, observed=True)[metric]
         pair_summary = grouped.agg(
             count="count",
             mean="mean",
@@ -655,16 +718,16 @@ def performance_compare_trigger(
 
         # Single-axis summaries answer: "which trigger/direction model is robust?"
         for axis in ["trigger_model", "direction_model"]:
-            axis_summary = metric_df.groupby(axis)[metric].agg(
+            axis_summary = metric_df.groupby(axis, observed=True)[metric].agg(
                 count="count",
                 mean="mean",
                 median="median",
                 std="std",
             ).reset_index()
-            axis_summary["best"] = metric_df.groupby(axis)[metric].apply(
+            axis_summary["best"] = metric_df.groupby(axis, observed=True)[metric].apply(
                 lambda x: _best_value(x, higher_is_better=higher_is_better)
             ).values
-            axis_summary[f"top{int(top_pct * 100)}_mean"] = metric_df.groupby(axis)[metric].apply(
+            axis_summary[f"top{int(top_pct * 100)}_mean"] = metric_df.groupby(axis, observed=True)[metric].apply(
                 lambda x: _top_pct_mean(x, pct=top_pct, higher_is_better=higher_is_better)
             ).values
             sort_col = f"top{int(top_pct * 100)}_mean"
@@ -701,8 +764,9 @@ def performance_compare_trigger(
         "metric_summary": metric_summary,
     }
 
+
 def main():
-    sim_dir1 = os.path.join(common.PERSISTENCE_DIR,'batch_train/DOGEUSDT_30m/2026-06-28/19_15_16/batch_simulation')
+    sim_dir1 = os.path.join(common.PERSISTENCE_DIR,'batch_train/DOGEUSDT_15m/2026-07-11/03_29_32/batch_simulation')
     output_dir = os.path.join(sim_dir1, 'report_view')
     os.makedirs(output_dir, exist_ok=True)
     exp_dir_list = [sim_dir1]
@@ -717,20 +781,27 @@ def main():
             if r['status'] != 'ok':
                 error_count += 1
                 continue
-            row = extract_row(r, report_file)
-            rows.append(row)
+            rows.extend(extract_row(r, report_file))
     symbol = rows[0]['short']['params']['common']['symbol']
     interval = rows[0]['short']['params']['common']['interval']
     print(f"Total reports loaded: {len(rows)}, {error_count} errors ")
+    if len(rows) == 0 :
+        raise RuntimeError("no report found")
+    os.makedirs(output_dir, exist_ok=True)
     # performance_compare_trigger(rows, output_dir)
+    x_input = 'label_type'  # holdbar 
+    y_input = 'holdbar'
+    # max_dd_pct sharpe cagr max_hwm_duration_days calmar rc_pos_ratio
+    metric = 'cagr'
+    higher_is_better = True
+    plot_model_param_heatmaps(rows, output_dir, x_input=x_input, y_input=y_input, metric=metric, side="trigger", agg="top10_mean", higher_is_better = higher_is_better)
+    plot_model_param_heatmaps(rows, output_dir, x_input=x_input, y_input=y_input, metric=metric, side="direction", agg="top10_mean", higher_is_better = higher_is_better)
 
-    plot_model_param_heatmaps(rows, output_dir, metric="l_cagr", side="trigger", agg="top10_mean")
-    plot_model_param_heatmaps(rows, output_dir, metric="l_cagr", side="direction", agg="top10_mean")
-
-    plot_model_param_heatmaps(rows, output_dir, metric="l_cagr", side="trigger", agg="best")
-    plot_model_param_heatmaps(rows, output_dir, metric="l_cagr", side="direction", agg="best")
-    sorted_records = sorted(rows, key=itemgetter("l_cagr"), reverse=True)
-    select_records = sorted_records[:10]
+    plot_model_param_heatmaps(rows, output_dir, x_input=x_input, y_input=y_input, metric=metric, side="trigger", agg="best", higher_is_better = higher_is_better)
+    plot_model_param_heatmaps(rows, output_dir, x_input=x_input, y_input=y_input, metric=metric, side="direction", agg="best", higher_is_better = higher_is_better)
+    sorted_records = sorted(rows, key=lambda r: common.recursive_get(r["long"], "cagr"), reverse=True)
+    index_form = 0
+    select_records = sorted_records[index_form:index_form+20]
     show_performance(select_records,output_dir,3)
     out_path = os.path.join(output_dir,"selected_configs.jsonl")
     with open(out_path, "w", encoding="utf-8") as f:

@@ -615,9 +615,9 @@ def run_single_model_binary_task(train_task:TrainTask, full_ds, feature_list,tra
 
     # 3. 专用采样器
     if train_task == TrainTask.SINGLE_MODEL_DIR:
-        sampler_tr = get_trigger_sampler(ds_tr.labels, pos_ratio=0.5)
+        sampler_tr = get_trigger_sampler(ds_tr.labels, pos_ratio= train_cfg.pos_ratio)
     else:
-        sampler_tr = get_trigger_sampler(ds_tr.labels, pos_ratio=0.3)
+        sampler_tr = get_trigger_sampler(ds_tr.labels, pos_ratio= train_cfg.pos_ratio)
     dl_tr = DataLoader(ds_tr, batch_size=train_cfg.batch_size, sampler=sampler_tr, shuffle=False)
     dl_va = DataLoader(ds_va, batch_size=train_cfg.batch_size, shuffle=False)
     dl_te = DataLoader(ds_te, batch_size=train_cfg.batch_size, shuffle=False)

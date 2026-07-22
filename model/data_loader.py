@@ -36,7 +36,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self.kline_interval_ms = kline_interval_ms
         self.feature_cols = feature_cols  # Keep a copy of requested feature list
         self.label_col = label_col
-        self.time_col = 'open_time_ms_utc'
+        self.time_col = 'open_time_sn'
         self.factory = common.FeatureFactory(self.kline_interval_ms)
 
         missing = set(feature_cols) - set(df.columns)
@@ -195,15 +195,17 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             
             if first_valid_loc > 0:
                 df_work = df_work.iloc[first_valid_loc:].copy()
-                self.logger.debug(f"✂️ [Step 1] Dropped head cold-start: {first_valid_loc} rows (indicator warmup, etc.)")
+                self.logger.info(f"✂️ [Step 1] Dropped head cold-start: {first_valid_loc} rows (indicator warmup, etc.)")
             else:
-                self.logger.debug("✅ [Step 1] No head cold-start rows.")
+                self.logger.info("✅ [Step 1] No head cold-start rows.")
         else:
             raise RuntimeError("❌ [Data Clean] Error: no complete rows found! Please check feature computation logic.")
 
         # --- Part 2: remove NaNs in the middle or tail (abnormal gaps) ---
         before_gap_clean = len(df_work)
-        df_work.dropna(inplace=True)  # Remaining NaNs are in the middle or tail
+        exclude_nan_check_cols = ["trend_strength"] #"trend_strength" is not feature
+        nan_check_cols = [ c for c in df_work.columns if c not in exclude_nan_check_cols ]
+        df_work.dropna(subset=nan_check_cols, inplace=True)
         after_gap_clean = len(df_work)
         
         gap_count = before_gap_clean - after_gap_clean
@@ -237,7 +239,10 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         """
         original_count = len(X3d)
         has_label = (label_col is not None) and (label_col in df_work.columns)
-        interval = self.kline_interval_ms
+        if self.time_col == 'open_time_sn':
+            interval = 1
+        else:
+            interval = self.kline_interval_ms
 
         # --- A. Continuity mask computation ---
         

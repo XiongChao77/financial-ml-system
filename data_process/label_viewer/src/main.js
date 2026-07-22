@@ -27,6 +27,7 @@ let startPoint = null;
 let rulerRect = null;
 let rulerLabel = null;
 let candleMap = new Map();
+let candleData = [];
 
 const fileInfo = document.getElementById("file-info");
 const INITIAL_VISIBLE_BARS = 300;
@@ -52,7 +53,7 @@ async function loadCsvFromUrl(url) {
         fileInfo.textContent = "No valid OHLC data found.";
         return;
       }
-
+      
       renderChart(candles);
       fileInfo.textContent = `${url} | ${candles.length} rows`;
     },
@@ -233,6 +234,7 @@ function renderChart(candles) {
     initChart();
   }
 
+  candleData = candles || [];
   candleMap = new Map();
 
   for (const c of candles) {
@@ -497,12 +499,18 @@ function setupRuler(container) {
 
     rulerRect.style.borderColor = isUp ? "#26a69a" : "#ef5350";
 
+    const timeSpanText = getRulerTimeSpanText(
+      startPoint.logicalIndex,
+      curLogicalIndex
+    );
+
     rulerLabel.innerHTML = `
       <b style="color:${isUp ? "#26a69a" : "#ef5350"}">
         ${isUp ? "▲" : "▼"} ${percentChange.toFixed(2)}%
       </b><br>
       Price Diff: ${priceDiff.toFixed(6)}<br>
-      Bars: ${barCount}
+      Bars: ${barCount}<br>
+      Time: ${timeSpanText}
     `;
   });
 
@@ -529,6 +537,54 @@ function setupRuler(container) {
       clearRuler();
     }
   });
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "N/A";
+
+  const totalMinutes = Math.floor(seconds / 60);
+
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  }
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  return `${minutes}m`;
+}
+
+function clampIndex(idx, min, max) {
+  return Math.max(min, Math.min(max, idx));
+}
+
+function getRulerTimeSpanText(startLogical, endLogical) {
+  if (!candleData || candleData.length === 0) return "N/A";
+
+  let startIdx = Math.floor(startLogical);
+  let endIdx = Math.floor(endLogical);
+
+  startIdx = clampIndex(startIdx, 0, candleData.length - 1);
+  endIdx = clampIndex(endIdx, 0, candleData.length - 1);
+
+  const leftIdx = Math.min(startIdx, endIdx);
+  const rightIdx = Math.max(startIdx, endIdx);
+
+  const startTime = Number(candleData[leftIdx]?.time);
+  const endTime = Number(candleData[rightIdx]?.time);
+
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) {
+    return "N/A";
+  }
+
+  const spanSeconds = Math.abs(endTime - startTime);
+
+  return formatDuration(spanSeconds);
 }
 
 function clearRuler() {

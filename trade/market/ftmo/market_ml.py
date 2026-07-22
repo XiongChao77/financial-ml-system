@@ -87,7 +87,7 @@ class LiveBot:
             self,
             trade_risk=LiveConfig.trade_risk,
             max_layers=LiveConfig.max_layers,
-            max_hold_num=LiveConfig.holdbar,
+            min_hold_num=LiveConfig.holdbar,
             allow_long=LiveConfig.allow_long,
             allow_short=LiveConfig.allow_short,
             thresh=LiveConfig.thresh,

@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Union, List, Dict
 from enum import IntEnum,Enum
+from data_process import feature
 # ==============================================================================
 # 1. 配置定义 (Configuration)
 # ==============================================================================
@@ -154,6 +155,7 @@ class TrainConfig:
     mag_limit: float = 4.0
     bias_lambda: float = 0.5
     flip_penalty: float = 1
+    pos_ratio: float = 0.5
     miss_penalty: float = 2
     false_trade: float = 1
     mag_warmup_epochs:int = 8
@@ -349,6 +351,6 @@ feature_conf_list = [
 # SingleModelTrainConfig = TrainConfig(model_cfg = LogisticConfig(model_version= 1))
 # SingleModelTrainConfig = TrainConfig(model_cfg = TransformerConfig(model_version= 1))
 seq_len = 128
-SingleModelTrigger = TrainConfig(model_cfg = ConvLSTMConfig(model_version= 1,seq_len=seq_len))
-SingleModelDirection = TrainConfig(model_cfg = TransformerConfig(model_version= 2,seq_len=seq_len))
+SingleModelTrigger = TrainConfig(model_cfg = ConvLSTMConfig(model_version= 1,seq_len=seq_len),feature_conf_list = feature.FEATURE_LIST_COMMODITY)
+SingleModelDirection = TrainConfig(model_cfg = TransformerConfig(model_version= 2,seq_len=seq_len),feature_conf_list = feature.FEATURE_LIST_COMMODITY)
 train_task_config = TrainTask.SINGLE_MODEL_TRIGGER
