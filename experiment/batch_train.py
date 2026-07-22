@@ -34,6 +34,7 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 
 from model import train_config
 from data_process import common, preparation
+from data_process.feature import FEATURE_LIST_COMMODITY
 from data_process.utils import (
     json_safe,
     load_selected_configs,
@@ -44,12 +45,12 @@ from data_process.utils import (
 #       This avoids CUDA / heavy imports in workers.
 
 TASKS_SPEC_FILE = "tasks_spec.json"
-REPORTS_FILE = "reports.jsonl"
+REPORTS_FILE = "train_reports.jsonl"
 SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 2  # max concurrent train processes (each train runs in its own process)
-SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
-INTERVAL: str = "30m"
+SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT XLMUSDT XAUUSD
+INTERVAL: str = "15m"
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -306,31 +307,23 @@ def collect_param_sweep(task_spec):
         "train": finalize(sweep["train"])
     }
 
+# sharpe cagr calmar different indicator will get different best parameters
+#    use cagr as target
 def construct_task_doge():
     import model.train as train
     preparation_task: List[Any] = []
 
-    for pn in [20,24,28]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18] # 24 >16
-        for vol_multiplier in [1.6,1.8,2]:#,1.8,1.9,2.0]:#1.8,1.9,2
+    for pn in [20]:#[20,24,28]
+        for vol_multiplier in [2]:# [1.7,1.8,1.9]  calmar:1.7 > 1.8> 1.9 cagr: 1.9>1.8>1.7
             for vol_ewma_span in [80]:
                 preparation_task.append(common.BaseDefine(
                         market_category = "Cryptocurrency", data_source = "binance_public_data",
                         vol_ewma_span = vol_ewma_span, predict_num=pn,
                         vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=None, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=None,
-                        symbol=SYMBOL,  interval=INTERVAL, trading_type= 'um', label_type = 'FTHL', version=0 ))
+                        symbol=SYMBOL,  interval=INTERVAL, trading_type= 'spot', label_type = 'FTHL', version=0 ))
 
     training_task: Dict[str,List[train.TrainConfig]] = {train.TrainTask.SINGLE_MODEL_DIR:[],train.TrainTask.SINGLE_MODEL_TRIGGER:[]}
 
-    # for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
-    #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
-    # for lambda_dir in np.arange(0.1, 0.7, 0.1).round(1):
-    #     for lambda_cost in np.arange(0.1, 0.7, 0.1).round(1):
-    #         for stride in [8]: #2,4,8
-    #             for bestf1 in [True]:
-    #                 for loss_fun_version_v in [4]:
-    #                     training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
-    #                                                 flip_penalty = float(1.3),miss_penalty = float(1.7),false_trade = 1,
-    #                                                 stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = lambda_dir,lambda_cost = lambda_cost))
     to_remove_1 = ["open", "high",'low' ]
     to_remove_2 = to_remove_1 + ['close','volume','number_of_trades','taker_buy_base_volume','taker_buy_quote_volume']
     to_remove_3 = to_remove_1 + ['close','volume','taker_buy_base_volume','taker_buy_quote_volume']
@@ -341,25 +334,33 @@ def construct_task_doge():
     feature_conf_list_3 = [f for f in train.feature_conf_list if f not in to_remove_3]
     feature_conf_list_4 = [f for f in train.feature_conf_list if f not in to_remove_4]
     feature_conf_list_5 = [f for f in train.feature_conf_list if f not in to_remove_5]
-    for seq_len in [16,96]:#in range(3*16,11*16,16): #12,16,24,32
-        for stride in [2]: #2,4,8
+    for seq_len in [24]:#in range(3*16,11*16,16): #12,16,24,28,32 , 24 is the best
+        for stride in [2]: #2>1
             for featrue_conf in [train.feature_conf_list]:
                 # compatibility seq_len_stride_featrue_conf
                 for model_cfg in [train_config.LogisticConfig(model_version= 1,seq_len=seq_len),
-                                  train_config.ConvLSTMConfig(model_version= 1,seq_len=seq_len),
+                                #   train_config.ConvLSTMConfig(model_version= 1,seq_len=seq_len),
                                   #train_config.ConvLSTMConfig(model_version= 5,seq_len=seq_len), #bad
-                                  train_config.LSTMConfig(model_version= 1,seq_len=seq_len),
+                                #   train_config.LSTMConfig(model_version= 1,seq_len=seq_len),
                                 #   train_config.TransformerConfig(model_version= 1,seq_len=seq_len),
-                                  train_config.TransformerConfig(model_version= 2,seq_len=seq_len)]:
-                    for miss_penalty in [2.5,3.5,4.5]:#np.arange(0.5,5, 0.5).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
-                        train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
-                                                        feature_conf_list= featrue_conf, model_cfg = model_cfg,
-                                                        miss_penalty = float(miss_penalty),stride = stride, patience = 5)
-                        training_task[train.TrainTask.SINGLE_MODEL_TRIGGER].append(train_conf)
+                                #   train_config.TransformerConfig(model_version= 2,seq_len=seq_len)
+                                  ]: #LogisticConfig > ConvLSTMConfig
+                    for pos_ratio in np.arange(0.15, 0.3, 0.01).round(2):   #high pos_ratio + high miss_penalty better
+                        for miss_penalty in np.linspace(1/pos_ratio/3*2, 1/pos_ratio*4,15).round(2):
+                        # for miss_penalty in np.arange(2.5, 5, 0.1).round(1):#np.arange(0.5,5, 0.5).round(1):#  explore range > 2.5
+                            train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
+                                                            feature_conf_list= featrue_conf, model_cfg = model_cfg,
+                                                            miss_penalty = float(miss_penalty),flip_penalty = 1,pos_ratio=pos_ratio, stride = stride, patience = 5)
+                            training_task[train.TrainTask.SINGLE_MODEL_TRIGGER].append(train_conf)
 
+                for model_cfg in [
+                                #   train_config.LSTMConfig(model_version= 1,seq_len=seq_len),
+                                  train_config.TransformerConfig(model_version= 1,seq_len=seq_len), #TransformerConfig v1 > v2
+                                #   train_config.TransformerConfig(model_version= 2,seq_len=seq_len)
+                                  ]:
                     train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
                                                     feature_conf_list= featrue_conf, model_cfg = model_cfg,
-                                                    flip_penalty = float(1),stride = stride, patience = 5)
+                                                    flip_penalty = float(1),miss_penalty = 1, pos_ratio=0.5, stride = stride, patience = 5)
                     training_task[train.TrainTask.SINGLE_MODEL_DIR].append(train_conf)
                         
     return preparation_task, training_task
@@ -399,11 +400,90 @@ def construct_task_eth():
                                                         stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0))
     return preparation_task, training_task
 
+def construct_task_xlm():
+    import model.train as train
+    preparation_task: List[Any] = []
+
+    for pn in [20]:#[20,24,28]
+        for vol_multiplier in [1.6,1.7,1.8,1.9,2.0,2.1,2.2]:#[1.7,1.8,1.9,2,2.1,2.2] best 1.8 > 2
+            for vol_ewma_span in [80]:
+                preparation_task.append(common.BaseDefine(
+                        market_category = "Cryptocurrency", data_source = "binance_public_data",
+                        vol_ewma_span = vol_ewma_span, predict_num=pn,
+                        vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=None, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=None,
+                        symbol=SYMBOL,  interval=INTERVAL, trading_type= 'um', label_type = 'FTHL', version=0 ))
+
+    training_task: Dict[str,List[train.TrainConfig]] = {train.TrainTask.SINGLE_MODEL_DIR:[],train.TrainTask.SINGLE_MODEL_TRIGGER:[]}
+
+    for seq_len in [24]:#in range(3*16,11*16,16): #12,16,24,28,32 , 24 is the best
+        for stride in [1,2,4]: #2,4,8
+            for featrue_conf in [train.feature_conf_list]:
+                # compatibility seq_len_stride_featrue_conf
+                for model_cfg in [train_config.LogisticConfig(model_version= 1,seq_len=seq_len),
+                                  ]:
+                    for miss_penalty in np.arange(2, 5, 0.1).round(1):#np.arange(0.5,5, 0.5).round(1):#  explore range > 2.5
+                        train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
+                                                        feature_conf_list= featrue_conf, model_cfg = model_cfg,
+                                                        miss_penalty = float(miss_penalty),stride = stride, patience = 5)
+                        training_task[train.TrainTask.SINGLE_MODEL_TRIGGER].append(train_conf)
+
+                for model_cfg in [
+                                  train_config.LSTMConfig(model_version= 1,seq_len=seq_len),
+                                #   train_config.TransformerConfig(model_version= 1,seq_len=seq_len),
+                                  train_config.TransformerConfig(model_version= 2,seq_len=seq_len)]:
+                    train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
+                                                    feature_conf_list= featrue_conf, model_cfg = model_cfg,
+                                                    flip_penalty = float(1),stride = stride, patience = 5)
+                    training_task[train.TrainTask.SINGLE_MODEL_DIR].append(train_conf)
+                        
+    return preparation_task, training_task
+
+def construct_task_xau():
+    import model.train as train
+    preparation_task: List[Any] = []
+
+    for pn in [20]:#[20,24,28]
+        for vol_multiplier in [1.7,1.8,1.9]:#[1.7,1.8,1.9,2,2.1,2.2] best 1.8 > 2
+            for vol_ewma_span in [80]:
+                preparation_task.append(common.BaseDefine(
+                        market_category="Forex", data_source="dukascopy",
+                        vol_ewma_span = vol_ewma_span, predict_num=pn,
+                        vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=None, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=None,
+                        symbol=SYMBOL,  interval=INTERVAL, trading_type= 'spot', label_type = 'FTHL', version=0 ))
+
+    training_task: Dict[str,List[train.TrainConfig]] = {train.TrainTask.SINGLE_MODEL_DIR:[],train.TrainTask.SINGLE_MODEL_TRIGGER:[]}
+
+    for seq_len in [24]:#in range(3*16,11*16,16): #12,16,24,28,32 , 24 is the best
+        for stride in [2]: #2,4,8
+            for featrue_conf in [FEATURE_LIST_COMMODITY]:
+                # compatibility seq_len_stride_featrue_conf
+                for model_cfg in [train_config.LogisticConfig(model_version= 1,seq_len=seq_len)]:
+                    for miss_penalty in [3.5]:#np.arange(0.5,5, 0.5).round(1):#  explore range > 2.5
+                        train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
+                                                        feature_conf_list= featrue_conf, model_cfg = model_cfg,
+                                                        miss_penalty = float(miss_penalty),stride = stride, patience = 5)
+                        training_task[train.TrainTask.SINGLE_MODEL_TRIGGER].append(train_conf)
+
+                for model_cfg in [
+                                  train_config.LSTMConfig(model_version= 1,seq_len=seq_len),
+                                #   train_config.TransformerConfig(model_version= 1,seq_len=seq_len),
+                                  train_config.TransformerConfig(model_version= 2,seq_len=seq_len)]:
+                    train_conf = train.TrainConfig(use_cache = False,epochs = 20, batch_size=256,
+                                                    feature_conf_list= featrue_conf, model_cfg = model_cfg,
+                                                    flip_penalty = float(1),stride = stride, patience = 5)
+                    training_task[train.TrainTask.SINGLE_MODEL_DIR].append(train_conf)
+                        
+    return preparation_task, training_task
+
 def create_task_spec(logger, exp_dir,done_set: set[str]):
     if SYMBOL == "DOGEUSDT":
         preparation_task, training_task = construct_task_doge()
     elif SYMBOL == "ETHUSDT":
         preparation_task, training_task = construct_task_eth()
+    elif SYMBOL == "XLMUSDT":
+        preparation_task, training_task = construct_task_xlm()
+    elif SYMBOL == "XAUUSD":
+        preparation_task, training_task = construct_task_xau()
     else:
         raise RuntimeError(f"no construct for {SYMBOL} yet")
 
@@ -446,7 +526,11 @@ def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Que
             t0 = time.time()
             try:
                 prep_dir = _prep_output_dir(temp_dir, pre_h)
-                preparation.main(logger, para=para, prep_output_dir=prep_dir)
+                if para.market_category == 'Forex':
+                    feature_conf_list = FEATURE_LIST_COMMODITY
+                else:
+                    feature_conf_list = []
+                preparation.main(logger, para=para, feature_conf_list=feature_conf_list, prep_output_dir=prep_dir)
             except Exception:
                 logger.exception(f"Prep failed: {pre_h}")
                 # still notify main so it can terminate early

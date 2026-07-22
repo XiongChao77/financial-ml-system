@@ -7,6 +7,7 @@ from dataclasses import asdict
 current_work_dir = os.path.dirname(__file__) 
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
+from data_process import feature
 
 def check_open_equals_prev_close(
     df: pd.DataFrame,
@@ -85,20 +86,21 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     df = common.clean_data_quality_auto(df,logger)  
     # 3. Pass interval_ms to label logic so it can adapt its volatility window to the real time span.
     label_col = 'label'
-    df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
+    if para.market_category == 'Forex':
+        df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
+    else:
+        df = common.attach_attr(df, feature_group_list , feature_conf_list, para)
     # common.print_zret_statistics(df)
-    if para.label_type == 'FTHL':
-        df = common.attach_label(df, para=para,label_col = label_col)
-    elif para.label_type == 'TBM':
-        df = common.attach_triple_barrier_label(df, para=para,label_col = label_col)
-    elif para.label_type == 'TBM_TREND':
-        df = common.attach_triple_barrier_trend_label(df, para=para,label_col = label_col)
+    df = common.attach_label(df, para=para,label_col = label_col)
     # common.print_label_performance_stats(df, para)
     # # common.attach_macd_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_boll_event_lifecycle_label(df, interval_ms=interval_ms)
     # # common.attach_sma_7_25_crossover_label(df, interval_ms=interval_ms)
 
     # ---------------- Summary statistics ----------------
+    # ---------------- Summary statistics ----------------
+    if 'open_time_date_utc' not in df.columns:
+        df['open_time_date_utc'] = pd.to_datetime(df['open_time_ms_utc'], unit='ms', utc=True)
     start_time = df['open_time_date_utc'].iloc[0]
     end_time = df['open_time_date_utc'].iloc[-1]
     duration = pd.to_datetime(end_time) - pd.to_datetime(start_time)
@@ -142,4 +144,9 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
 if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     logger, _ = common.setup_session_logger(sub_folder='data_process')
-    main(logger,common.FEATURE_GROUP_LIST, para= common.DOGE_30m)
+    pare_para = common.DOGE_30m
+    if pare_para.market_category == 'Forex':
+        feature_conf_list = feature.FEATURE_LIST_COMMODITY
+    else:
+        feature_conf_list = []
+    main(logger,common.FEATURE_GROUP_LIST, para= pare_para, feature_conf_list= feature_conf_list)

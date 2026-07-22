@@ -638,6 +638,7 @@ class FeatureKdj(FeatureBase):
 
 class FeatureContainer:
     def __init__(self,feature:type[FeatureBase],  **kwargs):
+        # self.input_require = 
         self.feature = feature
         self.parameters = kwargs
 
@@ -1951,3 +1952,59 @@ class FeatureFactory:
     def get_global_min_history(self) -> int:
         """Return the maximum min-history requirement across all registered features."""
         return max([f.min_history_request(self._kline_interval_ms) for f in self.feature_group_list])
+
+FEATURE_LIST_COMMODITY = [
+
+    # =========================
+    # Raw Market State
+    # =========================
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    # =========================
+    # 1) Trend / directional persistence: whether price has continuation
+    # =========================
+    "MA_WEEK_M_L",        # Long-term regime direction (core)
+    # "PVT",                # Price-volume enhanced momentum
+    "dist_to_high_100",   # Breakout-style trend structure
+    "id_factor_100",
+    "id_factor_20",
+    # "MFI_999",            # Extreme money flow
+    # "MFI_99",
+    # =========================
+    # 2) Volatility regime: amplitude and risk environment
+    # =========================
+    "vol_gk_100",          # Long-term volatility
+    "vol_gk_14",           # Short-term volatility
+    "skew_100",
+    "kurt_100",            # Tail structure (extreme risk)
+    # "BOLL_BW_25",         # Decide after uplift testing
+    "RSI_14",              # Relative Strength Index (momentum/overheat; indirectly reflects volatility)
+    # =========================
+    # 3) Efficiency / market structure: trending vs ranging
+    # =========================
+    "er_126",              # Trend efficiency ratio (high-quality structure factor)
+    # =========================
+    # 4) Participation / liquidity: market activity
+    # =========================
+    # "trade_density_14",    # Continuous participation intensity
+    # "vol_event_flag_500",  # Extreme volume event (regime trigger)
+    # =========================
+    # 5) Order flow / imbalance: buy-vs-sell dominance
+    # =========================
+    # "vpin_49",             # Mid-term order-flow imbalance
+    # "vpin_14",             # Needs uplift testing
+    # =========================
+    # 6) Spatial / price position: where price sits within ranges/cost
+    # =========================
+    # "poc_bias_600",        # Deviation from high-volume node (strong structural anchor)
+    # "poc_bias_99",
+    # "close_pos",           # Relative position within range
+    # =========================
+    # 7) Candlestick / path microstructure
+    # =========================
+    "upper_wick_pct",
+    "lower_wick_pct",
+]

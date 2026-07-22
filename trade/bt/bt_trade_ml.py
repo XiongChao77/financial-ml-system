@@ -40,12 +40,12 @@ class BtFtmoStrategy(BtExecutor):
         self.audit_results['short_total'] = 0
         self.audit_results['short_correct'] = 0
         self.params.trade_risk = self.params.trade_risk
+        self.leverage = self.broker.getcommissioninfo(self.data).p.leverage
         self.brain = FtmoBrain(
             self,
             init_equity = self.params.init_equity,
             trade_risk=self.params.trade_risk,
-            max_layers=self.params.max_layers,
-            max_hold_num=self.params.holdbar,
+            min_hold_num=self.params.holdbar,
             exist_hold_num = 0,
             allow_long=self.params.allow_long,
             allow_short=self.params.allow_short,
@@ -54,6 +54,7 @@ class BtFtmoStrategy(BtExecutor):
             atr_sl_mult_short = self.params.atr_sl_mult_short,
             atr_tp = self.params.atr_tp,
             max_daily_loss_pct = self.params.max_daily_loss_pct,
+            leverage = self.leverage,
             decide_version = self.params.decide_version,
         )
 
@@ -64,7 +65,7 @@ class BtFtmoStrategy(BtExecutor):
         if order.status in [order.Submitted, order.Accepted]:
             return
         if order.status in [order.Completed]:
-            role = order.info.get("role", None)
+            role = order.info.get("role", None) # 'open'/'close'/'sl','tp'
             sl_pct = order.info.get("sl_pct", None)
             tp_pct = order.info.get("tp_pct", None)
             sl_price = order.info.get("sl_price", None)
@@ -182,6 +183,8 @@ class BtFtmoStrategy(BtExecutor):
         current_signal = Signal.INVALID if np.isnan(pred) else Signal(int(pred))
         current_prob = 0.0 if np.isnan(pred_prob) else float(pred_prob)
 
+        comminfo = self.broker.getcommissioninfo(self.data)
+
         self.dir = PositionDir.FLAT
         if not self.position:   #sync with stopprice
             self.dir = PositionDir.FLAT
@@ -204,6 +207,7 @@ class BtFtmoStrategy(BtExecutor):
             atr_pct=self.data.atr_pct[0] if hasattr(self.data, 'atr_pct') else 0.0,
             slow_atr = self.data.slow_atr[0] if hasattr(self.data, 'slow_atr') else 0.0,
             vol_regime = self.data.vol_regime[0] if hasattr(self.data, 'vol_regime') else None,
+            bars_to_close = self.data.bars_to_close[0]
         )
 
         self.brain.decide(state)

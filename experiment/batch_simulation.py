@@ -9,7 +9,21 @@ import csv
 import hashlib
 import json
 import logging
-import os,torch
+import os
+
+# ---------------------------------------------------------------------------
+# 重要：OMP/MKL 等 BLAS 线程数环境变量必须在 numpy / torch 第一次被 import
+# 之前设置才 100% 保证生效（OpenMP 运行时通常只在首次进入并行区时读取一次
+# 环境变量，之后就固定住了）。所以这里把它们的设置挪到 "import torch" 之前。
+# 具体线程数由命令行参数 --torch-threads 决定，这里先给一个保守默认值，
+# 在 main() 里拿到真实参数后会再次通过 torch.set_num_threads 兜底设置。
+# ---------------------------------------------------------------------------
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+import torch
 import sys
 import time
 import pandas as pd
@@ -17,8 +31,9 @@ import numpy as np
 from collections import defaultdict
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 import traceback
 
 current_work_dir = os.path.dirname(__file__)
@@ -28,18 +43,21 @@ import batch_train
 from data_process import common
 from data_process.utils import param_hash
 from trade.bt import simulation
-from model.train import fusion_trigger_dir,TrainTask
+from model.train import fusion_trigger_dir, TrainTask
 from model import model_loader
 from model import data_loader
 
-REPORTS_FILE = "reports.jsonl"
+TRAIN_REPORTS_FILE = "train_reports.jsonl"
+SIM_REPORTS_FILE = "sim_reports.jsonl"
 SELECTED_MODELS_FILE = "selected_models.json"
 SELECTED_MODELS_CSV = "selected_models_summary.csv"
 
-SYMBOL = "DOGEUSDT"
-INTERVAL = "15m"
-
+# 注意：这个全局缓存现在只在"单个进程内、单个 batch 的执行过程中"有效。
+# 多进程模式下每个子进程有独立内存空间，缓存不能跨进程共享。
+# 为了尽量复用缓存，run_backtests 会把同一个 (pre_key, train_compatibility)
+# 的任务尽量打包成同一个 batch 交给同一个子进程顺序执行。
 QUICK_DS_CACHE = {}
+
 
 @dataclass
 class ModelRef:
@@ -110,6 +128,7 @@ def setup_logger(exp_dir: str) -> logging.Logger:
 
     return logging.getLogger("batch_simulation")
 
+
 def score_trigger(metrics: Dict[str, Any]) -> Tuple[float, str]:
     best = metrics["Best_F1"]
     pos = best["per_class"]["1"]
@@ -119,29 +138,17 @@ def score_trigger(metrics: Dict[str, Any]) -> Tuple[float, str]:
     pos_precision = pos["precision"]
     mcc = best["mcc"]
 
-    # score = (
-    #     0.40 * pos_f1
-    #     + 0.30 * pos_recall
-    #     + 0.20 * pos_precision
-    #     + 0.10 * mcc
-    # )
     score = pos_f1
 
-    return score, "pos_f1"#"0.40*pos_f1 + 0.30*pos_recall + 0.20*pos_precision + 0.10*mcc"
+    return score, "pos_f1"
 
 
 def score_direction(metrics: Dict[str, Any]) -> Tuple[float, str]:
     best = metrics["Best_F1"]
 
-    # score = (
-    #     0.45 * best["mcc"]
-    #     + 0.30 * best["macro_f1"]
-    #     + 0.20 * best["balanced_accuracy"]
-    #     + 0.05 * best["accuracy"]
-    # )
     score = best["macro_f1"]
 
-    return score, "macro_f1"#"0.45*mcc + 0.30*macro_f1 + 0.20*balanced_accuracy + 0.05*accuracy"
+    return score, "macro_f1"
 
 
 def calc_score(task_type: str, metrics: Dict[str, Any]) -> Tuple[float, str]:
@@ -158,7 +165,7 @@ def build_model_registry_from_reports(
     logger: logging.Logger,
     train_exp_dir: str,
 ) -> Dict[Tuple[str, str], Dict[str, List[ModelRef]]]:
-    reports_path = os.path.join(train_exp_dir, REPORTS_FILE)
+    reports_path = os.path.join(train_exp_dir, TRAIN_REPORTS_FILE)
     reports = load_jsonl(reports_path)
 
     registry = defaultdict(lambda: defaultdict(list))
@@ -211,20 +218,12 @@ def select_fusion_pairs(
     logger: logging.Logger,
     registry: Dict[Tuple[str, str], Dict[str, List[ModelRef]]],
 ) -> List[FusionTask]:
-    
+
     def select_representative_models(
         models: List[ModelRef],
         top_k: int = 5,
         mid_k: int = 5,
     ) -> List[ModelRef]:
-        """
-        每个模型架构内选择：
-        1. score 最高的 top_k
-        2. score 位于中间附近的 mid_k
-
-        分组依据：
-            model_type + model_version
-        """
         selected: Dict[str, ModelRef] = {}
 
         groups: Dict[Tuple[str, int], List[ModelRef]] = {}
@@ -237,16 +236,13 @@ def select_fusion_pairs(
             group = sorted(group, key=lambda x: x.score, reverse=True)
             n = len(group)
 
-            # top k
             top_models = group[:top_k]
 
-            # middle k
             mid = n // 2
             half = mid_k // 2
             start = max(0, mid - half)
             end = min(n, start + mid_k)
 
-            # 如果靠近尾部导致数量不足，往前补
             start = max(0, end - mid_k)
 
             mid_models = group[start:end]
@@ -255,24 +251,12 @@ def select_fusion_pairs(
                 selected[m.task_hash] = m
 
         return list(selected.values())
-    
+
     fusion_tasks = []
 
     for (pre_key, compatibility), task_map in registry.items():
         triggers = task_map[TrainTask.SINGLE_MODEL_TRIGGER]
         dirs = task_map[TrainTask.SINGLE_MODEL_DIR]
-
-        # triggers = select_representative_models(
-        #     triggers,
-        #     top_k=3,
-        #     mid_k=2,
-        # )
-
-        # dirs = select_representative_models(
-        #     dirs,
-        #     top_k=3,
-        #     mid_k=2,
-        # )
 
         logger.info(
             f"pre={pre_key}, compat={compatibility}: "
@@ -292,8 +276,6 @@ def select_fusion_pairs(
                         direction=dir_model,
                     )
                 )
-        # best_trigger = max(triggers, key=lambda x: x.score)
-        # best_dir = max(dirs, key=lambda x: x.score)
 
     fusion_tasks.sort(
         key=lambda x: x.trigger.score + x.direction.score,
@@ -315,7 +297,6 @@ def select_fusion_pairs(
 
 
 def infer_prep_output_dir(save_dir: str) -> str:
-    # save_dir = .../pre_xxx/SINGLE_MODEL_DIR/train_xxx
     return str(Path(save_dir).parents[1])
 
 
@@ -352,7 +333,7 @@ def load_pred_df_for_quick_eval(
     df = common.load_test_df_from_dir(prep_output_dir)
 
     cache_key = (task.pre_key, task.train_compatibility)
-    if cache_key not in QUICK_DS_CACHE :
+    if cache_key not in QUICK_DS_CACHE:
         QUICK_DS_CACHE[cache_key] = data_loader.TimeSeriesWindowDataset(
             df=df,
             kline_interval_ms=interval_ms,
@@ -386,6 +367,7 @@ def load_pred_df_for_quick_eval(
 
     return df_with_pred, model_stats
 
+
 def calc_fixed_horizon_signal_avg_return(
     df_with_pred,
     horizon: int,
@@ -416,7 +398,7 @@ def calc_fixed_horizon_signal_avg_return(
     entry_close = close[:valid_n]
     exit_close = close[horizon:]
 
-    signal_mask = np.isin(pred,[common.Signal.NEGATIVE,common.Signal.POSITIVE,],)
+    signal_mask = np.isin(pred, [common.Signal.NEGATIVE, common.Signal.POSITIVE])
 
     if signal_mask.sum() == 0:
         return {
@@ -464,6 +446,7 @@ def calc_fixed_horizon_signal_avg_return(
 
     return out
 
+
 def quick_signal_eval(
     logger: logging.Logger,
     pre_para,
@@ -471,9 +454,8 @@ def quick_signal_eval(
     task: FusionTask,
     fusion_dir: str,
     device: str,
-    fee_per_trade_list=(0.0)
+    fee_per_trade_list=(0.0,)
 ):
-
     df_with_pred, model_stats = load_pred_df_for_quick_eval(
         logger=logger,
         prep_output_dir=prep_output_dir,
@@ -502,6 +484,7 @@ def quick_signal_eval(
     )
 
     return signal_return
+
 
 def run_one_backtest(
     logger: logging.Logger,
@@ -538,10 +521,10 @@ def run_one_backtest(
     train_cfg = build_train_cfg(task)
     prep_output_dir = infer_prep_output_dir(task.trigger.save_dir)
 
-    fee_per_trade_list=(0.0, 0.005)
+    fee_per_trade_list = (0.0, 0.005)
     signal_return = quick_signal_eval(
-        pre_para= pre_para,
-        prep_output_dir = prep_output_dir,
+        pre_para=pre_para,
+        prep_output_dir=prep_output_dir,
         logger=logger,
         task=task,
         fusion_dir=fusion_dir,
@@ -549,14 +532,34 @@ def run_one_backtest(
         fee_per_trade_list=fee_per_trade_list,
     )
 
-    sim_result = {}
     zero_fee_key = f"{0.0:g}"
     passed = signal_return[zero_fee_key]["signal_avg_return"] > 0
     if True:
+        simulation_task: List[Any] = []
+        hold_range = [36, 40, 44, 100, 1000]
+        if pre_para.predict_num not in hold_range:
+            hold_range.append(pre_para.predict_num)
+        for i in hold_range:
+            holdbar = i
+            for (atr_sl, atr_tp) in [(6, 100)]:
+                sim_para = simulation.StrategyPara(
+                    allow_long=True, allow_short=True, holdbar=holdbar,
+                    commission=0.05, init_equity=10000.0, thresh=None,
+                    atr_sl_mult_long=atr_sl, atr_sl_mult_short=atr_sl,
+                    atr_tp=atr_tp, trade_risk=0.1, max_daily_loss_pct=0.025,
+                )
+                simulation_task.append(sim_para)
+        logger.info(f" {simulation_task} task for each simulation_task ")
+
+    sim_result = {}
+    for sim_task in simulation_task:
+        sim_d = asdict(sim_task)
+        sim_h = param_hash(sim_d)
+        sim_result[sim_h] = {'forward': {}, 'short': {}, 'long': {}}
         for period in ['forward', 'short', 'long']:
-            sim_result[period] = simulation.main(
+            sim_result[sim_h][period] = simulation.main(
                 logger,
-                para=simulation.StrategyPara(),
+                para=sim_task,
                 train_cfg=train_cfg,
                 prep_output_dir=prep_output_dir,
                 train_output_dir=fusion_dir,
@@ -635,7 +638,8 @@ def save_selected_models(sim_exp_dir: str, fusion_tasks: List[FusionTask]) -> No
                 }
             )
 
-def load_done_fusion_hashes(reports_path: str) -> set[str]:
+
+def load_done_fusion_hashes(reports_path: str) -> set:
     if not os.path.exists(reports_path):
         return set()
 
@@ -647,69 +651,138 @@ def load_done_fusion_hashes(reports_path: str) -> set[str]:
 
     return done
 
-def run_one_backtest_worker(
+
+# ---------------------------------------------------------------------------
+# 多进程相关部分
+# ---------------------------------------------------------------------------
+
+def _pool_initializer(torch_threads: int) -> None:
+    """
+    ProcessPoolExecutor 的 initializer，在每个子进程启动时执行且只执行一次。
+
+    - 用 torch.set_num_threads / set_num_interop_threads 直接控制 torch 的线程数，
+      这个 API 不依赖环境变量的设置时机，在子进程里调用总是有效。
+    - 同时把 OMP/MKL 等环境变量也设置一遍，作为其他可能用到 BLAS 的库
+      （比如 numpy）的兜底（在 fork 模式下，如果对应的 native 库在本进程内
+      还没有被首次使用过，这个设置仍然可能生效）。
+    """
+    if torch_threads > 0:
+        os.environ["OMP_NUM_THREADS"] = str(torch_threads)
+        os.environ["MKL_NUM_THREADS"] = str(torch_threads)
+        os.environ["OPENBLAS_NUM_THREADS"] = str(torch_threads)
+        os.environ["NUMEXPR_NUM_THREADS"] = str(torch_threads)
+
+        torch.set_num_threads(torch_threads)
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
+
+
+def _make_worker_logger(sim_exp_dir: str, name: str) -> logging.Logger:
+    worker_log_dir = os.path.join(sim_exp_dir, "worker_logs")
+    os.makedirs(worker_log_dir, exist_ok=True)
+
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    logger.handlers = []
+    logger.propagate = False
+
+    log_path = os.path.join(worker_log_dir, f"{name}.log")
+    file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    )
+    logger.addHandler(file_handler)
+
+    return logger
+
+
+def run_batch_backtests_worker(
     sim_exp_dir: str,
-    task: FusionTask,
+    tasks: List[FusionTask],
     device: str,
-    torch_threads: int = 1,
-) -> Dict[str, Any]:
+) -> List[Dict[str, Any]]:
     """
-    子进程执行单个回测任务。
+    在一个子进程内顺序执行一批 FusionTask。
 
-    注意：
-    1. 不传 logger 对象，因为 logger 不适合跨进程传递。
-    2. 每个子进程自己创建 logger。
-    3. reports.jsonl 由主进程统一写，避免并发写文件冲突。
+    与"每个任务单独起一个子进程"相比，这里把同一个
+    (pre_key, train_compatibility) 分组下的任务打包成一个 batch，
+    交给同一个子进程顺序处理：
+
+    1. 子进程内的 QUICK_DS_CACHE 是本进程私有的全局变量，
+       batch 内的多个任务如果共享同一个 (pre_key, train_compatibility)，
+       后面的任务可以复用前面任务已经构建好的 TimeSeriesWindowDataset，
+       避免重复构建。
+    2. 减少进程创建/销毁开销（如果 batch 内任务很多、单个任务耗时很短）。
+
+    每个任务各自的异常会被单独捕获，不会因为一个任务失败而丢失整个 batch
+    的其它结果。
     """
+    results: List[Dict[str, Any]] = []
+    pid = os.getpid()
 
-    try:
-        # 限制每个进程内部的 PyTorch CPU 线程数
-        # 否则 workers * torch内部线程 会导致 CPU 过度竞争
-        if torch_threads > 0:
-            torch.set_num_threads(torch_threads)
-            try:
-                torch.set_num_interop_threads(1)
-            except RuntimeError:
-                pass
+    logger = _make_worker_logger(sim_exp_dir, f"worker_{pid}")
+    logger.info(f"Worker(pid={pid}) start, batch_size={len(tasks)}")
 
-        worker_log_dir = os.path.join(sim_exp_dir, "worker_logs")
-        os.makedirs(worker_log_dir, exist_ok=True)
+    for task in tasks:
+        try:
+            result = run_one_backtest(
+                logger=logger,
+                sim_exp_dir=sim_exp_dir,
+                task=task,
+                device=device,
+            )
+            result["status"] = "ok"
+        except Exception as e:
+            result = {
+                "status": "error",
+                "fusion_hash": task.fusion_hash,
+                "pre_key": task.pre_key,
+                "train_compatibility": task.train_compatibility,
+                "device": device,
+                "error": repr(e),
+                "traceback": traceback.format_exc(),
+            }
+            logger.error(f"Task failed fusion_hash={task.fusion_hash}: {e!r}")
 
-        logger = logging.getLogger(f"worker_{os.getpid()}_{task.fusion_hash}")
-        logger.setLevel(logging.INFO)
-        logger.handlers = []
-        logger.propagate = False
+        results.append(result)
 
-        log_path = os.path.join(worker_log_dir, f"{task.fusion_hash}.log")
-        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        )
-        logger.addHandler(file_handler)
+    logger.info(f"Worker(pid={pid}) done, batch_size={len(tasks)}")
+    return results
 
-        logger.info(f"Worker start fusion_hash={task.fusion_hash}")
 
-        result = run_one_backtest(
-            logger=logger,
-            sim_exp_dir=sim_exp_dir,
-            task=task,
-            device=device,
-        )
+def _group_tasks_into_batches(
+    tasks: List[FusionTask],
+    workers: int,
+) -> List[List[FusionTask]]:
+    """
+    把 pending_tasks 按 (pre_key, train_compatibility) 分组，
+    尽量让同一组的任务被同一个子进程顺序执行，以复用 QUICK_DS_CACHE。
 
-        result["status"] = "ok"
-        return result
+    如果分组数量少于 workers（比如只有 1-2 个 pre_key），并行度会被
+    分组数限制住；这里对超大的分组按 workers 数量再切成若干份，
+    保证不会出现"一个分组占满所有任务、其它 worker 闲置"的情况。
+    """
+    groups: Dict[Tuple[str, str], List[FusionTask]] = defaultdict(list)
+    for t in tasks:
+        groups[(t.pre_key, t.train_compatibility)].append(t)
 
-    except Exception as e:
-        return {
-            "status": "error",
-            "fusion_hash": task.fusion_hash,
-            "pre_key": task.pre_key,
-            "train_compatibility": task.train_compatibility,
-            "device": device,
-            "error": repr(e),
-            "traceback": traceback.format_exc(),
-        }
-    
+    batches: List[List[FusionTask]] = []
+
+    for _, group_tasks in groups.items():
+        if workers <= 1 or len(group_tasks) <= max(1, len(group_tasks) // workers or 1):
+            batches.append(group_tasks)
+            continue
+
+        # 把较大的分组进一步切分成不超过 workers 份，缓存仍在份内复用
+        chunk_size = max(1, (len(group_tasks) + workers - 1) // workers)
+        for i in range(0, len(group_tasks), chunk_size):
+            batches.append(group_tasks[i:i + chunk_size])
+
+    return batches
+
+
 def run_backtests(
     logger: logging.Logger,
     sim_exp_dir: str,
@@ -720,14 +793,13 @@ def run_backtests(
     workers: int = 1,
     torch_threads: int = 1,
 ) -> None:
-    reports_path = os.path.join(sim_exp_dir, REPORTS_FILE)
+    reports_path = os.path.join(sim_exp_dir, SIM_REPORTS_FILE)
 
     done_fusion_hashes = load_done_fusion_hashes(reports_path)
 
     if max_backtests > 0:
         fusion_tasks = fusion_tasks[:max_backtests]
 
-    # 过滤已经完成的任务
     pending_tasks = []
     skipped = 0
 
@@ -758,47 +830,15 @@ def run_backtests(
         for i, task in enumerate(pending_tasks, start=1):
             logger.info(f"Backtest [{i}/{pending}] fusion_hash={task.fusion_hash}")
 
-            result = run_one_backtest(
-                logger=logger,
-                sim_exp_dir=sim_exp_dir,
-                task=task,
-                device=device,
-            )
-
-            result["status"] = "ok"
-            append_jsonl(reports_path, result)
-
-            done_fusion_hashes.add(task.fusion_hash)
-            completed += 1
-
-        logger.info(
-            f"Backtest finished: completed={completed}, failed={failed}, "
-            f"skipped={skipped}, total={total}"
-        )
-        return
-
-    # 并行模式
-    completed = 0
-    failed = 0
-
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        future_to_task = {}
-
-        for task in pending_tasks:
-            future = executor.submit(
-                run_one_backtest_worker,
-                sim_exp_dir,
-                task,
-                device,
-                torch_threads,
-            )
-            future_to_task[future] = task
-
-        for idx, future in enumerate(as_completed(future_to_task), start=1):
-            task = future_to_task[future]
-
             try:
-                result = future.result()
+                result = run_one_backtest(
+                    logger=logger,
+                    sim_exp_dir=sim_exp_dir,
+                    task=task,
+                    device=device,
+                )
+                result["status"] = "ok"
+                completed += 1
             except Exception as e:
                 result = {
                     "status": "error",
@@ -809,48 +849,124 @@ def run_backtests(
                     "error": repr(e),
                     "traceback": traceback.format_exc(),
                 }
-
-            # 只有主进程写 reports.jsonl，避免并发写冲突
-            append_jsonl(reports_path, result)
-
-            if result.get("status") == "ok":
-                completed += 1
-                done_fusion_hashes.add(task.fusion_hash)
-
-                logger.info(
-                    f"Done [{idx}/{pending}] fusion_hash={task.fusion_hash}, "
-                    f"elapsed={result.get('elapsed_sec', 0):.1f}s"
-                )
-            else:
                 failed += 1
-                logger.error(
-                    f"Failed [{idx}/{pending}] fusion_hash={task.fusion_hash}: "
-                    f"{result.get('error')}"
-                )
+
+            append_jsonl(reports_path, result)
+            done_fusion_hashes.add(task.fusion_hash)
+
+        logger.info(
+            f"Backtest finished: completed={completed}, failed={failed}, "
+            f"skipped={skipped}, total={total}"
+        )
+        return
+
+    # -----------------------------------------------------------------
+    # 并行模式：进程池，每个子进程内部只用 torch_threads 个线程（通常设为 1），
+    # 由操作系统在 workers 个进程之间做真正的并行调度，避免"进程数 x 线程数"
+    # 的超订问题。device 固定为 cpu，因此这里统一使用默认的 fork 启动方式，
+    # 不需要 spawn（fork 更快，且不涉及 CUDA context 问题）。
+    # -----------------------------------------------------------------
+    completed = 0
+    failed = 0
+
+    batches = _group_tasks_into_batches(pending_tasks, workers)
+
+    logger.info(
+        f"Split {pending} pending tasks into {len(batches)} batches "
+        f"(grouped by pre_key/train_compatibility for cache reuse)"
+    )
+
+    ctx = mp.get_context("fork")  # CPU-only，显式使用 fork，更快且不涉及 CUDA
+
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=ctx,
+        initializer=_pool_initializer,
+        initargs=(torch_threads,),
+    ) as executor:
+        future_to_batch = {
+            executor.submit(
+                run_batch_backtests_worker,
+                sim_exp_dir,
+                batch,
+                device,
+            ): batch
+            for batch in batches
+        }
+
+        batch_idx = 0
+        for future in as_completed(future_to_batch):
+            batch = future_to_batch[future]
+            batch_idx += 1
+
+            try:
+                batch_results = future.result()
+            except Exception as e:
+                # 整个子进程/batch 级别的异常（比如子进程被 kill），
+                # 把 batch 内所有任务都标记为失败，避免静默丢任务。
+                batch_results = [
+                    {
+                        "status": "error",
+                        "fusion_hash": t.fusion_hash,
+                        "pre_key": t.pre_key,
+                        "train_compatibility": t.train_compatibility,
+                        "device": device,
+                        "error": repr(e),
+                        "traceback": traceback.format_exc(),
+                    }
+                    for t in batch
+                ]
+
+            # 结果统一在主进程里写文件，天然串行，不需要额外加锁
+            for result in batch_results:
+                append_jsonl(reports_path, result)
+
+                if result.get("status") == "ok":
+                    completed += 1
+                    done_fusion_hashes.add(result["fusion_hash"])
+                    logger.info(
+                        f"Done fusion_hash={result['fusion_hash']}, "
+                        f"elapsed={result.get('elapsed_sec', 0):.1f}s "
+                        f"(batch {batch_idx}/{len(batches)})"
+                    )
+                else:
+                    failed += 1
+                    logger.error(
+                        f"Failed fusion_hash={result.get('fusion_hash')}: "
+                        f"{result.get('error')} (batch {batch_idx}/{len(batches)})"
+                    )
 
     logger.info(
         f"Backtest finished: completed={completed}, failed={failed}, "
         f"skipped={skipped}, total={total}"
     )
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-s",
         "--simulation",
-        default="/home/chao/work/quant_output/batch_train/DOGEUSDT_30m/2026-06-29/05_55_17",
+        default="/home/chao/work/quant_output/batch_train/DOGEUSDT_15m/2026-07-11/03_29_32",
     )
     parser.add_argument("--max-backtests", type=int, default=0)
     parser.add_argument("--period", type=str, default="short")
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=25)
     parser.add_argument("--torch-threads", type=int, default=2)
 
     args = parser.parse_args()
 
+    if args.device != "cpu":
+        raise ValueError(
+            f"This script is configured for CPU-only multiprocessing "
+            f"(fork start method, no CUDA context handling). "
+            f"Got --device={args.device!r}; use 'cpu'."
+        )
+
     train_exp_dir = args.simulation
 
-    sim_exp_dir = os.path.join(train_exp_dir,'batch_simulation')
+    sim_exp_dir = os.path.join(train_exp_dir, 'batch_simulation')
 
     logger = setup_logger(sim_exp_dir)
 

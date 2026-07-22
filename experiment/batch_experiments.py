@@ -338,7 +338,7 @@ def construct_task_doge():
         for seq_len in [12,16,24,96,256]: #12,16,24,32
             for flip_penalty in np.arange(0.8, 1.7, 1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
                 for miss_penalty in np.arange(0.5,2, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
-                    for stride in [4]: #2,4,8
+                    for stride in [2,4]: #2,4,8
                         for bestf1 in [True]:
                             for loss_fun_version in [2]:
                                 for featrue_conf in [train.feature_conf_list]:

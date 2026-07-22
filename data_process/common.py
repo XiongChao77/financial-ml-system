@@ -47,6 +47,11 @@ class BaseDefine:
     #data source
     market_category: str = "Cryptocurrency"   # cryptocurrency / Stock / Forex
     data_source: str = "binance_public_data"                   # binance / yahoo / dukascopy
+    # market
+    symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT XAUUSD
+    interval: str = "30m"
+    trading_type:str ='um'             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures) 
+    label_type:str = 'FTHL' # TBM / FTHL / "TBM_TREND"
     # model / data
     vol_ewma_span: int  = 80
     predict_num: int = 32
@@ -55,19 +60,17 @@ class BaseDefine:
     stop_multiplier_rate_long: Optional[float] = None
     vol_multiplier_short: float = 1.7
     stop_multiplier_rate_short: Optional[float] = None
-    # market
-    symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT XAUUSD
-    interval: str = "30m"
-    trading_type:str ='um'             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures) 
-    label_type:str = 'FTHL' # TBM / FTHL / "TBM_TREND"
     version:float = 0.1
 
 DOGE_15m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="15m", trading_type='um', label_type = 'FTHL')
-DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='um'
+DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='spot'
                       , label_type = 'FTHL',
-                      predict_num = 16,
-                      vol_ewma_span = 96, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
-XAU_15m = BaseDefine(market_category="Forex", data_source="dukascopy", symbol="XAUUSD", interval="15m", trading_type='spot', label_type = 'TBM')
+                      predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
+XLM_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="XLMUSDT", interval="30m", trading_type='um'
+                      , label_type = 'FTHL',
+                      predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
+XAU_15m = BaseDefine(market_category="Forex", data_source="dukascopy", symbol="XAUUSD", interval="15m", trading_type='spot', label_type = 'FTHL',
+                     vol_ewma_span = 80,predict_num = 16, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
 
 log_level = logging.INFO
 
@@ -143,7 +146,60 @@ def attach_attr(df, feature_group_list, feature_conf_list = [], para = BaseDefin
     kline_interval_ms = get_interval_ms(para.interval)
     return FeatureFactory(kline_interval_ms,feature_group_list, feature_conf_list).generate(df)
 
+
+# for Forex
+def add_bars_to_gap(
+    df,
+    interval_ms,
+    time_col="open_time_ms_utc",
+    col_name="bars_to_close",
+):
+    df = df.sort_values(time_col).reset_index(drop=True).copy()
+
+    t = df[time_col].to_numpy(np.int64)
+    n = len(df)
+
+    if n == 0:
+        df[col_name] = np.array([], dtype=float)
+        return df
+
+    # 1. 转成按 interval 编号的时间序列
+    time_seq = t // interval_ms
+
+    # 2. 相邻编号差不为 1，说明当前 bar 后面有 gap
+    gap_after = np.zeros(n, dtype=bool)
+    gap_after[:-1] = np.diff(time_seq) != 1
+
+    # 3. 找到每个位置之后最近的 gap bar index
+    idx = np.arange(n)
+    gap_idx_marker = np.where(gap_after, idx, np.inf)
+
+    next_gap_idx = np.minimum.accumulate(gap_idx_marker[::-1])[::-1]
+
+    # 4. 当前 bar 到 gap bar 的距离，gap bar 自己距离为 1
+    bars_to_close = next_gap_idx - idx + 1
+
+    df[col_name] = bars_to_close
+
+    return df
+
 def attach_label(df, para = BaseDefine, label_col = 'label'):
+    interval_ms = get_interval_ms(para.interval)
+    if para.market_category == 'Forex':
+        df = add_bars_to_gap(df, interval_ms)
+        df['open_time_sn'] = np.arange(len(df), dtype=np.int64)
+    else:
+        df['bars_to_close'] = np.inf
+        df['open_time_sn'] = df['open_time_ms_utc']// interval_ms
+    if para.label_type == 'FTHL':
+        df = attach_fthl_label(df, para=para,label_col = label_col)
+    elif para.label_type == 'TBM':
+        df = attach_triple_barrier_label(df, para=para,label_col = label_col)
+    elif para.label_type == 'TBM_TREND':
+        df = attach_triple_barrier_trend_label(df, para=para,label_col = label_col)
+    return df
+
+def attach_fthl_label(df, para=BaseDefine, label_col='label'):
     """
     Path-dependent asymmetric labeling logic.
     """
@@ -943,13 +999,21 @@ def clean_data_quality_auto(df: pd.DataFrame, logger) -> pd.DataFrame:
     if na_rows > 0:
         logger.warning(f"Detected {na_rows} rows containing NaN values; dropping them.")
 
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    zero_mask = (df[numeric_cols] == 0).any(axis=1)
-    zero_rows = zero_mask.sum()
+    zero_check_cols = [col for col in ["open", "close", "high", "low"] if col in df.columns]
+    if zero_check_cols:
+        zero_mask = (df[zero_check_cols] == 0).any(axis=1)
+        zero_rows = zero_mask.sum()
+    else:
+        zero_mask = pd.Series(False, index=df.index)
+        zero_rows = 0
+        logger.warning("OHLC columns not found; skipping zero-value check.")
     
     if zero_rows > 0:
-        zero_stats = (df[numeric_cols] == 0).sum()
-        logger.warning(f"Detected {zero_rows} rows containing zero values. Distribution:\n{zero_stats[zero_stats > 0]}")
+        zero_stats = (df[zero_check_cols] == 0).sum()
+        logger.warning(
+            f"Detected {zero_rows} rows containing zero values in OHLC columns {zero_check_cols}. "
+            f"Distribution:\n{zero_stats[zero_stats > 0]}"
+        )
 
     condition = df.isna().any(axis=1) | zero_mask
     df_cleaned = df[~condition].copy()
