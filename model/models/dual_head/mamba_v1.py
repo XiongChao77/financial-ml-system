@@ -32,7 +32,6 @@ class Mamba1D_V1(BaseTimeSeriesModel):
     def __init__(
         self,
         input_size: int,
-        n_classes: int = 3,
         d_model: int = 128,
         n_layers: int = 4,
         d_state: int = 16,

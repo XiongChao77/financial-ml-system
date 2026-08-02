@@ -346,9 +346,9 @@ class MasterController:
                             ds = TimeSeriesWindowDataset(
                                 df=df_with_feature, 
                                 kline_interval_ms = common.get_interval_ms(interval_str),
-                                feature_cols=self.feature_conf_list, 
-                                label_col=self.label_col, 
-                                window=window,
+                                feature_cols=self.feature_conf_list,
+                                label_col=self.label_col,
+                                seq_len=window,
                                 is_live=True,
                                 show_feature_distribution = False,
                             )

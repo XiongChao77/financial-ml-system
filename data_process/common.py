@@ -62,10 +62,11 @@ class BaseDefine:
     stop_multiplier_rate_short: Optional[float] = None
     version:float = 0.1
 
+stop_multiplier_rate = 0.4
 DOGE_15m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="15m", trading_type='um', label_type = 'FTHL')
 DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='spot'
                       , label_type = 'FTHL',
-                      predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
+                      predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=1.7, stop_multiplier_rate_long=stop_multiplier_rate, vol_multiplier_short=1.7, stop_multiplier_rate_short=stop_multiplier_rate)
 XLM_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="XLMUSDT", interval="30m", trading_type='um'
                       , label_type = 'FTHL',
                       predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
@@ -86,12 +87,12 @@ os.makedirs(EXPERIMENT_DIR, exist_ok=True)
 CONF_DF = 'to_csv'#/'to_feather'/'to_csv'
 
 # ---------- Per-directory read/write (for batch multiprocessing: each preparation uses its own directory) ----------
-def _data_path_in_dir(base_dir, name):
+def _data_path_in_dir(base_dir: str, name: str) -> str:
     return os.path.join(base_dir, name)
-    
+
     # return os.path.join('/home/chao/work/Quant/data_process/label_viewer/public', name)
 
-def save_train_df_to_dir(df, base_dir):
+def save_train_df_to_dir(df: pd.DataFrame, base_dir: str) -> None:
     os.makedirs(base_dir, exist_ok=True)
     path = _data_path_in_dir(base_dir, "train_data.csv" if CONF_DF == 'to_csv' else "train_data.feather")
     if os.path.exists(path):
@@ -102,7 +103,7 @@ def save_train_df_to_dir(df, base_dir):
         df.columns = df.columns.astype(str)
         df.to_feather(path)
 
-def save_test_df_to_dir(df, base_dir):
+def save_test_df_to_dir(df: pd.DataFrame, base_dir: str) -> None:
     os.makedirs(base_dir, exist_ok=True)
     path = _data_path_in_dir(base_dir, "test_data.csv" if CONF_DF == 'to_csv' else "test_data.feather")
     if os.path.exists(path):
@@ -113,22 +114,22 @@ def save_test_df_to_dir(df, base_dir):
         df.columns = df.columns.astype(str)
         df.to_feather(path)
 
-def load_train_df_from_dir(base_dir):
+def load_train_df_from_dir(base_dir: str) -> pd.DataFrame:
     path = _data_path_in_dir(base_dir, "train_data.csv" if CONF_DF == 'to_csv' else "train_data.feather")
     if CONF_DF == 'to_csv':
         return pd.read_csv(path, encoding="utf-8")
     return pd.read_feather(path)
 
-def load_test_df_from_dir(base_dir):
+def load_test_df_from_dir(base_dir: str) -> pd.DataFrame:
     path = _data_path_in_dir(base_dir, "test_data.csv" if CONF_DF == 'to_csv' else "test_data.feather")
     if CONF_DF == 'to_csv':
         return pd.read_csv(path, encoding="utf-8")
     return pd.read_feather(path)
 
-def get_data_config_path_in_dir(base_dir):
+def get_data_config_path_in_dir(base_dir: str) -> str:
     return _data_path_in_dir(base_dir, "data_config_meta.json")
 
-def load_pre_params_from_dir(base_dir) -> BaseDefine:
+def load_pre_params_from_dir(base_dir: str) -> BaseDefine:
     """Load interval settings from data_config_meta.json under base_dir (no global paths; multiprocessing-friendly)."""
     config_path = get_data_config_path_in_dir(base_dir)
     if not os.path.exists(config_path):

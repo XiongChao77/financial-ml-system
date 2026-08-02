@@ -1,6 +1,7 @@
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Union, List, Dict
-from enum import IntEnum,Enum
+import hashlib
+from dataclasses import dataclass, field
+from typing import List, Optional
+
 from data_process import feature
 # ==============================================================================
 # 1. 配置定义 (Configuration)
@@ -10,6 +11,15 @@ class DataConfig:
     label_col: str = "label"
     train_ratio: float = 0.7
     val_ratio: float = 0.15
+    purge_overlap: bool = True
+
+    def __post_init__(self):
+        if not 0 < self.train_ratio < 1:
+            raise ValueError("train_ratio must be between 0 and 1")
+        if not 0 < self.val_ratio < 1:
+            raise ValueError("val_ratio must be between 0 and 1")
+        if self.train_ratio + self.val_ratio >= 1:
+            raise ValueError("train_ratio + val_ratio must leave a non-empty test split")
 
 @dataclass
 class BaseModelConfig:
@@ -17,6 +27,20 @@ class BaseModelConfig:
     model_type: str = "base"
     model_version: int = 1
 
+class TrainTask:
+    DIRECT_3CLASS = "DIRECT_3CLASS"
+    DUAL_HEAD_3CLASS = "DUAL_HEAD_3CLASS"
+    TRIGGER_DIRECTION = "TRIGGER_DIRECTION"
+    LONG_SHORT_OVR = "LONG_SHORT_OVR"
+
+    TRIGGER = "TRIGGER"
+    DIRECTION = "DIRECTION"
+    LONG_OVR = "LONG_OVR"
+    SHORT_OVR = "SHORT_OVR"
+
+    BINARY_TASKS = {TRIGGER, DIRECTION, LONG_OVR, SHORT_OVR}
+    COMBO_TASKS = {TRIGGER_DIRECTION, LONG_SHORT_OVR}
+    
 @dataclass
 class LSTMConfig(BaseModelConfig):
     seq_len: int = 216     # 160 best for LSTM
@@ -109,7 +133,7 @@ class MambaConfig(BaseModelConfig):
 class XGBoostConfig(BaseModelConfig):
     seq_len: int = 96
     model_type: str = "xgboost"
-    model_version: int = 1
+    model_version: int = 2
 
     xgb_depth: int = 4
     xgb_estimators: int = 300
@@ -120,8 +144,32 @@ class XGBoostConfig(BaseModelConfig):
     reg_lambda: float = 1.0
     reg_alpha: float = 0.0
 
-    tree_method: str = "gpu_hist"       # "hist"/"gpu_hist"  有 GPU 可改成 "gpu_hist"，取决于 xgboost 版本
+    tree_method: str = "hist"           # "hist"/"gpu_hist"  有 GPU 可改成 "gpu_hist"，取决于 xgboost 版本
     eval_metric: str = "logloss"
+    use_scaler: bool = False            # 树模型不需要标准化
+
+@dataclass
+class SVCConfig(BaseModelConfig):
+    seq_len: int = 96
+    model_type: str = "svc"
+    model_version: int = 1
+
+    C: float = 1.0
+    kernel: str = "rbf"
+    gamma: str = "scale"
+    use_scaler: bool = True
+
+@dataclass
+class LogisticRegressionSklearnConfig(BaseModelConfig):
+    seq_len: int = 96
+    model_type: str = "logistic_regression_sklearn"
+    model_version: int = 1
+
+    C: float = 1.0
+    penalty: str = "l2"
+    solver: str = "lbfgs"
+    max_iter: int = 1000
+    use_scaler: bool = True
 
 @dataclass
 class CNNConfig(BaseModelConfig):
@@ -134,7 +182,9 @@ class CNNConfig(BaseModelConfig):
 
 @dataclass
 class TrainConfig:
-    model_cfg: BaseModelConfig = field(default_factory=ConvLSTMConfig)
+    model_cfg: BaseModelConfig = field(
+        default_factory=lambda: ConvLSTMConfig(model_version=3)
+    )
     data_cfg: DataConfig = field(default_factory=DataConfig)
     feature_conf_list: List[str] = field(default_factory=lambda: feature_conf_list)
     epochs: int = 100
@@ -146,27 +196,38 @@ class TrainConfig:
     seed: int = 42
     stride: int = 8
     use_cache: bool = False
-    lambda_trig: float = 0.5
     lambda_dir: float = 0.1  # Importance of long/short direction
     lambda_main:float = 0.7
-    lambda_cost: float = 0.4  # Flip / missed trend / noisy trades
-    lambda_gate: float = 1e-3
-    mag_alpha: float = 0
-    mag_limit: float = 4.0
-    bias_lambda: float = 0.5
+    lambda_cost: float = 1  # Flip / missed trend / noisy trades
     flip_penalty: float = 1
-    pos_ratio: float = 0.5
-    miss_penalty: float = 2
-    false_trade: float = 1
+    miss_penalty: float = 1
+    false_trade_penalty: float = 1
+    minority_sampling_ratio: Optional[float] = None
     mag_warmup_epochs:int = 8
     temperature:float = 2.0
-    best_f1 : bool = True
+    selection_metric: str = "macro_f1"  # "macro_f1" or "loss"
     label_smoothing :float = 0.02
-    loss_fun_version : int = 4
     train_compatibility:str = ''
+    train_task: str = TrainTask.DIRECT_3CLASS
 
     def __post_init__(self):
-        self.train_compatibility =f"{str(self.model_cfg.seq_len)}_{str(self.stride)}_{str(hash(tuple(self.feature_conf_list)))}"
+        if self.selection_metric not in {"macro_f1", "loss"}:
+            raise ValueError("selection_metric must be 'macro_f1' or 'loss'")
+        if self.epochs <= 0 or self.batch_size <= 0 or self.patience <= 0:
+            raise ValueError("epochs, batch_size and patience must be positive")
+        if (
+            self.minority_sampling_ratio is not None
+            and not 0 < self.minority_sampling_ratio < 0.5
+        ):
+            raise ValueError(
+                "minority_sampling_ratio must be between 0 and 0.5"
+            )
+        feature_hash = hashlib.sha256(
+            "\0".join(self.feature_conf_list).encode("utf-8")
+        ).hexdigest()[:12]
+        self.train_compatibility = (
+            f"{self.model_cfg.seq_len}_{self.stride}_{feature_hash}"
+        )
 
 @dataclass
 class LogisticConfig(BaseModelConfig):
@@ -174,16 +235,11 @@ class LogisticConfig(BaseModelConfig):
     model_type: str = "logistic_regression"
     model_version: int = 1
 
-class TrainTask:
-    SINGLE_MODEL_3CLASS = "SINGLE_MODEL_3CLASS"
-    TRIGGER_DIR = "TRIGGER_DIR"
-    LONG_SHORT_OVR = "LONG_SHORT_OVR"
 
-    SINGLE_MODEL_TRIGGER = "SINGLE_MODEL_TRIGGER"
-    SINGLE_MODEL_DIR = "SINGLE_MODEL_DIR"
-
-    SINGLE_MODEL_LONG_OVR = "SINGLE_MODEL_LONG_OVR"
-    SINGLE_MODEL_SHORT_OVR = "SINGLE_MODEL_SHORT_OVR"
+COMBO_SUB_TASKS = {
+    TrainTask.TRIGGER_DIRECTION: (TrainTask.TRIGGER, TrainTask.DIRECTION),
+    TrainTask.LONG_SHORT_OVR: (TrainTask.LONG_OVR, TrainTask.SHORT_OVR),
+}
 
 # feature_direction_map: 特征名 -> ic_direction (1 正向 / -1 负向)
 # 训练前会对 direction=-1 的特征乘以 -1，使其与收益正相关
@@ -346,11 +402,9 @@ feature_conf_list = [
     "lower_wick_pct",
 ]
 
-# SingleModelTrainConfig = TrainConfig(model_cfg = ConvLSTMConfig(model_version= 3))
-# train_task_config = TrainTask.SINGLE_MODEL_3CLASS
-# SingleModelTrainConfig = TrainConfig(model_cfg = LogisticConfig(model_version= 1))
-# SingleModelTrainConfig = TrainConfig(model_cfg = TransformerConfig(model_version= 1))
-seq_len = 128
-SingleModelTrigger = TrainConfig(model_cfg = ConvLSTMConfig(model_version= 1,seq_len=seq_len),feature_conf_list = feature.FEATURE_LIST_COMMODITY)
-SingleModelDirection = TrainConfig(model_cfg = TransformerConfig(model_version= 2,seq_len=seq_len),feature_conf_list = feature.FEATURE_LIST_COMMODITY)
-train_task_config = TrainTask.SINGLE_MODEL_TRIGGER
+seq_len = 216
+SingleModelConfig = TrainConfig(
+    model_cfg=LogisticConfig(model_version=1, seq_len=seq_len),
+    feature_conf_list=feature.FEATURE_LIST_COMMODITY,
+    train_task=TrainTask.DIRECT_3CLASS,
+)

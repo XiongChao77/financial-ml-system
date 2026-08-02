@@ -21,7 +21,7 @@ class MetaConfig:
         Extract dataset configuration from a meta dict.
         """
         self.feature_cols = meta["feature_cols"]
-        self.window = int(meta["window"])
+        self.seq_len = int(meta["seq_len"])
         # In pipeline mode, final output is typically mapped back to 3 classes.
         # If a sub-model is binary, the wrapper will handle mapping to 3 classes.
         self.classes = meta.get("classes", [0, 1]) 
@@ -56,7 +56,12 @@ class ModelHandler(MetaConfig):
         self.task_type = self.task_desc.get("task_type", "single")
         self.base_dir = os.path.dirname(task_desc_path)
         self.sub_model_conf :dict[str,MetaConfig]= {}
-        
+        # 组合任务(TRIGGER_DIR/LONG_SHORT_OVR)下各子模型自身的 nn.Module 和各自的
+        # task_type(如 SINGLE_MODEL_TRIGGER)，供 evaluate_sub_models() 单独评估用。
+        # 非组合任务下始终为空 dict。
+        self.loaded_sub_models: dict = {}
+        self.sub_model_task_type: dict = {}
+
         # 2. Initialize by task type
         self.logger.info(f"🚀 Loading Task: {self.task_type.upper()} from {task_desc_path}")
         
@@ -135,6 +140,7 @@ class ModelHandler(MetaConfig):
                 self.sub_model_conf[name] = MetaConfig()
                 self.sub_model_conf[name]._init_config_from_meta(sub_model_meta)
                 self._init_config_from_meta(sub_model_meta)
+            self.sub_model_task_type[name] = task_desc.get("task_type")
 
             self.logger.info(f"   🔄 Loading sub-model '{name}'...")
             model, _ = ModelFactory.load_from_checkpoint(
@@ -149,6 +155,7 @@ class ModelHandler(MetaConfig):
         self.model = FusionWrapper(loaded_sub_models, task_type=self.task_type)
         self.model.to(self.device)
         self.model.eval()
+        self.loaded_sub_models = loaded_sub_models
 
     def _load_pipeline_mode(self):
         sub_models_map = self.task_desc["models"]
@@ -198,7 +205,72 @@ class ModelHandler(MetaConfig):
         self.model = FusionWrapper(loaded_sub_models, task_type=self.task_type)
         self.model.to(self.device)
         self.model.eval()
-        
+
+    def evaluate_sub_models(self, df, kline_interval_ms, batch_size=2048):
+        """
+        组合任务(TRIGGER_DIR/LONG_SHORT_OVR)专用：在给定的 df(通常是回测区间的数据)上，
+        对每个子模型单独跑一遍预测并计算指标——而不是只看融合后的 3 类结果。
+
+        标签映射复用 train.prepare_binary_data_for_task，保证和训练时的二分类
+        任务定义(trigger: 是否有动作；direction: long/short；long_ovr/short_ovr: OvR)
+        完全一致，而不是临时发明一套映射。
+
+        非组合任务(self.loaded_sub_models 为空)时返回 {}。
+        """
+        if not self.loaded_sub_models:
+            return {}
+
+        from model.train import prepare_binary_data_for_task
+
+        results = {}
+        for name, sub_model in self.loaded_sub_models.items():
+            conf = self.sub_model_conf.get(name)
+            sub_task_type = self.sub_model_task_type.get(name)
+            if conf is None or sub_task_type is None:
+                self.logger.warning(f"⚠️ evaluate_sub_models: missing conf/task_type for sub-model '{name}', skip")
+                continue
+
+            ds = TimeSeriesWindowDataset(
+                df=df,
+                kline_interval_ms=kline_interval_ms,
+                feature_cols=conf.feature_cols,
+                label_col=conf.label_col,
+                seq_len=conf.seq_len,
+                is_live=False,
+            )
+            if len(ds) == 0:
+                self.logger.warning(f"⚠️ evaluate_sub_models: no valid windows for sub-model '{name}', skip")
+                results[name] = {}
+                continue
+
+            X_t, y_t, _ = prepare_binary_data_for_task(ds.X, ds.y, ds.returns, sub_task_type)
+            if len(y_t) == 0:
+                results[name] = {}
+                continue
+
+            sub_model.eval()
+            preds_list = []
+            with torch.no_grad():
+                for start in range(0, len(X_t), batch_size):
+                    xb = X_t[start:start + batch_size].to(self.device)
+                    logits = sub_model(xb)
+                    preds_list.append(torch.argmax(logits, dim=1).cpu().numpy())
+            y_pred = np.concatenate(preds_list)
+            y_true = y_t.cpu().numpy()
+
+            stats = self.evaluate_performance(y_true, y_pred)
+            # "signal"（short/long win rate 等）是按 3 类 Short/Neutral/Long 的 Signal
+            # 枚举语义写的，子模型这里是各自的二分类标签(0/1)，语义对不上，
+            # 直接展示会误导，故只保留通用的分类指标。
+            stats.pop("signal", None)
+
+            results[name] = {
+                "task_type": sub_task_type,
+                **stats,
+            }
+
+        return results
+
     def predict(self, df, kline_interval_ms, is_live=True, batch_size=2048, diff_thresh=None, min_thresh=0.3, stride =1,
                    cache_path = '', use_cache= False):
         """
@@ -221,8 +293,8 @@ class ModelHandler(MetaConfig):
             df=df, 
             kline_interval_ms = kline_interval_ms,
             feature_cols=self.feature_cols, 
-            label_col=self.label_col, 
-            window=self.window,
+            label_col=self.label_col,
+            seq_len=self.seq_len,
             is_live=is_live,
             stride= stride,
             cache_path = cache_path,
@@ -427,8 +499,8 @@ class ModelHandler(MetaConfig):
             kline_interval_ms = kline_interval_ms,
             feature_config_list = self.feature_group_list,
             feature_cols=self.feature_cols, 
-            label_col=self.label_col, 
-            window=self.window,
+            label_col=self.label_col,
+            seq_len=self.seq_len,
             is_live = False,
         )
         # shuffle=False to keep order consistent
@@ -452,8 +524,8 @@ class ModelHandler(MetaConfig):
         probs_all = np.concatenate(probs_list)
         
         # 3. Align true labels (y_true)
-        # TimeSeriesWindowDataset outputs start from window-1
-        valid_idx = df.index[self.window-1:]
+        # TimeSeriesWindowDataset outputs start from seq_len-1
+        valid_idx = df.index[self.seq_len-1:]
         
         # Truncate to avoid length mismatch
         min_len = min(len(valid_idx), len(probs_all))
@@ -649,20 +721,20 @@ class ModelHandler(MetaConfig):
         ds = {}
         for key, conf in self.sub_model_conf.items():
             self.logger.info(f"Constructing dataset using sub-model '{key}' configuration...")
-            hash_value  = self.generate_config_hash(conf.feature_cols, conf.window)
+            hash_value  = self.generate_config_hash(conf.feature_cols, conf.seq_len)
             self.logger.info(f"Dataset Config Hash (SHA256): {hash_value}")
             if hash_value not in ds:
                 ds[hash_value] = TimeSeriesWindowDataset(
-                    df=df, 
+                    df=df,
                     kline_interval_ms = kline_interval_ms,
-                    feature_cols=conf.feature_cols, 
-                    label_col=conf.label_col, 
-                    window=conf.window,
+                    feature_cols=conf.feature_cols,
+                    label_col=conf.label_col,
+                    seq_len=conf.seq_len,
                     is_live=is_live,
                 )
         return ds
 
-    def generate_config_hash(feature_cols: list, window: int):
+    def generate_config_hash(feature_cols: list, seq_len: int):
         """
         将特征列表和窗口大小融合，生成唯一的配置哈希
         """
@@ -670,7 +742,7 @@ class ModelHandler(MetaConfig):
         # 确保特征列表是有序的（如果模型输入依赖顺序）
         config_dict = {
             "features": feature_cols,
-            "window": window
+            "seq_len": seq_len
         }
         
         # 2. 序列化为稳定的 JSON 字符串

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse,shutil
 import copy
+import hashlib
 import json
 import logging
 import multiprocessing as mp
@@ -46,12 +47,21 @@ from data_process.utils import (
 
 TASKS_SPEC_FILE = "tasks_spec.json"
 REPORTS_FILE = "reports.jsonl"
+TRAIN_REPORTS_FILE = "train_reports.jsonl"
 SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
 MAX_SIM = 4
 SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
 INTERVAL: str = "30m"
+
+# 训练模式开关：
+# - train_config.TrainTask.SINGLE_MODEL_3CLASS（或 SINGLE_MODEL_LONG_OVR 等其它单模型任务）
+#   -> 走现有的单模型 prep->train->sim 流水线（construct_task_doge）
+# - train_config.TrainTask.TRIGGER_DIR / LONG_SHORT_OVR
+#   -> combo_model 模式：分别 sweep 两个子模型角色（construct_task_doge_combo），
+#      训练完成后自动按 (pre_key, train_compatibility) 分组两两 fuse 并回测
+TRAIN_MODE: str = train_config.TrainTask.DIRECT_3CLASS
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -304,7 +314,7 @@ def construct_task_doge():
     from trade.bt import simulation
     preparation_task: List[Any] = []
     for pn in [16,24,32]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-        for vol_multiplier in [5,6]:#1.8,1.9,2
+        for vol_multiplier in [1.8]:#1.8,1.9,2
             for vol_ewma_span in [80]:
                 preparation_task.append(common.BaseDefine(
                         market_category = "Cryptocurrency", data_source = "binance_public_data",
@@ -314,48 +324,97 @@ def construct_task_doge():
 
     training_task: List[train.TrainConfig] = []
 
-    # for flip_penalty in np.arange(0.5, 2.5, 0.1).round(1):
-    #     for miss_penalty in np.arange(0.2, 2.5, 0.1).round(1):
-    # for lambda_dir in np.arange(0.1, 0.7, 0.1).round(1):
-    #     for lambda_cost in np.arange(0.1, 0.7, 0.1).round(1):
-    #         for stride in [8]: #2,4,8
-    #             for bestf1 in [True]:
-    #                 for loss_fun_version_v in [4]:
-    #                     training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
-    #                                                 flip_penalty = float(1.3),miss_penalty = float(1.7),false_trade = 1,
-    #                                                 stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = lambda_dir,lambda_cost = lambda_cost))
     to_remove_1 = ["open", "high",'low' ]
     to_remove_2 = to_remove_1 + ['close','volume','number_of_trades','taker_buy_base_volume','taker_buy_quote_volume']
     to_remove_3 = to_remove_1 + ['close','volume','taker_buy_base_volume','taker_buy_quote_volume']
     to_remove_4 = to_remove_1 + ['close','taker_buy_base_volume','taker_buy_quote_volume']
     to_remove_5 = to_remove_1 + ['taker_buy_base_volume','taker_buy_quote_volume']
-    feature_conf_list_1 = [f for f in train.feature_conf_list if f not in to_remove_1]
-    feature_conf_list_2 = [f for f in train.feature_conf_list if f not in to_remove_2]
-    feature_conf_list_3 = [f for f in train.feature_conf_list if f not in to_remove_3]
-    feature_conf_list_4 = [f for f in train.feature_conf_list if f not in to_remove_4]
-    feature_conf_list_5 = [f for f in train.feature_conf_list if f not in to_remove_5]
-    for false_trade in [1]:
+    feature_conf_list_1 = [f for f in train_config.feature_conf_list if f not in to_remove_1]
+    feature_conf_list_2 = [f for f in train_config.feature_conf_list if f not in to_remove_2]
+    feature_conf_list_3 = [f for f in train_config.feature_conf_list if f not in to_remove_3]
+    feature_conf_list_4 = [f for f in train_config.feature_conf_list if f not in to_remove_4]
+    feature_conf_list_5 = [f for f in train_config.feature_conf_list if f not in to_remove_5]
+    for false_trade_penalty in [1]:
         for seq_len in [12,16,24,96,256]: #12,16,24,32
             for flip_penalty in np.arange(0.8, 1.7, 1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
                 for miss_penalty in np.arange(0.5,2, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
-                    for stride in [2,4]: #2,4,8
+                    for stride in [2]: #2,4,8
                         for bestf1 in [True]:
-                            for loss_fun_version in [2]:
-                                for featrue_conf in [train.feature_conf_list]:
-                                    train_conf = train.TrainConfig( use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version,
-                                                                        feature_conf_list= featrue_conf,
-                                                                flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
-                                                                stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0)
-                                    train_conf.model_cfg = train_config.ConvLSTMConfig(seq_len = seq_len,model_version= 1)
-                                    training_task.append(train_conf)
+                            for featrue_conf in [train_config.feature_conf_list]:
+                                train_conf = train.TrainConfig( use_cache = False,epochs = 100, batch_size=256,
+                                                                    feature_conf_list= featrue_conf,
+                                                            flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade_penalty = 1,
+                                                            stride = stride, patience = 8)
+                                train_conf.model_cfg = train_config.LogisticConfig(seq_len = seq_len,model_version= 1)
+                                # 单模型 sweep：这一整批配置统一按 TRAIN_MODE 指定的任务类型训练
+                                # (默认 SINGLE_MODEL_3CLASS；也可以设成 SINGLE_MODEL_LONG_OVR 等)
+                                train_conf.train_task = TRAIN_MODE
+                                training_task.append(train_conf)
 
     simulation_task: List[Any] = []
 
-    for i in [4,8,12,16,24]: #16,24,30,32,36,40,44,48
+    for i in [12,16,24]: #16,24,30,32,36,40,44,48
         holdbar = i
         for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,
+            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,init_equity=10000.0,thresh=None,
                                             atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,atr_tp=0.99,trade_risk=0.4,max_daily_loss_pct=0.04))
+    return preparation_task, training_task, simulation_task
+
+def construct_task_doge_combo():
+    """
+    combo_model(TRIGGER_DIR) 版本的任务构造：分别为 trigger / direction 两个子任务
+    角色构造各自的超参 sweep（两个独立的循环，对应 Q&A 里"两种架构分成两个
+    construct 函数"的约定——这里在单个 SYMBOL 下用两段循环各自打标签，
+    而不是复用 construct_task_doge 那一套单模型三分类的循环）。
+
+    两个角色的 TrainConfig 都放进同一个 flat training_task 列表里，只是通过
+    .train_task 字段打上不同标签（SINGLE_MODEL_TRIGGER / SINGLE_MODEL_DIR）。
+    训练完成后由 run_combo_fusion_and_backtest 按 (pre_key, train_compatibility)
+    分组，把同组下所有 trigger x direction 两两 fuse 成组合模型再回测。
+    """
+    import model.train as train
+    from trade.bt import simulation
+    preparation_task: List[Any] = []
+    for pn in [16, 24, 32]:
+        for vol_multiplier in [1.8, 1.9]:
+            for vol_ewma_span in [80]:
+                preparation_task.append(common.BaseDefine(
+                        market_category = "Cryptocurrency", data_source = "binance_public_data",
+                        vol_ewma_span = vol_ewma_span, predict_num=pn,
+                        vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=None, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=None,
+                        symbol=SYMBOL,  interval=INTERVAL, trading_type= 'um', label_type = 'FTHL', version=0 ))
+
+    training_task: List[train.TrainConfig] = []
+
+    seq_len = 24
+    stride = 2
+    # --- trigger 子任务 sweep ---
+    for pos_ratio in np.arange(0.2, 0.3, 0.02).round(2):
+        for miss_penalty in np.linspace(1 / pos_ratio / 3 * 2, 1 / pos_ratio * 4, 4).round(2):
+            trig_cfg = train.TrainConfig(
+                use_cache=False, epochs=20, batch_size=256,
+                model_cfg=train_config.LogisticConfig(model_version=1, seq_len=seq_len),
+                pos_ratio=pos_ratio, miss_penalty=float(miss_penalty), stride=stride, patience=5,
+            )
+            trig_cfg.train_task = train_config.TrainTask.SINGLE_MODEL_TRIGGER
+            training_task.append(trig_cfg)
+
+    # --- direction 子任务 sweep ---
+    for model_cfg in [train_config.TransformerConfig(model_version=1, seq_len=seq_len)]:
+        dir_cfg = train.TrainConfig(
+            use_cache=False, epochs=20, batch_size=256,
+            model_cfg=model_cfg, pos_ratio=0.5, stride=stride, patience=5,
+        )
+        dir_cfg.train_task = train_config.TrainTask.SINGLE_MODEL_DIR
+        training_task.append(dir_cfg)
+
+    simulation_task: List[Any] = []
+    for i in [4, 8, 12, 16, 24]:
+        holdbar = i
+        for (atr_sl_mult_long, atr_sl_mult_short) in [(6, 5), (5, 4)]:
+            simulation_task.append(simulation.StrategyPara(
+                allow_long=True, allow_short=True, holdbar=holdbar, commission=0.05, init_equity=10000.0, thresh=None,
+                atr_sl_mult_long=atr_sl_mult_long, atr_sl_mult_short=atr_sl_mult_short, atr_tp=0.99, trade_risk=0.4, max_daily_loss_pct=0.04))
     return preparation_task, training_task, simulation_task
 
 def construct_task_eth():
@@ -383,14 +442,14 @@ def construct_task_eth():
 
     training_task: List[train.TrainConfig] = []
 
-    for false_trade in [1]:
+    for false_trade_penalty in [1]:
         for flip_penalty in np.arange(0.9, 1.7, 0.1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
             for miss_penalty in np.arange(0.7, 1.2, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
                 for stride in [4,8]: #2,4,8
                     for bestf1 in [True]:
                         for loss_fun_version_v in [2]:
-                            training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
-                                                        flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
+                            training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,
+                                                        flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade_penalty = 1,
                                                         stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0))
 
     simulation_task: List[Any] = []
@@ -398,20 +457,30 @@ def construct_task_eth():
     for i in [30,32,36,38,40,44]: #16,24,30,32,36,40,44,48
         holdbar = i
         for (atr_sl_mult_long, atr_sl_mult_short) in [(6,6),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,cash=10000.0,thresh=None,
-                                            atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,atr_tp=0.99,trade_risk=0.4,max_daily_loss_pct=0.025))
+            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,init_equity=10000.0,thresh=None,
+                                            atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,trade_risk=0.1,max_daily_loss_pct=0.025))
     return preparation_task, training_task, simulation_task
 
 def create_task_spec(logger, exp_dir,done_set: set[str]):
+    is_combo = TRAIN_MODE in train_config.COMBO_SUB_TASKS
 
-    if SYMBOL == "DOGEUSDT":
+    if is_combo:
+        if SYMBOL == "DOGEUSDT":
+            preparation_task, training_task, simulation_task = construct_task_doge_combo()
+        else:
+            raise RuntimeError(f"no combo construct for {SYMBOL} yet")
+    elif SYMBOL == "DOGEUSDT":
         preparation_task, training_task, simulation_task = construct_task_doge()
     elif SYMBOL == "ETHUSDT":
         preparation_task, training_task, simulation_task = construct_task_eth()
     else:
         raise RuntimeError(f"no construct for {SYMBOL} yet")
 
-    task_spec = build_task_spec(preparation_task, training_task, simulation_task)
+    # combo_model 模式下，子模型自己不是可交易的策略，不在这里挂 sim_tasks——
+    # 真正的回测任务是训练完成后针对两两 fuse 出来的组合模型单独生成的，
+    # 见 run_combo_fusion_and_backtest。这里把真实的 simulation_task 列表
+    # 原样返回给调用方，供 fuse 阶段使用。
+    task_spec = build_task_spec(preparation_task, training_task, [] if is_combo else simulation_task)
     # task_spec is already ready
     sweep = collect_param_sweep(task_spec)
     log_param_sweep(logger, sweep)
@@ -429,7 +498,7 @@ def create_task_spec(logger, exp_dir,done_set: set[str]):
         n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
         total_pending = n_prep + n_train + n_sim
         logger.info(f"📊 Pending: {total_pending} (prep={n_prep}, train={n_train}, sim={n_sim}), done: {total_all - total_pending}")
-    return task_spec
+    return task_spec, (simulation_task if is_combo else None)
 
 # -----------------------------------------------------------------------------
 # Worker loops
@@ -500,15 +569,33 @@ def _train_task(
     try:
         pre_para = common.BaseDefine(**pre_params)
         t_cfg = _config_from_dict_train(train_params)
-        train.main(logger, train_task=train_config.TrainTask.SINGLE_MODEL_LONG_OVR ,train_cfg=t_cfg, prep_output_dir=prep_output_dir, save_dir=save_dir,experiment=True)
+        # 单模型模式(DIRECT_3CLASS/LONG_OVR/...)和 combo_model 子模型模式共用同一个
+        # worker：具体训练哪种任务由 TrainConfig 自己的 train_task 字段决定（construct_task_doge*
+        # 在构造每一行配置时已经打好标签），这里不再写死某一个任务类型。
+        result = train.train(logger, config=t_cfg, prep_output_dir=prep_output_dir, save_dir=save_dir)
 
         # IMPORTANT: enqueue sims BEFORE reporting train_done (so main can safely send None after last train_done)
         for sim in sim_tasks:
-            sim_task_queue.put((pre_h, pre_params, tr_h, train_params, sim))
-        train_result_queue.put(("train_done", pre_h, tr_h, time.time() - t0))
+            sim_task_queue.put((pre_h, pre_params, tr_h, train_params, sim, save_dir, {}))
+        # 训练报告（task_type/metrics/save_dir 等）单独落一份 train_reports.jsonl。
+        # 单模型模式下这只是额外的存档；combo_model 模式下这是后续 fuse 阶段
+        # 用来按 (pre_key, train_compatibility) 分组、两两配对子模型的唯一数据源。
+        train_report = {
+            "pre_h": pre_h,
+            "tr_h": tr_h,
+            "task_type": t_cfg.train_task,
+            "model_type": t_cfg.model_cfg.model_type,
+            "model_version": t_cfg.model_cfg.model_version,
+            "train_compatibility": t_cfg.train_compatibility,
+            "metrics": result,
+            "pre_params": pre_params,
+            "train_params": train_params,
+            "save_dir": save_dir,
+        }
+        train_result_queue.put(("train_done", pre_h, tr_h, time.time() - t0, train_report))
     except Exception:
         logger.exception(f"Train failed: {pre_h}/{tr_h}")
-        train_result_queue.put(("train_failed", pre_h, tr_h, time.time() - t0))
+        train_result_queue.put(("train_failed", pre_h, tr_h, time.time() - t0, None))
 
 def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Queue, reports_path: str, temp_dir: str):
     logger = _worker_logger(worker_log_file)
@@ -523,18 +610,21 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
         if msg is None:
             break
 
-        pre_h, pre_params, tr_h, train_params, sim = msg
+        # train_output_dir 由生产者（单模型 _train_task 或 combo_model 的
+        # run_combo_fusion_and_backtest）显式给出，不再由 worker 自己根据 (pre_h, tr_h)
+        # 反推路径——这样同一套 worker 池既能跑单模型的训练产出目录，也能跑
+        # combo_model fuse 出来的组合模型目录，回测阶段两者完全一样。
+        pre_h, pre_params, tr_h, train_params, sim, train_output_dir, extra_report_fields = msg
         sim_h = sim['hash']
         s_para = simulation.StrategyPara(**sim["params"])
         pre_para = common.BaseDefine(**pre_params)
         t_cfg = _config_from_dict_train(train_params)
         prep_dir = _prep_output_dir(temp_dir, pre_h)
-        train_output_dir = _train_output_dir(temp_dir, pre_h, tr_h)
-        
+
         t0 = time.time()
         try:
             report_stat = None
-            report = {'short':{}, 'long':{}, 'forward': {}, 'pass':False}
+            report = {'short':{}, 'long':{}, 'forward': {}, 'pass':False, **(extra_report_fields or {})}
             report['short'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                 train_output_dir=train_output_dir, device="cpu", period='short' )["statistics"][1]
             if report['short']["performance"]["cagr"] > 0 :
@@ -555,7 +645,7 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
             report_stat = None
 
         elapsed = time.time() - t0
-        result_queue.put(("sim_done", pre_h, tr_h, sim_h, elapsed, report_stat, reports_path))
+        result_queue.put(("sim_done", pre_h, tr_h, sim_h, elapsed, report_stat, reports_path, train_output_dir))
 
 
 # -----------------------------------------------------------------------------
@@ -574,11 +664,10 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
         if typ != "sim_done":
             continue
 
-        _, pre_h, tr_h, sim_h, elapsed, report_stat, rp = msg
+        _, pre_h, tr_h, sim_h, elapsed, report_stat, rp, train_dir = msg
         stats["simulation"]["time"] += elapsed
         stats["simulation"]["count"] += 1
 
-        train_dir = _train_output_dir(temp_dir, pre_h, tr_h)
         if report_stat is not None:
             common.append_jsonl(rp, report_stat)
             if valid == True:
@@ -860,6 +949,149 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     logger.info(f"Successfully saved {len(results)} cross test records to {output_path}")
 
+def run_combo_fusion_and_backtest(
+    logger: logging.Logger,
+    train_reports_path: str,
+    temp_dir: str,
+    simulation_task: List[Any],
+    reports_path: str,
+    sim_task_queue: mp.Queue,
+    sim_result_queue: mp.Queue,
+    valid: bool = False,
+):
+    """
+    combo_model 模式训练完成后的 fuse + 回测阶段：
+
+    1. 从 train_reports_path（每训练完一个子模型就追加一行，见 _train_task /
+       run_task_spec 的 _drain_train_results）读回所有已完成的子模型记录。
+    2. 按 (pre_h, train_compatibility) 分组——只有同一份数据准备(pre_h)、且
+       seq_len/stride/特征集完全一致(train_compatibility)的两个子模型才允许
+       配对，否则两个子模型消费的输入窗口对不上，融合没有意义。这个约束和
+       batch_simulation.py 里 build_model_registry_from_reports/select_fusion_pairs
+       的思路一致。
+    3. 组内按 TRAIN_MODE 对应的两个角色(COMBO_SUB_TASKS[TRAIN_MODE])做笛卡尔积
+       配对：M 个 role_1 子模型 x N 个 role_2 子模型 = M*N 个组合。
+    4. 每一对调用 fusion_trigger_dir / fusion_long_short_ovr 生成组合模型的
+       task_description.json，再用 simulation_task 跑 short/long/forward 回测，
+       写入 reports_path。回测报告里的 model_metrics(融合后 3 类整体指标)和
+       sub_model_metrics(两个子模型各自在回测数据上的指标)由 simulation.main
+       ->ModelHandler.evaluate_sub_models 自动附带，这里不用手工计算。
+    """
+    import model.train as train
+
+    role_1, role_2 = train_config.COMBO_SUB_TASKS[TRAIN_MODE]
+
+    if not os.path.exists(train_reports_path):
+        logger.warning(f"No train reports found at {train_reports_path}, nothing to fuse.")
+        return
+
+    records = []
+    with open(train_reports_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+
+    groups: Dict[Tuple[str, str], Dict[str, List[dict]]] = defaultdict(lambda: defaultdict(list))
+    for r in records:
+        groups[(r["pre_h"], r["train_compatibility"])][r["task_type"]].append(r)
+
+    fusion_pairs = []
+    for (pre_h, compat), by_role in groups.items():
+        role_1_items = by_role.get(role_1, [])
+        role_2_items = by_role.get(role_2, [])
+        logger.info(
+            f"[combo fuse] pre={pre_h}, compat={compat}: "
+            f"{role_1}={len(role_1_items)}, {role_2}={len(role_2_items)} -> "
+            f"{len(role_1_items) * len(role_2_items)} pairs"
+        )
+        for r1 in role_1_items:
+            for r2 in role_2_items:
+                fusion_pairs.append((pre_h, compat, r1, r2))
+
+    logger.info(f"[combo fuse] total fusion pairs: {len(fusion_pairs)}")
+
+    # 粗粒度的 resume-safety：整个 fusion_hash（不细到单个 sim_task）已经出现
+    # 在 reports_path 里就跳过——不是完整的 --resume 支持，只是避免重复脚本被
+    # 误跑两次时把同一批回测重复写一遍。
+    done_fusion_hashes = set()
+    if os.path.exists(reports_path):
+        with open(reports_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                fh = d.get("fusion_hash")
+                if fh:
+                    done_fusion_hashes.add(fh)
+
+    pending_sim_hashes: Dict[Tuple[str, str], Set[str]] = {}
+    n_sim_total = 0
+
+    for pre_h, compat, r1, r2 in fusion_pairs:
+        payload = {
+            "pre_h": pre_h, "compat": compat,
+            f"{role_1}_tr_h": r1["tr_h"], f"{role_2}_tr_h": r2["tr_h"],
+        }
+        fusion_hash = hashlib.sha1(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:12]
+
+        if fusion_hash in done_fusion_hashes:
+            logger.info(f"[combo fuse] skip fusion_hash={fusion_hash} (already in reports)")
+            continue
+
+        fusion_dir = os.path.join(temp_dir, f"pre_{pre_h}", "fusion", f"compat_{compat}", f"fusion_{fusion_hash}")
+        os.makedirs(fusion_dir, exist_ok=True)
+
+        logger.info(f"[combo fuse] fusing {role_1}={r1['tr_h']} + {role_2}={r2['tr_h']} -> {fusion_hash}")
+        if TRAIN_MODE == train_config.TrainTask.TRIGGER_DIR:
+            train.fusion_trigger_dir(logger, r1["save_dir"], r2["save_dir"], fusion_dir)
+        else:
+            train.fusion_long_short_ovr(logger, r1["save_dir"], r2["save_dir"], fusion_dir)
+
+        # 回测阶段和单模型模式完全一样(融合完的目录对 simulation.main 而言就是
+        # 一个普通的 train_output_dir)，所以这里不再自己顺序调用 simulation.main，
+        # 而是把每个 sim_task 塞进和单模型模式共用的 sim_task_queue，由已经在跑的
+        # MAX_SIM 个 _worker_sim 并行处理——combo 模式下这几个 worker 进程本来就
+        # 是空闲的(单模型子任务不挂 sim_tasks)，现在正好用上。
+        extra_report_fields = {
+            "fusion_hash": fusion_hash,
+            "train_compatibility": compat,
+            role_1: {"tr_h": r1["tr_h"], "metrics": r1["metrics"], "train_params": r1["train_params"]},
+            role_2: {"tr_h": r2["tr_h"], "metrics": r2["metrics"], "train_params": r2["train_params"]},
+        }
+        for sim_task in simulation_task:
+            sim_d = json_safe(asdict(sim_task))
+            sim_h = param_hash(sim_d)
+            pending_sim_hashes.setdefault((pre_h, fusion_hash), set()).add(sim_h)
+            sim_task_queue.put((
+                pre_h, r1["pre_params"], fusion_hash, r1["train_params"],
+                {"hash": sim_h, "params": sim_d}, fusion_dir, extra_report_fields,
+            ))
+            n_sim_total += 1
+
+    logger.info(f"[combo fuse] enqueued {n_sim_total} backtest tasks across {len(fusion_pairs)} fusion pairs")
+
+    if n_sim_total == 0:
+        return
+
+    # 复用单模型模式同一套 _drain_sim_results：写 reports_path、以及所有 sim
+    # 跑完后删掉对应的 fusion_dir（和单模型训练目录的清理逻辑一致），只是这里
+    # 没有 prep/train 阶段要一起协调，用一个简单的轮询循环等它跑完就够了。
+    stats = {"simulation": {"time": 0.0, "count": 0}}
+    def _no_eta():
+        return ""
+    while stats["simulation"]["count"] < n_sim_total:
+        _drain_sim_results(sim_result_queue, stats, logger, _no_eta, pending_sim_hashes, temp_dir, valid, {})
+        if stats["simulation"]["count"] < n_sim_total:
+            time.sleep(0.5)
+    logger.info(f"[combo fuse] all {n_sim_total} backtest tasks done.")
+
 def main():
     parser = argparse.ArgumentParser(description="Batch experiments: prep -> train -> sim (with resume)")
     parser.add_argument("-p", "--prep", action="store_true", help="Execute data preparation stage")
@@ -874,6 +1106,16 @@ def main():
 
     args = parser.parse_args()
     run_all = args.new
+
+    if TRAIN_MODE in train_config.COMBO_SUB_TASKS and (
+        args.resume or args.add or args.valid or args.cross_test or args.load
+    ):
+        print(
+            "❌ combo_model 模式 (TRAIN_MODE=TRIGGER_DIR/LONG_SHORT_OVR) 暂不支持 "
+            "--resume/--add/--valid/--cross_test/--load，这些流程假设的是单模型模式下 "
+            "sim_tasks 直接挂在训练节点上的 spec 形状。请用不带这些参数的全新实验跑一遍。"
+        )
+        return
 
     # ---------------- resolve exp_dir ----------------
     if args.resume:
@@ -962,9 +1204,12 @@ def main():
 
     begin_time = time.time()
     reports_path = os.path.join(exp_dir, REPORTS_FILE)
+    train_reports_path = os.path.join(exp_dir, TRAIN_REPORTS_FILE)
 
     temp_dir = _batch_temp_dir(exp_dir)
     os.makedirs(temp_dir, exist_ok=True)
+
+    combo_simulation_task = None
 
     # ---------------- build/load spec ----------------
     if args.resume:
@@ -978,7 +1223,7 @@ def main():
         logger.info(f"📊 Pending: {total_pending} (prep={n_prep}, train={n_train}, sim={n_sim}), done: {total_all - total_pending}")
     elif args.add:
         done_set = load_done_set(reports_path)
-        task_spec = create_task_spec(logger, exp_dir, done_set)
+        task_spec, combo_simulation_task = create_task_spec(logger, exp_dir, done_set)
     elif args.valid:
         valid_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out')
         shutil.rmtree(valid_save_dir,ignore_errors=True)
@@ -995,7 +1240,7 @@ def main():
         train_and_cross_test(logger,exp_dir,task_spec)
         exit()
     else:
-        task_spec = create_task_spec(logger, exp_dir, None)
+        task_spec, combo_simulation_task = create_task_spec(logger, exp_dir, None)
     if not task_spec:
         logger.info("✅ No pending tasks.")
         return
@@ -1017,12 +1262,22 @@ def main():
         p.start()
         prep_workers.append(p)
 
+    is_combo = TRAIN_MODE in train_config.COMBO_SUB_TASKS
+
+    # combo_model 模式下，训练阶段的子模型不挂 sim_tasks，这里的 sim_task_queue/
+    # sim_workers 在训练期间根本用不上——而且 run_task_spec 一旦训练全部完成就会
+    # 自动往 sim_task_queue 里塞 None 把 sim worker 关掉（单模型模式下这是对的，
+    # 因为那时候该跑的 sim 早就在训练过程中挂上队列了；combo 模式下这时候还
+    # 一个回测任务都没有）。所以 combo 模式这里不提前起 sim worker，等子模型
+    # 全部训练完、fuse 阶段真正有回测任务要跑时再起一批新的（见下面
+    # run_combo_fusion_and_backtest 调用处），避免被提前关掉。
     sim_workers = []
-    for i in range(MAX_SIM):
-        worker_log = os.path.join(exp_dir, f"sim_{i}.log")
-        p = mp.Process(target=_worker_sim, args=(worker_log, sim_task_queue, sim_result_queue, reports_path, temp_dir))
-        p.start()
-        sim_workers.append(p)
+    if not is_combo:
+        for i in range(MAX_SIM):
+            worker_log = os.path.join(exp_dir, f"sim_{i}.log")
+            p = mp.Process(target=_worker_sim, args=(worker_log, sim_task_queue, sim_result_queue, reports_path, temp_dir))
+            p.start()
+            sim_workers.append(p)
     run_task_spec(
         task_spec,
         temp_dir,
@@ -1035,16 +1290,50 @@ def main():
         logger,
         prep_workers,
         sim_workers,
-        valid= args.valid
+        valid= args.valid,
+        train_reports_path=train_reports_path,
     )
-    
-    
+
+
     _send_none_to_workers(prep_task_queue, MAX_PREP)
-    _send_none_to_workers(sim_task_queue, MAX_SIM)
+    if not is_combo:
+        _send_none_to_workers(sim_task_queue, MAX_SIM)
 
     if args.valid:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         compare_old_new_reports(selected_configs, reports_path, exp_dir, logger)
+
+    # combo_model 模式：子模型全部训练完成后，按 (pre_key, train_compatibility)
+    # 分组两两 fuse 成组合模型并回测，结果同样写入 reports_path。
+    # 用一套全新的 queue + sim worker（而不是复用上面训练阶段那套），避免和
+    # run_task_spec 训练完就自动发的 None 关闭信号产生竞争/串号。
+    if is_combo:
+        combo_sim_task_queue: mp.Queue = mp.Manager().Queue()
+        combo_sim_result_queue: mp.Queue = mp.Manager().Queue()
+        combo_sim_workers = []
+        for i in range(MAX_SIM):
+            worker_log = os.path.join(exp_dir, f"combo_sim_{i}.log")
+            p = mp.Process(target=_worker_sim, args=(worker_log, combo_sim_task_queue, combo_sim_result_queue, reports_path, temp_dir))
+            p.start()
+            combo_sim_workers.append(p)
+
+        try:
+            run_combo_fusion_and_backtest(
+                logger=logger,
+                train_reports_path=train_reports_path,
+                temp_dir=temp_dir,
+                simulation_task=combo_simulation_task or [],
+                reports_path=reports_path,
+                sim_task_queue=combo_sim_task_queue,
+                sim_result_queue=combo_sim_result_queue,
+                valid=args.valid,
+            )
+        finally:
+            _send_none_to_workers(combo_sim_task_queue, MAX_SIM)
+            for p in combo_sim_workers:
+                p.join(timeout=5)
+                if p.is_alive():
+                    p.terminate()
 
     logger.info("\n" + "=" * 40)
     elapsed = time.time() - begin_time
@@ -1068,7 +1357,8 @@ def run_task_spec(
     logger,
     prep_workers,
     sim_workers,
-    valid = False
+    valid = False,
+    train_reports_path = None,
 ):
     stats = {"preparation": {"time": 0.0, "count": 0}, "train": {"time": 0.0, "count": 0}, "simulation": {"time": 0.0, "count": 0}}
     # key: (pre_h, tr_h), value: set of sim_h
@@ -1111,7 +1401,7 @@ def run_task_spec(
                 break
             if not msg:
                 continue
-            typ, pre_h, tr_h, elapsed = msg
+            typ, pre_h, tr_h, elapsed, train_report = msg
             if typ == "train_failed":
                 logger.error(f"❌ Train failed for {pre_h}/{tr_h}, aborting.")
                 raise RuntimeError("train_failed")
@@ -1119,6 +1409,8 @@ def run_task_spec(
             stats["train"]["time"] += float(elapsed)
             stats["train"]["count"] += 1
             logger.info(f"  {pre_h}/{tr_h}  Train done in {elapsed:.2f}s")
+            if train_reports_path and train_report is not None:
+                common.append_jsonl(train_reports_path, train_report)
 
             # safe to stop sim workers only after ALL train_done received
             if stats["train"]["count"] >= n_train and not sim_nones_sent:

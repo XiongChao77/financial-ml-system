@@ -89,8 +89,8 @@ class StrategyPara:
     # signal
     thresh: Optional[float] = None
     # stop / take
-    atr_sl_mult_long: float = 4
-    atr_sl_mult_short: float = 4
+    atr_sl_mult_long: float = 6
+    atr_sl_mult_short: float = 6
     atr_tp: float = 100
     # risk
     trade_risk: float = 0.01
@@ -137,13 +137,16 @@ def main(logger:logging.Logger, para = StrategyPara(),train_cfg= train.TrainConf
         df=df, 
         kline_interval_ms = _interval_ms,
         feature_cols=handler.feature_cols, 
-        label_col=handler.label_col, 
-        window=handler.window,
+        label_col=handler.label_col,
+        seq_len=handler.seq_len,
         is_live=False,
     )
     df['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, para.holdbar)
     atr_colum = 'stop_loss_atr_pct'
     df_with_pred, model_stats = handler.predict_with_ds(ds,df,is_live=False,diff_thresh = None)
+    # 组合任务(TRIGGER_DIR/LONG_SHORT_OVR)下额外对每个子模型单独评估；
+    # 非组合任务下返回 {}，不影响单模型三分类的报告结构。
+    sub_model_stats = handler.evaluate_sub_models(df, kline_interval_ms=_interval_ms)
     # compare with random prediction (sanity check)
     # df_with_pred['pred'] = np.random.choice([0, 1, 2], size=len(df_with_pred))
     # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
@@ -224,7 +227,8 @@ def main(logger:logging.Logger, para = StrategyPara(),train_cfg= train.TrainConf
     # 5. 结果统计
     # UI
     # 封装统计数据 (合并回测数据和模型指标)
-    statistics = generate_backtest_report(logger, strat, model_stats, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'), para=para,pre_para=pre_para,train_cfg=train_cfg)
+    statistics = generate_backtest_report(logger, strat, model_stats, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'), para=para,pre_para=pre_para,train_cfg=train_cfg,
+                                           sub_model_stats=sub_model_stats)
 
     # ========== 转 K线 JSON ==========
     candles = df_with_pred[["open_time_date_utc", "open", "high", "low", "close", "volume", "pred", "label"]].copy()
@@ -234,7 +238,7 @@ def main(logger:logging.Logger, para = StrategyPara(),train_cfg= train.TrainConf
     candles["time"] = candles["time"].apply(lambda dt: int(dt.timestamp()))
     candles_json = candles.to_dict(orient="records")
 
-    return {"candles": candles_json, "trade_logs": cerebro.trade_logs, "statistics": statistics}
+    return {"candles": candles_json, "statistics": statistics}
 
 def build_daily_df(daily_stats):
     """Convert daily stats list (dict with 'date', 'dd_pct', 'equity') to DataFrame."""
@@ -403,12 +407,16 @@ def summarize_rolling_calmar(rc_df: pd.DataFrame) -> dict:
     return out
 
 
-def generate_backtest_report(logger,strat, model_stats, save_path, para:StrategyPara,pre_para:BaseDefine,train_cfg:train.TrainConfig):
+def generate_backtest_report(logger,strat, model_stats, save_path, para:StrategyPara,pre_para:BaseDefine,train_cfg:train.TrainConfig, sub_model_stats=None):
     """
     修复版报告生成器：
     1. 修正 Profit Factor 计算公式 (Gross Won / Gross Lost)
     2. 修正 PnL% 抓取逻辑 (处理 Backtrader 列表套列表结构)
+
+    sub_model_stats: 组合任务(TRIGGER_DIR/LONG_SHORT_OVR)下各子模型单独的评估指标
+    (见 ModelHandler.evaluate_sub_models)；单模型任务下为空 dict。
     """
+    sub_model_stats = sub_model_stats or {}
 
     # ========== 1. 提取 analyzers ==========
     perf = strat.analyzers.customize.get_analysis()
@@ -618,6 +626,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
             f"short_win_rate": short_win_rate,
         },
         f"model_metrics": model_stats,
+        f"sub_model_metrics": sub_model_stats,
     }
 
     report_additional = {
@@ -697,7 +706,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     return (report_additional,report)
 
 if __name__ == "__main__":
-    train_output_dir = os.path.join(common.TRAIN_OUT_DIR)
+    train_output_dir = os.path.join(common.TRAIN_OUT_DIR,'SINGLE_MODEL_3CLASS')
     start_time = time.time()
     pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
     exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'simulation'),pre_para.symbol, pre_para.interval)

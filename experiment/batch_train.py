@@ -389,14 +389,14 @@ def construct_task_eth():
 
     training_task: List[train.TrainConfig] = []
 
-    for false_trade in [1]:
+    for false_trade_penalty in [1]:
         for flip_penalty in np.arange(0.9, 1.7, 0.1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
             for miss_penalty in np.arange(0.7, 1.2, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
                 for stride in [4,8]: #2,4,8
                     for bestf1 in [True]:
                         for loss_fun_version_v in [2]:
                             training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,best_f1=bestf1,loss_fun_version = loss_fun_version_v,
-                                                        flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade = 1,
+                                                        flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade_penalty = 1,
                                                         stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0))
     return preparation_task, training_task
 
@@ -582,7 +582,7 @@ def _train_task(
     try:
         pre_para = common.BaseDefine(**pre_params)
         t_cfg:train.TrainConfig = _config_from_dict_train(train_params)
-        result = train.main(logger, train_task=task_type ,train_cfg=t_cfg, prep_output_dir=prep_output_dir, save_dir=save_dir,experiment=True)
+        result = train.run_single_model_task(logger, train_task=task_type ,train_cfg=t_cfg, prep_output_dir=prep_output_dir, save_dir=save_dir,experiment=True)
 
         train_result_queue.put(("train_done", {'task_type':task_type, 'task_hash':task_hash,
                                                'model_type':t_cfg.model_cfg.model_type,'model_version':t_cfg.model_cfg.model_version,

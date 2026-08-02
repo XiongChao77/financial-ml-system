@@ -85,8 +85,40 @@ class ConvBlock(nn.Module):
         h = self.drop(h)
         return x + h
 
+class InterpretabilityWeighting(nn.Module):
+    def __init__(self, channels: int, reduction: int = 4, temperature: float = 0.5):
+        super().__init__()
+        self.input_dim = channels * 2 
+        reduced_dim = max(4, self.input_dim // reduction)
+        self.temperature = temperature
+        
+        # 必须这样命名，以匹配 state_dict 中的 "fc1" 和 "fc2"
+        self.fc1 = nn.Linear(self.input_dim, reduced_dim, bias=False)
+        self.gelu = nn.GELU()
+        self.fc2 = nn.Linear(reduced_dim, channels, bias=False)
+        self.sigmoid = nn.Sigmoid()
 
-class ConvLSTM1D_V2(BaseTimeSeriesModel):
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        y_avg = x.mean(dim=1)
+        y_max = x.max(dim=1).values
+        y = torch.cat([y_avg, y_max], dim=1) 
+        
+        mid = self.gelu(self.fc1(y))
+        # 应用温度系数
+        logits = self.fc2(mid)
+        # weights = self.sigmoid(logits / self.temperature)
+        # alpha = 0.2  # 0.1~0.5 可扫
+        # x_weighted = x * (1.0 + alpha * (2.0 * weights - 1.0))  # 约等于 x * [1-alpha, 1+alpha]
+        # # x_weighted = x * weights.unsqueeze(1)
+        # return x_weighted, weights
+
+        weights = self.sigmoid(logits / self.temperature)     # [B, D]
+        alpha = 0.4
+        gate = (1.0 + alpha * (2.0 * weights - 1.0)).unsqueeze(1)  # [B, 1, D]
+        x_weighted = x * gate                                  # [B, T, D]
+        return x_weighted, weights
+
+class ConvLSTM1D_V3(BaseTimeSeriesModel):
     """
     Conv + LSTM hybrid for time-series classification / alpha modeling.
 
@@ -101,12 +133,11 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
       - 'mix'    : last + mean + max  (recommended)
     """
     MODEL_TYPE = "conv_lstm"
-    MODEL_VERSION = 2
+    MODEL_VERSION = 3
 
     def __init__(
         self,
         input_size: int,
-        n_classes: int = 3,
 
         # stem width
         d_model: int = 96,
@@ -136,18 +167,21 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
 
         # [NEW] Task Projection
         task_proj_dim: int | None = 64,  # If None, defaults to feat_dim
+        # compatibility: allow pass-all params
+        use_feature_weighting: bool = False,  # NEW: 是否启用样本级特征加权模块
+        se_reduction: int = 4,  # NEW: InterpretabilityWeighting 的 reduction 参数
+        temperature: float = 0.5,
         **kwargs,
     ):
         super().__init__()
 
         if kwargs:
-            print(f"[ConvLSTM1D_V2] Ignored kwargs: {list(kwargs.keys())}")
+            print(f"[ConvLSTM1D_V3] Ignored kwargs: {list(kwargs.keys())}")
 
         assert readout in {"last", "meanmax", "attn", "mix"}
         assert head in {"linear", "mlp"}
 
         self.input_size = int(input_size)
-        self.n_classes = int(n_classes)
         self.d_model = int(d_model)
 
         self.readout = readout
@@ -158,6 +192,10 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
         self.input_norm_enabled = bool(input_norm)
         self.in_locked_p = float(in_locked_p)
         self.out_locked_p = float(out_locked_p)
+
+        self.use_feature_weighting = use_feature_weighting
+        if self.use_feature_weighting:
+            self.feature_weighter = InterpretabilityWeighting(self.d_model, reduction=se_reduction,temperature=temperature)
 
         # ---- input preprocessing ----
         self.in_norm = nn.LayerNorm(self.input_size) if self.input_norm_enabled else nn.Identity()
@@ -251,13 +289,13 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
             return torch.cat((h_n[-2], h_n[-1]), dim=1)
         return h_n[-1]
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused=False) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused=False,return_weights=False) -> torch.Tensor:
         """
         x: [B,T,F]
         lengths: [B] optional
         """
         B, T, F_in = x.shape
-        assert F_in == self.input_size
+        assert F_in == self.input_size, f"Expected input_size={self.input_size}, got {F_in}"
 
         # mask for padded tokens (optional)
         if lengths is not None:
@@ -269,6 +307,11 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
         # input norm + projection
         x = self.in_norm(x)
         x = self.proj(x)
+
+        weights = None
+        if self.use_feature_weighting:
+            x, weights = self.feature_weighter(x)
+            
         x = self.in_locked(x)  # [B,T,D]
 
         # conv stem on channels-first
@@ -352,9 +395,12 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
             
             # 3. 生成预测标签 (基于合成概率的 argmax 确保与概率对齐)
             fused_preds = torch.argmax(fused_probs, dim=1)
-            
+            if return_weights:
+                return fused_preds, fused_probs, weights
             return fused_preds, fused_probs #  返回元组
         
+        if return_weights:
+            return logits_trig, logits_dir, weights
         return logits_trig, logits_dir
 
     # ---------- meta ----------
@@ -364,7 +410,6 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
             "model_version": self.MODEL_VERSION,
 
             "input_size": self.input_size,
-            "n_classes": self.n_classes,
 
             "d_model": self.d_model,
             "conv_kernel": self.conv_kernel,
@@ -385,7 +430,9 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
             "head_dropout": self.head_dropout,
             "logit_clip": self.logit_clip,
             "task_proj_dim": self.task_proj_dim,
-
+            "use_feature_weighting": self.use_feature_weighting,
+            "se_reduction": getattr(self, 'se_reduction', 4),
+            "temperature": getattr(self.feature_weighter, 'temperature', 0.5) if self.use_feature_weighting else 0.5,
             **extra,
         }
 
@@ -395,7 +442,6 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
 
         model = cls(
             input_size=input_size,
-            n_classes=len(meta["classes"]),
 
             d_model=meta.get("d_model", 96),
             conv_kernel=meta.get("conv_kernel", 5),
@@ -416,6 +462,9 @@ class ConvLSTM1D_V2(BaseTimeSeriesModel):
             head_dropout=0.0,
             logit_clip=meta.get("logit_clip", None),
             task_proj_dim=meta.get("task_proj_dim", 64),
+            use_feature_weighting=meta.get("use_feature_weighting", False),
+            se_reduction=meta.get("se_reduction", 4),
+            temperature=meta.get("temperature", 0.5),
         )
 
         model.load_state_dict(state["state_dict"])

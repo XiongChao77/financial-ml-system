@@ -339,7 +339,7 @@ def load_pred_df_for_quick_eval(
             kline_interval_ms=interval_ms,
             feature_cols=handler.feature_cols,
             label_col=handler.label_col,
-            window=handler.window,
+            seq_len=handler.seq_len,
             is_live=False,
         )
     ds = QUICK_DS_CACHE[cache_key]
