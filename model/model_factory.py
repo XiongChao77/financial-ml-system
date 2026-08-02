@@ -1,27 +1,38 @@
 import json
-from typing import Type, Tuple, Dict
+from typing import Any, Type, Tuple, Dict
+
+import torch
+
 from model.models.model_base import BaseTimeSeriesModel
 
 # =============================
 # Explicitly import all models
 # =============================
-from model.models.xgboost_model import XGBoostAdapter
-from model.models.tcn_v1 import TCN1D_V1
-from model.models.mamba_v1 import Mamba1D_V1
-from model.models.binary.lstm import LSTM1D_V1          
-from model.models.binary.lstm_v2 import LSTM1D_V2      # V2
-from model.models.binary.lstm_v5 import LSTM1D_V5      # V2
-from model.models.lstm_v3 import LSTM1D_V3      # V3  > V1 > V2
-from model.models.lstm_v4 import LSTM1D_V4      #
-from model.models.lstm_v4 import LSTM1D_V4      #
-from model.models.binary.conv_lstm_v1 import ConvLSTM1D_V1
-from model.models.conv_lstm_v2 import ConvLSTM1D_V2
-from model.models.conv_lstm_v3 import ConvLSTM1D_V3
-from model.models.cnn import CNN1D_V1
-from model.models.binary.transformer_v1 import Transformer1D_V1
-from model.models.binary.transformer_v2 import Transformer1D_V2
-from model.models.binary.logistic_regression import LogisticRegressionTS_V1
-from model.models.transformer_v3 import Transformer1D_V3
+
+# ---- generic: single-head, n_classes-configurable (binary OR direct 3-class) ----
+from model.models.generic.xgboost_model import XGBoostAdapter
+from model.models.generic.sklearn_adapter import SVCAdapter, LogisticRegressionSklearnAdapter
+from model.models.generic.lstm import LSTM1D_V1
+from model.models.generic.lstm_v2 import LSTM1D_V2
+from model.models.generic.lstm_v5 import LSTM1D_V5
+from model.models.generic.conv_lstm_v1 import ConvLSTM1D_V1
+from model.models.generic.transformer_v1 import Transformer1D_V1
+from model.models.generic.transformer_v2 import Transformer1D_V2
+from model.models.generic.logistic_regression import LogisticRegressionTS_V1
+from model.models.generic.logistic_regression_v2 import LogisticRegressionTS_V2
+
+# ---- dual_head: fixed trigger(2)+direction(2) heads, fused via return_fused ----
+# Dedicated to the "Two-Head Three-Class" branch only; not usable as a plain
+# binary or single-head 3-class classifier.
+from model.models.dual_head.tcn_v1 import TCN1D_V1
+from model.models.dual_head.mamba_v1 import Mamba1D_V1
+from model.models.dual_head.lstm_v3 import LSTM1D_V3
+from model.models.dual_head.lstm_v4 import LSTM1D_V4
+from model.models.dual_head.conv_lstm_v2 import ConvLSTM1D_V2
+from model.models.dual_head.conv_lstm_v3 import ConvLSTM1D_V3
+from model.models.dual_head.cnn import CNN1D_V1
+from model.models.dual_head.transformer_v3 import Transformer1D_V3
+
 from model.models.fusion_wrapper import FusionWrapper
 # Add new model imports here
 
@@ -35,23 +46,28 @@ class ModelFactory:
     """
 
     model_list = [
+        # ---- generic (single-head, n_classes-configurable) ----
         XGBoostAdapter,
-        TCN1D_V1,
-        Mamba1D_V1,
+        SVCAdapter,
+        LogisticRegressionSklearnAdapter,
         LSTM1D_V1,
         LSTM1D_V2,
         LSTM1D_V5,
-        LSTM1D_V3,  #good
-        LSTM1D_V4,  #good
         ConvLSTM1D_V1,
-        ConvLSTM1D_V2,
-        ConvLSTM1D_V3,
-        # FusionWrapper,
-        CNN1D_V1,
         Transformer1D_V1,
         Transformer1D_V2,
-        Transformer1D_V3,
         LogisticRegressionTS_V1,
+        LogisticRegressionTS_V2,
+
+        # ---- dual_head (fixed 2+2 trigger/direction heads) ----
+        TCN1D_V1,
+        Mamba1D_V1,
+        LSTM1D_V3,  #good
+        LSTM1D_V4,  #good
+        ConvLSTM1D_V2,
+        ConvLSTM1D_V3,
+        CNN1D_V1,
+        Transformer1D_V3,
     ]
 
     # Internal index
@@ -61,7 +77,7 @@ class ModelFactory:
     # Build index (only once)
     # =============================
     @classmethod
-    def _build_index(cls):
+    def _build_index(cls) -> None:
         if cls._index:
             return
 
@@ -82,7 +98,7 @@ class ModelFactory:
     # Lookup model class
     # =============================
     @classmethod
-    def get_model_class(cls, model_type: str, model_version: int):
+    def get_model_class(cls, model_type: str, model_version: int) -> Type[BaseTimeSeriesModel]:
         cls._build_index()
 
         key = (model_type, model_version)
@@ -102,9 +118,9 @@ class ModelFactory:
         cls,
         model_type: str,
         model_version: int,
-        device,
-        **model_kwargs,
-    ):
+        device: torch.device,
+        **model_kwargs: Any,
+    ) -> BaseTimeSeriesModel:
         model_cls = cls.get_model_class(model_type, model_version)
         model = model_cls(**model_kwargs)
         return model.to(device)
@@ -117,8 +133,8 @@ class ModelFactory:
         cls,
         model_path: str,
         meta_path: str,
-        device,
-    ):
+        device: torch.device,
+    ) -> Tuple[BaseTimeSeriesModel, dict]:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
@@ -138,6 +154,6 @@ class ModelFactory:
     # Debug / visualization
     # =============================
     @classmethod
-    def list_models(cls):
+    def list_models(cls) -> list:
         cls._build_index()
         return sorted(cls._index.keys())

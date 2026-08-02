@@ -12,7 +12,7 @@ def verify_model_alignment_v2():
     logger = logging.getLogger("AuditV2")
     handler = ModelHandler()
     
-    window = handler.window
+    window = handler.seq_len
     stride = 8 # 假设使用 stride=8 进行测试
     feature_cols = handler.feature_cols
     kline_interval = 60000

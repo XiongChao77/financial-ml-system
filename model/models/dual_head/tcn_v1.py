@@ -58,7 +58,6 @@ class TCN1D_V1(BaseTimeSeriesModel):
     def __init__(
         self,
         input_size: int,
-        n_classes: int = 3,
         num_channels: list = [64, 64, 64], # 每一层 TCN 的通道数
         kernel_size: int = 3,
         dropout: float = 0.2,

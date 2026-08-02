@@ -25,7 +25,7 @@ class Transformer1D_V2(BaseTimeSeriesModel):
         num_layers: int = 3,
         dim_feedforward: int = 512,
         dropout: float = 0.1,
-        max_len: int = 5000,
+        seq_len: int = 5000,
         **kwargs,
     ):
         super().__init__()
@@ -42,7 +42,7 @@ class Transformer1D_V2(BaseTimeSeriesModel):
         self.num_layers = num_layers
         self.dim_feedforward = dim_feedforward
         self.dropout_p = dropout
-        self.max_len = max_len
+        self.seq_len = seq_len
 
         # ---------- 特征投影 ----------
         self.input_proj = nn.Linear(input_size, d_model)
@@ -52,7 +52,7 @@ class Transformer1D_V2(BaseTimeSeriesModel):
 
         # ---------- Learnable Positional Embedding ----------
         self.pos_embedding = nn.Parameter(
-            torch.randn(1, max_len + 1, d_model)
+            torch.randn(1, seq_len + 1, d_model)
         )
 
         # ---------- Transformer Encoder ----------
@@ -124,7 +124,7 @@ class Transformer1D_V2(BaseTimeSeriesModel):
             "num_layers": self.num_layers,
             "dim_feedforward": self.dim_feedforward,
             "dropout": self.dropout_p,
-            "max_len": self.max_len,
+            "seq_len": self.seq_len,
             **extra,
         }
 
@@ -141,7 +141,7 @@ class Transformer1D_V2(BaseTimeSeriesModel):
             num_layers=meta["num_layers"],
             dim_feedforward=meta["dim_feedforward"],
             dropout=meta["dropout"],
-            max_len=meta["max_len"],
+            seq_len=meta["seq_len"],
         )
 
         model.load_state_dict(state["state_dict"])

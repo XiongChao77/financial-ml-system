@@ -5,34 +5,40 @@ import torch.nn.functional as F
 from model.models.model_base import BaseTimeSeriesModel
 
 
-class LogisticRegressionTS_V1(BaseTimeSeriesModel):
+class LogisticRegressionTS_V2(BaseTimeSeriesModel):
     """
-    Logistic Regression for time-series window classification.
+    Multinomial Logistic Regression for 3-class time-series window
+    classification: a single linear layer + softmax over all n_classes at
+    once (standard multinomial LR), not the trigger/direction dual-head
+    decomposition used by the other 3-class model families.
+
+    It is a standard single-head model and is trained by TorchTrainer with
+    DirectThreeClassTask.
 
     Input:
         x: [B, T, F]
     """
 
     MODEL_TYPE = "logistic_regression"
-    MODEL_VERSION = 1
+    MODEL_VERSION = 2
 
     def __init__(
         self,
         input_size: int,
         n_classes: int = 3,
-        window: int = 1,
+        seq_len: int = 1,
         **kwargs,
     ):
         super().__init__()
 
         if kwargs:
-            print(f"[LogisticRegressionTS_V1] Ignored kwargs: {list(kwargs.keys())}")
+            print(f"[LogisticRegressionTS_V2] Ignored kwargs: {list(kwargs.keys())}")
 
         self.input_size = int(input_size)
         self.n_classes = int(n_classes)
-        self.window = int(window)
+        self.seq_len = int(seq_len)
 
-        linear_in = self.input_size * self.window
+        linear_in = self.input_size * self.seq_len
 
         self.classifier = nn.Linear(linear_in, self.n_classes)
 
@@ -40,17 +46,17 @@ class LogisticRegressionTS_V1(BaseTimeSeriesModel):
         """
         x: [B, T, F]
         """
-
         if x.dim() != 3:
             raise ValueError(f"Expected input shape [B, T, F], got {tuple(x.shape)}")
 
         x = x.reshape(x.size(0), -1)
 
-        logits = self.classifier(x)
+        logits = self.classifier(x)  # [B, n_classes]
 
         if return_fused:
             probs = F.softmax(logits, dim=1)
-            return logits, probs
+            preds = torch.argmax(probs, dim=1)
+            return preds, probs
 
         return logits
 
@@ -60,7 +66,7 @@ class LogisticRegressionTS_V1(BaseTimeSeriesModel):
             "model_version": self.MODEL_VERSION,
             "input_size": self.input_size,
             "n_classes": self.n_classes,
-            "window": self.window,
+            "seq_len": self.seq_len,
             **extra,
         }
 
@@ -69,7 +75,7 @@ class LogisticRegressionTS_V1(BaseTimeSeriesModel):
         model = cls(
             input_size=meta.get("input_size", state.get("channel")),
             n_classes=len(meta["classes"]),
-            window=meta.get("window", 1),
+            seq_len=meta.get("seq_len", 1),
         )
 
         model.load_state_dict(state["state_dict"])

@@ -76,7 +76,6 @@ class LSTM1D_V4(BaseTimeSeriesModel):
         input_size: int,
         hidden_size: int = 64,
         num_layers: int = 2,
-        n_classes: int = 3,
         bidirectional: bool = True,
 
         # ---- Dropout interface (compat & explicit) ----
@@ -346,7 +345,6 @@ class LSTM1D_V4(BaseTimeSeriesModel):
             input_size=input_size,
             hidden_size=meta["lstm_hidden"],
             num_layers=meta["lstm_layers"],
-            n_classes=len(meta["classes"]),
             bidirectional=meta["bidirectional"],
             readout=meta.get("readout", "meanmax"),
             head=meta.get("head", "linear"),

@@ -301,7 +301,8 @@ class Transformer1D_V3(BaseTimeSeriesModel):
     - Readout: 'cls' | 'meanmax' | 'attn' | 'mix'
 
     Input:  x [B, T, F], lengths optional (for padding mask)
-    Output: logits [B, n_classes]
+    Output: dual-head logits (logits_trig [B, 2], logits_dir [B, 2]),
+            or fused 3-class probs when return_fused=True.
     """
     MODEL_TYPE = "transformer"
     MODEL_VERSION = 3
@@ -309,7 +310,6 @@ class Transformer1D_V3(BaseTimeSeriesModel):
     def __init__(
         self,
         input_size: int,
-        n_classes: int = 3,
 
         d_model: int = 128,
         nhead: int = 8,
@@ -328,7 +328,7 @@ class Transformer1D_V3(BaseTimeSeriesModel):
         use_alibi: bool = True,
         alibi_mode: str = "abs",          # "abs" | "causal"
         pos_encoding: str = "none",       # "none" | "learned" | "sin"
-        max_len: int = 512,               # only for learned/sin
+        seq_len: int = 512,               # only for learned/sin
 
         # tokens / readout
         cls_token: bool = True,
@@ -359,7 +359,6 @@ class Transformer1D_V3(BaseTimeSeriesModel):
 
         # store meta
         self.input_size = int(input_size)
-        self.n_classes = int(n_classes)
         self.d_model = int(d_model)
         self.nhead = int(nhead)
         self.num_layers = int(num_layers)
@@ -375,7 +374,7 @@ class Transformer1D_V3(BaseTimeSeriesModel):
         self.use_alibi = bool(use_alibi)
         self.alibi_mode = alibi_mode
         self.pos_encoding = pos_encoding
-        self.max_len = int(max_len)
+        self.seq_len = int(seq_len)
 
         self.cls_token_enabled = bool(cls_token)
         self.readout = readout
@@ -399,12 +398,12 @@ class Transformer1D_V3(BaseTimeSeriesModel):
         # absolute positional encoding (optional)
         if self.pos_encoding == "learned":
             extra = 1 if self.cls_token_enabled else 0
-            self.pos_embed = nn.Parameter(torch.zeros(1, self.max_len + extra, self.d_model))
+            self.pos_embed = nn.Parameter(torch.zeros(1, self.seq_len + extra, self.d_model))
             nn.init.trunc_normal_(self.pos_embed, std=0.02)
             self.pos_sin = None
         elif self.pos_encoding == "sin":
             extra = 1 if self.cls_token_enabled else 0
-            self.pos_sin = SinusoidalPositionalEncoding(self.d_model, self.max_len + extra)
+            self.pos_sin = SinusoidalPositionalEncoding(self.d_model, self.seq_len + extra)
             self.pos_embed = None
         else:
             self.pos_embed = None
@@ -502,7 +501,7 @@ class Transformer1D_V3(BaseTimeSeriesModel):
         # positional
         if self.pos_encoding == "learned":
             if x.size(1) > self.pos_embed.size(1):
-                raise ValueError(f"Sequence too long: {x.size(1)} > max_len({self.pos_embed.size(1)})")
+                raise ValueError(f"Sequence too long: {x.size(1)} > seq_len({self.pos_embed.size(1)})")
             x = x + self.pos_embed[:, : x.size(1), :].to(dtype=x.dtype)
         elif self.pos_encoding == "sin":
             x = self.pos_sin(x)
@@ -599,7 +598,6 @@ class Transformer1D_V3(BaseTimeSeriesModel):
             "model_version": self.MODEL_VERSION,
 
             "input_size": self.input_size,
-            "n_classes": self.n_classes,
 
             "d_model": self.d_model,
             "nhead": self.nhead,
@@ -616,7 +614,7 @@ class Transformer1D_V3(BaseTimeSeriesModel):
             "use_alibi": self.use_alibi,
             "alibi_mode": self.alibi_mode,
             "pos_encoding": self.pos_encoding,
-            "max_len": self.max_len,
+            "seq_len": self.seq_len,
 
             "cls_token": self.cls_token_enabled,
             "readout": self.readout,
@@ -636,7 +634,6 @@ class Transformer1D_V3(BaseTimeSeriesModel):
 
         model = cls(
             input_size=input_size,
-            n_classes=len(meta["classes"]),
 
             d_model=meta["d_model"],
             nhead=meta["nhead"],
@@ -653,7 +650,7 @@ class Transformer1D_V3(BaseTimeSeriesModel):
             use_alibi=meta.get("use_alibi", True),
             alibi_mode=meta.get("alibi_mode", "abs"),
             pos_encoding=meta.get("pos_encoding", "none"),
-            max_len=meta.get("max_len", 512),
+            seq_len=meta.get("seq_len", 512),
 
             cls_token=meta.get("cls_token", True),
             readout=meta.get("readout", "mix"),

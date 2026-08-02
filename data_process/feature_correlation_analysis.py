@@ -113,7 +113,7 @@ def single_run_analysis(pre_task: common.BaseDefine, train_cfg: train.TrainConfi
             kline_interval_ms=common.get_interval_ms(pre_task.interval),
             feature_cols=all_cols,
             label_col='label',
-            window=train_cfg.data_cfg.window,
+            seq_len=train_cfg.model_cfg.seq_len,
             stride=train_cfg.stride,
             use_cache=False
         )

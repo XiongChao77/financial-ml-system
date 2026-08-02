@@ -68,7 +68,6 @@ class CNN1D_V1(BaseTimeSeriesModel):
     def __init__(
         self,
         input_size: int,
-        n_classes: int = 3,  # n_classes is for meta compatibility; actual output is 2+2
         p_drop: float = 0.3,
         tau: float = 16.0,
         use_tpool: bool = False,

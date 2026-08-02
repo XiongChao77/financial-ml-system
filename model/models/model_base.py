@@ -15,6 +15,9 @@ class BaseTimeSeriesModel(torch.nn.Module, ABC):
 
     MODEL_TYPE: str = "base"
     MODEL_VERSION: int = 0
+    # "gradient": trained by TorchTrainer
+    # "sklearn": trained by SklearnTrainer
+    TRAINING_BACKEND: str = "gradient"
 
     def __init__(self):
         super().__init__()
@@ -36,7 +39,7 @@ class BaseTimeSeriesModel(torch.nn.Module, ABC):
     def export_meta(self) -> dict:
         """
         Return model-specific meta needed to reconstruct architecture.
-        Must NOT include dataset-dependent info (window, feature_cols).
+        Must NOT include dataset-dependent info (seq_len, feature_cols).
         """
         pass
 
@@ -60,7 +63,7 @@ class BaseTimeSeriesModel(torch.nn.Module, ABC):
         """
         Save model weights + meta.
         extra_meta: dataset / training related info
-                    (window, feature_cols, label_col, classes, etc.)
+                    (seq_len, feature_cols, label_col, classes, etc.)
         """
         # 1) save weights
         torch.save(
@@ -91,7 +94,10 @@ class BaseTimeSeriesModel(torch.nn.Module, ABC):
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        state = torch.load(model_path, map_location=device)
+        # weights_only=False: checkpoints are produced by this project's own
+        # training pipeline (trusted source), and non-tensor model backends
+        # (e.g. sklearn Pipeline objects) need full unpickling to load.
+        state = torch.load(model_path, map_location=device, weights_only=False)
 
         # identity check
         if meta["model_type"] != cls.MODEL_TYPE:
@@ -121,7 +127,7 @@ class BaseTimeSeriesModel(torch.nn.Module, ABC):
         Prevents silent mismatch between training & inference.
         """
         keys = sorted(k for k in meta.keys() if k not in {
-            "window", "feature_cols", "label_col", "classes", "arch_hash"
+            "seq_len", "feature_cols", "label_col", "classes", "arch_hash"
         })
         payload = json.dumps({k: meta[k] for k in keys}, sort_keys=True)
         return hashlib.md5(payload.encode()).hexdigest()

@@ -19,20 +19,20 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             self,
             df: pd.DataFrame,
             kline_interval_ms:int,
-            feature_cols,
+            feature_cols: List[str],
             label_col: str,
-            window: int,
+            seq_len: int,
             stride: int = 1,
             is_live: bool = False,
             cache_path: Optional[str] = None,
             use_cache: bool = False,
-            show_feature_distribution = True
-    ):
+            show_feature_distribution: bool = True
+    ) -> None:
         self.logger = logging.getLogger("dataset")
         self.is_live = is_live
         self.show_feature_distribution = show_feature_distribution
         self.stride = stride
-        self.window = window
+        self.seq_len = seq_len
         self.kline_interval_ms = kline_interval_ms
         self.feature_cols = feature_cols  # Keep a copy of requested feature list
         self.label_col = label_col
@@ -84,7 +84,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         if use_cache and cache_path:
             self._save_to_cache(cache_path)
 
-    def _save_to_cache(self, path: str):
+    def _save_to_cache(self, path: str) -> None:
         """Save processed data and all key initialization parameters."""
         data_to_save = {
             "X": self.X,
@@ -95,7 +95,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             "feature_count": self.feature_count,
             # Key parameter snapshot
             "stride": self.stride,
-            "window": self.window,
+            "seq_len": self.seq_len,
             "kline_interval_ms": self.kline_interval_ms,
             "label_col": self.label_col,
             "feature_cols": self.feature_cols,
@@ -123,8 +123,8 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             if self.stride != checkpoint.get("stride"):
                 mismatch_reasons.append(f"stride ({checkpoint.get('stride')} -> {self.stride})")
             
-            if self.window != checkpoint.get("window"):
-                mismatch_reasons.append(f"window ({checkpoint.get('window')} -> {self.window})")
+            if self.seq_len != checkpoint.get("seq_len"):
+                mismatch_reasons.append(f"seq_len ({checkpoint.get('seq_len')} -> {self.seq_len})")
             
             if self.kline_interval_ms != checkpoint.get("kline_interval_ms"):
                 mismatch_reasons.append(f"interval ({checkpoint.get('kline_interval_ms')} -> {self.kline_interval_ms})")
@@ -164,7 +164,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
     # --- Internal Pipeline Methods ---
     # ----------------------------------------------------------------
 
-    def _prepare_data(self, df: pd.DataFrame, feature_cols: List[str], label_col: str):
+    def _prepare_data(self, df: pd.DataFrame, feature_cols: List[str], label_col: str) -> Tuple[pd.DataFrame, List[str]]:
         """
         Clean data in two stages:
         1. Remove initial cold-start NaNs (expected)
@@ -226,11 +226,17 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         values = df_work[self.feature_names].to_numpy(dtype=np.float32)
         timestamps = df_work[self.time_col].to_numpy(dtype=np.int64)
 
-        X3d = _as_strided_windows(values, self.window, self.stride)
-        time_windows = _as_strided_windows(timestamps.reshape(-1, 1), self.window, self.stride).squeeze(-1)
+        X3d = _as_strided_windows(values, self.seq_len, self.stride)
+        time_windows = _as_strided_windows(timestamps.reshape(-1, 1), self.seq_len, self.stride).squeeze(-1)
         return X3d, time_windows
 
-    def _filter_and_align(self, df_work, X3d, time_windows, label_col):
+    def _filter_and_align(
+        self,
+        df_work: pd.DataFrame,
+        X3d: np.ndarray,
+        time_windows: np.ndarray,
+        label_col: Optional[str],
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
         """
         Enhanced filtering logic:
         1. Global check: total missing span within the window must be within tolerance.
@@ -248,7 +254,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         
         # 1. Global span check (e.g., allow limited gaps)
         global_actual_span = time_windows[:, -1] - time_windows[:, 0]
-        global_ideal_span = (self.window - 1) * interval
+        global_ideal_span = (self.seq_len - 1) * interval
         # You may tune tolerance here; currently 0 tolerance
         mask_global = (global_actual_span <= global_ideal_span) 
 
@@ -260,7 +266,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
 
         # --- B. Label validity check ---
         if has_label:
-            raw_labels = df_work[label_col].values[self.window - 1 :: self.stride]
+            raw_labels = df_work[label_col].values[self.seq_len - 1 :: self.stride]
             labels_all = raw_labels[:original_count]
             mask_label = (labels_all != common.Signal.INVALID)
         else:
@@ -282,11 +288,11 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         # --- D. Index alignment ---
         final_indices = None
         if not self.is_live:
-            raw_orig = df_work['orig_index'].values[self.window - 1 :: self.stride]
+            raw_orig = df_work['orig_index'].values[self.seq_len - 1 :: self.stride]
             final_indices = raw_orig[:original_count][final_mask]
 
         # --- E. Detailed audit logs ---
-        self.logger.info(f"📊 Data filter audit [window: {self.window}]:")
+        self.logger.info(f"📊 Data filter audit [seq_len: {self.seq_len}]:")
         self.logger.info(f"   - Original window count: {original_count}")
         if fail_global > 0:
             self.logger.warning(f"   - ❌ Dropped (global span exceeded): {fail_global}")
@@ -297,8 +303,8 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self.logger.info(f"   - ✅ Final kept: {final_count} ({final_count/original_count:.2%})")
     
         if 'trend_strength' in df_work.columns:
-            # Use the same slicing as labels: start at window-1 and sample by stride
-            aligned_returns = df_work['trend_strength'].values[self.window - 1 :: self.stride]
+            # Use the same slicing as labels: start at seq_len-1 and sample by stride
+            aligned_returns = df_work['trend_strength'].values[self.seq_len - 1 :: self.stride]
             df_work.drop(columns=['trend_strength'], inplace=True)
             # Truncate to match window count
             self.returns = aligned_returns[:original_count][final_mask]
@@ -308,7 +314,12 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
 
         return X3d[final_mask], labels_all[final_mask], final_indices
 
-    def _finalize_dataset(self, X_filtered, y_filtered, final_indices):
+    def _finalize_dataset(
+        self,
+        X_filtered: np.ndarray,
+        y_filtered: np.ndarray,
+        final_indices: Optional[np.ndarray],
+    ) -> None:
         """Normalization and conversion to Tensors."""
         self.factory.normalize(X_filtered, self.feature_names)
 
@@ -323,7 +334,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
     # --- Debugging and data review helpers ---
     # ----------------------------------------------------------------
 
-    def print_feature_stats(self):
+    def print_feature_stats(self) -> None:
         """
         Print statistics (Mean, Std, Min, Max) for all features to review normalization quality.
         Following the previous logic, we mainly inspect the distribution of the last step in each window.
@@ -368,12 +379,12 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         
         self.logger.info("="*90 + "\n")
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self.X.shape[0]
 
-    def __getitem__(self, i):
+    def __getitem__(self, i: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.X[i], self.y[i], self.returns[i]
-def should_regenerate_cache(cache_path, data_path, feature_file, data_cfg):
+def should_regenerate_cache(cache_path: str, data_path: str, feature_file: str, data_cfg) -> bool:
     """
     Decide whether to regenerate cache by checking file modification times and a config hash.
     """
@@ -390,7 +401,7 @@ def should_regenerate_cache(cache_path, data_path, feature_file, data_cfg):
 
     # 2. Check if critical config changed (hash check)
     # Convert config affecting cache generation into a string and hash it
-    config_str = f"{data_cfg.window}_{data_cfg.feature_cols}_{data_cfg.label_col}"
+    config_str = f"{data_cfg.seq_len}_{data_cfg.feature_cols}_{data_cfg.label_col}"
     current_hash = hashlib.md5(config_str.encode()).hexdigest()
     
     # Suggestion: write a .hash file together when creating cache
