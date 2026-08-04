@@ -19,7 +19,7 @@ class LockedDropout(nn.Module):
         mask = mask / keep
         return x * mask
 
-# 修改 conv_lstm_v1.py 中的 FeatureSelector 类
+# Modify the FeatureSelector class in conv_lstm_v1.py
 class FeatureSelector(nn.Module):
     def __init__(self, input_size: int):
         super().__init__()
@@ -159,7 +159,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
 
         # ---- input preprocessing ----
         self.in_norm = nn.LayerNorm(self.input_size) if self.input_norm_enabled else nn.Identity()
-        # 如果开启，则初始化 Gater；否则设为 Identity
+        # Initialize the gater when enabled, otherwise use Identity
         if self.use_feature_selector:
             self.feature_selector = FeatureSelector(self.input_size)
         else:
@@ -259,12 +259,12 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
         else:
             mask = None
 
-        # 门控逻辑分支
+        # Gating branch
         if self.use_feature_selector:
             x, feature_weights = self.feature_selector(x)
         else:
             x = self.feature_selector(x) # nn.Identity
-            # 保持与 FeatureSelector 返回值形状一致 [F]
+            # Keep the shape consistent with the FeatureSelector return value [F]
             feature_weights = torch.ones(self.input_size).to(x.device) if return_weights else None
             
         # input norm + projection
@@ -329,7 +329,7 @@ class ConvLSTM1D_V1(BaseTimeSeriesModel):
 
         if return_weights:
             return logits, feature_weights
-        return logits # 默认只返回 Tensor，解决报错
+        return logits # returns a plain tensor by default, which fixes the error
 
     # ---------- meta ----------
     def export_meta(self, **extra) -> dict:

@@ -12,11 +12,11 @@ import logging
 import os
 
 # ---------------------------------------------------------------------------
-# 重要：OMP/MKL 等 BLAS 线程数环境变量必须在 numpy / torch 第一次被 import
-# 之前设置才 100% 保证生效（OpenMP 运行时通常只在首次进入并行区时读取一次
-# 环境变量，之后就固定住了）。所以这里把它们的设置挪到 "import torch" 之前。
-# 具体线程数由命令行参数 --torch-threads 决定，这里先给一个保守默认值，
-# 在 main() 里拿到真实参数后会再次通过 torch.set_num_threads 兜底设置。
+# Important: the BLAS thread environment variables (OMP/MKL etc.) must be set before numpy / torch
+# is imported for the first time to be 100% effective (an OpenMP runtime usually reads them once,
+# when the first parallel region is entered, and freezes them afterwards). So they are set before "import torch".
+# The actual thread count comes from the --torch-threads command line argument; a conservative default is used
+# here and main() sets it again through torch.set_num_threads once the real arguments are known.
 # ---------------------------------------------------------------------------
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -42,7 +42,7 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 import batch_train
 from data_process import common
 from data_process.utils import param_hash
-from trade.bt import simulation
+from trade.runner import backtest_runner
 from model.train import fusion_trigger_dir, TrainTask
 from model import model_loader
 from model import data_loader
@@ -52,10 +52,10 @@ SIM_REPORTS_FILE = "sim_reports.jsonl"
 SELECTED_MODELS_FILE = "selected_models.json"
 SELECTED_MODELS_CSV = "selected_models_summary.csv"
 
-# 注意：这个全局缓存现在只在"单个进程内、单个 batch 的执行过程中"有效。
-# 多进程模式下每个子进程有独立内存空间，缓存不能跨进程共享。
-# 为了尽量复用缓存，run_backtests 会把同一个 (pre_key, train_compatibility)
-# 的任务尽量打包成同一个 batch 交给同一个子进程顺序执行。
+# Note: this global cache is now only valid "inside one process, during one batch".
+# In multiprocess mode every subprocess has its own memory, so the cache cannot be shared across processes.
+# To reuse the cache as much as possible, run_backtests packs the tasks of the same (pre_key, train_compatibility)
+# into one batch and hands it to a single subprocess to run sequentially.
 QUICK_DS_CACHE = {}
 
 
@@ -540,13 +540,13 @@ def run_one_backtest(
         if pre_para.predict_num not in hold_range:
             hold_range.append(pre_para.predict_num)
         for i in hold_range:
-            holdbar = i
-            for (atr_sl, atr_tp) in [(6, 100)]:
-                sim_para = simulation.StrategyPara(
-                    allow_long=True, allow_short=True, holdbar=holdbar,
-                    commission=0.05, init_equity=10000.0, thresh=None,
-                    atr_sl_mult_long=atr_sl, atr_sl_mult_short=atr_sl,
-                    atr_tp=atr_tp, trade_risk=0.1, max_daily_loss_pct=0.025,
+            min_hold_bars = i
+            for (atr_sl, atr_tp_mult) in [(6, 100)]:
+                sim_para = backtest_runner.StrategyPara(
+                    allow_long=True, allow_short=True, min_hold_bars=min_hold_bars,
+                    commission_pct=0.05, init_equity=10000.0, prob_thresh=None,
+                    atr_sl_long_mult=atr_sl, atr_sl_short_mult=atr_sl,
+                    atr_tp_mult=atr_tp_mult, risk_per_trade_pct=0.1, max_daily_loss_pct=0.025,
                 )
                 simulation_task.append(sim_para)
         logger.info(f" {simulation_task} task for each simulation_task ")
@@ -557,7 +557,7 @@ def run_one_backtest(
         sim_h = param_hash(sim_d)
         sim_result[sim_h] = {'forward': {}, 'short': {}, 'long': {}}
         for period in ['forward', 'short', 'long']:
-            sim_result[sim_h][period] = simulation.main(
+            sim_result[sim_h][period] = backtest_runner.main(
                 logger,
                 para=sim_task,
                 train_cfg=train_cfg,
@@ -653,18 +653,18 @@ def load_done_fusion_hashes(reports_path: str) -> set:
 
 
 # ---------------------------------------------------------------------------
-# 多进程相关部分
+# Multiprocessing part
 # ---------------------------------------------------------------------------
 
 def _pool_initializer(torch_threads: int) -> None:
     """
-    ProcessPoolExecutor 的 initializer，在每个子进程启动时执行且只执行一次。
+    ProcessPoolExecutor initializer, executed exactly once when a subprocess starts.
 
-    - 用 torch.set_num_threads / set_num_interop_threads 直接控制 torch 的线程数，
-      这个 API 不依赖环境变量的设置时机，在子进程里调用总是有效。
-    - 同时把 OMP/MKL 等环境变量也设置一遍，作为其他可能用到 BLAS 的库
-      （比如 numpy）的兜底（在 fork 模式下，如果对应的 native 库在本进程内
-      还没有被首次使用过，这个设置仍然可能生效）。
+    - torch.set_num_threads / set_num_interop_threads control the torch thread count directly;
+      this API does not depend on when the environment variables were set and always works in a subprocess.
+    - The OMP/MKL environment variables are set as well, as a fallback for other libraries that may use BLAS
+      (numpy for instance) -- under fork this can still take effect as long as the native library has not
+      been used in this process yet.
     """
     if torch_threads > 0:
         os.environ["OMP_NUM_THREADS"] = str(torch_threads)
@@ -704,20 +704,20 @@ def run_batch_backtests_worker(
     device: str,
 ) -> List[Dict[str, Any]]:
     """
-    在一个子进程内顺序执行一批 FusionTask。
+    Run a batch of FusionTasks sequentially inside one subprocess.
 
-    与"每个任务单独起一个子进程"相比，这里把同一个
-    (pre_key, train_compatibility) 分组下的任务打包成一个 batch，
-    交给同一个子进程顺序处理：
+    Compared with "one subprocess per task", the tasks of one
+    (pre_key, train_compatibility) group are packed into a single batch
+    and processed sequentially by the same subprocess:
 
-    1. 子进程内的 QUICK_DS_CACHE 是本进程私有的全局变量，
-       batch 内的多个任务如果共享同一个 (pre_key, train_compatibility)，
-       后面的任务可以复用前面任务已经构建好的 TimeSeriesWindowDataset，
-       避免重复构建。
-    2. 减少进程创建/销毁开销（如果 batch 内任务很多、单个任务耗时很短）。
+    1. QUICK_DS_CACHE is a process private global, so when several tasks in a batch share the same
+       (pre_key, train_compatibility), the later ones reuse the TimeSeriesWindowDataset built by the
+       earlier ones and avoid rebuilding it.
 
-    每个任务各自的异常会被单独捕获，不会因为一个任务失败而丢失整个 batch
-    的其它结果。
+    2. Fewer process create/destroy cycles (when a batch holds many short tasks).
+
+    Exceptions are caught per task, so one failing task does not lose the rest of the batch
+    results.
     """
     results: List[Dict[str, Any]] = []
     pid = os.getpid()
@@ -757,12 +757,12 @@ def _group_tasks_into_batches(
     workers: int,
 ) -> List[List[FusionTask]]:
     """
-    把 pending_tasks 按 (pre_key, train_compatibility) 分组，
-    尽量让同一组的任务被同一个子进程顺序执行，以复用 QUICK_DS_CACHE。
+    Group pending_tasks by (pre_key, train_compatibility) so that the tasks of one group are
+    run sequentially by the same subprocess and QUICK_DS_CACHE can be reused.
 
-    如果分组数量少于 workers（比如只有 1-2 个 pre_key），并行度会被
-    分组数限制住；这里对超大的分组按 workers 数量再切成若干份，
-    保证不会出现"一个分组占满所有任务、其它 worker 闲置"的情况。
+    When there are fewer groups than workers (say only 1-2 pre_keys), the parallelism would be
+    limited by the group count; oversized groups are therefore split into several chunks based on
+    the worker count, so "one group holds every task while the other workers idle" cannot happen.
     """
     groups: Dict[Tuple[str, str], List[FusionTask]] = defaultdict(list)
     for t in tasks:
@@ -775,7 +775,7 @@ def _group_tasks_into_batches(
             batches.append(group_tasks)
             continue
 
-        # 把较大的分组进一步切分成不超过 workers 份，缓存仍在份内复用
+        # Split the larger groups into at most `workers` chunks, the cache is still reused inside a chunk
         chunk_size = max(1, (len(group_tasks) + workers - 1) // workers)
         for i in range(0, len(group_tasks), chunk_size):
             batches.append(group_tasks[i:i + chunk_size])
@@ -822,7 +822,7 @@ def run_backtests(
         logger.info("No pending backtest tasks.")
         return
 
-    # 串行模式，方便 debug
+    # Serial mode, handy for debugging
     if workers <= 1:
         completed = 0
         failed = 0
@@ -861,10 +861,10 @@ def run_backtests(
         return
 
     # -----------------------------------------------------------------
-    # 并行模式：进程池，每个子进程内部只用 torch_threads 个线程（通常设为 1），
-    # 由操作系统在 workers 个进程之间做真正的并行调度，避免"进程数 x 线程数"
-    # 的超订问题。device 固定为 cpu，因此这里统一使用默认的 fork 启动方式，
-    # 不需要 spawn（fork 更快，且不涉及 CUDA context 问题）。
+    # Parallel mode: a process pool where every subprocess uses only torch_threads threads (usually 1),
+    # letting the OS schedule the real parallelism across the workers processes and avoiding the
+    # "processes x threads" oversubscription. device is fixed to cpu, so the default fork start method is
+    # used everywhere; spawn is not needed (fork is faster and there is no CUDA context involved).
     # -----------------------------------------------------------------
     completed = 0
     failed = 0
@@ -876,16 +876,16 @@ def run_backtests(
         f"(grouped by pre_key/train_compatibility for cache reuse)"
     )
 
-    ctx = mp.get_context("fork")  # CPU-only，显式使用 fork，更快且不涉及 CUDA
+    ctx = mp.get_context("fork")  # CPU-only, fork explicitly: faster and no CUDA involved
 
     with ProcessPoolExecutor(
         max_workers=workers,
         mp_context=ctx,
         initializer=_pool_initializer,
         initargs=(torch_threads,),
-    ) as executor:
+    ) as venue:
         future_to_batch = {
-            executor.submit(
+            venue.submit(
                 run_batch_backtests_worker,
                 sim_exp_dir,
                 batch,
@@ -902,8 +902,8 @@ def run_backtests(
             try:
                 batch_results = future.result()
             except Exception as e:
-                # 整个子进程/batch 级别的异常（比如子进程被 kill），
-                # 把 batch 内所有任务都标记为失败，避免静默丢任务。
+                # An exception at the subprocess/batch level (e.g. the subprocess was killed):
+                # mark every task of the batch as failed, so nothing is silently dropped.
                 batch_results = [
                     {
                         "status": "error",
@@ -917,7 +917,7 @@ def run_backtests(
                     for t in batch
                 ]
 
-            # 结果统一在主进程里写文件，天然串行，不需要额外加锁
+            # The results are written in the main process, naturally serialized, so no extra lock is needed
             for result in batch_results:
                 append_jsonl(reports_path, result)
 

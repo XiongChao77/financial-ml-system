@@ -224,10 +224,11 @@ class LSTM1D_V4(BaseTimeSeriesModel):
             return torch.cat((h_n[-2], h_n[-1]), dim=1)  # [B, 2H]
         return h_n[-1]  # [B, H]
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused=False) -> torch.Tensor:
-        """
-        Add return_fused support for directly outputting 3-class actions.
-        """
+    def forward(
+        self,
+        x: torch.Tensor,
+        lengths: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         B, T, F = x.shape
         assert F == self.input_size
 
@@ -282,22 +283,6 @@ class LSTM1D_V4(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        # Change 3: fixed fusion logic (for predict)
-        if return_fused:
-            p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
-            p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
-            
-            p_neutral = p_trig[:, 0]
-            p_act     = p_trig[:, 1]
-            p_short   = p_act * p_dir[:, 0]
-            p_long    = p_act * p_dir[:, 1]
-            
-            # Order: [Short(0), Neutral(1), Long(2)]
-            fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
-            fused_preds = torch.argmax(fused_probs, dim=1)
-            
-            return fused_preds, fused_probs
-        
         return logits_trig, logits_dir
     # ============================================================
     # meta / checkpoint interface

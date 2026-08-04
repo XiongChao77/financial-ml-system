@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import WeightedRandomSampler
 
+from model.models.fusion import fuse_trigger_direction_logits
 from model.train_config import TrainConfig, TrainTask
 from model.training_types import TensorSplit
 
@@ -206,21 +207,12 @@ class DualHeadThreeClassTask(TaskStrategy):
         self.direction_weights = _balanced_weights(direction_labels, [0, 1], self.device)
 
     def forward(self, model: torch.nn.Module, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return model(inputs, return_fused=False)
+        return model(inputs)
 
     @staticmethod
     def probabilities(output: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         trigger_logits, direction_logits = output
-        trigger = torch.softmax(trigger_logits, dim=1)
-        direction = torch.softmax(direction_logits, dim=1)
-        return torch.stack(
-            (
-                trigger[:, 1] * direction[:, 0],
-                trigger[:, 0],
-                trigger[:, 1] * direction[:, 1],
-            ),
-            dim=1,
-        )
+        return fuse_trigger_direction_logits(trigger_logits, direction_logits)
 
     def loss(
         self,
@@ -298,13 +290,13 @@ def build_task(task_type: str, config: TrainConfig, device: torch.device, model:
         if model is not None and (
             hasattr(model, "head_trigger") or hasattr(model, "head_direction")
         ):
-            raise TypeError("DIRECT_3CLASS requires a single-head model")
+            raise TypeError(f"DIRECT_3CLASS requires a single-head model, model:{config.model_cfg.model_type} {config.model_cfg.model_version}")
         return DirectThreeClassTask(config, device)
     if task_type == TrainTask.DUAL_HEAD_3CLASS:
         if model is not None and not (
             hasattr(model, "head_trigger") and hasattr(model, "head_direction")
         ):
-            raise TypeError("DUAL_HEAD_3CLASS requires a model with trigger and direction heads")
+            raise TypeError(f"DUAL_HEAD_3CLASS requires a model with trigger and direction heads, model:{config.model_cfg.model_type} {config.model_cfg.model_version}")
         return DualHeadThreeClassTask(config, device)
     if task_type in TrainTask.BINARY_TASKS:
         return BinaryTask(task_type, config, device)

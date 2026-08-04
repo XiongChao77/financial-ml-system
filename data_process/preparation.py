@@ -40,10 +40,10 @@ def check_open_equals_prev_close(
     curr_open = df[open_col].astype(float)
     prev_close = df[close_col].shift(1).astype(float)
 
-    # 第一行没有前一根K线，所以排除
+    # The first row has no previous kline, so it is excluded
     valid_mask = prev_close.notna()
 
-    # 用 tolerance 避免浮点精度误差
+    # tolerance avoids floating point rounding errors
     mismatch_mask = valid_mask & ((curr_open - prev_close).abs() > tolerance)
 
     mismatch_count = int(mismatch_mask.sum())

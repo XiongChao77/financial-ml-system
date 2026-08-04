@@ -14,7 +14,7 @@ Core workflow includes:
 7. Visualizing model signals and strategy behavior through a local UI.
 
 ## Running
-### 1. Data process
+### 1. Data Process
 Prepare market data for model training, including data cleaning, feature engineering, labeling, and dataset generation.
 ```bash
 cd data_process

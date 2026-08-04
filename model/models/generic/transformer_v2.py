@@ -14,7 +14,7 @@ class Transformer1D_V2(BaseTimeSeriesModel):
     MODEL_TYPE = "transformer"
     MODEL_VERSION = 2
 
-    supports_lengths = False  # 当前实现不支持变长序列
+    supports_lengths = False  # the current implementation does not support variable length sequences
 
     def __init__(
         self,
@@ -30,11 +30,11 @@ class Transformer1D_V2(BaseTimeSeriesModel):
     ):
         super().__init__()
 
-        # ---------- 兼容未来参数 ----------
+        # ---------- forward compatible parameters ----------
         if kwargs:
             print(f"[Transformer1D_V2] Ignored kwargs: {list(kwargs.keys())}")
 
-        # ---------- 保存架构参数（用于 meta）----------
+        # ---------- store the architecture parameters (for meta) ----------
         self.input_size = input_size
         self.n_classes = n_classes
         self.d_model = d_model
@@ -44,7 +44,7 @@ class Transformer1D_V2(BaseTimeSeriesModel):
         self.dropout_p = dropout
         self.seq_len = seq_len
 
-        # ---------- 特征投影 ----------
+        # ---------- feature projection ----------
         self.input_proj = nn.Linear(input_size, d_model)
 
         # ---------- [CLS] Token ----------

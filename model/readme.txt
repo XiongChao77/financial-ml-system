@@ -8,17 +8,17 @@
 
 
 --------------------Problem---------------------------
-*早停指标参考va_loss 还是va_macroF1？怎么选择
-    在验证既用交易 proxy 指标来判断？
+*Should early stopping follow va_loss or va_macroF1? How to choose
+    Should a trading proxy metric be used during validation as well?
 *unbalanced class
 
-*tr_loss 训练集损失（training loss）
-*va_loss 验证集损失（validation loss）
-*va_macroF1 precision + recall 的调和平均,0 = 完全乱猜,1 = 完美分类.
-    经验参考：
-    随机分类（多分类）：≈ 0.2~0.25
-    勉强有用：>0.3
-    有一定信号：>0.35
-    比较强：>0.45
-过拟合：va_loss ≫ tr_loss，va_macroF1 没跟着 tr_loss 的下降而上升，模型学到的是 训练集的模式 / 噪声
-将幅度信息部分反映在损失函数，尝试能否让模型学到更多信息
+*tr_loss training loss
+*va_loss validation loss
+*va_macroF1 harmonic mean of precision + recall, 0 = pure guessing, 1 = perfect classification.
+    Rules of thumb:
+    Random (multi-class): ~ 0.2~0.25
+    Barely useful: >0.3
+    Some signal: >0.35
+    Fairly strong: >0.45
+Overfitting: va_loss >> tr_loss and va_macroF1 does not rise while tr_loss falls -- the model learned the training set's patterns / noise
+Feed part of the magnitude information into the loss function and see whether the model can learn more

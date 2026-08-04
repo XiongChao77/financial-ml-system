@@ -1,43 +1,44 @@
 from dataclasses import dataclass
-from trade.strategy.strategy_ml import BrainBase, MarketState, TradingAction, ActionType, PositionDir
+from trade.core.protocol import Observation, TradeIntent, ActionType, PositionDir
+from trade.core.strategy_base import StrategyBase
 
 @dataclass
-class MaMarketState(MarketState):
-    """均线策略特定的市场状态"""
-    fast_ma: float
-    slow_ma: float
+class MaObservation(Observation):
+    """Moving average specific observation (the generic Observation plus two moving averages)"""
+    fast_ma: float = 0.0
+    slow_ma: float = 0.0
 
-class MaCrossoverBrain(BrainBase):
-    def __init__(self, trade_risk: float = 0.95):
-        self.trade_risk = trade_risk
+class MaCrossoverStrategy(StrategyBase):
+    def __init__(self, risk_per_trade_pct: float = 0.95):
+        self.risk_per_trade_pct = risk_per_trade_pct
 
-    def decide(self, state: MaMarketState) -> TradingAction:
-        # 1. 判断交叉方向
-        # 金叉：快线 > 慢线
+    def process(self, state: MaObservation) -> TradeIntent:
+        # 1. Detect the crossover direction
+        # Golden cross: fast > slow
         if state.fast_ma > state.slow_ma:
             target_dir = PositionDir.POSITIVE 
-        # 死叉：快线 < 慢线
+        # Death cross: fast < slow
         else:
             target_dir = PositionDir.NEGATIVE
 
-        # 2. 状态机逻辑
-        action = TradingAction(ActionType.HOLD)
+        # 2. State machine
+        action = TradeIntent(ActionType.HOLD)
 
-        # 当前无持仓 -> 开仓
-        if state.position_dir == PositionDir.FLAT:
-            action = TradingAction(
+        # Currently flat -> open
+        if state.position.dir == PositionDir.FLAT:
+            action = TradeIntent(
                 action=ActionType.OPEN,
                 target_dir=target_dir,
                 target_layers=1,
-                target_pct=self.trade_risk * target_dir
+                target_pct=self.risk_per_trade_pct * target_dir
             )
-        # 当前有持仓且方向相反 -> 反手 (Reverse)
-        elif state.position_dir != target_dir:
-            action = TradingAction(
+        # Currently in position with the opposite direction -> reverse
+        elif state.position.dir != target_dir:
+            action = TradeIntent(
                 action=ActionType.REVERSE,
                 target_dir=target_dir,
                 target_layers=1,
-                target_pct=self.trade_risk * target_dir
+                target_pct=self.risk_per_trade_pct * target_dir
             )
 
         return action

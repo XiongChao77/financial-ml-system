@@ -9,7 +9,7 @@ import traceback
 import time
 from datetime import datetime
 
-# 路径设置
+# Path setup
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, ".."))
 
@@ -17,39 +17,39 @@ from data_process import common, preparation
 from model import train
 
 # ==============================================================================
-# 🧬 GA 核心参数配置 (语义化调优版)
+# 🧬 GA core parameters (semantic tuning version)
 # ==============================================================================
-POP_SIZE = 40          # 种群大小：40 (保持多样性)
-GENERATIONS = 30       # 进化代数：25 (给算法足够时间做减法)
-MUTATION_RATE = 0.1    # 变异率：0.1 (稳定积木，微调为主)
-ELITISM_COUNT = 2      # 精英保留：每代最强的2个直接晋级
+POP_SIZE = 40          # population size: 40 (keeps the diversity)
+GENERATIONS = 30       # generations: 25 (enough time for the algorithm to prune)
+MUTATION_RATE = 0.1    # mutation rate: 0.1 (stable building blocks, mostly fine tuning)
+ELITISM_COUNT = 2      # elitism: the 2 strongest of each generation pass on directly
 
-# 惩罚系数
-PENALTY_FEATURE_COUNT = 0.0005  # 每多一个特征，F1 扣 0.0005 (奥卡姆剃刀)
-PENALTY_OVERFIT = 0.3           # 过拟合惩罚权重
+# Penalty coefficients
+PENALTY_FEATURE_COUNT = 0.0005  # every extra feature costs 0.0005 F1 (Occam's razor)
+PENALTY_OVERFIT = 0.3           # overfitting penalty weight
 
-# 1. 识别并提取必选组和可选组
-# 强制保留 Origin 和 Candle 作为语义底座
+# 1. Identify and extract the mandatory and the optional groups
+# Origin and Candle are always kept as the semantic base
 FULL_CONFIG = common.FEATURE_GROUP_LIST
 MANDATORY_CONFIG = [item for item in FULL_CONFIG if item[0].__name__ in ["FeatureOrigin"]]
 EVOLVABLE_CONFIG = [item for item in FULL_CONFIG if item[0].__name__ not in ["FeatureOrigin"]]
 
-# 2. 定义基因长度 (只进化可选部分)
+# 2. Gene length (only the optional part evolves)
 GENE_LENGTH = len(EVOLVABLE_CONFIG)
 
 # ==============================================================================
-# 🛠️ 子进程工作函数 (带异常熔断)
+# 🛠️ Subprocess worker (with crash isolation)
 # ==============================================================================
 def train_worker(result_queue, sub_config_list, data_cfg, train_cfg, model_cfg):
     """
-    在隔离的子进程中运行训练，防止 GPU 显存泄漏或模型崩溃影响主进程。
+    Runs the training in an isolated subprocess, so a GPU memory leak or a model crash cannot hit the main process.
     """
     try:
-        # 重新初始化简单的 logger
+        # Re-initialize a simple logger
         worker_logger = logging.getLogger(f"worker_{os.getpid()}")
         worker_logger.setLevel(logging.WARNING)
         
-        # 运行训练
+        # Run the training
         metrics = train.run_training(
             sub_config_list, 
             worker_logger, 
@@ -57,44 +57,44 @@ def train_worker(result_queue, sub_config_list, data_cfg, train_cfg, model_cfg):
             train_cfg, 
             model_cfg
         )
-        # 成功则返回字典
+        # Return a dict on success
         result_queue.put(metrics)
         
     except Exception:
-        # 💥 捕获所有崩溃，并返回完整的错误堆栈
+        # 💥 Catch every crash and return the full stack trace
         error_msg = traceback.format_exc()
         result_queue.put(f"ERROR: {error_msg}")
 
 # ==============================================================================
-# 🧠 GA 优化器主类
+# 🧠 GA optimizer main class
 # ==============================================================================
 class GroupGAOptimizer:
     def __init__(self, logger):
         self.logger = logger
         
-        # 初始化状态
+        # Initialize the state
         self.population = [np.random.randint(0, 2, GENE_LENGTH) for _ in range(POP_SIZE)]
         self.best_f1 = -1.0
         self.best_mask = None
         self.history = []
         self.start_gen = 0
         
-        # 配置文件初始化
+        # Configuration initialization
         self.data_cfg = train.DataConfig()
         self.train_cfg = train.TrainConfig()
         self.train_cfg.stride = 16
-        self.train_cfg.epochs = 5      # GA 搜索时用较少 Epoch 快速验证
-        self.train_cfg.use_cache = False # 必须关闭缓存，因为特征组合变了
+        self.train_cfg.epochs = 5      # fewer epochs for a fast check during the GA search
+        self.train_cfg.use_cache = False # the cache must be off, the feature combination changes
         self.model_cfg = train.ConvLSTMConfig()
         
-        # 存档路径
+        # Checkpoint path
         self.checkpoint_path = os.path.join(common.TEMPORARY_DIR, "ga_checkpoint.pkl")
         
-        # 🚀 启动时尝试加载存档
+        # 🚀 Try to load a checkpoint on start-up
         self.load_checkpoint()
 
     def save_checkpoint(self, gen):
-        """保存当前进化状态，防止断电/崩溃"""
+        """Save the current evolution state, to survive a power cut / crash"""
         try:
             checkpoint = {
                 'gen': gen,
@@ -112,7 +112,7 @@ class GroupGAOptimizer:
             self.logger.error(f"❌ Failed to save checkpoint: {e}")
 
     def load_checkpoint(self):
-        """尝试加载历史存档"""
+        """Try to load a previous checkpoint"""
         if os.path.exists(self.checkpoint_path):
             try:
                 with open(self.checkpoint_path, 'rb') as f:
@@ -124,7 +124,7 @@ class GroupGAOptimizer:
                 self.best_mask = cp['best_mask']
                 self.history = cp['history']
                 
-                # 恢复随机数状态，保证复现
+                # Restore the RNG state so the run stays reproducible
                 random.setstate(cp['random_state'])
                 np.random.set_state(cp['np_state'])
                 
@@ -134,12 +134,12 @@ class GroupGAOptimizer:
                 self.logger.error(f"❌ Failed to load checkpoint (will start fresh): {e}")
 
     def calculate_fitness(self, mask):
-        """计算个体的适应度分数"""
-        # 1. 拼接积木：必选组 + 基因选中的可选组
+        """Fitness score of one individual"""
+        # 1. Assemble the blocks: mandatory groups + the optional groups the gene selected
         sub_config_list = [EVOLVABLE_CONFIG[i] for i, bit in enumerate(mask) if bit == 1]
-        sub_config_list += MANDATORY_CONFIG  # 加上 Origin 和 Candle
+        sub_config_list += MANDATORY_CONFIG  # add Origin and Candle
         
-        # 安全检查：如果变异导致所有可选组都没选，只剩必选组，也可以跑
+        # Safety check: a mutation may deselect every optional group, running with the mandatory ones is fine
         
         result_queue = mp.Queue()
         p = mp.Process(
@@ -149,42 +149,42 @@ class GroupGAOptimizer:
         
         try:
             p.start()
-            # 设置超时，防止死锁 (例如 30分钟)
+            # Timeout, so a deadlock cannot block us (e.g. 30 minutes)
             metrics = result_queue.get(timeout=1800) 
             p.join()
             
-            # 2. 检查报错
+            # 2. Check for errors
             if isinstance(metrics, str) and metrics.startswith("ERROR"):
                 self.logger.error(f"❌ Subprocess CRASHED:\n{metrics}")
                 return 0.001
 
-            # 3. 提取指标
+            # 3. Extract the metrics
             val_f1 = metrics.get('val_f1', 0)
-            test_f1 = metrics.get('test_f1', 0) # 仅记录，不参与 fitness
+            test_f1 = metrics.get('test_f1', 0) # recorded only, not part of the fitness
             overfit_gap = metrics.get('overfit_gap', 0)
             p_long = metrics.get('precision_long', 0)
             p_short = metrics.get('precision_short', 0)
             r_long = metrics.get('recall_long', 0)
             r_short = metrics.get('recall_short', 0)
 
-            # 4. 💀 死模判定 (Dead Model Check)
+            # 4. 💀 dead model check
             if r_long < 0.005 and r_short < 0.005:
-                return 0.001 # 极低分，淘汰
+                return 0.001 # very low score, eliminated
 
-            # 5.  适应度公式 (Score Calculation)
+            # 5.  Score calculation
             score = val_f1
             
-            # 奖励高精度
+            # Reward accuracy
             if p_long > 0.45: score += 0.05 
             if p_short > 0.45: score += 0.05
             
-            # 惩罚过拟合
+            # Penalize overfitting
             score -= (overfit_gap * PENALTY_OVERFIT) 
             
-            # 惩罚特征数量 (奥卡姆剃刀)
+            # Penalize the feature count (Occam's razor)
             score -= (len(sub_config_list) * PENALTY_FEATURE_COUNT)
             
-            # 记录历史
+            # Record the history
             record = {
                 "mask": "".join(map(str, mask)),
                 "f1": test_f1,
@@ -203,7 +203,7 @@ class GroupGAOptimizer:
             return 0.001
 
     def log_diversity(self):
-        """计算种群多样性 (汉明距离)"""
+        """Population diversity (Hamming distance)"""
         if POP_SIZE < 2: return 0
         distances = []
         for i in range(len(self.population)):
@@ -214,13 +214,13 @@ class GroupGAOptimizer:
         self.logger.info(f"🧬 Diversity (Avg Hamming): {avg_dist:.2f} / {GENE_LENGTH}")
 
     def analyze_importance(self):
-        """分析哪些特征是'天选积木'"""
+        """Find out which features are the 'chosen blocks'"""
         if not self.history: return
         
         df_hist = pd.DataFrame(self.history)
         if 'mask' not in df_hist.columns: return
 
-        # 转换 mask 字符串为矩阵
+        # Turn the mask strings into a matrix
         mask_cols = df_hist['mask'].apply(lambda x: pd.Series(list(map(int, x))))
         
         self.logger.info("\n📊 === Feature Importance Analysis ===")
@@ -228,8 +228,8 @@ class GroupGAOptimizer:
         
         for i in range(GENE_LENGTH):
             group_name = EVOLVABLE_CONFIG[i][0].__name__
-            # 计算该特征开启与否与 F1 的相关性
-            if df_hist['f1'].std() > 0: # 防止全0报错
+            # Correlation between this feature being on and the F1
+            if df_hist['f1'].std() > 0: # guard against an all-zero column
                 corr = mask_cols[i].corr(df_hist['f1'])
             else:
                 corr = 0
@@ -249,7 +249,7 @@ class GroupGAOptimizer:
             self.logger.info(f"{mark} {row['Feature']:<20} | Corr: {row['Corr']:>6.2f} | Rate: {row['Rate']:>6.1%}")
 
     def evolve(self):
-        """主进化循环"""
+        """Main evolution loop"""
         self.logger.info(f"🚀 Starting Evolution: {GENERATIONS} gens, Pop {POP_SIZE}")
         
         for gen in range(self.start_gen, GENERATIONS):
@@ -259,7 +259,7 @@ class GroupGAOptimizer:
             
             fitness_scores = []
             
-            # 1. 计算适应度
+            # 1. Fitness
             for i, ind in enumerate(self.population):
                 start_t = time.time()
                 score = self.calculate_fitness(ind)
@@ -267,7 +267,7 @@ class GroupGAOptimizer:
                 fitness_scores.append(score)
                 self.logger.info(f"  > Ind {i+1:02d}/{POP_SIZE} | Fit: {score:.4f} | Time: {elapsed:.1f}s")
             
-            # 2. 记录最优
+            # 2. Record the best
             fitness_scores = np.array(fitness_scores)
             max_idx = np.argmax(fitness_scores)
             
@@ -275,23 +275,23 @@ class GroupGAOptimizer:
                 self.best_f1 = fitness_scores[max_idx]
                 self.best_mask = self.population[max_idx].copy()
                 
-                # 打印当前最强积木
+                # Print the strongest blocks so far
                 best_names = [EVOLVABLE_CONFIG[i][0].__name__ for i, bit in enumerate(self.best_mask) if bit == 1]
                 best_names += [m[0].__name__ for m in MANDATORY_CONFIG]
                 self.logger.warning(f"🏆 NEW RECORD! Score: {self.best_f1:.4f}")
                 self.logger.warning(f"🧱 Best Blocks: {best_names}")
 
-            # 3. 生成下一代
+            # 3. Build the next generation
             self.population = self._create_next_generation(fitness_scores)
             
-            # 4. 统计与分析
+            # 4. Statistics and analysis
             self.log_diversity()
             if gen % 2 == 0: self.analyze_importance()
             
-            # 5. 💾 关键步骤：每代存档
+            # 5. 💾 key step: checkpoint every generation
             self.save_checkpoint(gen)
             
-            # 6. 保存完整历史CSV
+            # 6. Save the full history CSV
             pd.DataFrame(self.history).to_csv(
                 os.path.join(common.TEMPORARY_DIR, "ga_history_full.csv"), index=False
             )
@@ -300,14 +300,14 @@ class GroupGAOptimizer:
         self.analyze_importance()
 
     def _create_next_generation(self, scores):
-        """选择、交叉、变异"""
-        # 精英策略
-        sorted_indices = np.argsort(scores)[::-1] # 降序
+        """Selection, crossover, mutation"""
+        # Elitism
+        sorted_indices = np.argsort(scores)[::-1] # descending
         elites = [self.population[i] for i in sorted_indices[:ELITISM_COUNT]]
         
         next_gen = list(elites)
         
-        # 锦标赛选择父代
+        # Tournament selection of the parents
         def tournament_select():
             candidates = random.sample(range(POP_SIZE), 3)
             best = candidates[0]
@@ -319,13 +319,13 @@ class GroupGAOptimizer:
             p1 = tournament_select()
             p2 = tournament_select()
             
-            # 交叉
+            # Crossover
             child = p1.copy()
             if GENE_LENGTH > 1:
                 cx_point = random.randint(1, GENE_LENGTH - 1)
                 child = np.concatenate([p1[:cx_point], p2[cx_point:]])
             
-            # 变异
+            # Mutation
             for k in range(GENE_LENGTH):
                 if random.random() < MUTATION_RATE:
                     child[k] = 1 - child[k]
@@ -335,12 +335,12 @@ class GroupGAOptimizer:
         return next_gen
 
 if __name__ == "__main__":
-    # 必须设置 spawn 启动方式，兼容 PyTorch 多进程
+    # The spawn start method is required for PyTorch multiprocessing
     mp.set_start_method("spawn", force=True)
     
     logger, _ = common.setup_session_logger(sub_folder='ga_group_select')
     
-    # 打印必选配置，确认语义底座
+    # Print the mandatory configuration to confirm the semantic base
     mandatory_names = [item[0].__name__ for item in MANDATORY_CONFIG]
     logger.info(f"🔒 Mandatory Semantic Base: {mandatory_names}")
     

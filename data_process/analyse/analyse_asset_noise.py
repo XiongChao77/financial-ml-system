@@ -14,8 +14,8 @@ def _calc_window_noise(
     eps: float = 1e-12,
 ) -> dict:
     """
-    对一个固定窗口计算整体噪声。
-    注意：这是窗口级别，不是单 bar，也不是整段全样本。
+    Overall noise of one fixed window.
+    Note: this is window level, not per bar and not over the whole sample.
     """
 
     o, h, l, c = price_cols
@@ -37,7 +37,7 @@ def _calc_window_noise(
     # =========================
     # 2. OHLC intrabar path noise
     # =========================
-    # 两种可能路径：
+    # Two possible paths:
     # open -> high -> low -> close
     path_high_first = (
         np.abs(high_arr - open_arr)
@@ -52,10 +52,10 @@ def _calc_window_noise(
         + np.abs(high_arr - close_arr)
     )
 
-    # 用较短路径作为保守估计
+    # Use the shorter path as the conservative estimate
     intrabar_path = np.minimum(path_high_first, path_low_first)
 
-    # bar 之间的 gap
+    # Gap between bars
     interbar_gap = np.abs(open_arr[1:] - close_arr[:-1])
 
     ohlc_path_length = np.sum(intrabar_path) + np.sum(interbar_gap)
@@ -65,7 +65,7 @@ def _calc_window_noise(
     ohlc_noise = 1.0 - ohlc_efficiency
 
     # =========================
-    # 3. 波动强度，辅助指标
+    # 3. Move intensity, a supporting metric
     # =========================
     log_close = np.log(np.where(close_arr > 0, close_arr, np.nan))
     abs_log_return_path = np.nansum(np.abs(np.diff(log_close)))
@@ -88,20 +88,20 @@ def calculate_windowed_noise(
     timestamp_col="timestamp",
 ) -> pd.DataFrame:
     """
-    对整个数据集做固定窗口噪声计算。
+    Fixed window noise over the whole dataset.
 
     window:
-        每个窗口多少根 bar。
-        例如 M15:
-            64  = 16 小时
-            96  = 1 天，若 24/7 市场
-            256 = 约 2.7 天，若 24/7 市场
-            1024 = 约 10.7 天，若 24/7 市场
+        How many bars per window.
+        For M15 for example:
+            64  = 16 hours
+            96  = 1 day on a 24/7 market
+            256 = about 2.7 days on a 24/7 market
+            1024 = about 10.7 days on a 24/7 market
 
     step:
-        窗口移动步长。
-        step=window 表示不重叠窗口。
-        step=window//4 表示重叠窗口。
+        Step between windows.
+        step=window means non overlapping windows.
+        step=window//4 means overlapping windows.
     """
 
     if step is None:

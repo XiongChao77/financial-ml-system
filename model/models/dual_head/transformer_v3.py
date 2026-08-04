@@ -301,8 +301,7 @@ class Transformer1D_V3(BaseTimeSeriesModel):
     - Readout: 'cls' | 'meanmax' | 'attn' | 'mix'
 
     Input:  x [B, T, F], lengths optional (for padding mask)
-    Output: dual-head logits (logits_trig [B, 2], logits_dir [B, 2]),
-            or fused 3-class probs when return_fused=True.
+    Output: dual-head logits (logits_trig [B, 2], logits_dir [B, 2]).
     """
     MODEL_TYPE = "transformer"
     MODEL_VERSION = 3
@@ -467,7 +466,11 @@ class Transformer1D_V3(BaseTimeSeriesModel):
         idx = torch.arange(T, device=device).unsqueeze(0)
         return idx < lengths.unsqueeze(1)
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused = False) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        lengths: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         x: [B, T, F]
         lengths optional: [B]
@@ -558,7 +561,7 @@ class Transformer1D_V3(BaseTimeSeriesModel):
             raise RuntimeError(f"Unknown readout={self.readout}")
 
         feat = self.out_norm(feat)
-        #  修改点 2：分别计算双头 Logits
+        #  Change 2: compute the logits of both heads separately
         logits_trig = self.head_trigger(feat)    # [B, 2]
         logits_dir = self.head_direction(feat)  # [B, 2]
 
@@ -566,27 +569,6 @@ class Transformer1D_V3(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        #  修改点 3：固化融合逻辑 (与 ConvLSTM_V1 保持同步)
-        if return_fused:
-            # 1. 计算各头概率 (Softmax)
-            p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
-            p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
-            
-            # 2. 合成 3 类概率
-            # p_neutral(1) = p_hold
-            # p_short(0)   = p_act * p_short_in_act
-            # p_long(2)    = p_act * p_long_in_act
-            p_neutral = p_trig[:, 0]
-            p_act     = p_trig[:, 1]
-            p_short   = p_act * p_dir[:, 0]
-            p_long    = p_act * p_dir[:, 1]
-            
-            # 拼接成 [B, 3] 顺序: [Short(0), Neutral(1), Long(2)]
-            fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
-            fused_preds = torch.argmax(fused_probs, dim=1)
-            
-            return fused_preds, fused_probs
-        
         return logits_trig, logits_dir
 
     # -------------------------

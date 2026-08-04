@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from data_process import feature
 # ==============================================================================
-# 1. 配置定义 (Configuration)
+# 1. Configuration
 # ==============================================================================
 @dataclass
 class DataConfig:
@@ -144,9 +144,9 @@ class XGBoostConfig(BaseModelConfig):
     reg_lambda: float = 1.0
     reg_alpha: float = 0.0
 
-    tree_method: str = "hist"           # "hist"/"gpu_hist"  有 GPU 可改成 "gpu_hist"，取决于 xgboost 版本
+    tree_method: str = "hist"           # "hist"/"gpu_hist"  can be "gpu_hist" with a GPU, depending on the xgboost version
     eval_metric: str = "logloss"
-    use_scaler: bool = False            # 树模型不需要标准化
+    use_scaler: bool = False            # tree models need no standardization
 
 @dataclass
 class SVCConfig(BaseModelConfig):
@@ -241,8 +241,8 @@ COMBO_SUB_TASKS = {
     TrainTask.LONG_SHORT_OVR: (TrainTask.LONG_OVR, TrainTask.SHORT_OVR),
 }
 
-# feature_direction_map: 特征名 -> ic_direction (1 正向 / -1 负向)
-# 训练前会对 direction=-1 的特征乘以 -1，使其与收益正相关
+# feature_direction_map: feature name -> ic_direction (1 positive / -1 negative)
+# Features with direction=-1 are multiplied by -1 before training, to correlate positively with the return
 feature_direction_map = {
     "PVT": -1,
     "BOLL_PB_25": -1,
@@ -404,7 +404,7 @@ feature_conf_list = [
 
 seq_len = 216
 SingleModelConfig = TrainConfig(
-    model_cfg=LogisticConfig(model_version=1, seq_len=seq_len),
+    model_cfg=ConvLSTMConfig(model_version=1, seq_len=seq_len),
     feature_conf_list=feature.FEATURE_LIST_COMMODITY,
     train_task=TrainTask.DIRECT_3CLASS,
 )

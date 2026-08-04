@@ -37,6 +37,7 @@ from model import train_config
 from data_process import common, preparation
 from data_process.utils import (
     calc_params_hash,
+    config_from_dict_train,
     json_safe,
     load_selected_configs,
     param_hash,
@@ -55,25 +56,25 @@ MAX_SIM = 4
 SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
 INTERVAL: str = "30m"
 
-# 训练模式开关：
-# - train_config.TrainTask.SINGLE_MODEL_3CLASS（或 SINGLE_MODEL_LONG_OVR 等其它单模型任务）
-#   -> 走现有的单模型 prep->train->sim 流水线（construct_task_doge）
-# - train_config.TrainTask.TRIGGER_DIR / LONG_SHORT_OVR
-#   -> combo_model 模式：分别 sweep 两个子模型角色（construct_task_doge_combo），
-#      训练完成后自动按 (pre_key, train_compatibility) 分组两两 fuse 并回测
+# Training mode switch:
+# - train_config.TrainTask.DIRECT_3CLASS (or TRIGGER/DIRECTION/LONG_OVR/SHORT_OVR and other single model tasks)
+#   -> the existing single model prep->train->sim pipeline (construct_task_doge)
+# - train_config.TrainTask.TRIGGER_DIRECTION / LONG_SHORT_OVR
+#   -> combo_model mode: sweep both sub-model roles separately (construct_task_doge_combo),
+#      then fuse them pairwise per (pre_key, train_compatibility) after training and backtest
 TRAIN_MODE: str = train_config.TrainTask.DIRECT_3CLASS
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
-def _batch_temp_dir(exp_dir: str) -> str:
+def _batch_train_dir(exp_dir: str) -> str:
     """
     Put all intermediate artifacts under TEMPORARY_DIR so persistence stays clean.
     """
     if exp_dir.startswith(common.PERSISTENCE_DIR):
         rel = os.path.relpath(exp_dir, common.PERSISTENCE_DIR)
-        return os.path.join(common.PERSISTENCE_DIR,"train" , rel)
+        return os.path.join(common.PERSISTENCE_DIR, rel, "train")
     base = os.path.basename(exp_dir.rstrip(os.sep)) or "run"
-    return os.path.join(common.PERSISTENCE_DIR, "train" ,"batch_temp", base)
+    return os.path.join(common.PERSISTENCE_DIR,"batch_temp", base, "train")
 
 def _prep_output_dir(temp_dir: str, pre_h: str) -> str:
     return os.path.join(temp_dir, f"pre_{pre_h}")
@@ -100,11 +101,14 @@ def build_task_spec(
       pre_hash -> {params, train: train_hash -> {params, sim_tasks:[{hash, params}, ...]}}
     NOTE: prep_output_dir/save_dir are NOT written to spec; they are derived from hash layout.
     """
+    from trade.runner import backtest_runner
+
     spec: Dict[str, Any] = {}
     for pre in preparation_task:
         pre_d = asdict(pre)
         pre_d.pop("prep_output_dir", None)
         pre_h = param_hash(pre_d)
+        _assert_hash_roundtrip("prep", pre_d, common.BaseDefine(**pre_d), pre_h)
 
         node_pre = spec.setdefault(pre_h, {"params": json_safe(pre_d), "train": {}})
 
@@ -112,6 +116,7 @@ def build_task_spec(
             tr_d = asdict(tr)
             tr_d.pop("save_dir", None)
             tr_h = param_hash(tr_d)
+            _config_from_dict_train(json_safe(tr_d), expected_hash=tr_h)
 
             node_tr = node_pre["train"].setdefault(tr_h, {"params": json_safe(tr_d), "sim_tasks": []})
 
@@ -120,6 +125,7 @@ def build_task_spec(
             for sim in simulation_task:
                 sim_d = asdict(sim)
                 sim_h = param_hash(sim_d)
+                _assert_hash_roundtrip("sim", sim_d, backtest_runner.StrategyPara(**sim_d), sim_h)
                 if sim_h in existing:
                     continue
                 node_tr["sim_tasks"].append({"hash": sim_h, "params": json_safe(sim_d)})
@@ -156,19 +162,39 @@ def load_done_set(reports_path: str) -> set[str]:
     return done
 
 
-def _config_from_dict_train(train_params: Dict[str, Any]):
+def _assert_hash_roundtrip(kind: str, original: Dict[str, Any], restored_obj: Any, expected_hash: str) -> None:
     """
-    Restore TrainConfig from dict stored in task spec.
-    Intentionally ignores nested model_cfg/data_cfg dicts in spec (those fields are dataclasses).
+    Recompute param_hash from the restored dataclass and check it against the hash the
+    dict was stored/looked-up under (pre_h/tr_h/sim_h). This is the same identity the
+    rest of the pipeline relies on (dir naming, dedup, done_set matching), so a mismatch
+    here means the dict<->dataclass round-trip silently changed the effective params
+    (dropped/defaulted field) -- exactly the class of bug that hid in the old
+    model_cfg/data_cfg skip.
     """
-    import model.train as train
+    restored_d = json_safe(asdict(restored_obj))
+    actual_hash = param_hash(restored_d)
+    if actual_hash != expected_hash:
+        before = json_safe(original)
+        mismatched = {
+            k: (before.get(k), restored_d.get(k))
+            for k in set(before) | set(restored_d)
+            if before.get(k) != restored_d.get(k)
+        }
+        raise ValueError(
+            f"{kind} params failed hash round-trip: expected {expected_hash!r}, "
+            f"restored config hashes to {actual_hash!r}. Mismatched fields: {mismatched}"
+        )
 
-    t_cfg = train.TrainConfig()
-    for k, v in (train_params or {}).items():
-        if isinstance(v, dict) and k in ("model_cfg", "data_cfg"):
-            continue
-        if hasattr(t_cfg, k):
-            setattr(t_cfg, k, v)
+
+def _config_from_dict_train(train_params: Dict[str, Any], expected_hash: Optional[str] = None):
+    """
+    Restore TrainConfig from dict stored in task spec, including nested
+    model_cfg/data_cfg dataclasses. If expected_hash (the tr_h the dict is
+    stored/keyed under) is given, verifies the restored config re-hashes to it.
+    """
+    t_cfg = config_from_dict_train(train_params)
+    if expected_hash is not None:
+        _assert_hash_roundtrip("train", train_params, t_cfg, expected_hash)
     return t_cfg
 
 
@@ -176,7 +202,7 @@ def filter_pending_from_spec(task_spec: Dict[str, Any], done_set: set[str]) -> D
     """
     Filter sim leaf tasks that are already present in reports.jsonl.
     """
-    from trade.bt import simulation
+    from trade.runner import backtest_runner
 
     pending: Dict[str, Any] = {}
     for pre_h, pre_node in task_spec.items():
@@ -188,9 +214,9 @@ def filter_pending_from_spec(task_spec: Dict[str, Any], done_set: set[str]) -> D
             sim_pending = []
             for sim in tr_node.get("sim_tasks", []):
                 task_hash = calc_params_hash(
-                    strategy=simulation.StrategyPara(**sim["params"]),
+                    strategy=backtest_runner.StrategyPara(**sim["params"]),
                     common=common.BaseDefine(**pre_params),
-                    train=_config_from_dict_train(train_params),
+                    train=_config_from_dict_train(train_params, expected_hash=tr_h),
                 )
                 if task_hash not in done_set:
                     sim_pending.append(sim)
@@ -311,7 +337,7 @@ def collect_param_sweep(task_spec):
 
 def construct_task_doge():
     import model.train as train
-    from trade.bt import simulation
+    from trade.runner import backtest_runner
     preparation_task: List[Any] = []
     for pn in [16,24,32]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
         for vol_multiplier in [1.8]:#1.8,1.9,2
@@ -346,34 +372,34 @@ def construct_task_doge():
                                                             flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade_penalty = 1,
                                                             stride = stride, patience = 8)
                                 train_conf.model_cfg = train_config.LogisticConfig(seq_len = seq_len,model_version= 1)
-                                # 单模型 sweep：这一整批配置统一按 TRAIN_MODE 指定的任务类型训练
-                                # (默认 SINGLE_MODEL_3CLASS；也可以设成 SINGLE_MODEL_LONG_OVR 等)
+                                # Single model sweep: this whole batch is trained with the task type given by TRAIN_MODE
+                                # (DIRECT_3CLASS by default; can be set to LONG_OVR etc.)
                                 train_conf.train_task = TRAIN_MODE
                                 training_task.append(train_conf)
 
     simulation_task: List[Any] = []
 
     for i in [12,16,24]: #16,24,30,32,36,40,44,48
-        holdbar = i
-        for (atr_sl_mult_long, atr_sl_mult_short) in [(6,5),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,init_equity=10000.0,thresh=None,
-                                            atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,atr_tp=0.99,trade_risk=0.4,max_daily_loss_pct=0.04))
+        min_hold_bars = i
+        for (atr_sl_long_mult, atr_sl_short_mult) in [(6,5),(5,4)]: #(6,5),(5,4)
+            simulation_task.append(backtest_runner.StrategyPara(allow_long=True,allow_short=True,min_hold_bars=min_hold_bars,commission_pct=0.05,init_equity=10000.0,prob_thresh=None,
+                                            atr_sl_long_mult=atr_sl_long_mult,atr_sl_short_mult=atr_sl_short_mult,atr_tp_mult=0.99,risk_per_trade_pct=0.4,max_daily_loss_pct=0.04))
     return preparation_task, training_task, simulation_task
 
 def construct_task_doge_combo():
     """
-    combo_model(TRIGGER_DIR) 版本的任务构造：分别为 trigger / direction 两个子任务
-    角色构造各自的超参 sweep（两个独立的循环，对应 Q&A 里"两种架构分成两个
-    construct 函数"的约定——这里在单个 SYMBOL 下用两段循环各自打标签，
-    而不是复用 construct_task_doge 那一套单模型三分类的循环）。
+    Task construction for combo_model(TRIGGER_DIRECTION): builds a separate hyper parameter sweep
+    for each of the trigger / direction sub-task roles (two independent loops, matching the
+    "two architectures, two construct functions" convention from the Q&A -- here the two loops
+    live under a single SYMBOL and tag their own rows, instead of reusing the single model
 
-    两个角色的 TrainConfig 都放进同一个 flat training_task 列表里，只是通过
-    .train_task 字段打上不同标签（SINGLE_MODEL_TRIGGER / SINGLE_MODEL_DIR）。
-    训练完成后由 run_combo_fusion_and_backtest 按 (pre_key, train_compatibility)
-    分组，把同组下所有 trigger x direction 两两 fuse 成组合模型再回测。
+    Both roles put their TrainConfig into the same flat training_task list, distinguished only
+    by the .train_task field (TRIGGER / DIRECTION).
+    After training, run_combo_fusion_and_backtest groups them by (pre_key, train_compatibility)
+    and fuses every trigger x direction pair inside a group into a combined model, then backtests it.
     """
     import model.train as train
-    from trade.bt import simulation
+    from trade.runner import backtest_runner
     preparation_task: List[Any] = []
     for pn in [16, 24, 32]:
         for vol_multiplier in [1.8, 1.9]:
@@ -388,38 +414,39 @@ def construct_task_doge_combo():
 
     seq_len = 24
     stride = 2
-    # --- trigger 子任务 sweep ---
-    for pos_ratio in np.arange(0.2, 0.3, 0.02).round(2):
-        for miss_penalty in np.linspace(1 / pos_ratio / 3 * 2, 1 / pos_ratio * 4, 4).round(2):
+    # --- trigger sub-task sweep ---
+    for minority_ratio in np.arange(0.2, 0.3, 0.02).round(2):
+        for miss_penalty in np.linspace(1 / minority_ratio / 3 * 2, 1 / minority_ratio * 4, 4).round(2):
             trig_cfg = train.TrainConfig(
                 use_cache=False, epochs=20, batch_size=256,
                 model_cfg=train_config.LogisticConfig(model_version=1, seq_len=seq_len),
-                pos_ratio=pos_ratio, miss_penalty=float(miss_penalty), stride=stride, patience=5,
+                minority_sampling_ratio=float(minority_ratio), miss_penalty=float(miss_penalty), stride=stride, patience=5,
             )
-            trig_cfg.train_task = train_config.TrainTask.SINGLE_MODEL_TRIGGER
+            trig_cfg.train_task = train_config.TrainTask.TRIGGER
             training_task.append(trig_cfg)
 
-    # --- direction 子任务 sweep ---
+    # --- direction sub-task sweep ---
+    # direction labels are naturally close to balanced, no minority oversampling needed, leave minority_sampling_ratio empty (None)
     for model_cfg in [train_config.TransformerConfig(model_version=1, seq_len=seq_len)]:
         dir_cfg = train.TrainConfig(
             use_cache=False, epochs=20, batch_size=256,
-            model_cfg=model_cfg, pos_ratio=0.5, stride=stride, patience=5,
+            model_cfg=model_cfg, stride=stride, patience=5,
         )
-        dir_cfg.train_task = train_config.TrainTask.SINGLE_MODEL_DIR
+        dir_cfg.train_task = train_config.TrainTask.DIRECTION
         training_task.append(dir_cfg)
 
     simulation_task: List[Any] = []
     for i in [4, 8, 12, 16, 24]:
-        holdbar = i
-        for (atr_sl_mult_long, atr_sl_mult_short) in [(6, 5), (5, 4)]:
-            simulation_task.append(simulation.StrategyPara(
-                allow_long=True, allow_short=True, holdbar=holdbar, commission=0.05, init_equity=10000.0, thresh=None,
-                atr_sl_mult_long=atr_sl_mult_long, atr_sl_mult_short=atr_sl_mult_short, atr_tp=0.99, trade_risk=0.4, max_daily_loss_pct=0.04))
+        min_hold_bars = i
+        for (atr_sl_long_mult, atr_sl_short_mult) in [(6, 5), (5, 4)]:
+            simulation_task.append(backtest_runner.StrategyPara(
+                allow_long=True, allow_short=True, min_hold_bars=min_hold_bars, commission_pct=0.05, init_equity=10000.0, prob_thresh=None,
+                atr_sl_long_mult=atr_sl_long_mult, atr_sl_short_mult=atr_sl_short_mult, atr_tp_mult=0.99, risk_per_trade_pct=0.4, max_daily_loss_pct=0.04))
     return preparation_task, training_task, simulation_task
 
 def construct_task_eth():
     import model.train as train
-    from trade.bt import simulation
+    from trade.runner import backtest_runner
     preparation_task: List[Any] = []
 
     for cn in [12,16]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
@@ -450,15 +477,15 @@ def construct_task_eth():
                         for loss_fun_version_v in [2]:
                             training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,
                                                         flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade_penalty = 1,
-                                                        stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4,mag_alpha = 0))
+                                                        stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4))
 
     simulation_task: List[Any] = []
 
     for i in [30,32,36,38,40,44]: #16,24,30,32,36,40,44,48
-        holdbar = i
-        for (atr_sl_mult_long, atr_sl_mult_short) in [(6,6),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(simulation.StrategyPara(allow_long=True,allow_short=True,holdbar=holdbar,commission=0.05,init_equity=10000.0,thresh=None,
-                                            atr_sl_mult_long=atr_sl_mult_long,atr_sl_mult_short=atr_sl_mult_short,trade_risk=0.1,max_daily_loss_pct=0.025))
+        min_hold_bars = i
+        for (atr_sl_long_mult, atr_sl_short_mult) in [(6,6),(5,4)]: #(6,5),(5,4)
+            simulation_task.append(backtest_runner.StrategyPara(allow_long=True,allow_short=True,min_hold_bars=min_hold_bars,commission_pct=0.05,init_equity=10000.0,prob_thresh=None,
+                                            atr_sl_long_mult=atr_sl_long_mult,atr_sl_short_mult=atr_sl_short_mult,risk_per_trade_pct=0.1,max_daily_loss_pct=0.025))
     return preparation_task, training_task, simulation_task
 
 def create_task_spec(logger, exp_dir,done_set: set[str]):
@@ -476,10 +503,10 @@ def create_task_spec(logger, exp_dir,done_set: set[str]):
     else:
         raise RuntimeError(f"no construct for {SYMBOL} yet")
 
-    # combo_model 模式下，子模型自己不是可交易的策略，不在这里挂 sim_tasks——
-    # 真正的回测任务是训练完成后针对两两 fuse 出来的组合模型单独生成的，
-    # 见 run_combo_fusion_and_backtest。这里把真实的 simulation_task 列表
-    # 原样返回给调用方，供 fuse 阶段使用。
+    # In combo_model mode a sub-model is not a tradable strategy on its own, so no sim_tasks are attached here --
+    # the real backtest tasks are generated after training for every fused pair,
+    # see run_combo_fusion_and_backtest. The real simulation_task list is returned
+    # to the caller unchanged, for the fuse stage to use.
     task_spec = build_task_spec(preparation_task, training_task, [] if is_combo else simulation_task)
     # task_spec is already ready
     sweep = collect_param_sweep(task_spec)
@@ -568,18 +595,18 @@ def _train_task(
     t0 = time.time()
     try:
         pre_para = common.BaseDefine(**pre_params)
-        t_cfg = _config_from_dict_train(train_params)
-        # 单模型模式(DIRECT_3CLASS/LONG_OVR/...)和 combo_model 子模型模式共用同一个
-        # worker：具体训练哪种任务由 TrainConfig 自己的 train_task 字段决定（construct_task_doge*
-        # 在构造每一行配置时已经打好标签），这里不再写死某一个任务类型。
-        result = train.train(logger, config=t_cfg, prep_output_dir=prep_output_dir, save_dir=save_dir)
+        t_cfg = _config_from_dict_train(train_params, expected_hash=tr_h)
+        # Single model mode (DIRECT_3CLASS/LONG_OVR/...) and the combo_model sub-model mode share one
+        # worker: which task is trained is decided by the train_task field of the TrainConfig itself (construct_task_doge*
+        # tagged every row when it was built), nothing is hard coded to one task type here.
+        result = train.train(logger=logger, config=t_cfg, prep_output_dir=prep_output_dir, save_dir=save_dir)
 
         # IMPORTANT: enqueue sims BEFORE reporting train_done (so main can safely send None after last train_done)
         for sim in sim_tasks:
             sim_task_queue.put((pre_h, pre_params, tr_h, train_params, sim, save_dir, {}))
-        # 训练报告（task_type/metrics/save_dir 等）单独落一份 train_reports.jsonl。
-        # 单模型模式下这只是额外的存档；combo_model 模式下这是后续 fuse 阶段
-        # 用来按 (pre_key, train_compatibility) 分组、两两配对子模型的唯一数据源。
+        # The training report (task_type/metrics/save_dir etc.) is also appended to train_reports.jsonl.
+        # In single model mode this is just an extra archive; in combo_model mode it is the only data source
+        # the later fuse stage uses to group by (pre_key, train_compatibility) and pair the sub-models.
         train_report = {
             "pre_h": pre_h,
             "tr_h": tr_h,
@@ -600,7 +627,7 @@ def _train_task(
 def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Queue, reports_path: str, temp_dir: str):
     logger = _worker_logger(worker_log_file)
 
-    from trade.bt import simulation
+    from trade.runner import backtest_runner
 
     while True:
         try:
@@ -610,28 +637,27 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
         if msg is None:
             break
 
-        # train_output_dir 由生产者（单模型 _train_task 或 combo_model 的
-        # run_combo_fusion_and_backtest）显式给出，不再由 worker 自己根据 (pre_h, tr_h)
-        # 反推路径——这样同一套 worker 池既能跑单模型的训练产出目录，也能跑
-        # combo_model fuse 出来的组合模型目录，回测阶段两者完全一样。
+        # train_output_dir is given explicitly by the producer (the single model _train_task or combo_model's
+        # run_combo_fusion_and_backtest), the worker no longer derives the path from (pre_h, tr_h)
+        # -- so the same worker pool can run both the single model training output directory and the
+        # combined model directory produced by the combo_model fuse; the backtest stage is identical for both.
         pre_h, pre_params, tr_h, train_params, sim, train_output_dir, extra_report_fields = msg
         sim_h = sim['hash']
-        s_para = simulation.StrategyPara(**sim["params"])
-        pre_para = common.BaseDefine(**pre_params)
-        t_cfg = _config_from_dict_train(train_params)
+        s_para = backtest_runner.StrategyPara(**sim["params"])
+        t_cfg = _config_from_dict_train(train_params, expected_hash=tr_h)
         prep_dir = _prep_output_dir(temp_dir, pre_h)
 
         t0 = time.time()
         try:
             report_stat = None
             report = {'short':{}, 'long':{}, 'forward': {}, 'pass':False, **(extra_report_fields or {})}
-            report['short'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
+            report['short'] = backtest_runner.main( logger, para=s_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                 train_output_dir=train_output_dir, device="cpu", period='short' )["statistics"][1]
-            if report['short']["performance"]["cagr"] > 0 :
-                report['forward'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
+            if report['short']["performance"]["cagr"] > -1000 :
+                report['forward'] = backtest_runner.main( logger, para=s_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                     train_output_dir=train_output_dir, device="cpu", period='forward' )["statistics"][1]
                 if report['forward']["performance"]["cagr"] > -1000 :
-                    report['long'] = simulation.main( logger, para=s_para, pre_para=pre_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
+                    report['long'] = backtest_runner.main( logger, para=s_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
                                         train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
                     if report['long']["performance"]["cagr"] > 0 :
                         report['pass'] = True
@@ -890,7 +916,7 @@ def _setup_root_logger(exp_dir: str) -> logging.Logger:
     return logger
 
 def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, Any] = {}):
-    from trade.bt import simulation
+    from trade.runner import backtest_runner
     #data prepare
     results = {}
     for pre_h, pre_node in task_spec.items():
@@ -904,7 +930,7 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
         original_interval = pre_para.interval
         for tr_h, tr_node in pre_node["train"].items():
             train_params = tr_node["params"]
-            t_cfg = _config_from_dict_train(train_params)
+            t_cfg = _config_from_dict_train(train_params, expected_hash=tr_h)
             for sim_task in tr_node['sim_tasks']:
                 hash_value =  sim_task['hash']
                 strategy_hash = sim_task['strategy_hash']
@@ -912,7 +938,7 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                 if not os.path.exists(train_save_dir):
                     raise RuntimeError(f" {train_save_dir} not exist,run valid first!")
                 sim_params = sim_task['params']
-                sim_para=simulation.StrategyPara(**sim_params)
+                sim_para=backtest_runner.StrategyPara(**sim_params)
                 results[strategy_hash] = {'orignal_symbol': f'{pre_para.symbol}_{pre_para.interval}','CAGR':{}}
                 for symbol in ["DOGEUSDT","ETHUSDT", "BTCUSDT"]:   #BTCUSDT ETHUSDT DOGEUSDT
                     if symbol != original_symbol:
@@ -923,7 +949,7 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                         if not os.path.exists(sim_prep_output_dir):
                             preparation.main(logger, para=t_pre_para, prep_output_dir=sim_prep_output_dir)
                             time.sleep(1)
-                        result = simulation.main( logger, para=sim_para, pre_para=t_pre_para, train_cfg=t_cfg, prep_output_dir=sim_prep_output_dir,
+                        result = backtest_runner.main( logger, para=sim_para, train_cfg=t_cfg, prep_output_dir=sim_prep_output_dir,
                                                                 train_output_dir=train_save_dir, device="cpu", period='long' )["statistics"][1]
                         results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
                         results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result['performance']['cagr']
@@ -936,7 +962,7 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                             if not os.path.exists(sim_prep_output_dir):
                                 preparation.main(logger, para=t_pre_para, prep_output_dir=sim_prep_output_dir)
                                 time.sleep(1)
-                            result = simulation.main( logger, para=sim_para, pre_para=t_pre_para, train_cfg=t_cfg, prep_output_dir=sim_prep_output_dir,
+                            result = backtest_runner.main( logger, para=sim_para, train_cfg=t_cfg, prep_output_dir=sim_prep_output_dir,
                                                                     train_output_dir=train_save_dir, device="cpu", period='long' )["statistics"][1]
                             results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
                             results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result['performance']['cagr']
@@ -960,22 +986,22 @@ def run_combo_fusion_and_backtest(
     valid: bool = False,
 ):
     """
-    combo_model 模式训练完成后的 fuse + 回测阶段：
+    Fuse + backtest stage that follows the combo_model training:
 
-    1. 从 train_reports_path（每训练完一个子模型就追加一行，见 _train_task /
-       run_task_spec 的 _drain_train_results）读回所有已完成的子模型记录。
-    2. 按 (pre_h, train_compatibility) 分组——只有同一份数据准备(pre_h)、且
-       seq_len/stride/特征集完全一致(train_compatibility)的两个子模型才允许
-       配对，否则两个子模型消费的输入窗口对不上，融合没有意义。这个约束和
-       batch_simulation.py 里 build_model_registry_from_reports/select_fusion_pairs
-       的思路一致。
-    3. 组内按 TRAIN_MODE 对应的两个角色(COMBO_SUB_TASKS[TRAIN_MODE])做笛卡尔积
-       配对：M 个 role_1 子模型 x N 个 role_2 子模型 = M*N 个组合。
-    4. 每一对调用 fusion_trigger_dir / fusion_long_short_ovr 生成组合模型的
-       task_description.json，再用 simulation_task 跑 short/long/forward 回测，
-       写入 reports_path。回测报告里的 model_metrics(融合后 3 类整体指标)和
-       sub_model_metrics(两个子模型各自在回测数据上的指标)由 simulation.main
-       ->ModelHandler.evaluate_sub_models 自动附带，这里不用手工计算。
+    1. Read every finished sub-model record back from train_reports_path (one line appended per finished
+       sub-model, see _train_task / run_task_spec's _drain_train_results).
+    2. Group them by (pre_h, train_compatibility) -- only two sub-models built on the same data preparation (pre_h)
+       and with identical seq_len/stride/feature set (train_compatibility) may be paired, otherwise the input
+       windows the two sub-models consume do not line up and fusing them is meaningless. This constraint follows
+       the same idea as build_model_registry_from_reports/select_fusion_pairs in
+       batch_simulation.py.
+    3. Inside a group, take the cartesian product of the two roles of TRAIN_MODE (COMBO_SUB_TASKS[TRAIN_MODE]):
+       M role_1 sub-models x N role_2 sub-models = M*N combinations.
+    4. Every pair calls fusion_trigger_dir / fusion_long_short_ovr to write the combined model's
+       task_description.json, then runs the short/long/forward backtests through simulation_task and
+       writes to reports_path. In the backtest report, model_metrics (overall 3-class metrics after fusion) and
+       sub_model_metrics (metrics of both sub-models on the backtest data) are attached automatically by
+       backtest_runner.main -> ModelHandler.evaluate_sub_models, nothing has to be computed here.
     """
     import model.train as train
 
@@ -1011,9 +1037,9 @@ def run_combo_fusion_and_backtest(
 
     logger.info(f"[combo fuse] total fusion pairs: {len(fusion_pairs)}")
 
-    # 粗粒度的 resume-safety：整个 fusion_hash（不细到单个 sim_task）已经出现
-    # 在 reports_path 里就跳过——不是完整的 --resume 支持，只是避免重复脚本被
-    # 误跑两次时把同一批回测重复写一遍。
+    # Coarse grained resume safety: skip when the whole fusion_hash (not per sim_task) already appears
+    # in reports_path -- not full --resume support, just a guard so an accidentally repeated script run
+    # does not write the same batch of backtests twice.
     done_fusion_hashes = set()
     if os.path.exists(reports_path):
         with open(reports_path, "r", encoding="utf-8") as f:
@@ -1049,16 +1075,16 @@ def run_combo_fusion_and_backtest(
         os.makedirs(fusion_dir, exist_ok=True)
 
         logger.info(f"[combo fuse] fusing {role_1}={r1['tr_h']} + {role_2}={r2['tr_h']} -> {fusion_hash}")
-        if TRAIN_MODE == train_config.TrainTask.TRIGGER_DIR:
+        if TRAIN_MODE == train_config.TrainTask.TRIGGER_DIRECTION:
             train.fusion_trigger_dir(logger, r1["save_dir"], r2["save_dir"], fusion_dir)
         else:
             train.fusion_long_short_ovr(logger, r1["save_dir"], r2["save_dir"], fusion_dir)
 
-        # 回测阶段和单模型模式完全一样(融合完的目录对 simulation.main 而言就是
-        # 一个普通的 train_output_dir)，所以这里不再自己顺序调用 simulation.main，
-        # 而是把每个 sim_task 塞进和单模型模式共用的 sim_task_queue，由已经在跑的
-        # MAX_SIM 个 _worker_sim 并行处理——combo 模式下这几个 worker 进程本来就
-        # 是空闲的(单模型子任务不挂 sim_tasks)，现在正好用上。
+        # The backtest stage is identical to the single model mode (a fused directory is just an ordinary
+        # train_output_dir as far as backtest_runner.main is concerned), so instead of calling backtest_runner.main
+        # sequentially here, every sim_task is pushed into the same sim_task_queue the single model mode uses and
+        # handled in parallel by the MAX_SIM _worker_sim processes already running -- in combo mode those worker
+        # processes are idle anyway (the sub-model tasks attach no sim_tasks), so they are put to good use.
         extra_report_fields = {
             "fusion_hash": fusion_hash,
             "train_compatibility": compat,
@@ -1080,9 +1106,9 @@ def run_combo_fusion_and_backtest(
     if n_sim_total == 0:
         return
 
-    # 复用单模型模式同一套 _drain_sim_results：写 reports_path、以及所有 sim
-    # 跑完后删掉对应的 fusion_dir（和单模型训练目录的清理逻辑一致），只是这里
-    # 没有 prep/train 阶段要一起协调，用一个简单的轮询循环等它跑完就够了。
+    # Reuses the same _drain_sim_results as the single model mode: writes reports_path and deletes the matching
+    # fusion_dir once every sim finished (mirroring the cleanup of the single model training directories), except
+    # that there is no prep/train stage to coordinate with here, so a simple polling loop is enough.
     stats = {"simulation": {"time": 0.0, "count": 0}}
     def _no_eta():
         return ""
@@ -1111,7 +1137,7 @@ def main():
         args.resume or args.add or args.valid or args.cross_test or args.load
     ):
         print(
-            "❌ combo_model 模式 (TRAIN_MODE=TRIGGER_DIR/LONG_SHORT_OVR) 暂不支持 "
+            "❌ combo_model 模式 (TRAIN_MODE=TRIGGER_DIRECTION/LONG_SHORT_OVR) 暂不支持 "
             "--resume/--add/--valid/--cross_test/--load，这些流程假设的是单模型模式下 "
             "sim_tasks 直接挂在训练节点上的 spec 形状。请用不带这些参数的全新实验跑一遍。"
         )
@@ -1145,7 +1171,7 @@ def main():
     elif args.load:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         records = common.load_selected_configs(selected_configs)  # just to validate file and format
-        from trade.bt import simulation
+        from trade.runner import backtest_runner
         import model.train as train
         exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "load_configs")
         os.makedirs(exp_dir, exist_ok=True)
@@ -1156,7 +1182,7 @@ def main():
         for r in records:
             report = {'short':{}, 'long':{}}
             params = r["short"] if "short" in r else r
-            sim_para =simulation.StrategyPara(**params["params"]["strategy"])
+            sim_para =backtest_runner.StrategyPara(**params["params"]["strategy"])
             pre_para =common.BaseDefine(**params["params"]["common"])
             train_para=_config_from_dict_train(params["params"]["train"])
             load_prep_output_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "load_configs",'prep',f'{pre_para.symbol}_{pre_para.interval}')
@@ -1168,19 +1194,19 @@ def main():
                 continue
             preparation.main(logger, para=pre_para,prep_output_dir = load_prep_output_dir)
             last_cagr = 0
-            for trade_risk in [0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
+            for risk_per_trade_pct in [0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
                 result = {}
-                sim_para.trade_risk = trade_risk
-                result[strategy_hash] = {trade_risk:{'cagr':{}}}
-                short_result = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, prep_output_dir =load_prep_output_dir,train_output_dir= train_save_dir,period='short')["statistics"][1]
-                long_result = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para, prep_output_dir =load_prep_output_dir,train_output_dir= train_save_dir,period='long')["statistics"][1]
-                forward_result = simulation.main(logger, pre_para=pre_para, para=sim_para, train_cfg=train_para,prep_output_dir =load_prep_output_dir,train_output_dir= train_save_dir, period='forward')["statistics"][1]
-                result[strategy_hash][trade_risk]['cagr']['short'] = short_result['performance']['cagr']
-                result[strategy_hash][trade_risk]['cagr']['long'] = long_result['performance']['cagr']
-                result[strategy_hash][trade_risk]['cagr']['forward'] = forward_result['performance']['cagr']
-                result[strategy_hash][trade_risk]['short'] = short_result
-                result[strategy_hash][trade_risk]['long'] = long_result
-                result[strategy_hash][trade_risk]['forward'] = forward_result
+                sim_para.risk_per_trade_pct = risk_per_trade_pct
+                result[strategy_hash] = {risk_per_trade_pct:{'cagr':{}}}
+                short_result = backtest_runner.main(logger, para=sim_para, train_cfg=train_para, prep_output_dir =load_prep_output_dir,train_output_dir= train_save_dir,period='short')["statistics"][1]
+                long_result = backtest_runner.main(logger, para=sim_para, train_cfg=train_para, prep_output_dir =load_prep_output_dir,train_output_dir= train_save_dir,period='long')["statistics"][1]
+                forward_result = backtest_runner.main(logger, para=sim_para, train_cfg=train_para,prep_output_dir =load_prep_output_dir,train_output_dir= train_save_dir, period='forward')["statistics"][1]
+                result[strategy_hash][risk_per_trade_pct]['cagr']['short'] = short_result['performance']['cagr']
+                result[strategy_hash][risk_per_trade_pct]['cagr']['long'] = long_result['performance']['cagr']
+                result[strategy_hash][risk_per_trade_pct]['cagr']['forward'] = forward_result['performance']['cagr']
+                result[strategy_hash][risk_per_trade_pct]['short'] = short_result
+                result[strategy_hash][risk_per_trade_pct]['long'] = long_result
+                result[strategy_hash][risk_per_trade_pct]['forward'] = forward_result
                 results.append(result)
                 if long_result['performance']['cagr'] < last_cagr:
                     break
@@ -1206,7 +1232,7 @@ def main():
     reports_path = os.path.join(exp_dir, REPORTS_FILE)
     train_reports_path = os.path.join(exp_dir, TRAIN_REPORTS_FILE)
 
-    temp_dir = _batch_temp_dir(exp_dir)
+    temp_dir = _batch_train_dir(exp_dir)
     os.makedirs(temp_dir, exist_ok=True)
 
     combo_simulation_task = None
@@ -1264,13 +1290,13 @@ def main():
 
     is_combo = TRAIN_MODE in train_config.COMBO_SUB_TASKS
 
-    # combo_model 模式下，训练阶段的子模型不挂 sim_tasks，这里的 sim_task_queue/
-    # sim_workers 在训练期间根本用不上——而且 run_task_spec 一旦训练全部完成就会
-    # 自动往 sim_task_queue 里塞 None 把 sim worker 关掉（单模型模式下这是对的，
-    # 因为那时候该跑的 sim 早就在训练过程中挂上队列了；combo 模式下这时候还
-    # 一个回测任务都没有）。所以 combo 模式这里不提前起 sim worker，等子模型
-    # 全部训练完、fuse 阶段真正有回测任务要跑时再起一批新的（见下面
-    # run_combo_fusion_and_backtest 调用处），避免被提前关掉。
+    # In combo_model mode the sub-models of the training stage attach no sim_tasks, so the sim_task_queue/
+    # sim_workers here are unused during training -- and run_task_spec pushes None into sim_task_queue as soon
+    # as training finishes, shutting the sim workers down (which is correct for the single model mode,
+    # where the sims were queued during training; in combo mode there is not a single backtest task at that
+    # point). So combo mode does not start the sim workers early: a fresh batch is started once every sub-model
+    # finished training and the fuse stage really has backtests to run (see the
+    # run_combo_fusion_and_backtest call below), so they cannot be shut down prematurely.
     sim_workers = []
     if not is_combo:
         for i in range(MAX_SIM):
@@ -1303,10 +1329,10 @@ def main():
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         compare_old_new_reports(selected_configs, reports_path, exp_dir, logger)
 
-    # combo_model 模式：子模型全部训练完成后，按 (pre_key, train_compatibility)
-    # 分组两两 fuse 成组合模型并回测，结果同样写入 reports_path。
-    # 用一套全新的 queue + sim worker（而不是复用上面训练阶段那套），避免和
-    # run_task_spec 训练完就自动发的 None 关闭信号产生竞争/串号。
+    # combo_model mode: once every sub-model finished training, group by (pre_key, train_compatibility),
+    # fuse the pairs into combined models and backtest them; the results also go to reports_path.
+    # A brand new queue + sim worker set is used (instead of reusing the training stage one), to avoid racing
+    # with the None shutdown signal run_task_spec sends as soon as training completes.
     if is_combo:
         combo_sim_task_queue: mp.Queue = mp.Manager().Queue()
         combo_sim_result_queue: mp.Queue = mp.Manager().Queue()

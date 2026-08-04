@@ -7,22 +7,22 @@ from model.models.model_base import BaseTimeSeriesModel
 
 class MambaBlock(nn.Module):
     """
-    高性能 Mamba Block (由官方 CUDA 算子驱动)
+    High performance Mamba block (driven by the official CUDA kernels)
     """
     def __init__(self, d_model, d_state=16, d_conv=4, expand=2):
         super().__init__()
-        #  直接实例化官方 Mamba 层，它内部已经包含了：
+        #  Instantiate the official Mamba layer directly, it already contains:
         # In_proj -> Conv1d -> S6 (Selective Scan) -> Out_proj
     #     self.mamba = Mamba(
-    #         d_model=d_model,    # 输入维度
-    #         d_state=d_state,    # SSM 状态维度 (N)
-    #         d_conv=d_conv,      # 局部卷积核大小
-    #         expand=expand       # 扩展因子 (E)
+    #         d_model=d_model,    # input dimension
+    #         d_state=d_state,    # SSM state dimension (N)
+    #         d_conv=d_conv,      # local convolution kernel size
+    #         expand=expand       # expansion factor (E)
     #     )
 
     # def forward(self, x):
     #     # x: [B, L, D]
-    #     #  这一行现在会直接调用 5090 的高性能 CUDA 内核
+    #     #  this line now calls the high performance CUDA kernel of the 5090
     #     return self.mamba(x)
 
 class Mamba1D_V1(BaseTimeSeriesModel):
@@ -48,15 +48,15 @@ class Mamba1D_V1(BaseTimeSeriesModel):
         self.readout = readout
         self.logit_clip = logit_clip
 
-        # 1. 输入投影
+        # 1. Input projection
         self.embedding = nn.Linear(input_size, d_model)
         self.norm_in = nn.LayerNorm(d_model)
 
-        # 2. Mamba 主干网络 (2+2 架构核心)
+        # 2. Mamba backbone (core of the 2+2 architecture)
         self.layers = nn.ModuleList([
             nn.ModuleDict({
                 "mamba": MambaBlock(d_model=d_model, d_state=d_state, expand=expand),
-                "norm": nn.RMSNorm(d_model) # 采用 RMSNorm 提升 5090 上的数值稳定性
+                "norm": nn.RMSNorm(d_model) # RMSNorm for better numerical stability on the 5090
             })
             for _ in range(n_layers)
         ])
@@ -77,17 +77,17 @@ class Mamba1D_V1(BaseTimeSeriesModel):
             nn.Linear(64, 2)
         )
 
-    def forward(self, x: torch.Tensor, return_fused=False):
+    def forward(self, x: torch.Tensor):
         # x: [B, L, F]
         x = self.embedding(x)
         x = self.norm_in(x)
 
-        # 经过 Mamba 层（残差连接）
+        # Through the Mamba layers (residual connections)
         for layer in self.layers:
-            #  这里的计算现在是全并行的
+            #  this computation is fully parallel now
             x = x + layer["mamba"](layer["norm"](x))
 
-        # Readout (保持你原有的逻辑)
+        # Readout (your original logic kept)
         if self.readout == "last":
             feat = x[:, -1, :]
         elif self.readout == "meanmax":
@@ -101,11 +101,6 @@ class Mamba1D_V1(BaseTimeSeriesModel):
         if self.logit_clip:
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
-
-        if return_fused:
-            p_trig, p_dir = torch.softmax(logits_trig, dim=1), torch.softmax(logits_dir, dim=1)
-            fused_probs = torch.stack([p_trig[:, 1] * p_dir[:, 0], p_trig[:, 0], p_trig[:, 1] * p_dir[:, 1]], dim=1)
-            return torch.argmax(fused_probs, dim=1), fused_probs
 
         return logits_trig, logits_dir
 

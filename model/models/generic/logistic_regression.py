@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from model.models.model_base import BaseTimeSeriesModel
 
@@ -36,7 +35,7 @@ class LogisticRegressionTS_V1(BaseTimeSeriesModel):
 
         self.classifier = nn.Linear(linear_in, self.n_classes)
 
-    def forward(self, x: torch.Tensor, return_fused: bool = False):
+    def forward(self, x: torch.Tensor):
         """
         x: [B, T, F]
         """
@@ -47,10 +46,6 @@ class LogisticRegressionTS_V1(BaseTimeSeriesModel):
         x = x.reshape(x.size(0), -1)
 
         logits = self.classifier(x)
-
-        if return_fused:
-            probs = F.softmax(logits, dim=1)
-            return logits, probs
 
         return logits
 

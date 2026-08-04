@@ -34,6 +34,7 @@ class PreparedData:
     feature_names: list[str]
     requested_features: list[str]
     feature_count: int
+    prep_output_dir: str
 
 
 @dataclass
@@ -148,6 +149,7 @@ def prepare_data(
         feature_names=list(dataset.feature_names),
         requested_features=requested_features,
         feature_count=dataset.feature_count,
+        prep_output_dir=prep_output_dir,
     )
 
 
@@ -213,6 +215,7 @@ def train_single(
         fit_result=fit_result,
         metrics=metrics,
         save_dir=save_dir,
+        prep_output_dir=prepared.prep_output_dir,
         feature_names=prepared.feature_names,
         feature_list=prepared.requested_features,
         label_col=config.data_cfg.label_col,

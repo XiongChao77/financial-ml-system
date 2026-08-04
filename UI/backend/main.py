@@ -6,8 +6,9 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir,'..','..'))
 from data_process import common
 
-from trade.bt import simulation
+from trade.runner import backtest_runner
 from data_process import common
+from model import train_config
 
 app = FastAPI()
 logger, _= common.setup_session_logger(sub_folder='backend',console_level= logging.INFO, file_level = logging.DEBUG)
@@ -22,9 +23,9 @@ if False:
     train_params = short['params']['train']
     fusion_dir = common.recursive_get(report, 'fusion_dir')
     prep_output_dir = common.recursive_get(report, 'prep_output_dir')
-    result = simulation.main(
+    result = backtest_runner.main(
                     logger,
-                    para=simulation.StrategyPara(**sim_params),
+                    para=backtest_runner.StrategyPara(**sim_params),
                     train_cfg=common.config_from_dict_train(train_params),
                     prep_output_dir=prep_output_dir,
                     train_output_dir=fusion_dir,
@@ -32,10 +33,10 @@ if False:
                     period='long',
                 )
 else:
-    result = simulation.main(logger)
+    train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.TrainTask.DIRECT_3CLASS)
+    result = backtest_runner.main(logger,train_output_dir=train_output_dir)
 
 candles = result["candles"]
-trade_logs = result["trade_logs"]
 statistics = result["statistics"][0]  # full report
 
 # Allow cross-domain access (required for front-end and back-end separation)
