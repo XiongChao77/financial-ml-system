@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-读取指定目录下所有子目录中的 reports.jsonl，统计 cagr/calmar 并选出最好的一个。
-用法: python compare_reports.py [目录路径]
+Read reports.jsonl from every subdirectory of a given directory, aggregate cagr/calmar and pick the best one.
+Usage: python compare_reports.py [directory]
 """
 from __future__ import absolute_import, division, print_function
 
@@ -16,7 +16,7 @@ DEFAULT_DIR = "/home/chao/work/quant_output/batch_experiments/2026-02-07/ETHUSDT
 
 
 def load_reports(path):
-    """逐行读取 jsonl，跳过损坏行。"""
+    """Read the jsonl line by line, skipping broken lines."""
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
     reports = []
@@ -33,14 +33,14 @@ def load_reports(path):
 
 
 def find_reports_jsonl(root_dir):
-    """在 root_dir 下查找所有 reports.jsonl 路径（子目录内）。"""
+    """Find every reports.jsonl path under root_dir (inside the subdirectories)."""
     pattern = os.path.join(root_dir, "*", "reports.jsonl")
     paths = sorted(glob.glob(pattern))
     return [p for p in paths if os.path.isfile(p)]
 
 
 def extract_cagr_calmar(reports):
-    """从 report 列表中提取 (cagr, calmar)，过滤掉缺失的。"""
+    """Extract (cagr, calmar) from a list of reports, dropping the missing ones."""
     pairs = []
     for r in reports:
         perf = r['short'].get("performance") or {}
@@ -52,7 +52,7 @@ def extract_cagr_calmar(reports):
 
 
 def stats(arr):
-    """返回 min, max, mean, median, std（空数组则全为 nan）。"""
+    """Return min, max, mean, median, std (all nan for an empty array)."""
     a = np.array(arr, dtype=float)
     if len(a) == 0:
         return np.nan, np.nan, np.nan, np.nan, np.nan
@@ -93,7 +93,7 @@ def main():
         print(f"❌ 在 {root} 下未找到任何 reports.jsonl。")
         return
 
-    # 每个文件对应一条汇总： (rel_path, n, mean_cagr, mean_calmar, ...)
+    # One summary row per file: (rel_path, n, mean_cagr, mean_calmar, ...)
     rows = []
     for path in paths:
         reports = load_reports(path)
@@ -123,7 +123,7 @@ def main():
         print(f"❌ 所有 reports.jsonl 中都没有有效的 cagr/calmar 记录。")
         return
 
-    # 表头
+    # Header
     header = f"{'实验(相对路径)':<28} | {'N':>4} | {'mean_cagr%':>10} | {'mean_calmar':>10} | {'max_cagr%':>10} | {'max_calmar':>10}"
     sep = "-" * 95
 
@@ -139,7 +139,7 @@ def main():
             f"{r['rel']:<28} | {r['n']:>4} | {r['mean_cagr']*100:>9.2f}% | {r['mean_calmar']:>10.3f} | {r['max_cagr']*100:>9.2f}% | {r['max_calmar']:>10.3f}"
         )
 
-    # 选最好的
+    # Pick the best
     if args.prefer == "cagr":
         best_idx = max(range(len(rows)), key=lambda i: rows[i]["mean_cagr"])
         reason = "mean CAGR 最高"

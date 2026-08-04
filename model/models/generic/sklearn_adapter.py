@@ -20,8 +20,8 @@ class SklearnEstimatorAdapter(BaseTimeSeriesModel):
       - forward(x) returns log(predict_proba(x)) as "logits", so the existing
         torch.softmax(logits) calls in train.py recover the exact probabilities
         (softmax(log(p)) == p since p already sums to 1).
-      - forward(x, return_fused=True) returns (preds, probs) matching the
-        contract ModelHandler (model_loader.py) expects at inference time.
+      - ModelHandler adds the common inference wrapper after loading the
+        checkpoint.
       - state_dict()/load_state_dict() hold the fitted sklearn Pipeline
         directly; BaseTimeSeriesModel.save_checkpoint/load_checkpoint pickle
         it via torch.save/torch.load like any other object.
@@ -98,12 +98,9 @@ class SklearnEstimatorAdapter(BaseTimeSeriesModel):
             return np.full((Xf.shape[0], self.n_classes), 1.0 / self.n_classes)
         return self.pipeline.predict_proba(Xf)
 
-    def forward(self, x, return_fused: bool = False):
+    def forward(self, x):
         probs_np = self.predict_proba(x)
         probs = torch.as_tensor(probs_np, dtype=torch.float32, device=x.device)
-        if return_fused:
-            preds = torch.argmax(probs, dim=1)
-            return preds, probs
         return torch.log(probs.clamp_min(1e-8))
 
     # ------------------------------------------------------------------

@@ -8,7 +8,11 @@ sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process.common import *
 from model.model_factory import ModelFactory
 from model.data_loader import TimeSeriesWindowDataset
-from model.models.fusion_wrapper import FusionWrapper
+from model.models.fusion_wrapper import (
+    DirectThreeClassInferenceWrapper,
+    DualHeadInferenceWrapper,
+    FusionWrapper,
+)
 from model.train_config import *
 # -----------------------------------------------------------------------------
 # Encapsulated Model Handler
@@ -56,26 +60,24 @@ class ModelHandler(MetaConfig):
         self.task_type = self.task_desc.get("task_type", "single")
         self.base_dir = os.path.dirname(task_desc_path)
         self.sub_model_conf :dict[str,MetaConfig]= {}
-        # 组合任务(TRIGGER_DIR/LONG_SHORT_OVR)下各子模型自身的 nn.Module 和各自的
-        # task_type(如 SINGLE_MODEL_TRIGGER)，供 evaluate_sub_models() 单独评估用。
-        # 非组合任务下始终为空 dict。
+        # For composite tasks (TRIGGER_DIRECTION/LONG_SHORT_OVR): the nn.Module of every sub-model and its
+        # task_type (e.g. TRIGGER/DIRECTION), used by evaluate_sub_models() for separate evaluation.
+        # Always an empty dict for non composite tasks.
         self.loaded_sub_models: dict = {}
         self.sub_model_task_type: dict = {}
 
         # 2. Initialize by task type
         self.logger.info(f"🚀 Loading Task: {self.task_type.upper()} from {task_desc_path}")
-        
-        if self.task_type == TrainTask.SINGLE_MODEL_3CLASS:
-            self._load_3class_mode()
-        elif self.task_type  ==TrainTask.TRIGGER_DIR:
-            self._load_long_short_ovr_mode()
-            # raise RuntimeError(f"🔄 Detected pipeline mode. Sub-models: {list(self.task_desc['models'].keys())}")
-        elif self.task_type  ==TrainTask.LONG_SHORT_OVR:
-            self._load_long_short_ovr_mode()
-        elif self.task_type in [TrainTask.SINGLE_MODEL_LONG_OVR, TrainTask.SINGLE_MODEL_SHORT_OVR]:
+
+        if self.task_type in TrainTask.COMBO_TASKS:
+            # produced by save_fusion_run: "models": {role: relative_dir_to_a_save_single_run_output}
+            self._load_fusion_mode()
+        elif self.task_type in TrainTask.BINARY_TASKS:
+            # produced by save_single_run for a lone TRIGGER/DIRECTION/LONG_OVR/SHORT_OVR model
             self._load_binary_mode()
-        elif self.task_type in ["trigger_direction", "long_short_ovr"]:
-            self._load_pipeline_mode()
+        elif self.task_type in (TrainTask.DIRECT_3CLASS, TrainTask.DUAL_HEAD_3CLASS):
+            # produced by save_single_run for a 3-class model
+            self._load_3class_mode()
         else:
             raise ValueError(f"Unknown task type: {self.task_type}")
 
@@ -90,6 +92,42 @@ class ModelHandler(MetaConfig):
         self._init_config_from_meta(meta)
         self.classes = meta["classes"]  # In single mode, use classes from meta directly
 
+        # 2. Load the raw training model, then adapt it to the common inference
+        # contract: (three_class_logits, three_class_probabilities).
+        raw_model, _ = ModelFactory.load_from_checkpoint(
+            model_path=model_path,
+            meta_path=meta_path,
+            device=self.device
+        )
+        raw_model.eval()
+        if self.task_type == TrainTask.DIRECT_3CLASS:
+            self.model = DirectThreeClassInferenceWrapper(raw_model)
+        else:
+            self.model = DualHeadInferenceWrapper(raw_model)
+        self.model.to(self.device)
+        self.model.eval()
+
+    def _load_binary_mode(self):
+        """
+        Load a lone TRIGGER/DIRECTION/LONG_OVR/SHORT_OVR model.
+
+        NOTE: a single binary model has no 3-class Short/Neutral/Long signal on its
+        own (FusionWrapper only fuses a *pair* of binary models, keyed "trigger"/
+        "direction" or "long_ovr"/"short_ovr" - see model/models/fusion_wrapper.py).
+        So self.model here is the raw binary classifier, useful for direct
+        evaluate_performance-style diagnostics; it is not meant to be driven
+        through predict()/backtesting, which assumes a 3-class output.
+        """
+        files = self.task_desc["models"]["main"]
+        meta_path = os.path.join(self.base_dir, files["meta"])
+        model_path = os.path.join(self.base_dir, files["model"])
+
+        # 1. Read meta and initialize configuration
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        self._init_config_from_meta(meta)
+        self.classes = meta["classes"]  # In single mode, use classes from meta directly
+
         # 2. Load model
         self.model, _ = ModelFactory.load_from_checkpoint(
             model_path=model_path,
@@ -98,31 +136,7 @@ class ModelHandler(MetaConfig):
         )
         self.model.eval()
 
-    def _load_binary_mode(self):
-        files = self.task_desc["models"]["main"]
-        meta_path = os.path.join(self.base_dir, files["meta"])
-        model_path = os.path.join(self.base_dir, files["model"])
-        
-        # 1. Read meta and initialize configuration
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        self._init_config_from_meta(meta)
-        self.classes = meta["classes"]  # In single mode, use classes from meta directly
-
-        # 2. Load model
-        model, _ = ModelFactory.load_from_checkpoint(
-            model_path=model_path,
-            meta_path=meta_path,
-            device=self.device
-        )
-        model.eval()
-
-        # 3. Assemble wrapper
-        self.model = FusionWrapper({ self.task_type:model}, task_type=self.task_type)
-        self.model.to(self.device)
-        self.model.eval()
-
-    def _load_long_short_ovr_mode(self):
+    def _load_fusion_mode(self):
         sub_models_map = self.task_desc["models"]
         loaded_sub_models = {}
         
@@ -157,70 +171,23 @@ class ModelHandler(MetaConfig):
         self.model.eval()
         self.loaded_sub_models = loaded_sub_models
 
-    def _load_pipeline_mode(self):
-        sub_models_map = self.task_desc["models"]
-        loaded_sub_models = {}
-        
-        # Key: determine which sub-model provides the "primary" configuration.
-        # Typically in Trigger/Direction mode, Trigger is the first stage; we use its config to initialize the dataset.
-        if "trigger" in sub_models_map:
-            primary_key = "trigger"
-        elif "long_ovr" in sub_models_map:
-            primary_key = "long_ovr"
-        else:
-            primary_key = list(sub_models_map.keys())[0]
-
-        # 1. Load primary configuration first
-        primary_files = sub_models_map[primary_key]
-        primary_meta_path = os.path.join(self.base_dir, primary_files["meta"])
-        with open(primary_meta_path, "r", encoding="utf-8") as f:
-            primary_meta = json.load(f)
-            
-        self.logger.info(f"📋 Using configuration from primary sub-model: '{primary_key}'")
-        self._init_config_from_meta(primary_meta)
-        
-        # Fix: pipeline mode always exposes 3 classes [Short, Neutral, Long]
-        # Even if sub-model meta says [0, 1], the loader must present a unified 3-class interface.
-        self.classes = [0, 1, 2]
-
-        # 2. Load all sub-models
-        for name, files in sub_models_map.items():
-            model_path = os.path.join(self.base_dir, files["model"])
-            meta_path = os.path.join(self.base_dir, files["meta"])
-            
-            # Optional: check whether sub-model config conflicts with primary config
-            # if name != primary_key:
-            #     check_consistency(primary_meta, meta_path)
-
-            self.logger.info(f"   🔄 Loading sub-model '{name}'...")
-            model, _ = ModelFactory.load_from_checkpoint(
-                model_path=model_path,
-                meta_path=meta_path,
-                device=self.device
-            )
-            model.eval()
-            loaded_sub_models[name] = model
-
-        # 3. Assemble wrapper
-        self.model = FusionWrapper(loaded_sub_models, task_type=self.task_type)
-        self.model.to(self.device)
-        self.model.eval()
-
     def evaluate_sub_models(self, df, kline_interval_ms, batch_size=2048):
         """
-        组合任务(TRIGGER_DIR/LONG_SHORT_OVR)专用：在给定的 df(通常是回测区间的数据)上，
-        对每个子模型单独跑一遍预测并计算指标——而不是只看融合后的 3 类结果。
+        Composite tasks (TRIGGER_DIRECTION/LONG_SHORT_OVR) only: on the given df (usually the backtest range),
+        run every sub-model separately and compute its metrics, instead of only looking at the fused 3-class result.
 
-        标签映射复用 train.prepare_binary_data_for_task，保证和训练时的二分类
-        任务定义(trigger: 是否有动作；direction: long/short；long_ovr/short_ovr: OvR)
-        完全一致，而不是临时发明一套映射。
+        The label mapping reuses model.tasks.strategies.BinaryTask.transform_split, so it matches the binary task
+        definitions used during training (trigger: is there an action; direction: long/short; long_ovr/short_ovr: OvR)
+        exactly, instead of inventing a mapping on the spot.
 
-        非组合任务(self.loaded_sub_models 为空)时返回 {}。
+        Returns {} for non composite tasks (self.loaded_sub_models empty).
         """
         if not self.loaded_sub_models:
             return {}
 
-        from model.train import prepare_binary_data_for_task
+        from model.tasks.strategies import BinaryTask
+        from model.train_config import TrainConfig
+        from model.training_types import TensorSplit
 
         results = {}
         for name, sub_model in self.loaded_sub_models.items():
@@ -243,7 +210,10 @@ class ModelHandler(MetaConfig):
                 results[name] = {}
                 continue
 
-            X_t, y_t, _ = prepare_binary_data_for_task(ds.X, ds.y, ds.returns, sub_task_type)
+            transformed = BinaryTask(sub_task_type, TrainConfig(), self.device).transform_split(
+                TensorSplit(ds.X, ds.y, ds.returns)
+            )
+            X_t, y_t = transformed.X, transformed.y
             if len(y_t) == 0:
                 results[name] = {}
                 continue
@@ -259,9 +229,9 @@ class ModelHandler(MetaConfig):
             y_true = y_t.cpu().numpy()
 
             stats = self.evaluate_performance(y_true, y_pred)
-            # "signal"（short/long win rate 等）是按 3 类 Short/Neutral/Long 的 Signal
-            # 枚举语义写的，子模型这里是各自的二分类标签(0/1)，语义对不上，
-            # 直接展示会误导，故只保留通用的分类指标。
+            # "signal" (short/long win rate etc.) is written against the 3-class Short/Neutral/Long
+            # Signal semantics, while a sub-model here has its own binary labels (0/1). The semantics
+            # do not line up and showing them would mislead, so only the generic classification metrics are kept.
             stats.pop("signal", None)
 
             results[name] = {
@@ -317,7 +287,7 @@ class ModelHandler(MetaConfig):
         with torch.no_grad():
             for xb, _, _ in dl:
                 xb = xb.to(self.device)
-                _, fused_probs = self.model(xb, return_fused=True) 
+                _, fused_probs = self.model(xb)
                 
                 # Convert to numpy for downstream processing
                 probs_list.append(fused_probs.cpu().numpy())
@@ -407,7 +377,7 @@ class ModelHandler(MetaConfig):
         with torch.no_grad():
             for xb, _, _ in dl:
                 xb = xb.to(self.device)
-                _, fused_probs = self.model(xb, return_fused=True) 
+                _, fused_probs = self.model(xb)
                 
                 # Convert to numpy for downstream processing
                 probs_list.append(fused_probs.cpu().numpy())
@@ -512,8 +482,8 @@ class ModelHandler(MetaConfig):
         with torch.no_grad():
             for xb, _ in dl:
                 xb = xb.to(self.device)
-                # Call fused interface to get [B, 3] probability distribution
-                _, fused_probs = self.model(xb, return_fused=True) 
+                # Common inference interface returns a [B, 3] probability distribution.
+                _, fused_probs = self.model(xb)
                 probs_list.append(fused_probs.cpu().numpy())
         
         if not probs_list:
@@ -670,7 +640,7 @@ class ModelHandler(MetaConfig):
         stats["label_distribution_true"] = {int(k): int(v) for k, v in zip(unique_t, cnt_t)}
         stats["label_distribution_pred"] = {int(k): int(v) for k, v in zip(unique_p, cnt_p)}
 
-        # 2. 核心修改：增加类别比例 (Proportions)
+        # 2. Core change: add the class proportions
         n_total_true = len(y_true)
         if n_total_true > 0:
             stats["label_proportions_true"] = {
@@ -717,7 +687,7 @@ class ModelHandler(MetaConfig):
         Construct dataset using the primary sub-model's configuration.
         This is useful for external modules that want to reuse the same dataset logic.
         """ 
-        # 这行代码直接替代你原来的 ds = [None, None] 和循环
+        # This line replaces your original ds = [None, None] plus the loop
         ds = {}
         for key, conf in self.sub_model_conf.items():
             self.logger.info(f"Constructing dataset using sub-model '{key}' configuration...")
@@ -736,18 +706,18 @@ class ModelHandler(MetaConfig):
 
     def generate_config_hash(feature_cols: list, seq_len: int):
         """
-        将特征列表和窗口大小融合，生成唯一的配置哈希
+        Combine the feature list and the window size into a unique configuration hash
         """
-        # 1. 构造一个包含所有核心信息的字典或元组
-        # 确保特征列表是有序的（如果模型输入依赖顺序）
+        # 1. Build a dict or tuple carrying every piece of core information
+        # Make sure the feature list is ordered (if the model input depends on the order)
         config_dict = {
             "features": feature_cols,
             "seq_len": seq_len
         }
         
-        # 2. 序列化为稳定的 JSON 字符串
-        # sort_keys=True 非常关键，确保字典键的顺序不影响结果
+        # 2. Serialize into a stable JSON string
+        # sort_keys=True is essential, so the dict key order cannot change the result
         config_str = json.dumps(config_dict, sort_keys=True).encode('utf-8')
         
-        # 3. 计算 SHA256 (比 MD5 更安全，抗碰撞能力更强)
+        # 3. Compute the SHA256 (safer than MD5, more collision resistant)
         return hashlib.sha256(config_str).hexdigest()

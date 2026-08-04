@@ -10,10 +10,10 @@ def add_spread_and_fee_features(
     use_price: str = "open",        # "open" or "close"
 ):
     """
-    根据 bid/ask OHLC 计算 spread 和近似单边手续费。
+    Spread and approximate one-way commission from the bid/ask OHLC.
 
     spread_abs:
-        ask - bid，价格单位，例如 XAUUSD 中是 USD / XAU
+        ask - bid, in price units, e.g. USD / XAU for XAUUSD
 
     spread_pct:
         spread_abs / mid_price
@@ -25,8 +25,8 @@ def add_spread_and_fee_features(
         spread_pct / 2
 
     single_side_fee_per_volume:
-        单边 spread 成本，按 1 volume 计算。
-        若 1 volume = 100 XAU，则：
+        One-way spread cost, computed for 1 volume.
+        With 1 volume = 100 XAU that gives:
         fee = spread / 2 * 100
     """
 
@@ -42,12 +42,12 @@ def add_spread_and_fee_features(
     if missing:
         raise ValueError(f"Missing columns: {missing}")
 
-    # 转成数值
+    # Convert to numbers
     for col in required_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # =========================
-    # 1. 计算 OHLC mid
+    # 1. OHLC mid
     # =========================
     df["open_mid"] = (df["open_bid"] + df["open_ask"]) / 2
     df["high_mid"] = (df["high_bid"] + df["high_ask"]) / 2
@@ -55,14 +55,14 @@ def add_spread_and_fee_features(
     df["close_mid"] = (df["close_bid"] + df["close_ask"]) / 2
 
     # =========================
-    # 2. 计算 OHLC spread
+    # 2. OHLC spread
     # =========================
     df["spread_open"] = df["open_ask"] - df["open_bid"]
     df["spread_high"] = df["high_ask"] - df["high_bid"]
     df["spread_low"] = df["low_ask"] - df["low_bid"]
     df["spread_close"] = df["close_ask"] - df["close_bid"]
 
-    # 相对 spread
+    # Relative spread
     eps = 1e-12
 
     df["spread_open_pct"] = df["spread_open"] / (df["open_mid"] + eps)
@@ -71,7 +71,7 @@ def add_spread_and_fee_features(
     df["spread_close_pct"] = df["spread_close"] / (df["close_mid"] + eps)
 
     # =========================
-    # 3. 选择用于近似手续费的 spread
+    # 3. Pick the spread used to approximate the commission
     # =========================
     if use_price == "open":
         spread_col = "spread_open"
@@ -84,17 +84,17 @@ def add_spread_and_fee_features(
     else:
         raise ValueError("use_price must be 'open' or 'close'")
 
-    # 单边 spread 成本
+    # One-way spread cost
     df["single_side_spread_abs"] = df[spread_col] / 2
     df["single_side_spread_pct"] = df[spread_pct_col] / 2
 
-    # 每 1 volume 的近似单边 spread 成本
+    # Approximate one-way spread cost per 1 volume
     # XAUUSD: 1 volume = 100 XAU
     df["single_side_spread_fee_per_volume"] = (
         df["single_side_spread_abs"] * contract_size
     )
 
-    # 双边 spread 成本
+    # Two-way spread cost
     df["round_turn_spread_abs"] = df[spread_col]
     df["round_turn_spread_pct"] = df[spread_pct_col]
     df["round_turn_spread_fee_per_volume"] = (
@@ -102,7 +102,7 @@ def add_spread_and_fee_features(
     )
 
     # =========================
-    # 4. 输出统计
+    # 4. Print the statistics
     # =========================
     stat_cols = [
         spread_col,
@@ -124,7 +124,7 @@ def add_spread_and_fee_features(
 
     print(summary)
 
-    # 输出文件
+    # Output file
     if output_file is not None:
         output_file = Path(output_file)
         df.to_csv(output_file, index=False)
@@ -140,5 +140,5 @@ if __name__ == "__main__":
         input_file=input_file,
         output_file=None,
         contract_size=100.0,   # 1 volume = 100 XAU
-        use_price="open",      # 用 open_bid/open_ask 计算近似开仓 spread
+        use_price="open",      # use open_bid/open_ask for the approximate opening spread
     )

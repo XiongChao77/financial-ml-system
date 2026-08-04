@@ -133,7 +133,7 @@ class LSTM1D_V3(BaseTimeSeriesModel):
         idx = torch.arange(T, device=device).unsqueeze(0)  # [1, T]
         return idx < lengths.unsqueeze(1)  # [B, T]
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None, return_fused = False):
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None):
         """
         x: [B, T, F]
         lengths (optional): [B] actual lengths before padding.
@@ -185,27 +185,6 @@ class LSTM1D_V3(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        # Change 3: hierarchical probability fusion
-        if return_fused:
-            # Compute per-head probabilities (softmax)
-            p_trig = torch.softmax(logits_trig, dim=1) # [p_hold, p_act]
-            p_dir = torch.softmax(logits_dir, dim=1)   # [p_short_in_act, p_long_in_act]
-            
-            # Compose 3-class probabilities
-            # Class 1 (Neutral) = p_hold
-            # Class 0 (Short)   = p_act * p_short_in_act
-            # Class 2 (Long)    = p_act * p_long_in_act
-            p_neutral = p_trig[:, 0]
-            p_act     = p_trig[:, 1]
-            p_short   = p_act * p_dir[:, 0]
-            p_long    = p_act * p_dir[:, 1]
-            
-            # Order: [Short(0), Neutral(1), Long(2)]
-            fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
-            fused_preds = torch.argmax(fused_probs, dim=1)
-            
-            return fused_preds, fused_probs
-        
         return logits_trig, logits_dir
 
     # ============================================================

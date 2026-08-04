@@ -620,9 +620,10 @@ def main():
     exp_dir14 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_1h','2026-04-18','19_11_25')
     exp_dir3 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','18_41_56')
     exp_dir4 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','20_17_30')
-    exp_dir_list = [exp_dir16]
+    exp_dir17= os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-08-02','20_56_16')
+    exp_dir_list = [exp_dir17]
     filter_report = None
-    filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
+    # filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
     rows = []
     records = []
@@ -651,12 +652,12 @@ def main():
         save_raw_reports(uin_records,output_dir, "filtered_raw_reports.jsonl")
         exit()
     analyze_holdbar(uin_records,target_key="stride",period ='long', metric_key="cagr")
-    analyze_holdbar(uin_records,target_key="holdbar",period ='long', metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="min_hold_bars",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="seq_len",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="vol_ewma_span", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="predict_num", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='long',metric_key="cagr")
-    analyze_holdbar(uin_records,target_key="atr_sl_mult_long", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="atr_sl_long_mult", period ='long',metric_key="cagr")
     # analyze_model_performance_correlation(uin_records)
     # analyze_model_metrics_by_decile(uin_records)
     # exit()
@@ -831,11 +832,11 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         #     group_1_data.append(row)
         # elif vol == 1.7:
         #     group_2_data.append(row)
-        holdbar = row["report"]["params"]["common"]["holdbar"]
-        holdbar = row["report"]["params"]["strategy"]["holdbar"]
-        if holdbar == 20 and holdbar ==20:
+        min_hold_bars = row["report"]["params"]["common"]["min_hold_bars"]
+        min_hold_bars = row["report"]["params"]["strategy"]["min_hold_bars"]
+        if min_hold_bars == 20 and min_hold_bars ==20:
             group_1_data.append(row)
-        elif holdbar == 20 and holdbar ==16:
+        elif min_hold_bars == 20 and min_hold_bars ==16:
             group_2_data.append(row)
 
     # 2. Internal metric extractor
@@ -1076,7 +1077,7 @@ def find_key_path(obj, target_key, path=None):
     Recursively find the path of target_key in a nested object.
     Returns a path list which can be used to directly index the value.
     
-    Example: find_key_path(report, "holdbar") returns ["params", "common", "holdbar"]
+    Example: find_key_path(report, "min_hold_bars") returns ["params", "common", "min_hold_bars"]
     """
     if path is None:
         path = []
@@ -1101,7 +1102,7 @@ def get_value_by_path(obj, path):
     """
     Get a value from an object using a path list.
     
-    Example: get_value_by_path(report, ["params", "common", "holdbar"])
+    Example: get_value_by_path(report, ["params", "common", "min_hold_bars"])
     """
     current = obj
     try:
@@ -1112,7 +1113,7 @@ def get_value_by_path(obj, path):
         return None
 
 
-def analyze_holdbar(records, target_key="holdbar", period='short', metric_key="cagr"):
+def analyze_holdbar(records, target_key="min_hold_bars", period='short', metric_key="cagr"):
     """
     Final enhanced version:
     1. Supports list-type target_key (auto sort, join, and hash).

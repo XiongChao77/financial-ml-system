@@ -21,7 +21,7 @@ from model.models.generic.transformer_v2 import Transformer1D_V2
 from model.models.generic.logistic_regression import LogisticRegressionTS_V1
 from model.models.generic.logistic_regression_v2 import LogisticRegressionTS_V2
 
-# ---- dual_head: fixed trigger(2)+direction(2) heads, fused via return_fused ----
+# ---- dual_head: fixed trigger(2)+direction(2) heads, fused by an inference wrapper ----
 # Dedicated to the "Two-Head Three-Class" branch only; not usable as a plain
 # binary or single-head 3-class classifier.
 from model.models.dual_head.tcn_v1 import TCN1D_V1

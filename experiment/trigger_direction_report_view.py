@@ -144,9 +144,9 @@ def plot_model_param_heatmaps(
             "seq_len":common.recursive_get(r, "seq_len"),
             "stride":common.recursive_get(r, "stride"),
             "predict_num":common.recursive_get(r, "predict_num"),
-            "holdbar":common.recursive_get(r, "holdbar"),
-            "atr_sl_mult_long":common.recursive_get(r, "atr_sl_mult_long"),
-            "atr_tp":common.recursive_get(r, "atr_tp"),
+            "min_hold_bars":common.recursive_get(r, "min_hold_bars"),
+            "atr_sl_long_mult":common.recursive_get(r, "atr_sl_long_mult"),
+            "atr_tp_mult":common.recursive_get(r, "atr_tp_mult"),
             }
             if key in para_meters_map:
                 return para_meters_map[key]
@@ -236,7 +236,7 @@ def plot_model_param_heatmaps(
         pivot = pivot.sort_index().sort_index(axis=1)
         pivots[model_class] = pivot
 
-        # # 单独保存每个模型一张图
+        # # Save one figure per model
         # _plot_heatmap(
         #     pivot,
         #     output_dir,
@@ -246,7 +246,7 @@ def plot_model_param_heatmaps(
         #     cmap="RdYlGn",
         # )
 
-    # ===== n 合一大图 =====
+    # ===== combined figure =====
 
     all_values = pd.concat(
         [p.stack() for p in pivots.values()],
@@ -327,7 +327,7 @@ def plot_model_param_heatmaps(
         ax.tick_params(axis="x", labelrotation=90, labelsize=max(6, annot_fontsize))
         ax.tick_params(axis="y", labelrotation=0, labelsize=max(6, annot_fontsize))
 
-    # colorbar 只放在最右边，跨所有行
+    # The colorbar sits on the far right only, spanning every row
     cbar_ax = fig.add_subplot(gs[:, -1])
 
     sm = plt.cm.ScalarMappable(
@@ -789,8 +789,8 @@ def main():
         raise RuntimeError("no report found")
     os.makedirs(output_dir, exist_ok=True)
     # performance_compare_trigger(rows, output_dir)
-    x_input = 'label_type'  # holdbar 
-    y_input = 'holdbar'
+    x_input = 'label_type'  # min_hold_bars 
+    y_input = 'min_hold_bars'
     # max_dd_pct sharpe cagr max_hwm_duration_days calmar rc_pos_ratio
     metric = 'cagr'
     higher_is_better = True

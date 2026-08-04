@@ -338,7 +338,7 @@ if __name__ == "__main__":
     parser.add_argument("--intervals", nargs='+', default=["30m"],
                         help="List of intervals: 1m 1h 1d ...")
     parser.add_argument("--dir", default=PROJECT_DATA_DIR)
-    parser.add_argument("--update", dest="update", action="store_true", default=False,
+    parser.add_argument("--update", dest="update", action="store_true", default=True,
                         help="Download/repair data (default: on)")
     parser.add_argument("--no-update", dest="update", action="store_false",
                         help="Only report gaps/status, don't download anything")

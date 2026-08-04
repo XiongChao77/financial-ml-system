@@ -111,10 +111,7 @@ class CNN1D_V1(BaseTimeSeriesModel):
             nn.Linear(128, 2)
         )
 
-    def forward(self, x, return_fused=False):
-        """
-        Supports raw 2+2 outputs and fused 3-class output.
-        """
+    def forward(self, x):
         # x: [B, T, F] -> [B, F, T]
         x = x.transpose(1, 2)
 
@@ -143,20 +140,6 @@ class CNN1D_V1(BaseTimeSeriesModel):
             logits_trig = torch.clamp(logits_trig, -self.logit_clip, self.logit_clip)
             logits_dir = torch.clamp(logits_dir, -self.logit_clip, self.logit_clip)
 
-        # Fusion: convert 2+2 into 3-class [Short(0), Neutral(1), Long(2)]
-        if return_fused:
-            p_trig = torch.softmax(logits_trig, dim=1) # [p_neutral, p_action]
-            p_dir = torch.softmax(logits_dir, dim=1)   # [p_short, p_long]
-            
-            p_neu = p_trig[:, 0]
-            p_act = p_trig[:, 1]
-            p_s   = p_act * p_dir[:, 0]
-            p_l   = p_act * p_dir[:, 1]
-            
-            fused_probs = torch.stack([p_s, p_neu, p_l], dim=1)
-            fused_preds = torch.argmax(fused_probs, dim=1)
-            return fused_preds, fused_probs
-        
         return logits_trig, logits_dir
 
     def export_meta(self, **extra):

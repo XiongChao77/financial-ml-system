@@ -44,7 +44,7 @@ async function loadData(timeframe = "") {
         }
 
         renderStats(data.statistics);
-        updateChart(data.candles, data.trade_logs , data.statistics);
+        updateChart(data.candles, data.statistics);
 
         loadingEl.style.display = "none";
 
@@ -809,7 +809,7 @@ function buildTradesByTime(rawTradeLogs) {
     return map;
 }
 
-function updateChart(candles, rawTradeLogs, statistics) {
+function updateChart(candles, statistics) {
     if (!chart) initChart();
 
     priceDecimals = inferPriceDecimals(candles);
@@ -823,7 +823,7 @@ function updateChart(candles, rawTradeLogs, statistics) {
     candleSeries.setData(candles);
     candleData = candles || [];
 
-    tradeLogs = rawTradeLogs || [];
+    tradeLogs = statistics[1].trade_logs || [];
     tradesByTime = buildTradesByTime(tradeLogs);
 
     const markers = buildTradeMarkers(tradeLogs);
@@ -968,7 +968,7 @@ function inferPriceDecimals(candles) {
 
     const avgPrice = validPrices.reduce((a, b) => a + b, 0) / validPrices.length;
 
-    // 先根据价格等级给一个基础精度
+    // Start from a base precision derived from the price magnitude
     let decimals;
     if (avgPrice >= 1000) {
         decimals = 2;
@@ -984,7 +984,7 @@ function inferPriceDecimals(candles) {
         decimals = 8;
     }
 
-    // 再根据真实价格变化补充精度
+    // Then refine it with the real price changes
     const sorted = [...new Set(validPrices.map(v => Number(v.toPrecision(12))))].sort((a, b) => a - b);
 
     let minDiff = Infinity;

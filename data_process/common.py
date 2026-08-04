@@ -62,11 +62,12 @@ class BaseDefine:
     stop_multiplier_rate_short: Optional[float] = None
     version:float = 0.1
 
+vol_multiplier = 1.8
 stop_multiplier_rate = 0.4
 DOGE_15m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="15m", trading_type='um', label_type = 'FTHL')
 DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='spot'
                       , label_type = 'FTHL',
-                      predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=1.7, stop_multiplier_rate_long=stop_multiplier_rate, vol_multiplier_short=1.7, stop_multiplier_rate_short=stop_multiplier_rate)
+                      predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=stop_multiplier_rate, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=stop_multiplier_rate)
 XLM_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="XLMUSDT", interval="30m", trading_type='um'
                       , label_type = 'FTHL',
                       predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
@@ -164,20 +165,20 @@ def add_bars_to_gap(
         df[col_name] = np.array([], dtype=float)
         return df
 
-    # 1. 转成按 interval 编号的时间序列
+    # 1. Turn it into a time series numbered by interval
     time_seq = t // interval_ms
 
-    # 2. 相邻编号差不为 1，说明当前 bar 后面有 gap
+    # 2. A difference other than 1 between neighbours means a gap follows the current bar
     gap_after = np.zeros(n, dtype=bool)
     gap_after[:-1] = np.diff(time_seq) != 1
 
-    # 3. 找到每个位置之后最近的 gap bar index
+    # 3. Find the closest gap bar index after every position
     idx = np.arange(n)
     gap_idx_marker = np.where(gap_after, idx, np.inf)
 
     next_gap_idx = np.minimum.accumulate(gap_idx_marker[::-1])[::-1]
 
-    # 4. 当前 bar 到 gap bar 的距离，gap bar 自己距离为 1
+    # 4. Distance from the current bar to the gap bar; the gap bar itself is 1
     bars_to_close = next_gap_idx - idx + 1
 
     df[col_name] = bars_to_close
@@ -331,7 +332,7 @@ def print_zret_statistics(df, label_col='label'):
 @njit(cache=True)
 def fast_triple_barrier_kernel(close, high, low, thresholds, window):
     n = len(close)
-    labels = np.ones(n, dtype=np.int32)        # 默认中性 (1)
+    labels = np.ones(n, dtype=np.int32)        # neutral (1) by default
     reach_times = np.full(n, window, dtype=np.int32) 
 
     l_tp_p = thresholds[:, 0]
@@ -342,17 +343,17 @@ def fast_triple_barrier_kernel(close, high, low, thresholds, window):
     for i in range(n - window):
         p0 = close[i]
         
-        # 独立的价格屏障
+        # Independent price barriers
         l_tp = p0 * (1 + l_tp_p[i])
         l_sl = p0 * (1 - l_sl_p[i])
         s_tp = p0 * (1 - s_tp_p[i])
         s_sl = p0 * (1 + s_sl_p[i])
         
-        # 用来记录该样本是否在窗口内达成过目标
+        # Tracks whether this sample ever hit its target inside the window
         first_l_tp = window + 1
         first_s_tp = window + 1
         
-        # 用来标记该侧是否已经由于止损而“死亡”
+        # Tracks whether this side already "died" on its stop loss
         l_active = True
         s_active = True
 
@@ -360,28 +361,28 @@ def fast_triple_barrier_kernel(close, high, low, thresholds, window):
             curr_idx = i + j
             h, l, c = high[curr_idx], low[curr_idx], close[curr_idx]
             
-            # --- 多头路径判定 ---
+            # --- long path ---
             if l_active:
-                if c >= l_tp:      # 先碰 TP
+                if c >= l_tp:      # TP hit first
                     first_l_tp = j
-                    l_active = False # 达成目标，不再更新
-                elif l <= l_sl:    # 先碰 SL
-                    l_active = False # 死亡
+                    l_active = False # target reached, stop updating
+                elif l <= l_sl:    # SL hit first
+                    l_active = False # dead
             
-            # --- 空头路径判定 ---
+            # --- short path ---
             if s_active:
-                if c <= s_tp:      # 先碰 TP
+                if c <= s_tp:      # TP hit first
                     first_s_tp = j
                     s_active = False
-                elif h >= s_sl:    # 先碰 SL
+                elif h >= s_sl:    # SL hit first
                     s_active = False
 
-            # 如果多空都已经有了结果（无论是 TP 还是 SL），提前退出
+            # Leave early once both sides have a result (TP or SL)
             if not l_active and not s_active:
                 break
 
-        # --- 最终决策 ---
-        # 只有在各自的路径中“获胜”（TP先于SL）才有资格参与比较
+        # --- final decision ---
+        # Only a side that "won" its own path (TP before SL) may take part in the comparison
         if first_l_tp <= window and first_l_tp < first_s_tp:
             labels[i] = 2 # Signal.POSITIVE
             reach_times[i] = first_l_tp
@@ -390,15 +391,15 @@ def fast_triple_barrier_kernel(close, high, low, thresholds, window):
             reach_times[i] = first_s_tp
         else:
             labels[i] = 1 # Signal.NEUTRAL
-            # reach_times 保持默认值或设为第一次发生 SL 的时间
+            # reach_times keeps its default or is set to the time of the first SL
             
     return labels, reach_times
 
 def attach_triple_barrier_label(df, para=BaseDefine, label_col = 'label'):
-    # 1. 获取基础阈值
+    # 1. Base thresholds
     df = calculate_thresholds(df, para)
     
-    # 2. 准备底层数据
+    # 2. Prepare the underlying data
     close = df['close'].values.astype(np.float64)
     high = df['high'].values.astype(np.float64)
     low = df['low'].values.astype(np.float64)
@@ -412,17 +413,17 @@ def attach_triple_barrier_label(df, para=BaseDefine, label_col = 'label'):
     
     window = int(para.predict_num)
     
-    # 3. 调用 Numba 加速计算
+    # 3. Call the numba accelerated kernel
     labels, reach_times = fast_triple_barrier_kernel(
         close, high, low, thresholds, window
     )
     
-    # 4. 写入结果
+    # 4. Write the results back
     df[label_col] = labels
     df['reach_time'] = reach_times
     
-    # 5. 物理时间校验 (掩码处理)
-    # 确保在 predict_num 步之后的时间戳与物理时间对齐
+    # 5. Physical time check (masking)
+    # Makes sure the timestamp predict_num steps later lines up with physical time
     interval_ms = get_interval_ms(para.interval)
     time_values = df['open_time_ms_utc'].values
     target_times = time_values + (window * interval_ms)
@@ -433,9 +434,9 @@ def attach_triple_barrier_label(df, para=BaseDefine, label_col = 'label'):
     valid_idx = np.where(in_bounds)[0]
     time_match[valid_idx] = (time_values[target_indices[valid_idx]] == target_times[valid_idx])
     
-    # 处理无效行
+    # Handle the invalid rows
     df.loc[~time_match, label_col] = -1       # Signal.INVALID
-    df.loc[~time_match, 'reach_time'] = -1  # 无效到达时间
+    df.loc[~time_match, 'reach_time'] = -1  # invalid reach time
     
     return df
 
@@ -698,13 +699,13 @@ def attach_triple_barrier_trend_label(
 
 def print_label_performance_stats(df, para=BaseDefine):
     """
-    打印标签分布及到达时间的深度统计信息
+    Print the label distribution and detailed statistics of the reach time
     """
     print("\n" + "="*20 + " 📊 Triple Barrier Statistics " + "="*20)
     
-    # 1. 基础信息
+    # 1. Basic information
     total_len = len(df)
-    valid_df = df[df['label'] != -1].copy() # 排除 INVALID (-1)
+    valid_df = df[df['label'] != -1].copy() # drop INVALID (-1)
     predict_num = para.predict_num
     
     print(f"Total Samples: {total_len}")
@@ -712,7 +713,7 @@ def print_label_performance_stats(df, para=BaseDefine):
     print(f"Max Window (predict_num): {predict_num}")
     print("-" * 50)
 
-    # 2. 标签分布统计
+    # 2. Label distribution
     label_counts = valid_df['label'].value_counts().sort_index()
     label_map = {0: "NEGATIVE (Short Win)", 1: "NEUTRAL (Time-out/SL)", 2: "POSITIVE (Long Win)"}
     
@@ -724,29 +725,29 @@ def print_label_performance_stats(df, para=BaseDefine):
     
     print("-" * 50)
 
-    # 3. Reach Time 统计 (针对非中性标签)
+    # 3. Reach time statistics (non neutral labels only)
     print("⏱️ Reach Time Descriptive Statistics (Steps):")
     
-    # 分组计算 reach_time 的描述性统计
+    # Descriptive statistics of reach_time per group
     stats = valid_df.groupby('label')['reach_time'].describe(
         percentiles=[0.25, 0.5, 0.75, 0.9]
     )
-    # 重命名索引方便阅读
+    # Rename the index for readability
     stats.index = stats.index.map(label_map)
     print(stats[['count', 'mean', 'min', '50%', '90%', 'max']])
 
-    # 4. 效率分析：快速触发 vs 慢速触发
+    # 4. Efficiency analysis: fast trigger vs slow trigger
     print("\n🚀 Efficiency Analysis (Speed of Signal):")
     for lbl in [0, 2]:
         sub = valid_df[valid_df['label'] == lbl]
         if len(sub) > 0:
             name = label_map[lbl]
-            # 定义“快速触发”为在窗口前 25% 的时间内就达标
+            # A "fast trigger" is defined as reaching the target within the first 25% of the window
             fast_threshold = predict_num * 0.25
             fast_hits = len(sub[sub['reach_time'] <= fast_threshold])
             fast_pct = (fast_hits / len(sub)) * 100
             
-            # 定义“压哨触发”为在窗口最后 10% 的时间内才达标
+            # A "buzzer beater" is defined as reaching it only in the last 10% of the window
             slow_threshold = predict_num * 0.9
             slow_hits = len(sub[sub['reach_time'] >= slow_threshold])
             

@@ -2,26 +2,27 @@ import pandas as pd
 import logging
 import math
 from datetime import datetime
-from trade.strategy.strategy_ml import BrainBase, TradingAction, ActionType, PositionDir
-from trade.strategy.base_executor import BaseExecutor
+from trade.core.protocol import TradeIntent, ActionType, PositionDir
+from trade.core.strategy_base import StrategyBase
+from trade.core.venue_base import VenueBase
 
-class RulesBrain(BrainBase):
-    def __init__(self, executor: BaseExecutor, **kwargs):
-        super().__init__(executor)
-        # --- 基础参数 ---
+class RulesStrategy(StrategyBase):
+    def __init__(self, venue: VenueBase, **kwargs):
+        super().__init__(venue)
+        # --- basic parameters ---
         self.entry_period = kwargs.get('entry_period', 20)
         self.exit_period = kwargs.get('exit_period', 10)
         self.atr_period = kwargs.get('atr_period', 20)
         self.max_layers = kwargs.get('max_layers', 1)
         
-        # --- 核心风控参数 (同步自 TurtleBrain) ---
-        self.risk_per_trade = kwargs.get('risk_per_trade', 0.01)     # 单层风险 (1%)
-        self.max_daily_loss_pct = kwargs.get('max_daily_loss_pct', 0.035) # 日亏损上限 (4.5%)
-        self.unit_pct_scale = kwargs.get('unit_pct_scale', 1.9)      # 资金利用率缩放
-        self.upper_limit = kwargs.get('upper_limit', 0.6)            # 单层名义价值上限
+        # --- core risk parameters (kept in sync with TurtleStrategy) ---
+        self.risk_per_trade = kwargs.get('risk_per_trade', 0.01)     # risk per layer (1%)
+        self.max_daily_loss_pct = kwargs.get('max_daily_loss_pct', 0.035) # daily loss cap (4.5%)
+        self.unit_pct_scale = kwargs.get('unit_pct_scale', 1.9)      # capital usage scaling
+        self.upper_limit = kwargs.get('upper_limit', 0.6)            # notional cap per layer
         self.pyramid_gap_atr = kwargs.get('pyramid_gap_atr', 0.5)
 
-        # --- 状态管理 ---
+        # --- state ---
         self.day_start_equity = None
         self.last_trade_date = None
         self.is_halted_today = False
@@ -29,10 +30,10 @@ class RulesBrain(BrainBase):
         self.layer_sizes = []  
         self.last_order_price = 0.0
         
-        self.logger = logging.getLogger("RulesBrain")
+        self.logger = logging.getLogger("RulesStrategy")
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """保持原有计算逻辑，确保 ATR 与唐奇安通道对齐"""
+        """Keeps the original computation so ATR stays aligned with the Donchian channel"""
         required = ['atr', 'entry_high', 'entry_low', 'exit_high', 'exit_low']
         if all(col in df.columns for col in required): return df
 
@@ -55,22 +56,22 @@ class RulesBrain(BrainBase):
         return df
 
     def _update_daily_equity(self, current_time: datetime, account_equity: float):
-        """日内净值更新与熔断重置"""
+        """Daily equity update and circuit breaker reset"""
         current_date = current_time.date()
         if self.last_trade_date != current_date:
             self.day_start_equity = account_equity
             self.last_trade_date = current_date
             self.is_halted_today = False
 
-    def decide(self, df: pd.DataFrame, current_time: datetime, account_equity: float, 
-               curr_dir: PositionDir, curr_pos_qty: float) -> TradingAction:
+    def process(self, df: pd.DataFrame, current_time: datetime, account_equity: float, 
+               curr_dir: PositionDir, curr_pos_qty: float) -> TradeIntent:
         
-        if len(df) < self.entry_period: return TradingAction(ActionType.HOLD)
+        if len(df) < self.entry_period: return TradeIntent(ActionType.HOLD)
 
-        # 1. 每日风险审计与熔断机制 (Sync from TurtleBrain)
+        # 1. Daily risk audit and circuit breaker (sync from TurtleStrategy)
         self._update_daily_equity(current_time, account_equity)
         if self.is_halted_today:
-            return TradingAction(ActionType.HOLD)
+            return TradeIntent(ActionType.HOLD)
 
         daily_loss_abs = max(0.0, self.day_start_equity - account_equity)
         max_loss_allowed_abs = self.day_start_equity * self.max_daily_loss_pct
@@ -79,12 +80,12 @@ class RulesBrain(BrainBase):
         if daily_loss_abs >= max_loss_allowed_abs:
             self.is_halted_today = True
             self.logger.warning(f"🚨 [MELTDOWN] 日亏损触及上限! 亏损: {daily_loss_abs/self.day_start_equity:.2f}, 强平离场。| Price: {df['close'].iloc[-1]}")
-            self.executor.user_close()
-            return TradingAction(ActionType.CLOSE)
+            self.venue.close_position()
+            return TradeIntent(ActionType.CLOSE)
 
-        # 2. 状态对齐 (保持 RulesBrain 特有的 Precision Reconciliation)
+        # 2. State reconciliation (RulesStrategy specific precision reconciliation)
         df = self._calculate_indicators(df)
-        self._check_gaps(df, current_time) # 调用封装的检测函数
+        self._check_gaps(df, current_time) # call the gap detection helper
         curr_row = df.iloc[-1]
         current_price = curr_row['close']
         atr = curr_row['atr']
@@ -103,40 +104,40 @@ class RulesBrain(BrainBase):
                     self.logger.error(f"⚠️ [仓位脱节] 无法匹配层级！实际:{abs_qty:.4f}")
                     self.curr_layers = self.max_layers 
 
-        # 3. 核心数学锚定：Unit 计算与动态止损 (Optimized)
-        # 计算理论 Unit (基于风险百分比和 2*ATR)
+        # 3. Core anchoring: unit sizing and dynamic stop loss (optimized)
+        # Theoretical unit (from the risk percentage and 2*ATR)
         # Unit Shares = (Balance * Risk) / (2 * ATR)
-        if atr <= 0: return TradingAction(ActionType.HOLD)
+        if atr <= 0: return TradeIntent(ActionType.HOLD)
         
         raw_unit_shares = (account_equity * self.risk_per_trade) / (2.0 * atr)
         
-        # 名义价值约束 (Nominal Value Constraint)
+        # Nominal value constraint
         unit_nominal_pct = (raw_unit_shares * current_price) / account_equity
         if unit_nominal_pct > self.upper_limit:
             unit_nominal_pct = self.upper_limit
         
-        # 最终执行股数 (应用 scale)
+        # Final order size (scale applied)
         final_unit_shares = (unit_nominal_pct * account_equity * self.unit_pct_scale) / current_price
         
-        # 预算约束止损 (Budget-Constrained Stop Loss)
-        # 计算加仓后预估的总仓位名义价值占比
+        # Budget-constrained stop loss
+        # Estimated total notional share after adding this layer
         target_layers = min(self.curr_layers + 1, self.max_layers)
         total_nominal_val = (unit_nominal_pct * self.unit_pct_scale) * target_layers * account_equity
         
-        # 基于剩余日内预算计算出的最大允许止损比例 (0.8 为滑点安全系数)
+        # Largest stop loss share allowed by the remaining daily budget (0.8 = slippage safety factor)
         max_sl_ratio = (remaining_budget / total_nominal_val) * 0.8 if total_nominal_val > 0 else 0.05
         turtle_sl_ratio = (2.0 * atr) / current_price
         
-        # 取两者最小值，确保止损既符合海龟法则，又不突破日内熔断预算
+        # Take the smaller of the two so the stop obeys the turtle rule and the daily breaker budget
         final_sl_pct = min(turtle_sl_ratio, max_sl_ratio)
 
-        # 4. 出场判断
+        # 4. Exit check
         if (curr_dir == PositionDir.POSITIVE  and current_price < curr_row['exit_low']) or \
            (curr_dir == PositionDir.NEGATIVE and current_price > curr_row['exit_high']):
-            self.executor.user_close()
-            return TradingAction(ActionType.CLOSE)
+            self.venue.close_position()
+            return TradeIntent(ActionType.CLOSE)
 
-        # 5. 进场与加仓判定 (使用优化后的 Unit 和 SL)
+        # 5. Entry and pyramiding check (with the optimized unit and SL)
         if curr_dir == PositionDir.FLAT:
             is_long = current_price > curr_row['entry_high']
             is_short = current_price < curr_row['entry_low']
@@ -145,8 +146,8 @@ class RulesBrain(BrainBase):
                 self.last_order_price, self.curr_layers = current_price, 1
                 direction = 'long' if  is_long else 'short'
                 self.logger.debug(f"🐢 [ENTRY] SL_Pct: {final_sl_pct:.2%} | {direction} | Shares: {final_unit_shares:.4f}")
-                self.executor.user_order(final_unit_shares, is_buy=is_long, stop_loss=final_sl_pct)
-                return TradingAction(ActionType.OPEN)
+                self.venue.submit_order(final_unit_shares, is_buy=is_long, stop_loss=final_sl_pct)
+                return TradeIntent(ActionType.OPEN)
 
         elif self.curr_layers < self.max_layers:
             threshold = self.pyramid_gap_atr * atr
@@ -157,13 +158,13 @@ class RulesBrain(BrainBase):
                 self.last_order_price, self.curr_layers = current_price, len(self.layer_sizes)
                 direction = 'long' if  curr_dir == PositionDir.POSITIVE  else 'short'
                 self.logger.info(f"➕ [PYRAMID] Layer: {self.curr_layers} | SL_Pct: {final_sl_pct:.2%} | {direction} ")
-                self.executor.user_order(final_unit_shares, is_buy=(curr_dir == PositionDir.POSITIVE ), stop_loss=final_sl_pct)
-                return TradingAction(ActionType.PYRAMID)
+                self.venue.submit_order(final_unit_shares, is_buy=(curr_dir == PositionDir.POSITIVE ), stop_loss=final_sl_pct)
+                return TradeIntent(ActionType.PYRAMID)
 
-        return TradingAction(ActionType.HOLD)
+        return TradeIntent(ActionType.HOLD)
 
     def _find_matched_layers(self, abs_qty):
-        """保持原有的双向层级匹配逻辑"""
+        """Keeps the original two-sided layer matching logic"""
         if not self.layer_sizes: return 0, True
         cum_forward = 0.0
         for i, size in enumerate(self.layer_sizes):
@@ -177,7 +178,7 @@ class RulesBrain(BrainBase):
     
     def _check_gaps(self, df: pd.DataFrame, current_time: datetime):
         """
-        检测价格跳空（Price Gap）和时间跳空（Time Gap）
+        Detect price gaps and time gaps
         """
         if len(df) < 2:
             return
@@ -185,13 +186,13 @@ class RulesBrain(BrainBase):
         last_row = df.iloc[-1]
         prev_row = df.iloc[-2]
         
-        # --- 1. 价格跳空检测 (Price Gap) ---
+        # --- 1. Price gap detection ---
         current_open = last_row['open']
         prev_close = prev_row['close']
         gap_price_pct = (current_open - prev_close) / prev_close if prev_close > 0 else 0
         
-        # 获取时间戳
-        # last_row.name 通常是当前 K 线的时间，prev_row.name 是上一根的时间
+        # Timestamps
+        # last_row.name is usually the time of the current kline, prev_row.name the previous one
         curr_time_str = last_row.name.strftime('%Y-%m-%d %H:%M') if hasattr(last_row.name, 'strftime') else str(last_row.name)
         prev_time_str = prev_row.name.strftime('%Y-%m-%d %H:%M') if hasattr(prev_row.name, 'strftime') else str(prev_row.name)
 
@@ -206,15 +207,15 @@ class RulesBrain(BrainBase):
             )
 
         if False:
-            # --- 2. 时间跳空检测 (Time Gap) ---
-            # 定义：当前 K 线时间与前一根 K 线时间之间的间隔是否符合预期（如 4h）
-            # 注意：df 的 index 必须是 datetime 类型
+            # --- 2. Time gap detection ---
+            # Definition: does the interval between this kline and the previous one match expectation (e.g. 4h)
+            # Note: the df index must be of datetime type
             current_ts = last_row.name if isinstance(last_row.name, datetime) else current_time
             prev_ts = prev_row.name
             
             if isinstance(current_ts, datetime) and isinstance(prev_ts, datetime):
                 time_delta = current_ts - prev_ts
-                # 根据 simulation_typical.py 中的设置，预期间隔通常为 4小时
+                # Per the setup in simulation_typical.py the expected interval is usually 4 hours
                 expected_delta = pd.Timedelta(hours=4) 
                 
                 if time_delta > expected_delta:

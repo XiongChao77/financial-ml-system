@@ -3,7 +3,38 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 
+from model.models.fusion import (
+    fuse_trigger_direction_logits,
+    probabilities_to_logits,
+)
 from model.train_config import TrainTask
+
+
+class DirectThreeClassInferenceWrapper(nn.Module):
+    """Expose a stable (logits, probabilities) interface for direct classifiers."""
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        logits = self.model(x)
+        probabilities = torch.softmax(logits, dim=1)
+        return logits, probabilities
+
+
+class DualHeadInferenceWrapper(nn.Module):
+    """Fuse a dual-head model's raw outputs for three-class inference."""
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        trigger_logits, direction_logits = self.model(x)
+        probabilities = fuse_trigger_direction_logits(trigger_logits, direction_logits)
+        return probabilities_to_logits(probabilities), probabilities
+
 
 class FusionWrapper(nn.Module):
     """
@@ -17,7 +48,7 @@ class FusionWrapper(nn.Module):
         # but we don't need to save this wrapper's state_dict
         self.models = nn.ModuleDict(models_dict)
 
-    def forward(self, x: torch.Tensor, return_fused: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.task_type == TrainTask.TRIGGER_DIRECTION:
             return self._forward_trigger_direction(x)
         if self.task_type == TrainTask.LONG_SHORT_OVR:
@@ -27,22 +58,13 @@ class FusionWrapper(nn.Module):
     def _forward_trigger_direction(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # 1. Trigger Inference
         logits_trig = self.models["trigger"](x)
-        probs_trig = torch.softmax(logits_trig, dim=1) # [B, 2] (0:Neutral, 1:Action)
-        
+
         # 2. Direction Inference
         logits_dir = self.models["direction"](x)
-        probs_dir = torch.softmax(logits_dir, dim=1)   # [B, 2] (0:Short, 1:Long)
-        
+
         # 3. Fusion Logic
-        p_neutral = probs_trig[:, 0]
-        p_action  = probs_trig[:, 1]
-        
-        p_short = p_action * probs_dir[:, 0]
-        p_long  = p_action * probs_dir[:, 1]
-        
-        # Stack: [Short, Neutral, Long]
-        fused_probs = torch.stack([p_short, p_neutral, p_long], dim=1)
-        fused_logits = torch.log(fused_probs.clamp_min(1e-8))
+        fused_probs = fuse_trigger_direction_logits(logits_trig, logits_dir)
+        fused_logits = probabilities_to_logits(fused_probs)
         
         return fused_logits, fused_probs
 
@@ -61,5 +83,5 @@ class FusionWrapper(nn.Module):
         p_long_only = p_long * (1.0 - p_short)
         p_neutral = (1.0 - p_short) * (1.0 - p_long) + p_short * p_long
         fused_probs = torch.stack((p_short_only, p_neutral, p_long_only), dim=1)
-        fused_logits = torch.log(fused_probs.clamp_min(1e-8))
+        fused_logits = probabilities_to_logits(fused_probs)
         return fused_logits, fused_probs
