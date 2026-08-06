@@ -1,17 +1,28 @@
 # Machine Learning Trading System
 
-An end-to-end quantitative trading system built around market data processing, feature engineering, machine-learning signal generation, backtesting, risk control, and visualization.
+An end-to-end quantitative trading system built around market data processing, feature engineering, machine-learning signal generation, cross-period and cross-asset backtesting, risk control, and visualization.
 
-## Overview
-Core workflow includes:
+## Architecture
 
-1. Downloading and preprocessing historical market data.
-2. Building relative, volatility-aware, and market-state-aware features.
-3. Training machine-learning models for long and short signal prediction.
-4. Evaluating model outputs with both ML metrics and trading-oriented metrics.
-5. Converting model predictions into strategy actions.
-6. Running backtests with fees, drawdown, position logic, and risk constraints.
-7. Visualizing model signals and strategy behavior through a local UI.
+```mermaid
+flowchart LR
+    DATA["Market Data"] --> MODEL["Model<br/>features + prediction"]
+    MODEL --> SIGNAL["Trading Signal"]
+    SIGNAL --> STRATEGY["Strategy"]
+    STRATEGY --> BACKTEST["Backtest Venue"]
+    BACKTEST --> VALIDATE["Cross-test<br/>different periods + assets"]
+    VALIDATE -->|"pass"| LIVE["Live Venue<br/>MT5 / Bybit"]
+    STRATEGY -.->|"same strategy + config"| LIVE
+    LIVE --> ORDER["Live Order"]
+```
+
+The model layer turns market data into trading signals. The strategy decides how to act on
+those signals. Before live deployment, the strategy is cross-tested on various periods
+and different assets. A strategy that passes this gate can be connected unchanged to a live
+venue; only the data feed and order adapter is replaced.
+
+- [Model architecture](model/readme.md#architecture)
+- [Trading architecture](trade/readme.md#trading-architecture-one-strategy-multiple-venues)
 
 ## Running
 ### 1. Data Process
@@ -47,7 +58,27 @@ cd trade/bt
 python simulation.py
 ```
 
-### 4. Web UI:
+### 4. Live Trading
+
+A strategy that passes cross-period and cross-asset validation can be deployed without
+changing its decision logic. The live venue replaces simulated state and fills with broker
+or exchange state and real orders.
+
+Configure credentials, symbol mapping, leverage, and risk limits before starting a live
+entry point. Use a demo or paper-trading account before committing capital.
+
+```bash
+# MT5 / FTMO
+python -m trade.venue.live.ftmo.market_ml
+
+# Bybit
+python -m trade.venue.live.bybit.bybit_turtle
+```
+
+Passing historical cross-tests reduces overfitting risk but does not guarantee future
+performance. Live monitoring and risk limits remain mandatory.
+
+### 5. Web UI:
 Launch the interactive dashboard for visualizing strategy performance, trading history, and market data.
 **Backend**
 ```bash
@@ -71,7 +102,7 @@ npm run dev
 <img src="figures/trading_details.png" alt="Trading details view" width="800">
 </p>
 
-### 5. Batch Experiments
+### 6. Batch Experiments
 Run large-scale experiments to compare different models, features, labeling methods, and trading strategies.
 ```bash
 cd experiment

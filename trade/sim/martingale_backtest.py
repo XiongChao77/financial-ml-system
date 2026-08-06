@@ -29,7 +29,6 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", ".."))
 
 from data_process import common
-from trade.sim.market_analysis import MarketAnalysisParams, analyze_market, log_summary
 from trade.sim.martingale_engine import (
     SIDE_NAME,
     AccountParams,
@@ -68,11 +67,35 @@ class MonteCarloParams:
 
 
 @dataclass(frozen=True)
+class CapitalParams:
+    """How realized profits are handled during one Monte Carlo run.
+
+    ``withdraw`` moves every positive closed-trade PnL to an isolated reserve,
+    so the next grid continues with the same trading capital. ``compound``
+    leaves profits in the trading account. ``both`` is accepted by the
+    top-level driver and replays identical random starts once per mode.
+    """
+
+    profit_handling: str = "compound"  # "withdraw", "compound", or "both"
+    stop_at_first_grid_breach: bool = False
+    double_target_multiple: float = 2.0
+
+    def __post_init__(self):
+        if self.profit_handling not in ("withdraw", "compound", "both"):
+            raise ValueError(
+                "profit_handling must be 'withdraw', 'compound', or 'both'"
+            )
+        if self.double_target_multiple <= 1.0:
+            raise ValueError("double_target_multiple must be > 1")
+
+
+@dataclass(frozen=True)
 class BacktestConfig:
     strategy: MartingaleParams = field(default_factory=MartingaleParams)
     account: AccountParams = field(default_factory=AccountParams)
     data: DataParams = field(default_factory=DataParams)
     monte_carlo: MonteCarloParams = field(default_factory=MonteCarloParams)
+    capital: CapitalParams = field(default_factory=CapitalParams)
     gap_analysis: "GapAnalysisParams" = field(default_factory=lambda: GapAnalysisParams())
     save_path: Optional[str] = None
     trades_path: Optional[str] = None   # one row per closed trade
@@ -80,8 +103,6 @@ class BacktestConfig:
     plot_path: Optional[str] = None      # price chart with every failure marked
     pressure_path: Optional[str] = None  # time x window-scale pressure heatmap
     cluster_path: Optional[str] = None   # gap allowance x cluster-size heatmap
-    market_path: Optional[str] = None    # stop losses vs deviation, real vs random
-    market_analysis: Optional["MarketAnalysisParams"] = None
     pressure_min_scale: int = 8
     pressure_max_scale: Optional[int] = None
     pressure_scale_count: int = 40
@@ -216,12 +237,21 @@ def run_once(
     start_index: int = 0,
     max_bars: Optional[int] = None,
 ) -> dict:
-    """Trade until liquidation, intrabar ruin threshold, limit or data end."""
+    """Trade until failure, limit, data end, or the configured first breach.
+
+    A breach is the first full-layer stop, liquidation, ruin threshold, or grid
+    that cannot be opened with the available margin.
+    """
     total_bars = len(bars)
     if not 0 <= start_index < total_bars:
         raise ValueError(f"start_index {start_index} outside 0..{total_bars - 1}")
 
     account = config.account
+    capital = config.capital
+    if capital.profit_handling == "both":
+        raise ValueError(
+            "run_once needs one profit_handling mode; use main() to compare both"
+        )
     simulator = MartingaleSimulator(config.strategy, account)
     state = simulator.new_state()
     initial_equity = account.initial_equity
@@ -234,6 +264,16 @@ def run_once(
     equity_curve = [initial_equity]
     exit_reason = "end_of_data"
     index = start_index
+    processed_trades = 0
+    reserve_balance = 0.0
+    first_grid_breach_reason: Optional[str] = None
+    first_grid_breach_index: Optional[int] = None
+    first_grid_breach_time = None
+    withdrawn_profit_before_breach: Optional[float] = None
+    doubled_before_grid_breach = False
+    double_index: Optional[int] = None
+    double_time = None
+    double_balance: Optional[float] = None
 
     for index in range(start_index, end_index):
         previous_peak = state.max_equity_seen
@@ -246,6 +286,54 @@ def run_once(
             low=bars.low[index],
             close=bars.close[index],
         )
+
+        new_trades = state.trades[processed_trades:]
+        processed_trades = len(state.trades)
+        if capital.profit_handling == "withdraw":
+            for trade in new_trades:
+                withdrawn = max(float(trade["net_pnl"]), 0.0)
+                if withdrawn:
+                    # The reserve is outside the trading account: it cannot
+                    # size the next ladder or be lost by the active grid.
+                    state.equity = max(0.0, state.equity - withdrawn)
+                    reserve_balance += withdrawn
+                trade["withdrawn_profit"] = withdrawn
+                trade["reserve_after"] = reserve_balance
+                trade["trading_balance_after_withdrawal"] = state.equity
+        else:
+            for trade in new_trades:
+                trade["withdrawn_profit"] = 0.0
+                trade["reserve_after"] = 0.0
+                trade["trading_balance_after_withdrawal"] = state.equity
+
+        if (
+            capital.profit_handling == "compound"
+            and first_grid_breach_reason is None
+            and not doubled_before_grid_breach
+            and state.max_balance_seen
+            >= initial_equity * capital.double_target_multiple - 1e-12
+        ):
+            doubled_before_grid_breach = True
+            double_index = index
+            double_time = bars.time[index]
+            double_balance = float(state.max_balance_seen)
+
+        breach_reason = next(
+            (trade["reason"] for trade in new_trades if trade["reason"] == "stop_loss"),
+            None,
+        )
+        if breach_reason is None:
+            if state.bankrupt:
+                breach_reason = "liquidation"
+            elif state.ruin_threshold_hit:
+                breach_reason = "ruin_threshold"
+            elif state.grid_infeasible:
+                breach_reason = "grid_infeasible"
+        if breach_reason is not None and first_grid_breach_reason is None:
+            first_grid_breach_reason = breach_reason
+            first_grid_breach_index = index
+            first_grid_breach_time = bars.time[index]
+            withdrawn_profit_before_breach = reserve_balance
 
         if state.max_equity_seen > peak_equity + 1e-12:
             peak_equity = state.max_equity_seen
@@ -264,11 +352,21 @@ def run_once(
                 else initial_equity * account.ruin_equity_pct
             )
             exit_reason = "ruin_threshold"
+        elif state.grid_infeasible:
+            current_equity = float(
+                state.failure_equity
+                if state.failure_equity is not None
+                else simulator.equity_at(state, bars.close[index])
+            )
+            exit_reason = "grid_infeasible"
         else:
             current_equity = simulator.equity_at(state, bars.close[index])
 
         equity_curve.append(max(current_equity, 0.0))
         if state.failed:
+            break
+        if breach_reason is not None and capital.stop_at_first_grid_breach:
+            exit_reason = "grid_breach"
             break
 
     final_equity = equity_curve[-1]
@@ -283,6 +381,8 @@ def run_once(
 
     profitable = sum(trade["net_pnl"] > 0.0 for trade in trades)
     stop_losses = [trade for trade in trades if trade["reason"] == "stop_loss"]
+    if withdrawn_profit_before_breach is None:
+        withdrawn_profit_before_breach = reserve_balance
     summary = {
         "start_index": start_index,
         "start_time": bars.time[start_index],
@@ -292,6 +392,29 @@ def run_once(
         "elapsed_years": elapsed_years,
         "initial_equity": initial_equity,
         "final_equity": final_equity,
+        "final_total_wealth": final_equity + reserve_balance,
+        "profit_handling": capital.profit_handling,
+        "reserve_balance": reserve_balance,
+        "withdrawn_profit_before_grid_breach": withdrawn_profit_before_breach,
+        "grid_breached": first_grid_breach_reason is not None,
+        "grid_breach_reason": first_grid_breach_reason,
+        "grid_breach_index": first_grid_breach_index,
+        "grid_breach_time": first_grid_breach_time,
+        "trades_before_grid_breach": (
+            len(trades)
+            if first_grid_breach_index is None
+            else sum(
+                trade["exit_bar"] <= first_grid_breach_index for trade in trades
+            )
+        ),
+        "doubled_before_grid_breach": doubled_before_grid_breach,
+        "double_target_multiple": capital.double_target_multiple,
+        "double_index": double_index,
+        "double_time": double_time,
+        "double_balance": double_balance,
+        "bars_to_double": (
+            None if double_index is None else double_index - start_index + 1
+        ),
         "min_equity": float(state.min_equity_seen),
         "peak_equity": float(peak_equity),
         "peak_realized_balance": float(state.max_balance_seen),
@@ -376,51 +499,78 @@ def direction_statistics(trades: Sequence[dict]) -> dict:
 
 
 def layer_statistics(trades: Sequence[dict]) -> dict:
-    """Bucket trades by how many layers the cycle reached before it closed."""
+    """Report terminal PnL and take-profit probability at every reached layer.
+
+    ``take_profit_pct`` uses every cycle that reached the layer as its
+    denominator. Its complement is simply "did not take profit at this layer".
+    """
+
+    def new_bucket() -> dict:
+        return {
+            # Cycles whose terminal exit happened at exactly this layer.
+            "trades": 0,
+            "profitable_trades": 0,
+            "entry_notional": 0.0,
+            "net_profit_abs": 0.0,
+            "fees": 0.0,
+            "profit_vs_balance": 0.0,
+            "same_bar_trades": 0,
+            "liquidations": 0,
+            "stop_losses": 0,
+            "stop_loss_net_pnl": 0.0,
+            # Cycles that reached this layer and what happened next.
+            "reached_trades": 0,
+            "take_profits_at_layer": 0,
+        }
+
     buckets: dict[str, dict] = {}
     for trade in trades:
-        bucket = buckets.setdefault(
-            str(trade["layers"]),
-            {
-                "trades": 0,
-                "profitable_trades": 0,
-                "entry_notional": 0.0,
-                "net_profit_abs": 0.0,
-                "fees": 0.0,
-                "profit_vs_balance": 0.0,
-                "same_bar_trades": 0,
-                "liquidations": 0,
-                "stop_losses": 0,
-                "stop_loss_net_pnl": 0.0,
-            },
-        )
-        bucket["trades"] += 1
-        bucket["profitable_trades"] += int(trade["net_pnl"] > 0.0)
-        bucket["entry_notional"] += trade["entry_notional"]
-        bucket["net_profit_abs"] += trade["net_pnl"]
-        bucket["fees"] += trade["fees"]
-        bucket["profit_vs_balance"] += trade.get("profit_vs_start_balance", 0.0)
-        bucket["same_bar_trades"] += int(trade["same_bar"])
-        bucket["liquidations"] += int(trade["reason"] == "liquidation")
+        final_layer = int(trade["layers"])
+        terminal = buckets.setdefault(str(final_layer), new_bucket())
+        terminal["trades"] += 1
+        terminal["profitable_trades"] += int(trade["net_pnl"] > 0.0)
+        terminal["entry_notional"] += trade["entry_notional"]
+        terminal["net_profit_abs"] += trade["net_pnl"]
+        terminal["fees"] += trade["fees"]
+        terminal["profit_vs_balance"] += trade.get("profit_vs_start_balance", 0.0)
+        terminal["same_bar_trades"] += int(trade["same_bar"])
+        terminal["liquidations"] += int(trade["reason"] == "liquidation")
         if trade["reason"] == "stop_loss":
-            bucket["stop_losses"] += 1
-            bucket["stop_loss_net_pnl"] += trade["net_pnl"]
+            terminal["stop_losses"] += 1
+            terminal["stop_loss_net_pnl"] += trade["net_pnl"]
+
+        for reached_layer in range(1, final_layer + 1):
+            bucket = buckets.setdefault(str(reached_layer), new_bucket())
+            bucket["reached_trades"] += 1
+            if reached_layer == final_layer and trade["reason"] == "take_profit":
+                bucket["take_profits_at_layer"] += 1
 
     total = len(trades)
     for bucket in buckets.values():
-        bucket["trade_pct"] = bucket["trades"] / total if total else 0.0
-        bucket["win_rate"] = bucket["profitable_trades"] / bucket["trades"]
-        bucket["same_bar_pct"] = bucket["same_bar_trades"] / bucket["trades"]
+        closed = bucket["trades"]
+        reached = bucket["reached_trades"]
+        bucket["trade_pct"] = closed / total if total else 0.0
+        bucket["reach_pct"] = reached / total if total else 0.0
+        bucket["win_rate"] = (
+            bucket["profitable_trades"] / closed if closed else 0.0
+        )
+        bucket["take_profit_pct"] = (
+            bucket["take_profits_at_layer"] / reached if reached else 0.0
+        )
+        bucket["same_bar_pct"] = (
+            bucket["same_bar_trades"] / closed if closed else 0.0
+        )
         bucket["net_profit_pct"] = (
             bucket["net_profit_abs"] / bucket["entry_notional"]
             if bucket["entry_notional"]
             else 0.0
         )
-        bucket["avg_net_profit_abs"] = bucket["net_profit_abs"] / bucket["trades"]
-        # Under the balance basis this is the number that must come out flat
-        # across every layer bucket: one fixed slice of the account per
-        # completed sequence, however deep the ladder had to go.
-        bucket["avg_profit_vs_balance"] = bucket["profit_vs_balance"] / bucket["trades"]
+        bucket["avg_net_profit_abs"] = (
+            bucket["net_profit_abs"] / closed if closed else 0.0
+        )
+        bucket["avg_profit_vs_balance"] = (
+            bucket["profit_vs_balance"] / closed if closed else 0.0
+        )
         bucket["avg_stop_loss_abs"] = (
             bucket["stop_loss_net_pnl"] / bucket["stop_losses"]
             if bucket["stop_losses"]
@@ -652,6 +802,10 @@ def run_monte_carlo(
     bars: BarSeries,
     config: BacktestConfig,
 ) -> dict:
+    if config.capital.profit_handling == "both":
+        raise ValueError(
+            "run_monte_carlo needs one profit_handling mode; use main() to compare both"
+        )
     monte_carlo = config.monte_carlo
     available_last_start = len(bars) - monte_carlo.min_bars
     if available_last_start < 0:
@@ -706,6 +860,8 @@ def run_monte_carlo(
 
     summaries = [run["summary"] for run in runs]
     ruined = [s for s in summaries if s["ruined"]]
+    breached = [s for s in summaries if s["grid_breached"]]
+    doubled = [s for s in summaries if s["doubled_before_grid_breach"]]
     all_trades = [trade for run in runs for trade in run["trades"]]
 
     total_trades = len(all_trades)
@@ -733,20 +889,50 @@ def run_monte_carlo(
 
     aggregate = {
         "runs": len(summaries),
+        "profit_handling": config.capital.profit_handling,
+        "stop_at_first_grid_breach": config.capital.stop_at_first_grid_breach,
+        "grid_breached_runs": len(breached),
+        "grid_breach_rate": len(breached) / len(summaries) if summaries else 0.0,
+        "grid_breach_reasons": {
+            reason: sum(s["grid_breach_reason"] == reason for s in breached)
+            for reason in sorted({s["grid_breach_reason"] for s in breached})
+        },
+        "withdrawn_profit_before_grid_breach_mean": float(np.mean([
+            s["withdrawn_profit_before_grid_breach"] for s in summaries
+        ])),
+        "withdrawn_profit_before_grid_breach": _percentiles([
+            s["withdrawn_profit_before_grid_breach"] for s in summaries
+        ]),
+        "withdrawn_profit_on_breached_runs": _distribution([
+            s["withdrawn_profit_before_grid_breach"] for s in breached
+        ]),
+        "doubled_before_grid_breach_runs": len(doubled),
+        "double_before_grid_breach_rate": (
+            len(doubled) / len(summaries) if summaries else 0.0
+        ),
+        "double_before_grid_breach_rate_on_breached_runs": (
+            sum(s["doubled_before_grid_breach"] for s in breached) / len(breached)
+            if breached else 0.0
+        ),
+        "bars_to_double": _distribution([s["bars_to_double"] for s in doubled]),
         "ruined_runs": len(ruined),
         "ruin_rate": len(ruined) / len(summaries) if summaries else 0.0,
         "liquidation_runs": sum(s["exit_reason"] == "liquidation" for s in summaries),
         "ruin_threshold_runs": sum(s["exit_reason"] == "ruin_threshold" for s in summaries),
+        "grid_infeasible_runs": sum(s["exit_reason"] == "grid_infeasible" for s in summaries),
         "survived_runs": len(summaries) - len(ruined),
         "bars_survived_mean": float(np.mean([s["bars_survived"] for s in summaries])),
         "bars_survived": _percentiles([s["bars_survived"] for s in summaries]),
         "bars_to_ruin": _percentiles([s["bars_survived"] for s in ruined]),
+        "elapsed_years_mean": float(np.mean([s["elapsed_years"] for s in summaries])),
+        "elapsed_years": _percentiles([s["elapsed_years"] for s in summaries]),
         "total_return_pct_mean": float(np.mean([s["total_return_pct"] for s in summaries])),
         "total_return_pct": _percentiles([s["total_return_pct"] for s in summaries]),
         "max_drawdown_pct_mean": float(np.mean([s["max_drawdown_pct"] for s in summaries])),
         "max_margin_usage_mean": float(np.mean([s["max_margin_usage"] for s in summaries])),
         "total_trades": total_trades,
         "trades_per_run": total_trades / len(summaries) if summaries else 0.0,
+        "trades_per_run_percentiles": _percentiles([s["total_trades"] for s in summaries]),
         "profitable_trades": profitable,
         "losing_trades": total_trades - profitable,
         "win_rate": profitable / total_trades if total_trades else 0.0,
@@ -788,6 +974,12 @@ def run_monte_carlo(
     )
     aggregate["distributions"] = {
         "final_equity": _distribution([s["final_equity"] for s in summaries]),
+        "final_total_wealth": _distribution([
+            s["final_total_wealth"] for s in summaries
+        ]),
+        "reserve_balance": _distribution([
+            s["reserve_balance"] for s in summaries
+        ]),
         "peak_equity": _distribution([s["peak_equity"] for s in summaries]),
         "peak_realized_balance": _distribution([s["peak_realized_balance"] for s in summaries]),
         "peak_equity_multiple": _distribution([s["peak_equity_multiple"] for s in summaries]),
@@ -801,6 +993,8 @@ def run_monte_carlo(
         "max_drawdown_pct": _distribution([s["max_drawdown_pct"] for s in summaries]),
         "max_margin_usage": _distribution([s["max_margin_usage"] for s in summaries]),
         "bars_survived": _distribution([s["bars_survived"] for s in summaries]),
+        "elapsed_years": _distribution([s["elapsed_years"] for s in summaries]),
+        "total_trades": _distribution([s["total_trades"] for s in summaries]),
         "stop_loss_trades": _distribution([s["stop_loss_trades"] for s in summaries]),
     }
     return {
@@ -852,6 +1046,7 @@ def fills_dataframe(trades: Sequence[dict]) -> pd.DataFrame:
     rows = [
         {
             "run_id": trade.get("run_id"),
+            "capital_mode": trade.get("capital_mode"),
             "trade_index": trade["index"],
             "trade_reason": trade["reason"],
             **fill,
@@ -933,15 +1128,17 @@ def log_loss_gaps(logger: logging.Logger, gaps: dict):
 
 def log_layer_table(logger: logging.Logger, layer_stats: dict):
     logger.info(
-        f"{'LAYERS':<7}{'TRADES':>9}{'SHARE':>8}{'WINRATE':>9}{'SAMEBAR':>9}"
+        f"{'LAYERS':<7}{'REACHED':>9}{'REACH%':>8}{'TP%':>8}{'CLOSED':>9}"
+        f"{'SAMEBAR':>9}"
         f"{'LIQ':>7}{'STOP':>7}{'AVG_STOP':>12}{'NET_PNL':>18}"
         f"{'PNL/NOTIONAL':>15}{'AVG %BAL':>11}"
     )
     for layer, bucket in layer_stats.items():
         logger.info(
-            f"{layer:<7}{bucket['trades']:>9}"
-            f"{bucket['trade_pct'] * 100:>7.2f}%"
-            f"{bucket['win_rate'] * 100:>8.2f}%"
+            f"{layer:<7}{bucket['reached_trades']:>9}"
+            f"{bucket['reach_pct'] * 100:>7.2f}%"
+            f"{bucket['take_profit_pct'] * 100:>7.2f}%"
+            f"{bucket['trades']:>9}"
             f"{bucket['same_bar_pct'] * 100:>8.2f}%"
             f"{bucket['liquidations']:>7}"
             f"{bucket['stop_losses']:>7}"
@@ -962,8 +1159,8 @@ def log_report(logger: logging.Logger, result: dict, config: BacktestConfig):
     account = config.account
     logger.info("-" * 96)
     logger.info(
-        f"STRATEGY| target/tp {strategy.take_profit_pct:.3%} of cycle balance "
-        f"| adverse deviation {strategy.price_deviation_pct:.3%} "
+        f"STRATEGY| target {strategy.take_profit_pct:.3%} of cycle balance "
+        f"| symmetric boundary {strategy.price_deviation_pct:.3%} "
         f"| step x{strategy.deviation_step_mult} "
         f"| max_layers {strategy.max_layers} "
         f"| preflight full grid"
@@ -978,11 +1175,33 @@ def log_report(logger: logging.Logger, result: dict, config: BacktestConfig):
         f"| maint {account.maintenance_margin_pct}% "
         f"| margin cap {account.margin_usage_cap_pct:.0%}"
     )
+    breach_profit = aggregate["withdrawn_profit_before_grid_breach"]
+    logger.info(
+        f"CAPITAL | mode {config.capital.profit_handling} "
+        f"| stop at first breach {config.capital.stop_at_first_grid_breach} "
+        f"| breached {aggregate['grid_breached_runs']}/{aggregate['runs']} "
+        f"({aggregate['grid_breach_rate'] * 100:.2f}%) "
+        f"| reasons {aggregate['grid_breach_reasons']}"
+    )
+    if config.capital.profit_handling == "withdraw":
+        logger.info(
+            f"WITHDRAW| accumulated before breach mean "
+            f"{aggregate['withdrawn_profit_before_grid_breach_mean']:.2f} "
+            f"| p5 {breach_profit['p5']:.2f} | p50 {breach_profit['p50']:.2f} "
+            f"| p95 {breach_profit['p95']:.2f}"
+        )
+    else:
+        logger.info(
+            f"COMPOUND| reached {config.capital.double_target_multiple:g}x before breach "
+            f"{aggregate['doubled_before_grid_breach_runs']}/{aggregate['runs']} "
+            f"({aggregate['double_before_grid_breach_rate'] * 100:.2f}%)"
+        )
     logger.info(
         f"SURVIVE | runs {aggregate['runs']} "
         f"| ruined {aggregate['ruined_runs']} ({aggregate['ruin_rate'] * 100:.2f}%) "
         f"| liquidation {aggregate['liquidation_runs']} "
         f"| threshold {aggregate['ruin_threshold_runs']} "
+        f"| grid infeasible {aggregate['grid_infeasible_runs']} "
         f"| survived {aggregate['survived_runs']}"
     )
     bars = aggregate["bars_survived"]
@@ -990,6 +1209,13 @@ def log_report(logger: logging.Logger, result: dict, config: BacktestConfig):
         f"BARS    | mean {aggregate['bars_survived_mean']:.0f} "
         f"| p5 {bars['p5']:.0f} | p25 {bars['p25']:.0f} | p50 {bars['p50']:.0f} "
         f"| p75 {bars['p75']:.0f} | p95 {bars['p95']:.0f}"
+    )
+    years = aggregate["elapsed_years"]
+    logger.info(
+        f"TIME    | survived mean {aggregate['elapsed_years_mean']:.3f}y "
+        f"| p5 {years['p5']:.3f}y | p25 {years['p25']:.3f}y "
+        f"| p50 {years['p50']:.3f}y | p75 {years['p75']:.3f}y "
+        f"| p95 {years['p95']:.3f}y"
     )
     returns = aggregate["total_return_pct"]
     logger.info(
@@ -1019,11 +1245,17 @@ def log_report(logger: logging.Logger, result: dict, config: BacktestConfig):
         f"| Sharpe mean {_fmt(sharpe['mean'], 3)} "
         f"| p50 {_fmt(sharpe['p50'], 3)} | p95 {_fmt(sharpe['p95'], 3)}"
     )
+    trade_counts = aggregate["trades_per_run_percentiles"]
     logger.info(
         f"TRADES  | total {aggregate['total_trades']} "
-        f"| per run {aggregate['trades_per_run']:.1f} "
-        f"| win {aggregate['win_rate'] * 100:.2f}% "
-        f"| net {aggregate['total_net_profit_abs']:.2f} "
+        f"| per run mean {aggregate['trades_per_run']:.1f} "
+        f"| p5 {trade_counts['p5']:.0f} | p25 {trade_counts['p25']:.0f} "
+        f"| p50 {trade_counts['p50']:.0f} | p75 {trade_counts['p75']:.0f} "
+        f"| p95 {trade_counts['p95']:.0f} "
+        f"| win {aggregate['win_rate'] * 100:.2f}%"
+    )
+    logger.info(
+        f"PNL     | net {aggregate['total_net_profit_abs']:.2f} "
         f"| fees {aggregate['total_fees_abs']:.2f} "
         f"({aggregate['fees_pct_of_notional'] * 100:.4f}% of notional) "
         f"| avg {aggregate['avg_net_profit_abs_per_trade']:.4f}/trade"
@@ -1088,36 +1320,184 @@ def json_safe(value):
     return value
 
 
+GRID_FAILURE_HINTS = {
+    "target_already_met_without_new_order": (
+        "the existing position already exceeds the cash target at this layer's "
+        "take-profit price; reduce max_layers to the last OK layer or lower "
+        "deviation_step_mult"
+    ),
+    "non_positive_required_notional": (
+        "the sizing equation produced no positive order; reduce max_layers or "
+        "deviation_step_mult and inspect existing_net_at_take_profit"
+    ),
+    "non_positive_incremental_return": (
+        "the layer's price edge does not cover its entry and exit fees; increase "
+        "price_deviation_pct or reduce fees"
+    ),
+    "margin_cap_exceeded": (
+        "initial margin exceeds margin_usage_cap_pct; reduce take_profit_pct or "
+        "max_layers, or increase leverage/margin_usage_cap_pct"
+    ),
+    "non_positive_equity_after_order": (
+        "mark-to-market equity after the order fee is non-positive; reduce grid "
+        "size, take_profit_pct, or max_layers"
+    ),
+    "adverse_step_ge_100pct": (
+        "an adverse grid step reached 100%; reduce deviation_step_mult, "
+        "price_deviation_pct, or max_layers"
+    ),
+    "take_profit_deviation_ge_100pct": (
+        "the take-profit deviation reached 100%; reduce deviation_step_mult, "
+        "price_deviation_pct, or max_layers"
+    ),
+    "non_positive_layer_price": (
+        "the planned layer price is non-positive; reduce grid spacing or layers"
+    ),
+}
+
+
+def _diagnostic_number(value: Optional[float], digits: int = 6) -> str:
+    if value is None or not np.isfinite(value):
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
+def log_grid_preflight(
+    logger: logging.Logger,
+    diagnostics: dict[str, dict],
+    config: BacktestConfig,
+    start_price: float,
+):
+    """Print enough sizing state to explain an invalid grid configuration."""
+    logger.info(
+        f"GRID PREFLIGHT | start {start_price:.12g} "
+        f"| target {config.strategy.take_profit_pct:.4%} of equity "
+        f"| deviation {config.strategy.price_deviation_pct:.4%} "
+        f"| step x{config.strategy.deviation_step_mult:g} "
+        f"| layers {config.strategy.max_layers} "
+        f"| leverage {config.account.leverage:g}x "
+        f"| margin cap {config.account.margin_usage_cap_pct:.2%}"
+    )
+    for side, result in diagnostics.items():
+        outcome = "OK" if result["executable"] else (
+            f"FAIL L{result['failure_layer']:02d} {result['failure_reason']}"
+        )
+        logger.info(
+            f"GRID SIDE | {side.upper():<5} | {outcome} "
+            f"| cash target {result['target_cash']:.6f}"
+        )
+        for row in result["layers"]:
+            if "take_profit_deviation_pct" not in row:
+                entry = _diagnostic_number(row.get("entry_price"), 12)
+                adverse = row.get("adverse_step_pct")
+                logger.info(
+                    f"GRID LAYER | {side:<5} L{row['layer']:02d} FAILED "
+                    f"| reason {row['failure_reason']} "
+                    f"| entry {entry} "
+                    f"| adverse step {_fmt(adverse, 4, 100.0)}%"
+                )
+                continue
+            average_before = (
+                row["cumulative_notional_before"] / row["position_qty_before"]
+                if row["position_qty_before"] > 0.0 else None
+            )
+            margin_relation = (
+                "<=" if row.get("initial_margin_after", 0.0)
+                <= row.get("margin_cap_amount", 0.0) + 1e-12 else ">"
+            )
+            logger.info(
+                f"GRID LAYER | {side:<5} L{row['layer']:02d} {row['status'].upper():<6} "
+                f"| entry {row['entry_price']:.12g} "
+                f"| avg_before {_diagnostic_number(average_before, 10)} "
+                f"| tp {row.get('take_profit_price', float('nan')):.12g} "
+                f"| tp_dev {row['take_profit_deviation_pct']:.4%} "
+                f"| existing@tp {row.get('existing_net_at_take_profit', 0.0):.6f} "
+                f"/ target {row['target_cash']:.6f} "
+                f"| add raw {_diagnostic_number(row.get('raw_required_notional'))} "
+                f"used {row.get('required_notional', 0.0):.6f} "
+                f"| cumulative {row.get('cumulative_notional_after', 0.0):.6f} "
+                f"| fee {row.get('order_fee', 0.0):.6f} "
+                f"| equity_mtm {row.get('equity_mtm_before_order', 0.0):.6f} "
+                f"| IM {row.get('initial_margin_after', 0.0):.6f} "
+                f"{margin_relation} cap {row.get('margin_cap_amount', 0.0):.6f}"
+            )
+        if not result["executable"]:
+            reason = result["failure_reason"]
+            logger.error(
+                f"GRID FAILURE | {side.upper()} layer {result['failure_layer']} "
+                f"| {reason} | {GRID_FAILURE_HINTS.get(reason, 'inspect the failed layer')}"
+            )
+
+
 def main(logger: logging.Logger, config: BacktestConfig) -> dict:
     bars = load_bars(logger, config.data)
-    result = run_monte_carlo(logger, bars, config)
-    log_report(logger, result, config)
-
-    trades = result["trades"]
-    if config.trades_path:
-        write_table(logger, trades_dataframe(trades), config.trades_path, "trade")
-    if config.fills_path:
-        write_table(logger, fills_dataframe(trades), config.fills_path, "fill")
-    if config.market_path:
-        from trade.sim.martingale_plot import plot_market_analysis
-
-        params = config.market_analysis or MarketAnalysisParams()
-        analysis = analyze_market(logger, bars.close, params)
-        log_summary(logger, analysis)
-        plot_market_analysis(
-            logger, analysis, config.market_path,
-            title=(
-                f"Stop losses vs price deviation — {config.data.symbol} "
-                f"{config.data.interval} | tp/adverse = layer step | "
-                f"real series vs {params.baseline_repeats} {params.baseline_model} IID random walks"
-            ),
+    start_price = float(bars.open[0])
+    simulator = MartingaleSimulator(config.strategy, config.account)
+    diagnostics = simulator.grid_diagnostics(start_price)
+    log_grid_preflight(logger, diagnostics, config, start_price)
+    simulator.validate_initial_grid(start_price, diagnostics)
+    modes = (
+        ("withdraw", "compound")
+        if config.capital.profit_handling == "both"
+        else (config.capital.profit_handling,)
+    )
+    scenario_results = {}
+    export_trades = []
+    for mode in modes:
+        scenario_config = replace(
+            config, capital=replace(config.capital, profit_handling=mode)
         )
-        result["market_analysis"] = {
-            "bars": analysis["bars"],
-            "deviations": analysis["deviations"].tolist(),
-            "summary": analysis["summary"],
+        logger.info(f"CAPITAL SCENARIO | {mode}")
+        scenario_result = run_monte_carlo(logger, bars, scenario_config)
+        for trade in scenario_result["trades"]:
+            trade["capital_mode"] = mode
+        export_trades.extend(scenario_result["trades"])
+        scenario_results[mode] = scenario_result
+        log_report(logger, scenario_result, scenario_config)
+
+    # Keep the existing result shape for plots and callers. In comparison mode
+    # the primary path is compound, while both complete summary sets are nested.
+    primary_mode = "compound" if "compound" in scenario_results else modes[0]
+    result = scenario_results[primary_mode]
+    if len(scenario_results) > 1:
+        result["capital_scenarios"] = {
+            mode: {
+                key: value
+                for key, value in scenario_result.items()
+                if key != "trades"
+            }
+            for mode, scenario_result in scenario_results.items()
+        }
+        result["capital_comparison"] = {
+            "withdraw": {
+                "accumulated_before_breach": scenario_results["withdraw"]["aggregate"][
+                    "withdrawn_profit_before_grid_breach"
+                ],
+                "mean": scenario_results["withdraw"]["aggregate"][
+                    "withdrawn_profit_before_grid_breach_mean"
+                ],
+                "on_breached_runs": scenario_results["withdraw"]["aggregate"][
+                    "withdrawn_profit_on_breached_runs"
+                ],
+            },
+            "compound": {
+                "double_target_multiple": config.capital.double_target_multiple,
+                "doubled_runs": scenario_results["compound"]["aggregate"][
+                    "doubled_before_grid_breach_runs"
+                ],
+                "double_rate": scenario_results["compound"]["aggregate"][
+                    "double_before_grid_breach_rate"
+                ],
+                "double_rate_on_breached_runs": scenario_results["compound"][
+                    "aggregate"
+                ]["double_before_grid_breach_rate_on_breached_runs"],
+            },
         }
 
+    if config.trades_path:
+        write_table(logger, trades_dataframe(export_trades), config.trades_path, "trade")
+    if config.fills_path:
+        write_table(logger, fills_dataframe(export_trades), config.fills_path, "fill")
     if config.pressure_path or config.cluster_path:
         from trade.sim.martingale_plot import plot_cluster_scales, plot_pressure_heatmap
 
@@ -1170,6 +1550,7 @@ def main(logger: logging.Logger, config: BacktestConfig) -> dict:
         "account": asdict(config.account),
         "data": asdict(config.data),
         "monte_carlo": asdict(config.monte_carlo),
+        "capital": asdict(config.capital),
     }
     if config.save_path:
         os.makedirs(os.path.dirname(config.save_path), exist_ok=True)
@@ -1205,10 +1586,10 @@ class Args:
     to_date: Optional[str] = None
 
     # --- strategy ---
-    price_deviation_pct: float = 0.01     # next layer, adverse of the last fill
-    take_profit_pct: float = 0.01         # target move/profit of each layer
-    deviation_step_mult: float = 1      # >1 widens each successive step
-    max_layers: int = 8
+    price_deviation_pct: float = 0.01   # first-layer adverse/favourable distance
+    take_profit_pct: float = 0.0008       # fixed net cash target / cycle-start balance
+    deviation_step_mult: float = 1.5
+    max_layers: int = 10
     initial_direction: str = "long"       # "long" or "short"
     reverse_after_stop_loss: bool = False  # flip the side after every stop
     loss_cooldown_bars: int = 0           # bars to sit out after a losing cycle
@@ -1220,12 +1601,17 @@ class Args:
     taker_fee_pct: float = 0.05           # percent, base order / stop / liquidation
     maker_fee_pct: float = 0.02           # percent, ladder and take profit
     maintenance_margin_pct: float = 0.5   # percent of position notional
-    margin_usage_cap_pct: float = 0.80    # refuse orders past this share of equity
+    margin_usage_cap_pct: float = 0.90    # refuse orders past this share of equity
     liquidation_penalty_pct: float = 0.0
     ruin_equity_pct: float = 0.05         # a run is dead below this share of start
 
+    # --- profit handling experiment ---
+    profit_handling: str = "both"         # "withdraw", "compound", or "both"
+    stop_at_first_grid_breach: bool = True
+    double_target_multiple: float = 2.0
+
     # --- monte carlo ---
-    runs: int = 30
+    runs: int = 120
     seed: int = 42
     min_bars: int = 2_000                 # bars that must remain ahead of a start
     max_bars: Optional[int] = None        # None: run until ruin or end of data
@@ -1245,15 +1631,6 @@ class Args:
     plot_path: Optional[str] = None       # .png loss/failure chart
     pressure_path: Optional[str] = None   # .png time x window-scale pressure map
     cluster_path: Optional[str] = None    # .png cluster size vs gap allowance
-    market_path: Optional[str] = None     # .png stop losses vs deviation
-    # Market analysis: one panel per layer count, 1..market_max_layers.
-    market_max_layers: int = 10
-    market_deviation_min: float = 0.002
-    market_deviation_max: float = 0.05
-    market_deviation_count: int = 20
-    market_baseline_repeats: int = 20
-    market_baseline_model: str = "gaussian"
-    market_seed: int = 11
     # Window-scale ladders for those two charts, in bars.
     pressure_min_scale: int = 8
     pressure_max_scale: Optional[int] = None   # None: total_bars // 8
@@ -1287,6 +1664,11 @@ def config_from_args(args: Args) -> BacktestConfig:
             liquidation_penalty_pct=args.liquidation_penalty_pct,
             ruin_equity_pct=args.ruin_equity_pct,
         ),
+        capital=CapitalParams(
+            profit_handling=args.profit_handling,
+            stop_at_first_grid_breach=args.stop_at_first_grid_breach,
+            double_target_multiple=args.double_target_multiple,
+        ),
         data=DataParams(
             market_category=args.market_category,
             data_source=args.data_source,
@@ -1316,18 +1698,6 @@ def config_from_args(args: Args) -> BacktestConfig:
         plot_path=None if args.no_plot else args.plot_path,
         pressure_path=None if args.no_plot else args.pressure_path,
         cluster_path=None if args.no_plot else args.cluster_path,
-        market_path=None if args.no_plot else args.market_path,
-        market_analysis=MarketAnalysisParams(
-            max_layers=args.market_max_layers,
-            deviation_min=args.market_deviation_min,
-            deviation_max=args.market_deviation_max,
-            deviation_count=args.market_deviation_count,
-            deviation_step_mult=args.deviation_step_mult,
-            baseline_model=args.market_baseline_model,
-            baseline_repeats=args.market_baseline_repeats,
-            seed=args.market_seed,
-            workers=args.workers,
-        ),
         pressure_min_scale=args.pressure_min_scale,
         pressure_max_scale=args.pressure_max_scale,
         pressure_scale_count=args.pressure_scale_count,
@@ -1368,8 +1738,6 @@ def run(args: Optional[Args] = None) -> dict:
             defaults["pressure_path"] = os.path.join(exp_dir, "pressure.png")
         if config.cluster_path is None:
             defaults["cluster_path"] = os.path.join(exp_dir, "clusters.png")
-        if config.market_path is None:
-            defaults["market_path"] = os.path.join(exp_dir, "market_analysis.png")
     config = replace(config, **defaults)
     started = time.time()
     result = main(logger, config)

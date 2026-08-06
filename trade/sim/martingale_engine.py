@@ -28,13 +28,13 @@ the take profit on the way up.  Every event re-prices the ones after it.
 
 Layer boundaries
 ----------------
-At layer ``i`` the adverse boundary is:
-``price_deviation_pct * deviation_step_mult ** (i - 1)``.
-The favourable take-profit boundary is independent:
-``take_profit_pct * deviation_step_mult ** (i - 1)``.
-The adverse boundary enters the next layer, or stops the cycle once the ladder
-is full. Before a base order is opened, the simulator prices the whole planned
-grid and rejects the cycle if any scheduled layer would breach the margin cap.
+At layer ``i`` both price boundaries use the same distance from the latest
+fill: ``price_deviation_pct * deviation_step_mult ** (i - 1)``. The favourable
+boundary takes profit; the adverse boundary enters the next layer, or stops the
+cycle once the ladder is full. ``take_profit_pct`` is only the fixed cash target
+as a share of the cycle's starting balance. Before a base order is opened, the
+simulator prices the whole planned grid and rejects the cycle if any scheduled
+layer would breach the margin cap.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class MartingaleParams:
     """Decision parameters of one martingale cycle."""
 
     price_deviation_pct: float = 0.01     # next layer, adverse of the last fill
-    take_profit_pct: float = 0.01         # target move/profit of each layer
+    take_profit_pct: float = 0.01         # fixed net profit / cycle start balance
     deviation_step_mult: float = 1.0      # >1 widens each successive step
     max_layers: int = 7
 
@@ -191,6 +191,7 @@ class AccountState:
     up_first_worse_bars: int = 0
     dual_path_bars: int = 0
     ruin_threshold_hit: bool = False
+    grid_infeasible: bool = False
     min_equity_seen: float = float("inf")
     max_equity_seen: float = 0.0
     max_balance_seen: float = 0.0
@@ -206,7 +207,7 @@ class AccountState:
 
     @property
     def failed(self) -> bool:
-        return self.bankrupt or self.ruin_threshold_hit
+        return self.bankrupt or self.ruin_threshold_hit or self.grid_infeasible
 
     def clone(self) -> "AccountState":
         return AccountState(
@@ -219,6 +220,7 @@ class AccountState:
             up_first_worse_bars=self.up_first_worse_bars,
             dual_path_bars=self.dual_path_bars,
             ruin_threshold_hit=self.ruin_threshold_hit,
+            grid_infeasible=self.grid_infeasible,
             min_equity_seen=self.min_equity_seen,
             max_equity_seen=self.max_equity_seen,
             max_balance_seen=self.max_balance_seen,
@@ -244,18 +246,18 @@ class MartingaleSimulator:
         self.account = account
         maker = account.maker_rate
         taker = account.taker_rate
-        tp_deviations = (
-            params.take_profit_pct * params.deviation_step_mult ** i
+        boundary_deviations = (
+            params.price_deviation_pct * params.deviation_step_mult ** i
             for i in range(params.max_layers)
         )
         minimum_edge = min(
             deviation - (1.0 + side * deviation) * maker - taker
-            for deviation in tp_deviations
+            for deviation in boundary_deviations
             for side in (LONG, SHORT)
         )
         if minimum_edge <= 0.0:
             raise ValueError(
-                "take_profit_pct must exceed round-trip fees for "
+                "price_deviation_pct must exceed round-trip fees for "
                 "target-derived sizing"
             )
         self._bar_index = -1
@@ -356,17 +358,6 @@ class MartingaleSimulator:
         )
         return deviation if deviation < 1.0 else None
 
-    def _layer_take_profit_deviation(self, state: AccountState) -> Optional[float]:
-        """Current layer favourable distance from the latest fill."""
-        cycle = state.cycle
-        if cycle.layers <= 0 or cycle.last_entry_price <= 0.0:
-            return None
-        deviation = (
-            self.params.take_profit_pct
-            * self.params.deviation_step_mult ** (cycle.layers - 1)
-        )
-        return deviation if deviation < 1.0 else None
-
     def _grid_price(self, state: AccountState) -> Optional[float]:
         """Current layer adverse boundary around the latest fill."""
         cycle = state.cycle
@@ -400,7 +391,7 @@ class MartingaleSimulator:
         cycle = state.cycle
         if cycle.qty <= 0.0:
             return None
-        deviation = self._layer_take_profit_deviation(state)
+        deviation = self._layer_deviation(state)
         if deviation is None:
             return None
         return cycle.last_entry_price * (1.0 + cycle.side * deviation)
@@ -425,7 +416,7 @@ class MartingaleSimulator:
         is_base: bool,
     ) -> float:
         """Additional notional needed to net target_cash at this layer TP."""
-        deviation = self.params.take_profit_pct * self.params.deviation_step_mult ** layer_index
+        deviation = self.params.price_deviation_pct * self.params.deviation_step_mult ** layer_index
         if deviation >= 1.0:
             return 0.0
 
@@ -542,6 +533,190 @@ class MartingaleSimulator:
             is_base=cycle.qty <= 0.0,
         )
 
+    def grid_diagnostics(self, price: float) -> dict[str, dict]:
+        """Explain every full-grid preflight decision for long and short.
+
+        This intentionally mirrors ``_plan_cycle`` but retains the intermediate
+        values that method discards, so configuration errors can identify the
+        exact layer and constraint instead of returning a generic ``None``.
+        """
+        if price <= 0.0:
+            raise ValueError("startup grid diagnostic price must be positive")
+
+        results: dict[str, dict] = {}
+        for side in (LONG, SHORT):
+            equity = self.account.initial_equity
+            target_cash = equity * self.params.take_profit_pct
+            qty = 0.0
+            cost = 0.0
+            entry_fees = 0.0
+            layer_price = price
+            rows = []
+            failure_reason = None
+
+            for layer_index in range(self.params.max_layers):
+                layer = layer_index + 1
+                adverse = None
+                if layer_index > 0:
+                    adverse = (
+                        self.params.price_deviation_pct
+                        * self.params.deviation_step_mult ** (layer_index - 1)
+                    )
+                    if adverse >= 1.0:
+                        failure_reason = "adverse_step_ge_100pct"
+                        rows.append({
+                            "layer": layer,
+                            "status": "failed",
+                            "failure_reason": failure_reason,
+                            "adverse_step_pct": adverse,
+                        })
+                        break
+                    layer_price = layer_price * (1.0 - side * adverse)
+                    if layer_price <= 0.0:
+                        failure_reason = "non_positive_layer_price"
+                        rows.append({
+                            "layer": layer,
+                            "status": "failed",
+                            "failure_reason": failure_reason,
+                            "adverse_step_pct": adverse,
+                            "entry_price": layer_price,
+                        })
+                        break
+
+                deviation = (
+                    self.params.price_deviation_pct
+                    * self.params.deviation_step_mult ** layer_index
+                )
+                is_base = layer_index == 0
+                entry_rate = (
+                    self.account.taker_rate if is_base else self.account.maker_rate
+                )
+                row = {
+                    "layer": layer,
+                    "status": "ok",
+                    "failure_reason": None,
+                    "adverse_step_pct": adverse,
+                    "take_profit_deviation_pct": deviation,
+                    "entry_price": layer_price,
+                    "target_cash": target_cash,
+                    "equity_ledger_before": equity,
+                    "position_qty_before": qty,
+                    "cumulative_notional_before": cost,
+                    "entry_fees_before": entry_fees,
+                }
+
+                if deviation >= 1.0:
+                    failure_reason = "take_profit_deviation_ge_100pct"
+                    row.update(status="failed", failure_reason=failure_reason)
+                    rows.append(row)
+                    break
+
+                exit_ratio = 1.0 + side * deviation
+                exit_price = layer_price * exit_ratio
+                incremental_return = (
+                    side * (exit_ratio - 1.0)
+                    - exit_ratio * self.account.maker_rate
+                    - entry_rate
+                )
+                existing_net_at_tp = (
+                    side * (qty * exit_price - cost)
+                    - entry_fees
+                    - qty * exit_price * self.account.maker_rate
+                )
+                raw_required_notional = (
+                    (target_cash - existing_net_at_tp) / incremental_return
+                    if incremental_return > 0.0 else None
+                )
+                required_notional = (
+                    max(0.0, raw_required_notional)
+                    if raw_required_notional is not None else 0.0
+                )
+                order_fee = required_notional * entry_rate
+                equity_mtm_before_order = equity + side * (qty * layer_price - cost)
+                equity_after_order = equity_mtm_before_order - order_fee
+                initial_margin_after = (
+                    (cost + required_notional) / self.account.leverage
+                )
+                margin_cap_amount = (
+                    equity_after_order * self.account.margin_usage_cap_pct
+                )
+                row.update({
+                    "take_profit_price": exit_price,
+                    "incremental_return": incremental_return,
+                    "existing_net_at_take_profit": existing_net_at_tp,
+                    "raw_required_notional": raw_required_notional,
+                    "required_notional": required_notional,
+                    "order_fee": order_fee,
+                    "equity_mtm_before_order": equity_mtm_before_order,
+                    "equity_after_order": equity_after_order,
+                    "cumulative_notional_after": cost + required_notional,
+                    "initial_margin_after": initial_margin_after,
+                    "margin_cap_amount": margin_cap_amount,
+                    "margin_usage_pct": (
+                        initial_margin_after / equity_after_order
+                        if equity_after_order > 0.0 else None
+                    ),
+                })
+
+                if incremental_return <= 0.0:
+                    failure_reason = "non_positive_incremental_return"
+                elif required_notional <= 0.0:
+                    failure_reason = (
+                        "target_already_met_without_new_order"
+                        if existing_net_at_tp >= target_cash
+                        else "non_positive_required_notional"
+                    )
+                elif equity_after_order <= 0.0:
+                    failure_reason = "non_positive_equity_after_order"
+                elif initial_margin_after > margin_cap_amount + 1e-12:
+                    failure_reason = "margin_cap_exceeded"
+
+                if failure_reason is not None:
+                    row.update(status="failed", failure_reason=failure_reason)
+                    rows.append(row)
+                    break
+
+                rows.append(row)
+                equity -= order_fee
+                qty += required_notional / layer_price
+                cost += required_notional
+                entry_fees += order_fee
+
+            name = SIDE_NAME[side]
+            results[name] = {
+                "side": name,
+                "executable": failure_reason is None and len(rows) == self.params.max_layers,
+                "failure_layer": (
+                    None if failure_reason is None else rows[-1]["layer"]
+                ),
+                "failure_reason": failure_reason,
+                "target_cash": target_cash,
+                "layers": rows,
+            }
+        return results
+
+    def validate_initial_grid(
+        self, price: float, diagnostics: Optional[dict[str, dict]] = None
+    ):
+        """Fail fast if the configured full grid cannot be executed at startup."""
+        if price <= 0.0:
+            raise ValueError("startup grid validation price must be positive")
+        diagnostics = (
+            diagnostics if diagnostics is not None else self.grid_diagnostics(price)
+        )
+        failed = [result for result in diagnostics.values() if not result["executable"]]
+        if failed:
+            details = "; ".join(
+                f"{result['side']} layer {result['failure_layer']}: "
+                f"{result['failure_reason']}"
+                for result in failed
+            )
+            raise ValueError(
+                "configured martingale grid is not executable at startup "
+                f"at price {price:.12g}; {details}. See GRID PREFLIGHT log lines "
+                "for prices, notionals, target PnL, fees and margin constraints"
+            )
+
     # ---------- fills ----------
     def _affordable(self, state: AccountState, notional: float, price: float) -> bool:
         cycle = state.cycle
@@ -594,10 +769,16 @@ class MartingaleSimulator:
         )
         self._observe(state, price)
 
+    def _mark_grid_infeasible(self, state: AccountState, price: float, layers: int):
+        state.grid_infeasible = True
+        state.unfilled_layers += max(1, layers)
+        state.failure_equity = self.equity_at(state, price)
+        state.failure_price = price
+
     def _open_base(self, state: AccountState, price: float) -> bool:
         planned = self._plan_cycle(state, price)
         if not planned:
-            state.unfilled_layers += self.params.max_layers
+            self._mark_grid_infeasible(state, price, self.params.max_layers)
             return False
         state.cycle.planned_notionals = planned
         self._fill(state, price, planned[0], is_base=True)
@@ -606,11 +787,11 @@ class MartingaleSimulator:
     def _add_layer(self, state: AccountState, price: float) -> bool:
         cycle = state.cycle
         if cycle.layers >= len(cycle.planned_notionals):
-            state.unfilled_layers += 1
+            self._mark_grid_infeasible(state, price, 1)
             return False
         notional = cycle.planned_notionals[cycle.layers]
         if not self._affordable(state, notional, price):
-            state.unfilled_layers += 1
+            self._mark_grid_infeasible(state, price, 1)
             return False
         self._fill(state, price, notional, is_base=False)
         return True
