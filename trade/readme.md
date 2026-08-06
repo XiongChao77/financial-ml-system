@@ -5,13 +5,43 @@ feed/     Data source: klines + model inference output (pred/pred_prob/atr_pct/l
 strategy/ Strategy layer: consumes an Observation -> produces a TradeIntent, imports neither backtrader nor any exchange SDK
 venue/    Venue layer: bt/ backtest, live/ real trading (bybit, ftmo); assembles the Observation inbound, executes the TradeIntent outbound
 core/     Protocol shared by the three layers: protocol.py (enums/Observation/TradeIntent), strategy_base.py, venue_base.py
-runner/   Wires the three together and produces the report: backtest_runner.py (ML) / typical_runner.py (turtle etc.) / martingale_runner.py (restartable martingale)
+runner/   Wires the three together and produces the report: one backtest_runner.py for every strategy
 ```
 
 Data flow: `feed → venue assembles the Observation → strategy.process() → TradeIntent → venue.submit_order/close_position`
 
 Boundary test: **whatever can exist without a trading venue belongs to the feed; whatever only the venue knows (equity, current position, fill callbacks) belongs to the venue; the pure decision in between belongs to the strategy.**
 Switching backtest framework only touches venue/bt; running the same strategy live only swaps venue/live; switching model only touches the feed.
+
+## Parameter ownership
+
+Parameters are split by the layer that owns their meaning:
+
+- `trade.strategy.*StrategyConfig`: decision parameters only, such as holding bars, signal thresholds, risk budget and grid rules.
+- `trade.runner.config.BrokerConfig`: initial equity, commission and leverage.
+- `ModelDataConfig` / `CsvDataConfig`: model artifact paths, period selection, symbol, interval and date range.
+- `BacktestEngineConfig`: Backtrader execution switches.
+
+`RunnerConfig` is the single input to `backtest_runner.main(logger, config)`. Its fields are
+grouped by owner: `strategy_config`, `broker_config`, `data_config`, `engine_config` and
+`report_config`. The concrete data config type selects the pipeline: `ModelDataConfig` loads
+prepared data, model artifacts and predictions internally; `CsvDataConfig` loads raw market
+data internally. Callers never load a DataFrame or model and pass it into the runner.
+
+`MarketDataSourceConfig` is the common raw-data locator shared by `BaseDefine` and
+`CsvDataConfig`: `market_category / data_source / trading_type / symbol_interval.csv`.
+`atr_ref_bars` is required in both data configs. `bars_to_close` is an optional feed column;
+when it is absent, the observation uses infinity to represent a continuous market with no close.
+
+`create_backtest_cerebro()` is the common execution skeleton. It installs the same broker,
+Sharpe/Returns/DrawDown/TradeAnalyzer/CusAnalyzer set for ML and non-ML runs, and passes
+the strategy-owned config to a `*BtVenue` as one opaque `strategy_config` object. The venue
+understands the concrete type and constructs the strategy; the runner never expands strategy
+fields. `generate_backtest_report()` is shared as well, so return, drawdown, rolling Calmar,
+exposure and trade metrics use one implementation.
+
+`backtest_runner.StrategyPara` is a small experiment bundle containing `strategy_config` and
+`broker_config` directly. It performs no field copying or config conversion.
 
 Naming convention: strategy classes `*Strategy` (`MlSignalStrategy` / `RestartableMartingaleStrategy`),
 backtest venue classes `*BtVenue` (`MlBtVenue` / `MartingaleBtVenue`), live venue classes `*Venue` (`BybitVenue` / `MT5Venue`).

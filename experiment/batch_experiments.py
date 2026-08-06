@@ -125,7 +125,15 @@ def build_task_spec(
             for sim in simulation_task:
                 sim_d = asdict(sim)
                 sim_h = param_hash(sim_d)
-                _assert_hash_roundtrip("sim", sim_d, backtest_runner.StrategyPara(**sim_d), sim_h)
+                restored_sim = backtest_runner.StrategyPara(
+                    strategy_config=backtest_runner.MlStrategyConfig(
+                        **sim_d["strategy_config"]
+                    ),
+                    broker_config=backtest_runner.BrokerConfig(
+                        **sim_d["broker_config"]
+                    ),
+                )
+                _assert_hash_roundtrip("sim", sim_d, restored_sim, sim_h)
                 if sim_h in existing:
                     continue
                 node_tr["sim_tasks"].append({"hash": sim_h, "params": json_safe(sim_d)})
@@ -213,8 +221,16 @@ def filter_pending_from_spec(task_spec: Dict[str, Any], done_set: set[str]) -> D
             train_params = tr_node["params"]
             sim_pending = []
             for sim in tr_node.get("sim_tasks", []):
+                sim_params = sim["params"]
                 task_hash = calc_params_hash(
-                    strategy=backtest_runner.StrategyPara(**sim["params"]),
+                    strategy=backtest_runner.StrategyPara(
+                        strategy_config=backtest_runner.MlStrategyConfig(
+                            **sim_params["strategy_config"]
+                        ),
+                        broker_config=backtest_runner.BrokerConfig(
+                            **sim_params["broker_config"]
+                        ),
+                    ),
                     common=common.BaseDefine(**pre_params),
                     train=_config_from_dict_train(train_params, expected_hash=tr_h),
                 )
@@ -382,8 +398,17 @@ def construct_task_doge():
     for i in [12,16,24]: #16,24,30,32,36,40,44,48
         min_hold_bars = i
         for (atr_sl_long_mult, atr_sl_short_mult) in [(6,5),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(backtest_runner.StrategyPara(allow_long=True,allow_short=True,min_hold_bars=min_hold_bars,commission_pct=0.05,init_equity=10000.0,prob_thresh=None,
-                                            atr_sl_long_mult=atr_sl_long_mult,atr_sl_short_mult=atr_sl_short_mult,atr_tp_mult=0.99,risk_per_trade_pct=0.4,max_daily_loss_pct=0.04))
+            simulation_task.append(backtest_runner.StrategyPara(
+                strategy_config=backtest_runner.MlStrategyConfig(
+                    allow_long=True, allow_short=True, min_hold_bars=min_hold_bars,
+                    prob_thresh=None, atr_sl_long_mult=atr_sl_long_mult,
+                    atr_sl_short_mult=atr_sl_short_mult, atr_tp_mult=0.99,
+                    risk_per_trade_pct=0.4, max_daily_loss_pct=0.04,
+                ),
+                broker_config=backtest_runner.BrokerConfig(
+                    initial_equity=10000.0, commission_pct=0.05,
+                ),
+            ))
     return preparation_task, training_task, simulation_task
 
 def construct_task_doge_combo():
@@ -440,8 +465,16 @@ def construct_task_doge_combo():
         min_hold_bars = i
         for (atr_sl_long_mult, atr_sl_short_mult) in [(6, 5), (5, 4)]:
             simulation_task.append(backtest_runner.StrategyPara(
-                allow_long=True, allow_short=True, min_hold_bars=min_hold_bars, commission_pct=0.05, init_equity=10000.0, prob_thresh=None,
-                atr_sl_long_mult=atr_sl_long_mult, atr_sl_short_mult=atr_sl_short_mult, atr_tp_mult=0.99, risk_per_trade_pct=0.4, max_daily_loss_pct=0.04))
+                strategy_config=backtest_runner.MlStrategyConfig(
+                    allow_long=True, allow_short=True, min_hold_bars=min_hold_bars,
+                    prob_thresh=None, atr_sl_long_mult=atr_sl_long_mult,
+                    atr_sl_short_mult=atr_sl_short_mult, atr_tp_mult=0.99,
+                    risk_per_trade_pct=0.4, max_daily_loss_pct=0.04,
+                ),
+                broker_config=backtest_runner.BrokerConfig(
+                    initial_equity=10000.0, commission_pct=0.05,
+                ),
+            ))
     return preparation_task, training_task, simulation_task
 
 def construct_task_eth():
@@ -484,8 +517,17 @@ def construct_task_eth():
     for i in [30,32,36,38,40,44]: #16,24,30,32,36,40,44,48
         min_hold_bars = i
         for (atr_sl_long_mult, atr_sl_short_mult) in [(6,6),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(backtest_runner.StrategyPara(allow_long=True,allow_short=True,min_hold_bars=min_hold_bars,commission_pct=0.05,init_equity=10000.0,prob_thresh=None,
-                                            atr_sl_long_mult=atr_sl_long_mult,atr_sl_short_mult=atr_sl_short_mult,risk_per_trade_pct=0.1,max_daily_loss_pct=0.025))
+            simulation_task.append(backtest_runner.StrategyPara(
+                strategy_config=backtest_runner.MlStrategyConfig(
+                    allow_long=True, allow_short=True, min_hold_bars=min_hold_bars,
+                    prob_thresh=None, atr_sl_long_mult=atr_sl_long_mult,
+                    atr_sl_short_mult=atr_sl_short_mult,
+                    risk_per_trade_pct=0.1, max_daily_loss_pct=0.025,
+                ),
+                broker_config=backtest_runner.BrokerConfig(
+                    initial_equity=10000.0, commission_pct=0.05,
+                ),
+            ))
     return preparation_task, training_task, simulation_task
 
 def create_task_spec(logger, exp_dir,done_set: set[str]):
@@ -643,7 +685,15 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
         # combined model directory produced by the combo_model fuse; the backtest stage is identical for both.
         pre_h, pre_params, tr_h, train_params, sim, train_output_dir, extra_report_fields = msg
         sim_h = sim['hash']
-        s_para = backtest_runner.StrategyPara(**sim["params"])
+        sim_params = sim["params"]
+        s_para = backtest_runner.StrategyPara(
+            strategy_config=backtest_runner.MlStrategyConfig(
+                **sim_params["strategy_config"]
+            ),
+            broker_config=backtest_runner.BrokerConfig(
+                **sim_params["broker_config"]
+            ),
+        )
         t_cfg = _config_from_dict_train(train_params, expected_hash=tr_h)
         prep_dir = _prep_output_dir(temp_dir, pre_h)
 
@@ -651,14 +701,26 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
         try:
             report_stat = None
             report = {'short':{}, 'long':{}, 'forward': {}, 'pass':False, **(extra_report_fields or {})}
-            report['short'] = backtest_runner.main( logger, para=s_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
-                                train_output_dir=train_output_dir, device="cpu", period='short' )["statistics"][1]
+            def run_period(period):
+                runner_config = backtest_runner.RunnerConfig(
+                    strategy_config=s_para.strategy_config,
+                    broker_config=s_para.broker_config,
+                    data_config=backtest_runner.ModelDataConfig(
+                        atr_ref_bars=s_para.strategy_config.min_hold_bars,
+                        prep_output_dir=prep_dir,
+                        train_output_dir=train_output_dir,
+                        device="cpu",
+                        period=period,
+                        train_config=t_cfg,
+                    ),
+                )
+                return backtest_runner.main(logger, runner_config)["statistics"][1]
+
+            report['short'] = run_period('short')
             if report['short']["performance"]["cagr"] > -1000 :
-                report['forward'] = backtest_runner.main( logger, para=s_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
-                                    train_output_dir=train_output_dir, device="cpu", period='forward' )["statistics"][1]
+                report['forward'] = run_period('forward')
                 if report['forward']["performance"]["cagr"] > -1000 :
-                    report['long'] = backtest_runner.main( logger, para=s_para, train_cfg=t_cfg, prep_output_dir=prep_dir,
-                                        train_output_dir=train_output_dir, device="cpu", period='long' )["statistics"][1]
+                    report['long'] = run_period('long')
                     if report['long']["performance"]["cagr"] > 0 :
                         report['pass'] = True
                 else:
@@ -938,7 +1000,14 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                 if not os.path.exists(train_save_dir):
                     raise RuntimeError(f" {train_save_dir} not exist,run valid first!")
                 sim_params = sim_task['params']
-                sim_para=backtest_runner.StrategyPara(**sim_params)
+                sim_para = backtest_runner.StrategyPara(
+                    strategy_config=backtest_runner.MlStrategyConfig(
+                        **sim_params["strategy_config"]
+                    ),
+                    broker_config=backtest_runner.BrokerConfig(
+                        **sim_params["broker_config"]
+                    ),
+                )
                 results[strategy_hash] = {'orignal_symbol': f'{pre_para.symbol}_{pre_para.interval}','CAGR':{}}
                 for symbol in ["DOGEUSDT","ETHUSDT", "BTCUSDT"]:   #BTCUSDT ETHUSDT DOGEUSDT
                     if symbol != original_symbol:
@@ -949,8 +1018,19 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                         if not os.path.exists(sim_prep_output_dir):
                             preparation.main(logger, para=t_pre_para, prep_output_dir=sim_prep_output_dir)
                             time.sleep(1)
-                        result = backtest_runner.main( logger, para=sim_para, train_cfg=t_cfg, prep_output_dir=sim_prep_output_dir,
-                                                                train_output_dir=train_save_dir, device="cpu", period='long' )["statistics"][1]
+                        runner_config = backtest_runner.RunnerConfig(
+                            strategy_config=sim_para.strategy_config,
+                            broker_config=sim_para.broker_config,
+                            data_config=backtest_runner.ModelDataConfig(
+                                atr_ref_bars=sim_para.strategy_config.min_hold_bars,
+                                prep_output_dir=sim_prep_output_dir,
+                                train_output_dir=train_save_dir,
+                                device="cpu",
+                                period="long",
+                                train_config=t_cfg,
+                            ),
+                        )
+                        result = backtest_runner.main(logger, runner_config)["statistics"][1]
                         results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
                         results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result['performance']['cagr']
                     else:
@@ -962,8 +1042,19 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                             if not os.path.exists(sim_prep_output_dir):
                                 preparation.main(logger, para=t_pre_para, prep_output_dir=sim_prep_output_dir)
                                 time.sleep(1)
-                            result = backtest_runner.main( logger, para=sim_para, train_cfg=t_cfg, prep_output_dir=sim_prep_output_dir,
-                                                                    train_output_dir=train_save_dir, device="cpu", period='long' )["statistics"][1]
+                            runner_config = backtest_runner.RunnerConfig(
+                                strategy_config=sim_para.strategy_config,
+                                broker_config=sim_para.broker_config,
+                                data_config=backtest_runner.ModelDataConfig(
+                                    atr_ref_bars=sim_para.strategy_config.min_hold_bars,
+                                    prep_output_dir=sim_prep_output_dir,
+                                    train_output_dir=train_save_dir,
+                                    device="cpu",
+                                    period="long",
+                                    train_config=t_cfg,
+                                ),
+                            )
+                            result = backtest_runner.main(logger, runner_config)["statistics"][1]
                             results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
                             results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result['performance']['cagr']
     output_path = os.path.join(output_dir, "cross_test_reports.jsonl")
@@ -1182,7 +1273,14 @@ def main():
         for r in records:
             report = {'short':{}, 'long':{}}
             params = r["short"] if "short" in r else r
-            sim_para =backtest_runner.StrategyPara(**params["params"]["strategy"])
+            sim_para = backtest_runner.StrategyPara(
+                strategy_config=backtest_runner.MlStrategyConfig(
+                    **params["params"]["strategy"]
+                ),
+                broker_config=backtest_runner.BrokerConfig(
+                    **params["params"]["broker"]
+                ),
+            )
             pre_para =common.BaseDefine(**params["params"]["common"])
             train_para=_config_from_dict_train(params["params"]["train"])
             load_prep_output_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "load_configs",'prep',f'{pre_para.symbol}_{pre_para.interval}')
@@ -1196,11 +1294,25 @@ def main():
             last_cagr = 0
             for risk_per_trade_pct in [0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
                 result = {}
-                sim_para.risk_per_trade_pct = risk_per_trade_pct
+                sim_para.strategy_config.risk_per_trade_pct = risk_per_trade_pct
                 result[strategy_hash] = {risk_per_trade_pct:{'cagr':{}}}
-                short_result = backtest_runner.main(logger, para=sim_para, train_cfg=train_para, prep_output_dir =load_prep_output_dir,train_output_dir= train_save_dir,period='short')["statistics"][1]
-                long_result = backtest_runner.main(logger, para=sim_para, train_cfg=train_para, prep_output_dir =load_prep_output_dir,train_output_dir= train_save_dir,period='long')["statistics"][1]
-                forward_result = backtest_runner.main(logger, para=sim_para, train_cfg=train_para,prep_output_dir =load_prep_output_dir,train_output_dir= train_save_dir, period='forward')["statistics"][1]
+                def run_selected_period(period):
+                    runner_config = backtest_runner.RunnerConfig(
+                        strategy_config=sim_para.strategy_config,
+                        broker_config=sim_para.broker_config,
+                        data_config=backtest_runner.ModelDataConfig(
+                            atr_ref_bars=sim_para.strategy_config.min_hold_bars,
+                            prep_output_dir=load_prep_output_dir,
+                            train_output_dir=train_save_dir,
+                            period=period,
+                            train_config=train_para,
+                        ),
+                    )
+                    return backtest_runner.main(logger, runner_config)["statistics"][1]
+
+                short_result = run_selected_period('short')
+                long_result = run_selected_period('long')
+                forward_result = run_selected_period('forward')
                 result[strategy_hash][risk_per_trade_pct]['cagr']['short'] = short_result['performance']['cagr']
                 result[strategy_hash][risk_per_trade_pct]['cagr']['long'] = long_result['performance']['cagr']
                 result[strategy_hash][risk_per_trade_pct]['cagr']['forward'] = forward_result['performance']['cagr']

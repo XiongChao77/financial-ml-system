@@ -378,10 +378,10 @@ def print_gap_report(gaps: list[tuple[int, int, int, int]], interval_ms: int) ->
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Download Binance Vision daily kline ZIP files and merge into one CSV.")
-    parser.add_argument("--market", choices=VALID_MARKETS.keys(), default="spot",
+    parser.add_argument("--market", choices=VALID_MARKETS.keys(), default="um",
                         help="Market: spot, um=USDⓈ-M futures, cm=COIN-M futures. Default: spot")
     parser.add_argument("--symbol", required=False, help="Symbol, e.g. BTCUSDT, DOGEUSDT",default="DOGEUSDT")
-    parser.add_argument("--interval", required=False, help="Kline interval, e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d",default="30m")
+    parser.add_argument("--interval", required=False, help="Kline interval, e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d",default="5m")
     parser.add_argument("--start", default=None, help="Start day UTC, YYYY-MM-DD. Default: earliest conservative date for market.")
     parser.add_argument("--end", default=None, help="End day UTC, YYYY-MM-DD. Default: today UTC.")
     parser.add_argument("--dir", default="data", help="Output root directory. Default: ./data")

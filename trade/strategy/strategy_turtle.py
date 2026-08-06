@@ -1,42 +1,33 @@
 import pandas as pd
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from trade.core.protocol import TradeIntent, ActionType, PositionDir
 from trade.core.strategy_base import StrategyBase
 from trade.core.venue_base import VenueBase
 
+@dataclass(frozen=True)
+class TurtleStrategyConfig:
+    entry_period: int = 20
+    exit_period: int = 10
+    atr_period: int = 20
+    max_layers: int = 4
+    risk_per_unit: float = 0.01
+    max_daily_loss_pct: float = 0.045
+    soft_limit_ratio: float = 0.6
+    upper_limit: float = 0.7
+    unit_pct_scale: float = 0.7
+
+
 class TurtleStrategy(StrategyBase):
-    def __init__(
-        self, 
-        venue: VenueBase,
-        entry_period: int = 20,
-        exit_period: int = 10,
-        atr_period: int = 20,
-        max_layers: int = 4,
-        risk_per_unit: float = 0.01,
-        max_daily_loss_pct: float = 0.045, # fix: make sure the attribute is set on init
-        soft_limit_ratio: float = 0.6,
-        upper_limit : float = 0.7,
-        unit_pct_scale:float = 0.7
-    ):
-        self.venue = venue
-        self.entry_period = entry_period
-        self.exit_period = exit_period
-        self.atr_period = atr_period
-        self.max_layers = max_layers
-        self.risk_per_unit = risk_per_unit
-        self.upper_limit = upper_limit
-        self.unit_pct_scale = unit_pct_scale
-        
-        # Core risk parameters
-        self.max_daily_loss_pct = max_daily_loss_pct # fix: must be assigned explicitly
-        self.soft_limit_ratio = soft_limit_ratio
-        
-        self.curr_layers = 0 
+    def __init__(self, venue: VenueBase, config: TurtleStrategyConfig):
+        super().__init__(venue)
+        self.config = config
+
+        self.curr_layers = 0
         self.day_start_equity = None
         self.last_trade_date = None
-        self.is_halted_today = False 
-        
+        self.is_halted_today = False
         self.logger = logging.getLogger("TurtleStrategy")
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -48,7 +39,7 @@ class TurtleStrategy(StrategyBase):
         df['tr'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         
         # 2. Strict Wilder's ATR
-        atr_period = self.atr_period
+        atr_period = self.config.atr_period
         df['atr'] = 0.0
         
         if len(df) >= atr_period:
@@ -66,10 +57,10 @@ class TurtleStrategy(StrategyBase):
             df['atr'] = atr_values
 
         # 3. Donchian channel
-        df['entry_high'] = df['high'].shift(1).rolling(window=self.entry_period).max()
-        df['entry_low'] = df['low'].shift(1).rolling(window=self.entry_period).min()
-        df['exit_high'] = df['high'].shift(1).rolling(window=self.exit_period).max()
-        df['exit_low'] = df['low'].shift(1).rolling(window=self.exit_period).min()
+        df['entry_high'] = df['high'].shift(1).rolling(window=self.config.entry_period).max()
+        df['entry_low'] = df['low'].shift(1).rolling(window=self.config.entry_period).min()
+        df['exit_high'] = df['high'].shift(1).rolling(window=self.config.exit_period).max()
+        df['exit_low'] = df['low'].shift(1).rolling(window=self.config.exit_period).min()
         
         return df
 
@@ -83,7 +74,7 @@ class TurtleStrategy(StrategyBase):
     def process(self, df: pd.DataFrame, current_time: datetime, account_equity: float, 
                curr_dir: PositionDir, curr_pos_size: float, last_entry_price: float) -> TradeIntent:
         
-        if len(df) < self.entry_period:
+        if len(df) < self.config.entry_period:
             return TradeIntent(ActionType.HOLD)
 
         self._update_daily_equity(current_time, account_equity)
@@ -95,7 +86,7 @@ class TurtleStrategy(StrategyBase):
 
         # 1. Risk budget audit
         daily_loss_abs = max(0, self.day_start_equity - account_equity)
-        max_loss_allowed_abs = self.day_start_equity * self.max_daily_loss_pct
+        max_loss_allowed_abs = self.day_start_equity * self.config.max_daily_loss_pct
         remaining_budget = max_loss_allowed_abs - daily_loss_abs
 
         if daily_loss_abs > max_loss_allowed_abs:
@@ -113,17 +104,17 @@ class TurtleStrategy(StrategyBase):
         
         # 3. Anchor sizing to the stop loss (fixes the false sense of safety)
         # Estimated total notional share after adding this layer
-        target_layers = (self.curr_layers + 1) if self.curr_layers < self.max_layers else self.max_layers
+        target_layers = (self.curr_layers + 1) if self.curr_layers < self.config.max_layers else self.config.max_layers
         
         # Unit size from the risk formula
-        unit_size = (account_equity * self.risk_per_unit) / atr if atr > 0 else 0
+        unit_size = (account_equity * self.config.risk_per_unit) / atr if atr > 0 else 0
         # unit_size = unit_size*0.2
         unit_pct = (unit_size * current_price) / account_equity
         # 3. Enforce the share cap (e.g. 50%)
-        if unit_pct > self.upper_limit:
-            unit_pct = self.upper_limit
+        if unit_pct > self.config.upper_limit:
+            unit_pct = self.config.upper_limit
         # === key: keep the actual order size in sync ===
-        unit_pct = unit_pct* self.unit_pct_scale
+        unit_pct = unit_pct* self.config.unit_pct_scale
         unit_size = (unit_pct * account_equity) / current_price
         # unit_pct = unit_pct*0.2
         
@@ -147,7 +138,7 @@ class TurtleStrategy(StrategyBase):
                 action = TradeIntent(ActionType.OPEN, PositionDir.POSITIVE , 1, unit_pct)
             elif current_price < last_row['entry_low']:
                 action = TradeIntent(ActionType.OPEN, PositionDir.NEGATIVE, 1, unit_pct)
-        elif self.curr_layers < self.max_layers:
+        elif self.curr_layers < self.config.max_layers:
             threshold = 0.5 * atr
             if curr_dir == PositionDir.POSITIVE  and current_price > last_entry_price + threshold:
                 action = TradeIntent(ActionType.PYRAMID, PositionDir.POSITIVE , target_layers, unit_pct)

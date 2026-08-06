@@ -5,7 +5,7 @@ import logging,math,re,git
 import pandas as pd
 import numpy as np
 import os, colorlog , logging, json,platform
-from dataclasses import asdict, is_dataclass,fields
+from dataclasses import asdict, is_dataclass,fields,replace
 from typing import Optional
 from datetime import datetime
 from data_process.utils import *
@@ -43,14 +43,19 @@ LABEL_VIERER_PUBLICE_DIR = os.path.join(DATA_PROCESS_DIR,'label_viewer','public'
 if not os.path.islink(LABEL_VIERER_PUBLICE_DIR):   os.symlink(DATA_OUT_DIR, LABEL_VIERER_PUBLICE_DIR)
 
 @dataclass
-class BaseDefine:
-    #data source
+class MarketDataSourceConfig:
+    """Fields that uniquely locate one raw market-data file."""
+
     market_category: str = "Cryptocurrency"   # cryptocurrency / Stock / Forex
     data_source: str = "binance_public_data"                   # binance / yahoo / dukascopy
-    # market
     symbol: str = "DOGEUSDT"    #BTCUSDT ETHUSDT DOGEUSDT XAUUSD
     interval: str = "30m"
-    trading_type:str ='um'             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures) 
+    trading_type: str = 'um'             #spot  / um(USDT-M Futures) / cm    (Coin-M Futures)
+
+
+@dataclass
+class BaseDefine(MarketDataSourceConfig):
+    #label
     label_type:str = 'FTHL' # TBM / FTHL / "TBM_TREND"
     # model / data
     vol_ewma_span: int  = 80
@@ -64,10 +69,11 @@ class BaseDefine:
 
 vol_multiplier = 1.8
 stop_multiplier_rate = 0.4
-DOGE_15m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="15m", trading_type='um', label_type = 'FTHL')
-DOGE_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="30m", trading_type='spot'
+DOGE_1m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="1m", trading_type='um'
                       , label_type = 'FTHL',
                       predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=stop_multiplier_rate, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=stop_multiplier_rate)
+DOGE_15m = replace(DOGE_1m,interval="15m",)
+DOGE_30m = replace(DOGE_1m,interval="30m",)
 XLM_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="XLMUSDT", interval="30m", trading_type='um'
                       , label_type = 'FTHL',
                       predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
@@ -77,6 +83,23 @@ XAU_15m = BaseDefine(market_category="Forex", data_source="dukascopy", symbol="X
 log_level = logging.INFO
 
 PROJECT_DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'QuantData')
+
+
+def market_data_path(
+    source: MarketDataSourceConfig,
+    root_dir: Optional[str] = None,
+) -> str:
+    """Resolve the canonical raw CSV path for a market data source."""
+    root_dir = PROJECT_DATA_DIR if root_dir is None else root_dir
+    return os.path.join(
+        root_dir,
+        source.market_category,
+        source.data_source,
+        source.trading_type,
+        f"{source.symbol}_{source.interval}.csv",
+    )
+
+
 train_data_path = os.path.join(DATA_OUT_DIR, "train_data.csv")
 test_data_path  = os.path.join(DATA_OUT_DIR, "test_data.csv")
 data_config_path  = os.path.join(DATA_OUT_DIR, "data_config_meta.json")

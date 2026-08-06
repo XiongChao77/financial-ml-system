@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import Optional
 from datetime import datetime
+from math import inf
 
 from data_process.common import Signal
 
@@ -67,12 +68,17 @@ class TradeIntent:
 class MarketView:
     """From the feed: market data + model signal; account independent and reproducible offline."""
     price: float
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
     signal: Optional[Signal] = None
     pred_prob: float = 0.0
     atr_pct: float = 0.0            # current ATR (as a fraction of price)
     slow_atr: Optional[float] = None
     vol_regime: Optional[float] = None
-    bars_to_close: Optional[int] = None   # bars left before this trading session closes
+    # Optional feed value: infinity means a continuous market with no close boundary.
+    bars_to_close: Optional[float] = inf
 
 
 @dataclass

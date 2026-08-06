@@ -1,35 +1,37 @@
 import pandas as pd
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime
 from trade.core.protocol import TradeIntent, ActionType, PositionDir
 from trade.core.strategy_base import StrategyBase
 from trade.core.venue_base import VenueBase
 
+@dataclass(frozen=True)
+class RulesStrategyConfig:
+    entry_period: int = 20
+    exit_period: int = 10
+    atr_period: int = 20
+    max_layers: int = 1
+    risk_per_trade: float = 0.01
+    max_daily_loss_pct: float = 0.035
+    unit_pct_scale: float = 1.9
+    upper_limit: float = 0.6
+    pyramid_gap_atr: float = 0.5
+
+
 class RulesStrategy(StrategyBase):
-    def __init__(self, venue: VenueBase, **kwargs):
+    def __init__(self, venue: VenueBase, config: RulesStrategyConfig):
         super().__init__(venue)
-        # --- basic parameters ---
-        self.entry_period = kwargs.get('entry_period', 20)
-        self.exit_period = kwargs.get('exit_period', 10)
-        self.atr_period = kwargs.get('atr_period', 20)
-        self.max_layers = kwargs.get('max_layers', 1)
-        
-        # --- core risk parameters (kept in sync with TurtleStrategy) ---
-        self.risk_per_trade = kwargs.get('risk_per_trade', 0.01)     # risk per layer (1%)
-        self.max_daily_loss_pct = kwargs.get('max_daily_loss_pct', 0.035) # daily loss cap (4.5%)
-        self.unit_pct_scale = kwargs.get('unit_pct_scale', 1.9)      # capital usage scaling
-        self.upper_limit = kwargs.get('upper_limit', 0.6)            # notional cap per layer
-        self.pyramid_gap_atr = kwargs.get('pyramid_gap_atr', 0.5)
+        self.config = config
 
         # --- state ---
         self.day_start_equity = None
         self.last_trade_date = None
         self.is_halted_today = False
-        self.curr_layers = 0 
-        self.layer_sizes = []  
+        self.curr_layers = 0
+        self.layer_sizes = []
         self.last_order_price = 0.0
-        
         self.logger = logging.getLogger("RulesStrategy")
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -38,20 +40,20 @@ class RulesStrategy(StrategyBase):
         if all(col in df.columns for col in required): return df
 
         df = df.copy()
-        df['entry_high'] = df['high'].shift(1).rolling(window=self.entry_period).max()
-        df['entry_low'] = df['low'].shift(1).rolling(window=self.entry_period).min()
-        df['exit_high'] = df['high'].shift(1).rolling(window=self.exit_period).max()
-        df['exit_low'] = df['low'].shift(1).rolling(window=self.exit_period).min()
+        df['entry_high'] = df['high'].shift(1).rolling(window=self.config.entry_period).max()
+        df['entry_low'] = df['low'].shift(1).rolling(window=self.config.entry_period).min()
+        df['exit_high'] = df['high'].shift(1).rolling(window=self.config.exit_period).max()
+        df['exit_low'] = df['low'].shift(1).rolling(window=self.config.exit_period).min()
         
         tr = pd.concat([df['high']-df['low'], 
                        (df['high']-df['close'].shift(1)).abs(), 
                        (df['low']-df['close'].shift(1)).abs()], axis=1).max(axis=1)
         
         atr_vals = [0.0] * len(df)
-        if len(df) >= self.atr_period:
-            atr_vals[self.atr_period-1] = tr[:self.atr_period].mean()
-            for i in range(self.atr_period, len(df)):
-                atr_vals[i] = (atr_vals[i-1] * (self.atr_period-1) + tr.iloc[i]) / self.atr_period
+        if len(df) >= self.config.atr_period:
+            atr_vals[self.config.atr_period-1] = tr[:self.config.atr_period].mean()
+            for i in range(self.config.atr_period, len(df)):
+                atr_vals[i] = (atr_vals[i-1] * (self.config.atr_period-1) + tr.iloc[i]) / self.config.atr_period
         df['atr'] = atr_vals
         return df
 
@@ -66,7 +68,7 @@ class RulesStrategy(StrategyBase):
     def process(self, df: pd.DataFrame, current_time: datetime, account_equity: float, 
                curr_dir: PositionDir, curr_pos_qty: float) -> TradeIntent:
         
-        if len(df) < self.entry_period: return TradeIntent(ActionType.HOLD)
+        if len(df) < self.config.entry_period: return TradeIntent(ActionType.HOLD)
 
         # 1. Daily risk audit and circuit breaker (sync from TurtleStrategy)
         self._update_daily_equity(current_time, account_equity)
@@ -74,7 +76,7 @@ class RulesStrategy(StrategyBase):
             return TradeIntent(ActionType.HOLD)
 
         daily_loss_abs = max(0.0, self.day_start_equity - account_equity)
-        max_loss_allowed_abs = self.day_start_equity * self.max_daily_loss_pct
+        max_loss_allowed_abs = self.day_start_equity * self.config.max_daily_loss_pct
         remaining_budget = max_loss_allowed_abs - daily_loss_abs
 
         if daily_loss_abs >= max_loss_allowed_abs:
@@ -100,29 +102,29 @@ class RulesStrategy(StrategyBase):
                 new_sizes = self.layer_sizes[:matched_count] if is_forward else self.layer_sizes[-matched_count:]
                 self.layer_sizes, self.curr_layers = new_sizes, len(new_sizes)
             else:
-                if self.curr_layers != self.max_layers:
+                if self.curr_layers != self.config.max_layers:
                     self.logger.error(f"⚠️ [仓位脱节] 无法匹配层级！实际:{abs_qty:.4f}")
-                    self.curr_layers = self.max_layers 
+                    self.curr_layers = self.config.max_layers
 
         # 3. Core anchoring: unit sizing and dynamic stop loss (optimized)
         # Theoretical unit (from the risk percentage and 2*ATR)
         # Unit Shares = (Balance * Risk) / (2 * ATR)
         if atr <= 0: return TradeIntent(ActionType.HOLD)
         
-        raw_unit_shares = (account_equity * self.risk_per_trade) / (2.0 * atr)
+        raw_unit_shares = (account_equity * self.config.risk_per_trade) / (2.0 * atr)
         
         # Nominal value constraint
         unit_nominal_pct = (raw_unit_shares * current_price) / account_equity
-        if unit_nominal_pct > self.upper_limit:
-            unit_nominal_pct = self.upper_limit
+        if unit_nominal_pct > self.config.upper_limit:
+            unit_nominal_pct = self.config.upper_limit
         
         # Final order size (scale applied)
-        final_unit_shares = (unit_nominal_pct * account_equity * self.unit_pct_scale) / current_price
+        final_unit_shares = (unit_nominal_pct * account_equity * self.config.unit_pct_scale) / current_price
         
         # Budget-constrained stop loss
         # Estimated total notional share after adding this layer
-        target_layers = min(self.curr_layers + 1, self.max_layers)
-        total_nominal_val = (unit_nominal_pct * self.unit_pct_scale) * target_layers * account_equity
+        target_layers = min(self.curr_layers + 1, self.config.max_layers)
+        total_nominal_val = (unit_nominal_pct * self.config.unit_pct_scale) * target_layers * account_equity
         
         # Largest stop loss share allowed by the remaining daily budget (0.8 = slippage safety factor)
         max_sl_ratio = (remaining_budget / total_nominal_val) * 0.8 if total_nominal_val > 0 else 0.05
@@ -149,8 +151,8 @@ class RulesStrategy(StrategyBase):
                 self.venue.submit_order(final_unit_shares, is_buy=is_long, stop_loss=final_sl_pct)
                 return TradeIntent(ActionType.OPEN)
 
-        elif self.curr_layers < self.max_layers:
-            threshold = self.pyramid_gap_atr * atr
+        elif self.curr_layers < self.config.max_layers:
+            threshold = self.config.pyramid_gap_atr * atr
             if (curr_dir == PositionDir.POSITIVE  and current_price > self.last_order_price + threshold) or \
                (curr_dir == PositionDir.NEGATIVE and current_price < self.last_order_price - threshold):
                 

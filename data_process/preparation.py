@@ -74,7 +74,7 @@ def check_open_equals_prev_close(
     return mismatch_count, total_checked, mismatch_ratio
 
 def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine(), prep_output_dir =common.DATA_OUT_DIR ):
-    file = os.path.join(common.PROJECT_DATA_DIR,para.market_category, para.data_source ,para.trading_type ,f"{para.symbol}_{para.interval}.csv")
+    file = common.market_data_path(para)
     logger.info(f"using file :{file}")
     # 1. Convert interval string to milliseconds
     interval_ms = common.get_interval_ms(para.interval)

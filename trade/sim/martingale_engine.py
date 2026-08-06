@@ -1,0 +1,920 @@
+"""Self-contained long martingale simulator with a worst-of-two-paths bar model.
+
+No backtrader, no venue, no broker adapter: this module owns the whole ledger
+(fees, leverage, initial margin, maintenance margin, forced liquidation) and
+consumes plain OHLC floats.
+
+Why two paths per bar
+---------------------
+Every safety order changes the latest layer entry and therefore resets both
+layer boundaries. So ``Open -> Low -> High -> Close`` is *not* automatically the
+worst intrabar route: reaching Low first can lower the dynamically recalculated take-profit price
+enough for the later High to close the cycle, while reaching High first may
+miss the old take profit and then leave a larger position open after the fall.
+Which one hurts more depends on the numbers, so both are replayed from the same
+snapshot and the worse outcome is kept:
+
+    path A: Open -> Low  -> High -> Close
+    path B: Open -> High -> Low  -> Close
+
+"Worse" is ordered as (1) liquidation, (2) crossing the configured ruin-equity
+threshold, (3) lower mark-to-market equity at Close, and (4) larger position
+notional carried into the next bar. Intrabar equity and margin extrema are
+tracked on the selected path rather than only at the bar close.
+
+Within one leg the price moves monotonically, so events fire in strict price
+order: liquidation, then stop loss, then the next safety order on the way down;
+the take profit on the way up.  Every event re-prices the ones after it.
+
+Layer boundaries
+----------------
+At layer ``i`` the adverse boundary is:
+``price_deviation_pct * deviation_step_mult ** (i - 1)``.
+The favourable take-profit boundary is independent:
+``take_profit_pct * deviation_step_mult ** (i - 1)``.
+The adverse boundary enters the next layer, or stops the cycle once the ladder
+is full. Before a base order is opened, the simulator prices the whole planned
+grid and rejects the cycle if any scheduled layer would breach the margin cap.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from typing import Any, List, Optional
+
+
+# A cycle's side.  Every price rule is written as "adverse" / "favourable"
+# relative to this sign, so long and short share one implementation.
+LONG = 1
+SHORT = -1
+SIDE_NAME = {LONG: "long", SHORT: "short"}
+
+
+# ============================================================
+# Parameters
+# ============================================================
+@dataclass(frozen=True)
+class MartingaleParams:
+    """Decision parameters of one martingale cycle."""
+
+    price_deviation_pct: float = 0.01     # next layer, adverse of the last fill
+    take_profit_pct: float = 0.01         # target move/profit of each layer
+    deviation_step_mult: float = 1.0      # >1 widens each successive step
+    max_layers: int = 7
+
+    # --- stop once the ladder can no longer average down ---
+    stop_at_full_layers: bool = True      # park a stop at the next grid price
+
+    # --- direction ---
+    initial_direction: str = "long"          # "long" or "short"
+    # Flip the side of the next cycle every time one is stopped out.  A long
+    # martingale only loses in a downtrend, so the question this answers is
+    # whether following the break is better than starting the same ladder again.
+    reverse_after_stop_loss: bool = False
+
+    # --- pause after a losing cycle ---
+    # Bars to sit out after a loss.  0 keeps the default behaviour: the cycle
+    # that closed cannot re-open inside its own bar, so the next base order
+    # fills at the very next bar's open.  N pushes that N bars further out.
+    loss_cooldown_bars: int = 0
+
+    def __post_init__(self):
+        if not 0.0 < self.price_deviation_pct < 1.0:
+            raise ValueError("price_deviation_pct must be in (0, 1)")
+        if not 0.0 < self.take_profit_pct < 1.0:
+            raise ValueError("take_profit_pct must be in (0, 1)")
+        if self.deviation_step_mult <= 0.0:
+            raise ValueError("deviation_step_mult must be positive")
+        if self.max_layers < 1:
+            raise ValueError("max_layers must be >= 1")
+        if self.loss_cooldown_bars < 0:
+            raise ValueError("loss_cooldown_bars must be >= 0")
+        if self.initial_direction not in ("long", "short"):
+            raise ValueError("initial_direction must be 'long' or 'short'")
+
+    @property
+    def initial_side(self) -> int:
+        return LONG if self.initial_direction == "long" else SHORT
+
+
+@dataclass(frozen=True)
+class AccountParams:
+    """Broker side: fees, leverage and the margin model.
+
+    All ``*_pct`` fee/margin fields are percent, i.e. ``0.05`` means 0.05%.
+    Ladder and take-profit orders rest on the book (maker); the base order,
+    stop loss and forced liquidation cross the spread (taker).
+    """
+
+    initial_equity: float = 10_000.0
+    leverage: float = 10.0
+    taker_fee_pct: float = 0.05
+    maker_fee_pct: float = 0.02
+    maintenance_margin_pct: float = 0.5   # of position notional
+    margin_usage_cap_pct: float = 0.80    # refuse orders past this share of equity
+    liquidation_penalty_pct: float = 0.0  # extra fee charged on a forced close
+    ruin_equity_pct: float = 0.10         # run is dead below this share of start
+
+    def __post_init__(self):
+        if self.initial_equity <= 0.0:
+            raise ValueError("initial_equity must be positive")
+        if self.leverage < 1.0:
+            raise ValueError("leverage must be >= 1")
+        if not 0.0 < self.margin_usage_cap_pct <= 1.0:
+            raise ValueError("margin_usage_cap_pct must be in (0, 1]")
+        if not 0.0 <= self.maintenance_margin_pct < 100.0:
+            raise ValueError("maintenance_margin_pct must be in [0, 100)")
+        for name in ("taker_fee_pct", "maker_fee_pct", "liquidation_penalty_pct"):
+            if getattr(self, name) < 0.0:
+                raise ValueError(f"{name} must be >= 0")
+
+    @property
+    def taker_rate(self) -> float:
+        return self.taker_fee_pct / 100.0
+
+    @property
+    def maker_rate(self) -> float:
+        return self.maker_fee_pct / 100.0
+
+    @property
+    def maintenance_rate(self) -> float:
+        return self.maintenance_margin_pct / 100.0
+
+    @property
+    def liquidation_penalty_rate(self) -> float:
+        return self.liquidation_penalty_pct / 100.0
+
+
+# ============================================================
+# Mutable state
+# ============================================================
+@dataclass
+class Cycle:
+    """The open martingale cycle: one averaged long position."""
+
+    side: int = LONG             # LONG or SHORT, fixed for the whole cycle
+    layers: int = 0
+    qty: float = 0.0             # always positive: the side carries the sign
+    cost: float = 0.0            # sum of qty * fill price, the entry notional
+    entry_fees: float = 0.0      # already deducted from AccountState.equity
+    last_entry_price: float = 0.0
+    base_notional: float = 0.0
+    start_balance: float = 0.0   # account balance when the base order filled
+    start_bar: int = -1
+    start_time: Any = None
+    fills_in_bar: int = 0
+    max_fills_in_bar: int = 0
+    planned_notionals: List[float] = field(default_factory=list)
+    fills: List[dict] = field(default_factory=list)  # one record per layer filled
+    min_price_seen: float = float("inf")             # worst excursion while open
+    max_price_seen: float = 0.0
+
+    def clone(self) -> "Cycle":
+        # ``fills`` must be copied: the two candidate paths of one bar branch
+        # from the same cycle and would otherwise append into a shared list.
+        clone = replace(self)
+        clone.fills = list(self.fills)
+        clone.planned_notionals = list(self.planned_notionals)
+        return clone
+
+
+@dataclass
+class AccountState:
+    """Wallet balance plus the open cycle. Everything a path needs to branch on."""
+
+    equity: float                # realized balance, all paid fees included
+    cycle: Cycle = field(default_factory=Cycle)
+    bankrupt: bool = False
+    trades: List[dict] = field(default_factory=list)
+    events: int = 0              # fills + closes, used to detect a quiet bar
+    unfilled_layers: int = 0     # layers a margin cap refused
+    up_first_worse_bars: int = 0
+    dual_path_bars: int = 0
+    ruin_threshold_hit: bool = False
+    min_equity_seen: float = float("inf")
+    max_equity_seen: float = 0.0
+    max_balance_seen: float = 0.0
+    max_margin_usage_seen: float = 0.0
+    max_drawdown_seen: float = 0.0
+    failure_equity: Optional[float] = None
+    failure_price: Optional[float] = None
+    # No base order on or before this bar: set when a cycle closes at a loss.
+    cooldown_until_bar: int = -1
+    cooldown_blocked_bars: int = 0
+    next_side: int = LONG        # side the next base order will take
+    reversals: int = 0
+
+    @property
+    def failed(self) -> bool:
+        return self.bankrupt or self.ruin_threshold_hit
+
+    def clone(self) -> "AccountState":
+        return AccountState(
+            equity=self.equity,
+            cycle=self.cycle.clone(),
+            bankrupt=self.bankrupt,
+            trades=list(self.trades),   # records are never mutated after append
+            events=self.events,
+            unfilled_layers=self.unfilled_layers,
+            up_first_worse_bars=self.up_first_worse_bars,
+            dual_path_bars=self.dual_path_bars,
+            ruin_threshold_hit=self.ruin_threshold_hit,
+            min_equity_seen=self.min_equity_seen,
+            max_equity_seen=self.max_equity_seen,
+            max_balance_seen=self.max_balance_seen,
+            max_margin_usage_seen=self.max_margin_usage_seen,
+            max_drawdown_seen=self.max_drawdown_seen,
+            failure_equity=self.failure_equity,
+            failure_price=self.failure_price,
+            cooldown_until_bar=self.cooldown_until_bar,
+            cooldown_blocked_bars=self.cooldown_blocked_bars,
+            next_side=self.next_side,
+            reversals=self.reversals,
+        )
+
+
+# ============================================================
+# Simulator
+# ============================================================
+class MartingaleSimulator:
+    """Replays completed OHLC bars against the martingale ledger."""
+
+    def __init__(self, params: MartingaleParams, account: AccountParams):
+        self.params = params
+        self.account = account
+        maker = account.maker_rate
+        taker = account.taker_rate
+        tp_deviations = (
+            params.take_profit_pct * params.deviation_step_mult ** i
+            for i in range(params.max_layers)
+        )
+        minimum_edge = min(
+            deviation - (1.0 + side * deviation) * maker - taker
+            for deviation in tp_deviations
+            for side in (LONG, SHORT)
+        )
+        if minimum_edge <= 0.0:
+            raise ValueError(
+                "take_profit_pct must exceed round-trip fees for "
+                "target-derived sizing"
+            )
+        self._bar_index = -1
+        self._bar_time = None
+
+    # ---------- construction ----------
+    def new_state(self) -> AccountState:
+        initial = self.account.initial_equity
+        return AccountState(
+            equity=initial,
+            min_equity_seen=initial,
+            max_equity_seen=initial,
+            max_balance_seen=initial,
+            next_side=self.params.initial_side,
+            cycle=Cycle(side=self.params.initial_side),
+        )
+
+    # ---------- read-only views ----------
+    def equity_at(self, state: AccountState, price: float) -> float:
+        """Mark-to-market equity: balance plus unrealized PnL."""
+        cycle = state.cycle
+        if cycle.qty <= 0.0:
+            return state.equity
+        return state.equity + cycle.side * (cycle.qty * price - cycle.cost)
+
+    def margin_usage(self, state: AccountState, price: float) -> float:
+        """Initial margin locked by the position, as a share of equity."""
+        equity = self.equity_at(state, price)
+        if equity <= 0.0 or state.cycle.qty <= 0.0:
+            return 0.0
+        return (state.cycle.cost / self.account.leverage) / equity
+
+    def liquidation_price(self, state: AccountState) -> Optional[float]:
+        """Price where mark-to-market equity falls to the maintenance margin."""
+        cycle = state.cycle
+        if cycle.qty <= 0.0:
+            return None
+        maintenance = self.account.maintenance_rate
+        if cycle.side == LONG:
+            denominator = cycle.qty * (1.0 - maintenance)
+            if denominator <= 0.0:
+                return None
+            price = (cycle.cost - state.equity) / denominator
+        else:
+            # A short is liquidated on the way up, and can never be squeezed
+            # out at a non-positive price.
+            price = (cycle.cost + state.equity) / (cycle.qty * (1.0 + maintenance))
+        return price if price > 0.0 else None
+
+
+    def ruin_threshold_price(self, state: AccountState) -> Optional[float]:
+        """Price where mark-to-market equity reaches the configured ruin level."""
+        cycle = state.cycle
+        if cycle.qty <= 0.0:
+            return None
+        ruin_level = self.account.initial_equity * self.account.ruin_equity_pct
+        if cycle.side == LONG:
+            price = (ruin_level - state.equity + cycle.cost) / cycle.qty
+        else:
+            price = (state.equity + cycle.cost - ruin_level) / cycle.qty
+        return price if price > 0.0 else None
+
+    def _observe(self, state: AccountState, price: float) -> float:
+        """Record intrabar MTM equity/margin and stop at the ruin threshold."""
+        cycle = state.cycle
+        if cycle.qty > 0.0:
+            cycle.min_price_seen = min(cycle.min_price_seen, price)
+            cycle.max_price_seen = max(cycle.max_price_seen, price)
+        equity = self.equity_at(state, price)
+        state.min_equity_seen = min(state.min_equity_seen, equity)
+        state.max_equity_seen = max(state.max_equity_seen, equity)
+        state.max_balance_seen = max(state.max_balance_seen, state.equity)
+        if state.max_equity_seen > 0.0:
+            state.max_drawdown_seen = max(
+                state.max_drawdown_seen,
+                (state.max_equity_seen - equity) / state.max_equity_seen,
+            )
+        state.max_margin_usage_seen = max(
+            state.max_margin_usage_seen, self.margin_usage(state, price)
+        )
+        ruin_level = self.account.initial_equity * self.account.ruin_equity_pct
+        if not state.bankrupt and equity <= ruin_level + 1e-12:
+            state.ruin_threshold_hit = True
+            if state.failure_equity is None:
+                state.failure_equity = equity
+                state.failure_price = price
+        return equity
+
+    # ---------- ladder geometry ----------
+    def _layer_deviation(self, state: AccountState) -> Optional[float]:
+        """Current layer adverse distance from the latest fill."""
+        cycle = state.cycle
+        if cycle.layers <= 0 or cycle.last_entry_price <= 0.0:
+            return None
+        deviation = (
+            self.params.price_deviation_pct
+            * self.params.deviation_step_mult ** (cycle.layers - 1)
+        )
+        return deviation if deviation < 1.0 else None
+
+    def _layer_take_profit_deviation(self, state: AccountState) -> Optional[float]:
+        """Current layer favourable distance from the latest fill."""
+        cycle = state.cycle
+        if cycle.layers <= 0 or cycle.last_entry_price <= 0.0:
+            return None
+        deviation = (
+            self.params.take_profit_pct
+            * self.params.deviation_step_mult ** (cycle.layers - 1)
+        )
+        return deviation if deviation < 1.0 else None
+
+    def _grid_price(self, state: AccountState) -> Optional[float]:
+        """Current layer adverse boundary around the latest fill."""
+        cycle = state.cycle
+        deviation = self._layer_deviation(state)
+        if deviation is None:
+            return None
+        return cycle.last_entry_price * (1.0 - cycle.side * deviation)
+
+    def next_layer_price(self, state: AccountState) -> Optional[float]:
+        cycle = state.cycle
+        if cycle.layers == 0:
+            return None
+        if cycle.layers >= self.params.max_layers:
+            return None
+        return self._grid_price(state)
+
+    def _full_layer_stop_armed(self, state: AccountState) -> bool:
+        """True once the cycle can no longer average down."""
+        if not self.params.stop_at_full_layers:
+            return False
+        return state.cycle.layers >= self.params.max_layers
+
+    def stop_loss_price(self, state: AccountState) -> Optional[float]:
+        """Full-layer adverse boundary."""
+        if state.cycle.qty <= 0.0 or not self._full_layer_stop_armed(state):
+            return None
+        return self._grid_price(state)
+
+    def take_profit_price(self, state: AccountState) -> Optional[float]:
+        """Current layer favourable boundary around the latest fill."""
+        cycle = state.cycle
+        if cycle.qty <= 0.0:
+            return None
+        deviation = self._layer_take_profit_deviation(state)
+        if deviation is None:
+            return None
+        return cycle.last_entry_price * (1.0 + cycle.side * deviation)
+
+    # ---------- target-derived sizing ----------
+    def profit_target(self, state: AccountState) -> float:
+        """Fixed cash target for the cycle: start balance times take-profit pct."""
+        cycle = state.cycle
+        basis = cycle.start_balance if cycle.qty > 0.0 else state.equity
+        return basis * self.params.take_profit_pct
+
+    def _target_notional_from_position(
+        self,
+        *,
+        side: int,
+        price: float,
+        layer_index: int,
+        target_cash: float,
+        qty: float,
+        cost: float,
+        entry_fees: float,
+        is_base: bool,
+    ) -> float:
+        """Additional notional needed to net target_cash at this layer TP."""
+        deviation = self.params.take_profit_pct * self.params.deviation_step_mult ** layer_index
+        if deviation >= 1.0:
+            return 0.0
+
+        exit_ratio = 1.0 + side * deviation
+        exit_price = price * exit_ratio
+        maker = self.account.maker_rate
+        entry_rate = self.account.taker_rate if is_base else maker
+        incremental_return = (
+            side * (exit_ratio - 1.0)
+            - exit_ratio * maker
+            - entry_rate
+        )
+        if incremental_return <= 0.0:
+            return 0.0
+
+        existing_net_at_exit = (
+            side * (qty * exit_price - cost)
+            - entry_fees
+            - qty * exit_price * maker
+        )
+        required = (target_cash - existing_net_at_exit) / incremental_return
+        return max(0.0, required)
+
+    def _affordable_position(
+        self,
+        *,
+        equity: float,
+        side: int,
+        qty: float,
+        cost: float,
+        notional: float,
+        price: float,
+        is_base: bool,
+    ) -> bool:
+        """Reject an order that would push initial margin past the cap."""
+        if notional <= 0.0 or price <= 0.0:
+            return False
+        fee = notional * (self.account.taker_rate if is_base else self.account.maker_rate)
+        equity_mtm = equity + side * (qty * price - cost)
+        equity_after = equity_mtm - fee
+        if equity_after <= 0.0:
+            return False
+        initial_margin = (cost + notional) / self.account.leverage
+        return initial_margin <= equity_after * self.account.margin_usage_cap_pct + 1e-12
+
+    def _plan_cycle(self, state: AccountState, price: float) -> Optional[List[float]]:
+        """Plan and validate every scheduled layer before the base order opens."""
+        side = state.next_side
+        equity = state.equity
+        target_cash = equity * self.params.take_profit_pct
+        qty = 0.0
+        cost = 0.0
+        entry_fees = 0.0
+        layer_price = price
+        notionals: List[float] = []
+
+        for layer_index in range(self.params.max_layers):
+            if layer_index > 0:
+                adverse = (
+                    self.params.price_deviation_pct
+                    * self.params.deviation_step_mult ** (layer_index - 1)
+                )
+                if adverse >= 1.0:
+                    return None
+                layer_price = layer_price * (1.0 - side * adverse)
+                if layer_price <= 0.0:
+                    return None
+
+            is_base = layer_index == 0
+            notional = self._target_notional_from_position(
+                side=side,
+                price=layer_price,
+                layer_index=layer_index,
+                target_cash=target_cash,
+                qty=qty,
+                cost=cost,
+                entry_fees=entry_fees,
+                is_base=is_base,
+            )
+            if notional <= 0.0 or not self._affordable_position(
+                equity=equity,
+                side=side,
+                qty=qty,
+                cost=cost,
+                notional=notional,
+                price=layer_price,
+                is_base=is_base,
+            ):
+                return None
+
+            fee = notional * (
+                self.account.taker_rate if is_base else self.account.maker_rate
+            )
+            equity -= fee
+            qty += notional / layer_price
+            cost += notional
+            entry_fees += fee
+            notionals.append(notional)
+
+        return notionals
+
+    def target_notional(self, state: AccountState, price: float) -> float:
+        """Additional notional needed to net the cycle target at the new layer TP."""
+        cycle = state.cycle
+        side = cycle.side if cycle.qty > 0.0 else state.next_side
+        return self._target_notional_from_position(
+            side=side,
+            price=price,
+            layer_index=cycle.layers,
+            target_cash=self.profit_target(state),
+            qty=cycle.qty,
+            cost=cycle.cost,
+            entry_fees=cycle.entry_fees,
+            is_base=cycle.qty <= 0.0,
+        )
+
+    # ---------- fills ----------
+    def _affordable(self, state: AccountState, notional: float, price: float) -> bool:
+        cycle = state.cycle
+        return self._affordable_position(
+            equity=state.equity,
+            side=cycle.side if cycle.qty > 0.0 else state.next_side,
+            qty=cycle.qty,
+            cost=cycle.cost,
+            notional=notional,
+            price=price,
+            is_base=cycle.qty <= 0.0,
+        )
+
+    def _fill(self, state: AccountState, price: float, notional: float, is_base: bool):
+        cycle = state.cycle
+        fee = notional * (
+            self.account.taker_rate if is_base else self.account.maker_rate
+        )
+        if is_base:
+            cycle.side = state.next_side
+            cycle.base_notional = notional
+            cycle.start_balance = state.equity
+            cycle.start_bar = self._bar_index
+            cycle.start_time = self._bar_time
+            cycle.max_fills_in_bar = 0
+        qty = notional / price
+        cycle.qty += qty
+        cycle.cost += notional
+        cycle.entry_fees += fee
+        cycle.last_entry_price = price
+        cycle.layers += 1
+        cycle.fills_in_bar += 1
+        cycle.max_fills_in_bar = max(cycle.max_fills_in_bar, cycle.fills_in_bar)
+        state.equity -= fee
+        state.events += 1
+        cycle.fills.append(
+            {
+                "layer": cycle.layers,
+                "bar": self._bar_index,
+                "time": self._bar_time,
+                "price": price,
+                "qty": qty,
+                "notional": notional,
+                "fee": fee,
+                "role": "base" if is_base else "safety",
+                "avg_entry_price_after": cycle.cost / cycle.qty,
+                "position_qty_after": cycle.qty,
+                "balance_after": state.equity,
+            }
+        )
+        self._observe(state, price)
+
+    def _open_base(self, state: AccountState, price: float) -> bool:
+        planned = self._plan_cycle(state, price)
+        if not planned:
+            state.unfilled_layers += self.params.max_layers
+            return False
+        state.cycle.planned_notionals = planned
+        self._fill(state, price, planned[0], is_base=True)
+        return True
+
+    def _add_layer(self, state: AccountState, price: float) -> bool:
+        cycle = state.cycle
+        if cycle.layers >= len(cycle.planned_notionals):
+            state.unfilled_layers += 1
+            return False
+        notional = cycle.planned_notionals[cycle.layers]
+        if not self._affordable(state, notional, price):
+            state.unfilled_layers += 1
+            return False
+        self._fill(state, price, notional, is_base=False)
+        return True
+
+    # ---------- exits ----------
+    def _close(self, state: AccountState, price: float, reason: str, fee_rate: float):
+        cycle = state.cycle
+        exit_notional = cycle.qty * price
+        exit_fee = exit_notional * fee_rate
+        gross_pnl = cycle.side * (exit_notional - cycle.cost)
+        avg_entry_price = cycle.cost / cycle.qty
+        balance_before = state.equity
+        state.equity += gross_pnl - exit_fee
+        shortfall = 0.0
+        if state.equity < 0.0:
+            # The exchange absorbs the gap; a wallet cannot go negative.
+            shortfall = -state.equity
+            state.equity = 0.0
+        net_pnl = gross_pnl - exit_fee - cycle.entry_fees
+        # Adverse is down for a long and up for a short.
+        if cycle.side == LONG:
+            worst_price = cycle.min_price_seen if cycle.fills else price
+            best_price = cycle.max_price_seen
+        else:
+            worst_price = cycle.max_price_seen if cycle.fills else price
+            best_price = cycle.min_price_seen
+
+        state.trades.append(
+            {
+                "index": len(state.trades) + 1,
+                "direction": SIDE_NAME[cycle.side],
+                # --- time ---
+                "opened_at": cycle.start_time,
+                "closed_at": self._bar_time,
+                "entry_bar": cycle.start_bar,
+                "exit_bar": self._bar_index,
+                "bars_held": self._bar_index - cycle.start_bar + 1,
+                "same_bar": cycle.start_bar == self._bar_index,
+                # --- price ---
+                "first_entry_price": cycle.fills[0]["price"] if cycle.fills else price,
+                "last_entry_price": cycle.last_entry_price,
+                "avg_entry_price": avg_entry_price,
+                "exit_price": price,
+                "worst_price": worst_price,
+                "best_price": best_price,
+                # Signed by side, so negative always means "against the trade".
+                "mae_pct": cycle.side * (worst_price / avg_entry_price - 1.0),
+                "mfe_pct": cycle.side * (best_price / avg_entry_price - 1.0),
+                "exit_pct_from_avg": cycle.side * (price / avg_entry_price - 1.0),
+                # --- size ---
+                "layers": cycle.layers,
+                "qty": cycle.qty,
+                "entry_notional": cycle.cost,
+                "exit_notional": exit_notional,
+                "max_fills_in_one_bar": cycle.max_fills_in_bar,
+                "multiple_fills_same_bar": cycle.max_fills_in_bar > 1,
+                "full_layers": cycle.layers >= self.params.max_layers,
+                # --- pnl ---
+                "gross_pnl": gross_pnl,
+                "entry_fees": cycle.entry_fees,
+                "exit_fee": exit_fee,
+                "fees": cycle.entry_fees + exit_fee,
+                "net_pnl": net_pnl,
+                "profit_pct": net_pnl / cycle.cost if cycle.cost else 0.0,
+                "profit_vs_base": (
+                    net_pnl / cycle.base_notional if cycle.base_notional else 0.0
+                ),
+                "start_balance": cycle.start_balance,
+                "profit_target": self.profit_target(state),
+                "profit_vs_start_balance": (
+                    net_pnl / cycle.start_balance if cycle.start_balance else 0.0
+                ),
+                "balance_before": balance_before,
+                "balance_after": state.equity,
+                "return_on_balance": (
+                    net_pnl / balance_before if balance_before > 0.0 else 0.0
+                ),
+                "shortfall": shortfall,
+                "reason": reason,
+                # --- per layer detail ---
+                "fills": cycle.fills,
+            }
+        )
+        state.events += 1
+        if reason == "stop_loss" and self.params.reverse_after_stop_loss:
+            state.next_side = -cycle.side
+            state.reversals += 1
+        if net_pnl < 0.0:
+            # Sit out the next ``loss_cooldown_bars`` bars.  At the default 0
+            # this still bans re-entry inside the closing bar and no more.
+            state.cooldown_until_bar = self._bar_index + self.params.loss_cooldown_bars
+        if reason == "liquidation":
+            state.bankrupt = True
+            state.failure_equity = state.equity
+            state.failure_price = price
+        # A closed cycle never re-opens inside the same bar: the next base order
+        # is decided on this close and can only fill at the next bar's open.
+        # The reset must happen before observing, otherwise the position that
+        # was just realized into the balance is counted a second time as
+        # unrealized PnL and the equity extrema come out at double the loss.
+        state.cycle = Cycle(side=state.next_side, fills_in_bar=cycle.fills_in_bar)
+        self._observe(state, price)
+
+    def _liquidate(self, state: AccountState, price: float):
+        self._close(
+            state,
+            price,
+            "liquidation",
+            self.account.taker_rate + self.account.liquidation_penalty_rate,
+        )
+
+    # ---------- price legs ----------
+    @staticmethod
+    def _reached(price: float, price_now: float, to_price: float) -> bool:
+        """Is ``price`` swept by a monotone move from price_now to to_price?"""
+        low, high = (price_now, to_price) if price_now <= to_price else (to_price, price_now)
+        tolerance = max(abs(price), abs(price_now), abs(to_price)) * 1e-12
+        return low - tolerance <= price <= high + tolerance
+
+    def _walk_adverse(self, state: AccountState, from_price: float, to_price: float):
+        """Move against the position: layers, stops and liquidation fire here.
+
+        Down for a long, up for a short.  Events are handled in the order the
+        price actually reaches them, and every fill re-prices the rest.
+        """
+        price_now = from_price
+        while not state.failed and state.cycle.qty > 0.0:
+            side = state.cycle.side
+            liquidation = self.liquidation_price(state)
+            ruin = self.ruin_threshold_price(state)
+            stop_loss = self.stop_loss_price(state)
+            layer = self.next_layer_price(state)
+
+            # ``-side * price`` sorts by "reached first": the highest price for
+            # a long, the lowest for a short.  On a tie the most adverse
+            # terminal event wins over a stop, and a stop over a new layer.
+            candidates = []
+            for price, rank, kind in (
+                (liquidation, 0, "liquidation"),
+                (ruin, 1, "ruin_threshold"),
+                (stop_loss, 2, "stop_loss"),
+                (layer, 3, "layer"),
+            ):
+                if price is not None and self._reached(price, price_now, to_price):
+                    candidates.append((-side * price, rank, price, kind))
+            if not candidates:
+                self._observe(state, to_price)
+                return
+
+            _, _, price, kind = min(candidates)
+            # A gap never fills better than where the price already is.
+            if side * (price - price_now) > 0.0:
+                price = price_now
+            self._observe(state, price)
+            if kind == "liquidation":
+                self._liquidate(state, price)
+                return
+            if kind == "ruin_threshold":
+                state.ruin_threshold_hit = True
+                state.failure_equity = self.equity_at(state, price)
+                state.failure_price = price
+                return
+            if kind == "stop_loss":
+                self._close(state, price, "stop_loss", self.account.taker_rate)
+                return
+            if not self._add_layer(state, price):
+                return
+            price_now = price
+
+        if not state.failed:
+            self._observe(state, to_price)
+
+    def _walk_favourable(self, state: AccountState, from_price: float, to_price: float):
+        """Move in the position's favour: only the repriced take profit fires."""
+        if state.failed or state.cycle.qty <= 0.0:
+            return
+        side = state.cycle.side
+        take_profit = self.take_profit_price(state)
+        tolerance = (
+            0.0 if take_profit is None
+            else max(abs(to_price), abs(take_profit)) * 1e-12
+        )
+        if take_profit is None or side * (to_price - take_profit) < -tolerance:
+            self._observe(state, to_price)
+            return
+        fill_price = (
+            max(take_profit, from_price) if side == LONG
+            else min(take_profit, from_price)
+        )
+        self._observe(state, fill_price)
+        self._close(state, fill_price, "take_profit", self.account.maker_rate)
+
+    def _replay(self, state: AccountState, start: float, waypoints) -> AccountState:
+        price_now = start
+        self._observe(state, start)
+        for price in waypoints:
+            if state.failed or state.cycle.qty <= 0.0:
+                break
+            travel = 1 if price > price_now else (-1 if price < price_now else 0)
+            if travel == 0:
+                self._observe(state, price)
+            elif travel == -state.cycle.side:
+                self._walk_adverse(state, price_now, price)
+            else:
+                self._walk_favourable(state, price_now, price)
+            price_now = price
+        return state
+
+    # ---------- path choice ----------
+    def _path_key(self, state: AccountState, close: float):
+        """Ascending order = worse first."""
+        close_equity = (
+            state.min_equity_seen if state.failed else self.equity_at(state, close)
+        )
+        return (
+            0 if state.bankrupt else 1,
+            0 if state.ruin_threshold_hit else 1,
+            close_equity,
+            -state.cycle.qty * close,
+        )
+
+    # ---------- public entry point ----------
+    def process_bar(
+        self,
+        state: AccountState,
+        *,
+        index: int,
+        time: Any,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+    ) -> AccountState:
+        """Replay one completed bar and return the pessimistic valid path."""
+        if state.failed:
+            return state
+        if min(open_, high, low, close) <= 0.0:
+            raise ValueError("OHLC prices must be positive")
+        if high < max(open_, low, close) or low > min(open_, high, close):
+            raise ValueError("inconsistent OHLC bar")
+
+        self._bar_index = index
+        self._bar_time = time
+        state.cycle.fills_in_bar = 0
+
+        # What the open alone settles is identical on both candidate paths.
+        if state.cycle.qty > 0.0:
+            # ``side * (open - trigger) <= 0`` means the open is already at or
+            # past the trigger on the adverse side, for either direction.
+            side = state.cycle.side
+            liquidation = self.liquidation_price(state)
+            liquidation_tolerance = (
+                0.0 if liquidation is None
+                else max(abs(open_), abs(liquidation)) * 1e-12
+            )
+            if liquidation is not None and side * (open_ - liquidation) <= liquidation_tolerance:
+                self._observe(state, open_)
+                self._liquidate(state, open_)
+                return state
+            self._observe(state, open_)
+            if state.ruin_threshold_hit:
+                return state
+            stop_loss = self.stop_loss_price(state)
+            # A gap through the stop fills at the open, not at the stop price:
+            # the full-layer stop is precisely the one a fast move jumps over.
+            stop_tolerance = (
+                0.0 if stop_loss is None
+                else max(abs(open_), abs(stop_loss)) * 1e-12
+            )
+            if stop_loss is not None and side * (open_ - stop_loss) <= stop_tolerance:
+                self._close(state, open_, "stop_loss", self.account.taker_rate)
+            else:
+                take_profit = self.take_profit_price(state)
+                take_profit_tolerance = (
+                    0.0 if take_profit is None
+                    else max(abs(open_), abs(take_profit)) * 1e-12
+                )
+                if take_profit is not None and side * (open_ - take_profit) >= -take_profit_tolerance:
+                    self._close(state, open_, "take_profit", self.account.maker_rate)
+        elif index > state.cooldown_until_bar:
+            self._open_base(state, open_)
+            self._observe(state, open_)
+        else:
+            state.cooldown_blocked_bars += 1
+            self._observe(state, open_)
+
+        # A cycle closed at the open cannot restart inside this bar.
+        if state.failed or state.cycle.qty <= 0.0:
+            return state
+
+        baseline_events = state.events
+        down_first = self._replay(state.clone(), open_, (low, high, close))
+        up_first = self._replay(state.clone(), open_, (high, low, close))
+
+        # Keep path counters only when at least one path had a trading/risk event.
+        if down_first.events == baseline_events and up_first.events == baseline_events \
+                and not down_first.failed and not up_first.failed:
+            return down_first
+
+        dual_count = state.dual_path_bars + 1
+        if self._path_key(up_first, close) < self._path_key(down_first, close):
+            up_first.up_first_worse_bars = state.up_first_worse_bars + 1
+            up_first.dual_path_bars = dual_count
+            return up_first
+        down_first.up_first_worse_bars = state.up_first_worse_bars
+        down_first.dual_path_bars = dual_count
+        return down_first

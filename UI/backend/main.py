@@ -23,18 +23,37 @@ if False:
     train_params = short['params']['train']
     fusion_dir = common.recursive_get(report, 'fusion_dir')
     prep_output_dir = common.recursive_get(report, 'prep_output_dir')
-    result = backtest_runner.main(
-                    logger,
-                    para=backtest_runner.StrategyPara(**sim_params),
-                    train_cfg=common.config_from_dict_train(train_params),
-                    prep_output_dir=prep_output_dir,
-                    train_output_dir=fusion_dir,
-                    device='cpu',
-                    period='long',
-                )
+    strategy_params = backtest_runner.StrategyPara(
+        strategy_config=backtest_runner.MlStrategyConfig(**short["params"]["strategy"]),
+        broker_config=backtest_runner.BrokerConfig(**short["params"]["broker"]),
+    )
+    runner_config = backtest_runner.RunnerConfig(
+        strategy_config=strategy_params.strategy_config,
+        broker_config=strategy_params.broker_config,
+        data_config=backtest_runner.ModelDataConfig(
+            atr_ref_bars=strategy_params.strategy_config.min_hold_bars,
+            prep_output_dir=prep_output_dir,
+            train_output_dir=fusion_dir,
+            device="cpu",
+            period="long",
+            train_config=common.config_from_dict_train(train_params),
+        ),
+    )
+    result = backtest_runner.main(logger, runner_config)
 else:
     train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.TrainTask.DIRECT_3CLASS)
-    result = backtest_runner.main(logger,train_output_dir=train_output_dir)
+    strategy_params = backtest_runner.StrategyPara()
+    runner_config = backtest_runner.RunnerConfig(
+        strategy_config=strategy_params.strategy_config,
+        broker_config=strategy_params.broker_config,
+        data_config=backtest_runner.ModelDataConfig(
+            atr_ref_bars=strategy_params.strategy_config.min_hold_bars,
+            prep_output_dir=common.DATA_OUT_DIR,
+            train_output_dir=train_output_dir,
+            period="long",
+        ),
+    )
+    result = backtest_runner.main(logger, runner_config)
 
 candles = result["candles"]
 statistics = result["statistics"][0]  # full report
