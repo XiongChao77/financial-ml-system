@@ -1,17 +1,54 @@
-# Directory layout (three layers)
+# Trading architecture: one strategy, multiple venues
 
+`Venue` is the adapter between a reusable strategy and a concrete trading environment.
+The feed supplies market data to the venue; the venue passes market and trading state to
+the strategy, receives its decision, and converts that decision into an order.
+
+```mermaid
+flowchart LR
+    FEED["Feed<br/>market data + signal"]
+    STRATEGY["Strategy<br/>shared decision and risk logic"]
+
+    subgraph VENUES["Venue adapters"]
+        direction TB
+        BT_VENUE["Backtest Venue<br/>Backtrader"]
+        LIVE_VENUE["Live Venue<br/>MT5 / Bybit"]
+    end
+
+    BT_ORDER["Backtest Order<br/>simulated fill"]
+    LIVE_ORDER["Live Order<br/>broker / exchange API"]
+
+    FEED -->|"market data"| BT_VENUE
+    FEED -->|"market data"| LIVE_VENUE
+    BT_VENUE -->|"market + trading state"| STRATEGY
+    LIVE_VENUE -->|"market + trading state"| STRATEGY
+    STRATEGY -->|"decision"| BT_VENUE
+    STRATEGY -->|"decision"| LIVE_VENUE
+    BT_VENUE -->|"place order"| BT_ORDER
+    LIVE_VENUE -->|"place order"| LIVE_ORDER
 ```
-feed/     Data source: klines + model inference output (pred/pred_prob/atr_pct/label), computable offline, account independent
-strategy/ Strategy layer: consumes an Observation -> produces a TradeIntent, imports neither backtrader nor any exchange SDK
-venue/    Venue layer: bt/ backtest, live/ real trading (bybit, ftmo); assembles the Observation inbound, executes the TradeIntent outbound
-core/     Protocol shared by the three layers: protocol.py (enums/Observation/TradeIntent), strategy_base.py, venue_base.py
-runner/   Wires the three together and produces the report: one backtest_runner.py for every strategy
-```
 
-Data flow: `feed → venue assembles the Observation → strategy.process() → TradeIntent → venue.submit_order/close_position`
+## How Venue adapts backtest and live trading
 
-Boundary test: **whatever can exist without a trading venue belongs to the feed; whatever only the venue knows (equity, current position, fill callbacks) belongs to the venue; the pure decision in between belongs to the strategy.**
-Switching backtest framework only touches venue/bt; running the same strategy live only swaps venue/live; switching model only touches the feed.
+| Component | Backtest | Live trading |
+| --- | --- | --- |
+| Feed | historical data and offline prediction | exchange klines and online inference |
+| Venue | `BtVenue` reads simulated state and drives Backtrader orders | `MT5Venue`/`BybitVenue` reads live state and calls broker APIs |
+| Strategy | shared strategy and configuration | the same strategy and configuration |
+| Order | simulated fill | real broker/exchange order |
+
+The stable relationship is:
+
+`Feed → Venue ↔ Strategy → Venue → Order`
+
+`Venue` absorbs the environmental differences: bar driving, position and equity state,
+order conversion, fills, precision, and error handling. Strategy code remains independent
+of whether its venue is a backtest engine or a live broker.
+
+Current migration status: `venue/live/ftmo/market_ml.py` is the reference live path and
+constructs the full `Observation`. `venue/live/bybit/bybit_turtle.py` still calls the old
+`strategy.process(df=...)` signature, so the Bybit turtle path is not yet fully on the shared
+protocol.
 
 ## Parameter ownership
 
