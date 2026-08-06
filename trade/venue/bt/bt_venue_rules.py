@@ -1,6 +1,6 @@
 import backtrader as bt
 import pandas as pd
-from trade.venue.bt.bt_venue import BtVenue
+from trade.venue.bt.bt_venue_base import BtVenue
 from trade.strategy.strategy_rules import RulesStrategy
 from trade.core.protocol import PositionDir
 
@@ -11,21 +11,17 @@ class RulesBtVenue(BtVenue):
         # 3. Build the decision engine
         self.strategy = RulesStrategy(
             venue=self,
+            config=self.p.strategy_config,
         )
-        # 1. Turtle strategy parameters (must stay in sync with RulesStrategy)
-        self.entry_period = self.strategy.entry_period
-        self.exit_period = self.strategy.exit_period
-        self.atr_period = self.strategy.atr_period
-
         # 2. Pre-create the backtrader indicators in init (computed vectorized)
         # Note: the (-1) offset emulates shift(1) and prevents look-ahead bias
-        self.entry_high = bt.indicators.Highest(self.data.high(-1), period=self.entry_period)
-        self.entry_low = bt.indicators.Lowest(self.data.low(-1), period=self.entry_period)
-        self.exit_high = bt.indicators.Highest(self.data.high(-1), period=self.exit_period)
-        self.exit_low = bt.indicators.Lowest(self.data.low(-1), period=self.exit_period)
+        self.entry_high = bt.indicators.Highest(self.data.high(-1), period=self.strategy.config.entry_period)
+        self.entry_low = bt.indicators.Lowest(self.data.low(-1), period=self.strategy.config.entry_period)
+        self.exit_high = bt.indicators.Highest(self.data.high(-1), period=self.strategy.config.exit_period)
+        self.exit_low = bt.indicators.Lowest(self.data.low(-1), period=self.strategy.config.exit_period)
         
         # The standard turtle uses Wilder's ATR, backtrader defaults to a smoothed moving average
-        self.atr = bt.indicators.ATR(self.data, period=self.atr_period)
+        self.atr = bt.indicators.ATR(self.data, period=self.strategy.config.atr_period)
 
 
     def next(self):
@@ -34,7 +30,7 @@ class RulesBtVenue(BtVenue):
 
         # 2. Determine the lookback length dynamically
         # At least 2 rows are needed for gap detection; entry_period + 1 if the strategy recomputes indicators
-        lookback = self.strategy.entry_period*10
+        lookback = self.strategy.config.entry_period*10
         
         # Skip until enough data points are available
         if len(self.data) < lookback:

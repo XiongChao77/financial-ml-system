@@ -1,42 +1,23 @@
 import backtrader as bt
 import pandas as pd
 import logging
-from trade.venue.bt.bt_venue import BtVenue
+from trade.venue.bt.bt_venue_base import BtVenue
 from trade.strategy.strategy_turtle import TurtleStrategy
 from trade.core.protocol import PositionDir
 
 class TurtleBtVenue(BtVenue):
-    params = dict(
-        # Turtle system parameters
-        entry_period=20,
-        exit_period=10,
-        atr_period=20,
-        max_layers=1,
-        risk_per_unit=0.01,
-        max_daily_loss_pct = 0.045,
-        upper_limit = 0.7,
-        unit_pct_scale = 0.7,
-
-    )
-
     def __init__(self):
         super().__init__()
+        strategy_config = self.p.strategy_config
         # === core: build the decision engine ===
         # self (i.e. the BtVenue) is passed in as the executor
         self.strategy = TurtleStrategy(
-            venue=self, 
-            entry_period=self.params.entry_period,
-            exit_period=self.params.exit_period,
-            atr_period=self.params.atr_period,
-            max_layers=self.params.max_layers,
-            risk_per_unit=self.params.risk_per_unit,
-            max_daily_loss_pct = self.params.max_daily_loss_pct,
-            upper_limit = self.params.upper_limit,
-            unit_pct_scale = self.params.unit_pct_scale,
+            venue=self,
+            config=strategy_config,
         )
         
         # Audit-only variables
-        self.atr = bt.ind.ATR(period=self.params.atr_period)
+        self.atr = bt.ind.ATR(period=strategy_config.atr_period)
 
     def next(self):
         """
@@ -47,7 +28,7 @@ class TurtleBtVenue(BtVenue):
         current_atr = self.atr[0]
 
         # 2. Convert the backtrader series into a pandas DataFrame
-        lookback = max(self.params.entry_period, self.params.atr_period * 4) + 10
+        lookback = max(self.strategy.config.entry_period, self.strategy.config.atr_period * 4) + 10
         if len(self.data) < lookback:
             return
             

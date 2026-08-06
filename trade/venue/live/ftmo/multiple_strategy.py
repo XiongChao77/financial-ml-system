@@ -16,7 +16,7 @@ sys.path.append(os.path.join(current_work_dir, "..", "..", "..", ".."))
 
 from data_process import common
 from model.train import TrainConfig
-from trade.runner.backtest_runner import StrategyPara
+from trade.strategy.strategy_ml import MlStrategyConfig
 from data_process.common import FeatureFactory
 from model.data_loader import TimeSeriesWindowDataset
 from model import model_loader
@@ -47,7 +47,7 @@ class StrategyType:
     BYBIT = "BYBIT"
 
 class StrategyHolder:
-    def __init__(self,strategy_hash,strategy_type:str,path:str,tarin_out_path:str,pre_para:common.BaseDefine, train_para:TrainConfig, st_para:StrategyPara):
+    def __init__(self,strategy_hash,strategy_type:str,path:str,tarin_out_path:str,pre_para:common.BaseDefine, train_para:TrainConfig, st_para:MlStrategyConfig):
         self.strategy_hash = strategy_hash
         self.pre_para = pre_para
         self.train_para = train_para
@@ -119,16 +119,9 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
     
     strategy = MlSignalStrategy(
         venue,
-        risk_per_trade_pct=st_para.risk_per_trade_pct,
-        max_layers=1,
-        min_hold_bars=st_para.min_hold_bars,
+        config=st_para,
+        init_equity=venue.get_account_equity(),
         exist_hold_bars= get_bars_since_open(venue,pre_para),
-        allow_long=st_para.allow_long,
-        allow_short=st_para.allow_short,
-        prob_thresh=st_para.prob_thresh,
-        atr_sl_long_mult=st_para.atr_sl_long_mult,
-        atr_sl_short_mult=st_para.atr_sl_short_mult,
-        max_daily_loss_pct=st_para.max_daily_loss_pct,
     )
 
     while True:
@@ -202,7 +195,11 @@ class MasterController:
             params =record["short"]
             pre_para= common.BaseDefine(**params["params"]["common"])
             train_para = TrainConfig(**params["params"]["train"])
-            st_para = StrategyPara(**params["params"]["strategy"])
+            raw_strategy = params["params"]["strategy"]
+            st_para = MlStrategyConfig(**{
+                key: value for key, value in raw_strategy.items()
+                if key in MlStrategyConfig.__dataclass_fields__
+            })
             if strategy_hash in self.strategies:
                 raise RuntimeError(f"Duplicate strategy hash detected: {strategy_hash}. Please check CSV for duplicate configurations.")
             self.strategies[strategy_hash]= StrategyHolder(strategy_hash,strategy_type,config_path,train_out_path,pre_para, train_para, st_para)

@@ -76,6 +76,36 @@ class CycleStat:
     reason: str
 
 
+@dataclass(frozen=True)
+class MartingaleStrategyConfig:
+    """Static parameters owned by the restartable martingale decision logic."""
+
+    reserve_pct: float = 0.7
+    restart_capital_pct: float = 0.3
+    min_restart_capital_pct: float = 0.05
+    restart_cost_pct: float = 0.0
+    pause_days: int = 7
+    sweep_trigger_pct: float = 0.10
+    compound_pct: float = 0.0
+    sweep_min_interval_days: int = 0
+    base_order_pct: float = 0.02
+    max_safety_orders: int = 8
+    price_deviation_pct: float = 0.01
+    step_mult: float = 1.2
+    volume_mult: float = 1.6
+    tp_pct: float = 0.01
+    atr_grid_mult: Optional[float] = None
+    atr_tp_mult: Optional[float] = None
+    max_hold_bars: Optional[int] = None
+    margin_usage_cap_pct: float = 0.9
+    death_equity_pct: float = 0.2
+    cycle_stop_pct: Optional[float] = None
+    entry_mode: str = "signal"
+    prob_thresh: Optional[float] = None
+    allow_long: bool = True
+    allow_short: bool = True
+
+
 # ============================================================
 # RestartableMartingaleStrategy
 # ============================================================
@@ -86,73 +116,18 @@ class RestartableMartingaleStrategy(StrategyBase):
         self,
         venue: VenueBase,
         init_equity: float,
-        # ---- capital isolation ----
-        reserve_pct: float = 0.7,          # share of the initial capital that goes to the reserve
-        restart_capital_pct: float = 0.3,    # share of the "current reserve balance" released on each restart
-        min_restart_capital_pct: float = 0.05,  # a release below this share of the initial capital -> reserve considered exhausted
-        restart_cost_pct: float = 0.0,       # restart friction cost (share of the released amount)
-        pause_days: int = 7,                 # days trading is paused after a death
-        # ---- profit sweep ----
-        sweep_trigger_pct: float = 0.10,     # trade account equity above base by this share -> trigger a sweep
-        compound_pct: float = 0.0,         # share of the profit left in the trade account to compound
-        sweep_min_interval_days: int = 0,    # minimum interval between two sweeps (0 = no limit)
-        # ---- martingale parameters ----
-        base_order_pct: float = 0.02,        # notional of the base order / trade account equity
-        max_safety_orders: int = 8,          # maximum number of safety orders
-        price_deviation_pct: float = 0.01,       # adverse move required for the first safety order
-        step_mult: float = 1.2,             # spacing multiplier of the safety orders (the grid gets sparser)
-        volume_mult: float = 1.6,           # size multiplier of the safety orders
-        tp_pct: float = 0.01,                # take profit distance from the average entry price
-        atr_grid_mult: Optional[float] = None,   # not None -> ATR driven grid: dev = atr_pct * mult
-        atr_tp_mult: Optional[float] = None,     # not None -> ATR driven take profit
-        max_hold_bars: Optional[int] = None,     # max bars held per cycle (None = unlimited)
-        margin_usage_cap_pct: float = 0.9,       # margin usage cap (relative to trade account equity)
+        config: MartingaleStrategyConfig,
         leverage: float = 1.0,
-        # ---- death rule ----
-        death_equity_pct: float = 0.2,       # trade account equity <= base of this life * this value -> declared dead
-        cycle_stop_pct: Optional[float] = None,  # unrealized loss >= trade base * this value -> cut the cycle (None = pure martingale)
-        # ---- entry direction ----
-        entry_mode: str = "signal",          # signal / long / short / reversion
-        prob_thresh: Optional[float] = None,      # confidence threshold when entry_mode=signal
-        allow_long: bool = True,
-        allow_short: bool = True,
     ):
         self.logger = logging.getLogger("trade")
-        self.venue = venue
-
+        super().__init__(venue)
+        self.config = config
         self.init_equity = init_equity
-        self.reserve_pct = reserve_pct
-        self.restart_capital_pct = restart_capital_pct
-        self.min_restart_capital = init_equity * min_restart_capital_pct
-        self.restart_cost_pct = restart_cost_pct
-        self.pause_days = pause_days
-
-        self.sweep_trigger_pct = sweep_trigger_pct
-        self.compound_pct = compound_pct
-        self.sweep_min_interval_days = sweep_min_interval_days
-
-        self.base_order_pct = base_order_pct
-        self.max_safety_orders = max_safety_orders
-        self.price_deviation_pct = price_deviation_pct
-        self.step_mult = step_mult
-        self.volume_mult = volume_mult
-        self.tp_pct = tp_pct
-        self.atr_grid_mult = atr_grid_mult
-        self.atr_tp_mult = atr_tp_mult
-        self.max_hold_bars = max_hold_bars
-        self.margin_usage_cap_pct = margin_usage_cap_pct
+        self.min_restart_capital = init_equity * config.min_restart_capital_pct
         self.leverage = max(1.0, float(leverage))
 
-        self.death_equity_pct = death_equity_pct
-        self.cycle_stop_pct = cycle_stop_pct
-
-        self.entry_mode = entry_mode
-        self.prob_thresh = prob_thresh
-        self.allow_long = allow_long
-        self.allow_short = allow_short
-
         # ---- the two accounts ----
-        self.reserve = init_equity * reserve_pct       # reserve account (isolated capital)
+        self.reserve = init_equity * self.config.reserve_pct  # reserve account (isolated capital)
         self.trade_base = init_equity - self.reserve     # starting capital of the current trade account
         self.trade_equity = self.trade_base              # current trade account equity (unrealized pnl included)
 
@@ -187,7 +162,7 @@ class RestartableMartingaleStrategy(StrategyBase):
 
         self.logger.info(
             f"🎲 [MARTINGALE INIT] 总资金={init_equity:.2f} | 交易账户={self.trade_base:.2f} "
-            f"| 储备账户={self.reserve:.2f} | 最大补仓={max_safety_orders} 层"
+            f"| 储备账户={self.reserve:.2f} | 最大补仓={self.config.max_safety_orders} 层"
         )
 
     # ------------------------------------------------------------------
@@ -250,25 +225,25 @@ class RestartableMartingaleStrategy(StrategyBase):
     # Grid parameters
     # ------------------------------------------------------------------
     def _deviation(self, state: Observation, layer: int) -> float:
-        base = self.price_deviation_pct
-        if self.atr_grid_mult is not None and state.market.atr_pct and state.market.atr_pct > 0:
-            base = state.market.atr_pct * self.atr_grid_mult
-        return base * (self.step_mult ** max(0, layer - 1))
+        base = self.config.price_deviation_pct
+        if self.config.atr_grid_mult is not None and state.market.atr_pct and state.market.atr_pct > 0:
+            base = state.market.atr_pct * self.config.atr_grid_mult
+        return base * (self.config.step_mult ** max(0, layer - 1))
 
     def _tp_pct(self, state: Observation) -> float:
-        if self.atr_tp_mult is not None and state.market.atr_pct and state.market.atr_pct > 0:
-            return max(1e-4, state.market.atr_pct * self.atr_tp_mult)
-        return self.tp_pct
+        if self.config.atr_tp_mult is not None and state.market.atr_pct and state.market.atr_pct > 0:
+            return max(1e-4, state.market.atr_pct * self.config.atr_tp_mult)
+        return self.config.tp_pct
 
     def _next_layer_qty(self, state: Observation) -> float:
         """Size of layer (cycle_layers+1), capped by the margin limit"""
         layer = self.cycle_layers  # 0 => base order
-        base_notional = self.trade_base * self.base_order_pct
-        notional = base_notional * (self.volume_mult ** layer)
+        base_notional = self.trade_base * self.config.base_order_pct
+        notional = base_notional * (self.config.volume_mult ** layer)
         qty = notional / max(state.market.price, 1e-12)
 
         used_margin = self.cycle_qty * state.market.price / self.leverage
-        free_margin = self.trade_equity * self.margin_usage_cap_pct - used_margin
+        free_margin = self.trade_equity * self.config.margin_usage_cap_pct - used_margin
         if free_margin <= 0:
             return 0.0
         max_qty = free_margin * self.leverage / max(state.market.price, 1e-12)
@@ -284,7 +259,7 @@ class RestartableMartingaleStrategy(StrategyBase):
     # Death / pause / restart
     # ------------------------------------------------------------------
     def _is_dead(self) -> bool:
-        return self.trade_equity <= self.trade_base * self.death_equity_pct
+        return self.trade_equity <= self.trade_base * self.config.death_equity_pct
 
     def _kill(self, state: Observation):
         """Trade account wiped out: flatten + record + enter the cooling off period"""
@@ -307,15 +282,15 @@ class RestartableMartingaleStrategy(StrategyBase):
         )
         self._reset_cycle(ExitReason.DEATH)
         self.phase = AccountPhase.PAUSED
-        self.resume_time = state.current_time + timedelta(days=self.pause_days)
+        self.resume_time = state.current_time + timedelta(days=self.config.pause_days)
         self.swept_this_life = 0.0
 
     def _try_restart(self, state: Observation) -> bool:
         """After the cooling off period, fund a restart from the reserve; returns whether it succeeded"""
-        draw = self.reserve * self.restart_capital_pct
+        draw = self.reserve * self.config.restart_capital_pct
         if draw > self.reserve:
             draw = self.reserve
-        cost = draw * self.restart_cost_pct
+        cost = draw * self.config.restart_cost_pct
         new_base = self.trade_equity + draw - cost   # trade_equity may be a remainder / negative
 
         if draw < self.min_restart_capital or new_base <= 0:
@@ -351,14 +326,14 @@ class RestartableMartingaleStrategy(StrategyBase):
         """Only sweep while flat, so unrealized profit is never moved as if it were realized"""
         if self.cycle_dir != PositionDir.FLAT or self.cycle_qty > 0:
             return
-        if self.trade_equity <= self.trade_base * (1.0 + self.sweep_trigger_pct):
+        if self.trade_equity <= self.trade_base * (1.0 + self.config.sweep_trigger_pct):
             return
-        if self.sweep_min_interval_days > 0 and self.last_sweep_time is not None:
-            if (state.current_time - self.last_sweep_time).days < self.sweep_min_interval_days:
+        if self.config.sweep_min_interval_days > 0 and self.last_sweep_time is not None:
+            if (state.current_time - self.last_sweep_time).days < self.config.sweep_min_interval_days:
                 return
 
         profit = self.trade_equity - self.trade_base
-        keep = profit * self.compound_pct
+        keep = profit * self.config.compound_pct
         move = profit - keep
         if move <= 0:
             return
@@ -377,19 +352,19 @@ class RestartableMartingaleStrategy(StrategyBase):
     # Entry direction
     # ------------------------------------------------------------------
     def _entry_dir(self, state: Observation) -> PositionDir:
-        if self.entry_mode == "long":
-            return PositionDir.POSITIVE if self.allow_long else PositionDir.FLAT
-        if self.entry_mode == "short":
-            return PositionDir.NEGATIVE if self.allow_short else PositionDir.FLAT
-        if self.entry_mode == "reversion":
+        if self.config.entry_mode == "long":
+            return PositionDir.POSITIVE if self.config.allow_long else PositionDir.FLAT
+        if self.config.entry_mode == "short":
+            return PositionDir.NEGATIVE if self.config.allow_short else PositionDir.FLAT
+        if self.config.entry_mode == "reversion":
             # Counter trend: buy the dip, sell the rip (the classic mean reverting martingale)
             prev = getattr(self, "_prev_price", None)
             self._prev_price = state.market.price
             if prev is None:
                 return PositionDir.FLAT
-            if state.market.price < prev and self.allow_long:
+            if state.market.price < prev and self.config.allow_long:
                 return PositionDir.POSITIVE
-            if state.market.price > prev and self.allow_short:
+            if state.market.price > prev and self.config.allow_short:
                 return PositionDir.NEGATIVE
             return PositionDir.FLAT
 
@@ -397,11 +372,11 @@ class RestartableMartingaleStrategy(StrategyBase):
         signal = state.market.signal
         if signal == Signal.INVALID:
             return PositionDir.FLAT
-        if self.prob_thresh is not None and state.market.pred_prob < self.prob_thresh:
+        if self.config.prob_thresh is not None and state.market.pred_prob < self.config.prob_thresh:
             return PositionDir.FLAT
-        if signal == Signal.POSITIVE and self.allow_long:
+        if signal == Signal.POSITIVE and self.config.allow_long:
             return PositionDir.POSITIVE
-        if signal == Signal.NEGATIVE and self.allow_short:
+        if signal == Signal.NEGATIVE and self.config.allow_short:
             return PositionDir.NEGATIVE
         return PositionDir.FLAT
 
@@ -459,21 +434,21 @@ class RestartableMartingaleStrategy(StrategyBase):
                 self._reset_cycle(ExitReason.TAKE_PROFIT)
                 return self._emit(TradeIntent(ActionType.CLOSE, reason="tp"), state)
 
-            if self.cycle_stop_pct is not None and unreal <= -self.trade_base * self.cycle_stop_pct:
+            if self.config.cycle_stop_pct is not None and unreal <= -self.trade_base * self.config.cycle_stop_pct:
                 self.logger.warning(
-                    f"🛑 [CYCLE STOP] 浮亏={unreal:.2f} >= 本金*{self.cycle_stop_pct:.0%} "
+                    f"🛑 [CYCLE STOP] 浮亏={unreal:.2f} >= 本金*{self.config.cycle_stop_pct:.0%} "
                     f"| layers={self.cycle_layers}"
                 )
                 self._reset_cycle(ExitReason.CYCLE_STOP)
                 return self._emit(TradeIntent(ActionType.CLOSE, reason="cycle_stop"), state)
 
-            if self.max_hold_bars is not None and self.cycle_bars >= self.max_hold_bars:
+            if self.config.max_hold_bars is not None and self.cycle_bars >= self.config.max_hold_bars:
                 self.logger.debug(f"⌛ [TIMEOUT] 持仓 {self.cycle_bars} bars，强制离场")
                 self._reset_cycle(ExitReason.TIMEOUT)
                 return self._emit(TradeIntent(ActionType.CLOSE, reason="timeout"), state)
 
             # Safety order
-            if self.cycle_layers <= self.max_safety_orders:
+            if self.cycle_layers <= self.config.max_safety_orders:
                 need = self._deviation(state, self.cycle_layers)
                 if adverse >= need:
                     qty = self._next_layer_qty(state)

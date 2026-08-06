@@ -7,8 +7,8 @@ import backtrader as bt
 import backtrader.analyzers as btanalyzers
 import pandas as pd
 import logging
-from dataclasses import asdict, is_dataclass,dataclass
-from typing import Optional
+from dataclasses import asdict, dataclass, field
+from typing import Any, Optional, Type
 
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..",'..'))
@@ -16,14 +16,32 @@ sys.path.append(os.path.join(current_work_dir, "..",'..'))
 # Import project modules
 from data_process.common import *
 from data_process import common 
+from data_process.utils import param_hash
 from model import model_loader
 from model import data_loader
-from trade.runner import cus_analyzer, result_analyze
+from trade.runner import cus_analyzer
+from trade.runner.config import (
+    BrokerConfig,
+    BacktestEngineConfig,
+    CsvDataConfig,
+    ModelDataConfig,
+    ReportConfig,
+    RunnerConfig,
+)
 from trade.venue.bt import cus_comminfo
 from model import train
 from model import train_config
 from trade.venue.bt.bt_venue_ml import MlBtVenue
+from trade.venue.bt.bt_venue_ma import MaBtVenue
+from trade.venue.bt.bt_venue_martingale import MartingaleBtVenue
+from trade.venue.bt.bt_venue_rules import RulesBtVenue
+from trade.venue.bt.bt_venue_turtle import TurtleBtVenue
 from trade.feed.prediction_feed import PredictionFeed
+from trade.strategy.strategy_ml import MlStrategyConfig
+from trade.strategy.strategy_ma import MaStrategyConfig
+from trade.strategy.strategy_martingale import MartingaleStrategyConfig
+from trade.strategy.strategy_rules import RulesStrategyConfig
+from trade.strategy.strategy_turtle import TurtleStrategyConfig
 log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
 
 class TradeResult:
@@ -76,166 +94,254 @@ def log_metrics_block(logger, prefix: str, metrics: dict, items_per_line: int = 
 
 @dataclass
 class StrategyPara:
-    # switches
-    allow_long: bool = True
-    allow_short: bool = True
-    # execution
-    min_hold_bars: int = 48       # default value, may be overridden on init
-    commission_pct: float = 0.05   # cryptocurrency: 0.05. 0.1 = 0.1%, can't be 0   XAU: comission:0.0007, spread: 0.02
-    init_equity: float = 10000.0
-    # signal
-    prob_thresh: Optional[float] = None
-    # stop / take
-    atr_sl_long_mult: float = 6
-    atr_sl_short_mult: float = 6
-    atr_tp_mult: float = 100
-    # risk
-    risk_per_trade_pct: float = 0.01
-    max_daily_loss_pct: float = 0.04
-    decide_version : int = 0
+    """Experiment parameters grouped by their owning modules."""
 
-# period: short / forward / long
-def main(logger:logging.Logger, para = StrategyPara(),train_cfg= train.TrainConfig(),prep_output_dir =common.DATA_OUT_DIR,train_output_dir: str = common.TRAIN_OUT_DIR,
-         device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), period = 'long'):
-    pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
-    logger.info(f"prep_output_dir:{prep_output_dir}, train_output_dir:{train_output_dir}")
-    if period == 'short' or period == 'forward':
-        df = common.load_test_df_from_dir(prep_output_dir)
-        recent_month = 2
-        split_ts = pd.to_datetime(df['open_time_date_utc'].iloc[-1]) - pd.DateOffset(months=recent_month)
-        if period == 'forward':
-            # Forward test: use last 2 months
-            df = df[df['open_time_date_utc'] >= str(split_ts)]
-            logger.info(f"🚀 Using forward period (recent {recent_month} months) from {str(split_ts)[:10]}")
-        elif period == 'short':
-            # Short test: exclude last 2 months
-            df = df[df['open_time_date_utc'] < str(split_ts)]
+    strategy_config: MlStrategyConfig = field(
+        default_factory=lambda: MlStrategyConfig(
+            min_hold_bars=48,
+            atr_sl_long_mult=6,
+            atr_sl_short_mult=6,
+            atr_tp_mult=100,
+            max_daily_loss_pct=0.04,
+        )
+    )
+    broker_config: BrokerConfig = field(default_factory=BrokerConfig)
+
+
+def create_backtest_cerebro(
+    *,
+    venue_cls: Type[bt.Strategy],
+    strategy_config: Any,
+    broker_config: BrokerConfig,
+    data: bt.feed.DataBase,
+    predict_num: Optional[int] = None,
+    engine_config: Optional[BacktestEngineConfig] = None,
+    venue_params: Optional[dict] = None,
+) -> bt.Cerebro:
+    """Create the shared Backtrader runtime and preserve the original analyzers."""
+    engine_config = engine_config or BacktestEngineConfig()
+    cerebro = bt.Cerebro(
+        runonce=engine_config.runonce,
+        cheat_on_open=engine_config.cheat_on_open,
+        maxcpus=engine_config.max_cpus,
+    )
+    params = dict(venue_params or {})
+    params.update(
+        strategy_config=strategy_config,
+        initial_equity=broker_config.initial_equity,
+    )
+    if predict_num is not None:
+        params["predict_num"] = predict_num
+    cerebro.addstrategy(venue_cls, **params)
+    cerebro.adddata(data)
+    cerebro.broker.setcash(broker_config.initial_equity)
+    cerebro.broker.addcommissioninfo(
+        cus_comminfo.CommInfo_Cryptocurrency(commission=broker_config.commission_pct, leverage=broker_config.leverage,)
+    )
+
+    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, compression=1, annualize=True, factor=365)
+    cerebro.addanalyzer(btanalyzers.Returns, _name="returns", tann=365)
+    cerebro.addanalyzer(btanalyzers.DrawDown, _name="dd")
+    cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
+    cerebro.addanalyzer(cus_analyzer.CusAnalyzer, _name="customize")
+    return cerebro
+
+
+def _venue_for_strategy(strategy_config):
+    venue_by_config = (
+        (MlStrategyConfig, MlBtVenue),
+        (MartingaleStrategyConfig, MartingaleBtVenue),
+        (TurtleStrategyConfig, TurtleBtVenue),
+        (RulesStrategyConfig, RulesBtVenue),
+        (MaStrategyConfig, MaBtVenue),
+    )
+    for config_type, venue_cls in venue_by_config:
+        if isinstance(strategy_config, config_type):
+            return venue_cls
+    raise TypeError(f"Unsupported strategy config: {type(strategy_config).__name__}")
+
+
+def _resolve_device(device_name):
+    if device_name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device_name) if isinstance(device_name, str) else device_name
+
+
+def _load_model_data(logger, data_config: ModelDataConfig):
+    pre_para: BaseDefine = common.load_pre_params_from_dir(data_config.train_output_dir)
+    logger.info(
+        f"prep_output_dir:{data_config.prep_output_dir}, "
+        f"train_output_dir:{data_config.train_output_dir}"
+    )
+
+    if data_config.period in ("short", "forward"):
+        frame = common.load_test_df_from_dir(data_config.prep_output_dir)
+        split_ts = (
+            pd.to_datetime(frame["open_time_date_utc"].iloc[-1])
+            - pd.DateOffset(months=data_config.recent_months)
+        )
+        if data_config.period == "forward":
+            frame = frame[frame["open_time_date_utc"] >= str(split_ts)]
+            logger.info(
+                f"🚀 Using forward period (recent {data_config.recent_months} months) "
+                f"from {str(split_ts)[:10]}"
+            )
+        else:
+            frame = frame[frame["open_time_date_utc"] < str(split_ts)]
             logger.info(f"📊 Using short period (Prior to {str(split_ts)[:10]})")
+    elif data_config.period == "long":
+        frame = common.load_train_df_from_dir(data_config.prep_output_dir)
     else:
-        df = common.load_train_df_from_dir(prep_output_dir)
-    logger.info(f"Using period {period} for backtest.Backtest settings: Short={para.allow_short}, Long={para.allow_long}")
-    _interval_ms = common.get_interval_ms(pre_para.interval)
-    df["open_time_date_utc"] = pd.to_datetime(df["open_time_date_utc"], utc=True)
+        raise ValueError(f"Unsupported model data period: {data_config.period}")
 
-    # -----------------------------------------------------------
-    # 2. Wrapped model inference (loading and prediction in one call)
-    # -----------------------------------------------------------
-    # train_output_dir is the model directory (batch experiments give every training its own dir, keeping training and simulation paired)
-    tarin_out_path = train_output_dir
-    if not os.path.isabs(tarin_out_path):
-        tarin_out_path = os.path.join(PROJECT_DIR, tarin_out_path)
-    handler = model_loader.ModelHandler(tarin_out_path=tarin_out_path, device=device)  # Best_F1/Best_Loss
-    # # Run the prediction and collect the results and metrics
-    # df_with_pred, model_stats = handler.predict(df, kline_interval_ms=_interval_ms, is_live = False, diff_thresh = None,
-    #                                                cache_path=os.path.join(TEMPORARY_DIR,"trade_cache.pt"), use_cache = False )
-
-    # 1. Prepare the data: the is_live flag controls how indices are recorded
-    ds = data_loader.TimeSeriesWindowDataset(
-        df=df, 
-        kline_interval_ms = _interval_ms,
-        feature_cols=handler.feature_cols, 
+    frame["open_time_date_utc"] = pd.to_datetime(frame["open_time_date_utc"], utc=True)
+    interval_ms = common.get_interval_ms(pre_para.interval)
+    train_output_dir = data_config.train_output_dir
+    if not os.path.isabs(train_output_dir):
+        train_output_dir = os.path.join(PROJECT_DIR, train_output_dir)
+    handler = model_loader.ModelHandler(
+        tarin_out_path=train_output_dir,
+        device=_resolve_device(data_config.device),
+    )
+    dataset = data_loader.TimeSeriesWindowDataset(
+        df=frame,
+        kline_interval_ms=interval_ms,
+        feature_cols=handler.feature_cols,
         label_col=handler.label_col,
         seq_len=handler.seq_len,
         is_live=False,
     )
-    df['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, para.min_hold_bars)
-    atr_colum = 'stop_loss_atr_pct'
-    df_with_pred, model_stats = handler.predict_with_ds(ds,df,is_live=False,diff_thresh = None)
-    # For composite tasks (TRIGGER_DIR/LONG_SHORT_OVR) every sub-model is evaluated on its own;
-    # non composite tasks return {}, leaving the single model 3-class report structure untouched.
-    sub_model_stats = handler.evaluate_sub_models(df, kline_interval_ms=_interval_ms)
-    # compare with random prediction (sanity check)
-    # df_with_pred['pred'] = np.random.choice([0, 1, 2], size=len(df_with_pred))
-    # handler.scan_thresholds(df, thresholds=[0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
-    # exit()
-    # Drop the leading rows without a prediction (for backtrader)
-    # 2. [core change]: find the index of the first valid prediction
-    # This skips the warm-up period where the features are not ready yet
-    # while keeping the NaN holes caused by time discontinuities in the middle
-    first_valid_idx = df_with_pred['pred'].first_valid_index()
-
-    if first_valid_idx is not None:
-        # Keep every row from the first signal onwards (NaN holes included)
-        df_with_pred = df_with_pred.loc[first_valid_idx:].copy()
-        logger.info(f"Backtest starts from first signal at {df_with_pred.index[0]}")
-    else:
-        logger.error("No valid predictions found in the entire dataset!")
-        sys.exit(1)
-
+    frame["stop_loss_atr_pct"] = common.stop_loss_atr_pct(
+        frame,
+        data_config.atr_ref_bars,
+    )
+    model_input_frame = frame
+    frame, model_stats = handler.predict_with_ds(
+        dataset,
+        model_input_frame,
+        is_live=False,
+        diff_thresh=None,
+    )
+    sub_model_stats = handler.evaluate_sub_models(
+        model_input_frame,
+        kline_interval_ms=interval_ms,
+    )
+    first_valid_idx = frame["pred"].first_valid_index()
+    if first_valid_idx is None:
+        raise RuntimeError("No valid predictions found in the entire dataset")
+    frame = frame.loc[first_valid_idx:].copy()
     logger.info(
-        f"Backtest range: {df_with_pred['open_time_date_utc'].min()} to {df_with_pred['open_time_date_utc'].max()}"
+        f"Backtest range: {frame['open_time_date_utc'].min()} "
+        f"to {frame['open_time_date_utc'].max()}"
     )
+    return frame, model_stats, sub_model_stats, pre_para
 
-    # 4. Run backtrader
-    cerebro = bt.Cerebro(runonce=False,cheat_on_open=True,maxcpus=1)
-    cerebro.addstrategy(
-        MlBtVenue,
-        predict_num = pre_para.predict_num,
-        min_hold_bars=para.min_hold_bars,
-        allow_short=para.allow_short,
-        allow_long=para.allow_long,
-        prob_thresh=para.prob_thresh,
-        atr_sl_long_mult = para.atr_sl_long_mult,
-        atr_sl_short_mult = para.atr_sl_short_mult,
-        atr_tp_mult = para.atr_tp_mult,
-        risk_per_trade_pct = para.risk_per_trade_pct,
-        max_daily_loss_pct = para.max_daily_loss_pct,
-        decide_version = para.decide_version,
-        init_equity = para.init_equity,
+
+def _load_csv_data(logger, data_config: CsvDataConfig):
+    data_path = common.market_data_path(data_config, root_dir=PROJECT_DATA_DIR)
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Data file not found: {data_path}")
+    frame = pd.read_csv(data_path, encoding="utf-8")
+    if "open_time_date_utc" not in frame.columns:
+        raise ValueError("'open_time_date_utc' column missing from market data")
+    frame["open_time_date_utc"] = pd.to_datetime(frame["open_time_date_utc"], utc=True)
+    frame["stop_loss_atr_pct"] = common.stop_loss_atr_pct(
+        frame,
+        data_config.atr_ref_bars,
     )
+    logger.info(f"Loaded {len(frame)} bars from {data_path}")
+    return frame, {}, {}, None
 
-    data = PredictionFeed(
-        dataname=df_with_pred,
+
+def _build_feed(frame: pd.DataFrame, data_config):
+    from_date = data_config.from_date if isinstance(data_config, CsvDataConfig) else None
+    to_date = data_config.to_date if isinstance(data_config, CsvDataConfig) else None
+    feed_params = dict(
+        dataname=frame,
         datetime="open_time_date_utc",
         open="open",
         high="high",
         low="low",
         close="close",
         volume="volume",
-        atr_pct = atr_colum,
-        # slow_atr = "atr_5000",
-        # vol_regime = "vol_regime_100",
-        label = "label",
-        bars_to_close = "bars_to_close",
         openinterest=-1,
         nocase=True,
-        # fromdate=datetime(2023, 10, 1),
-        # todate=datetime(2024, 1, 1),
+        fromdate=pd.Timestamp(from_date).to_pydatetime() if from_date else None,
+        todate=pd.Timestamp(to_date).to_pydatetime() if to_date else None,
+    )
+    feed_params["atr_pct"] = (
+        "stop_loss_atr_pct" if "stop_loss_atr_pct" in frame.columns else None
+    )
+    return PredictionFeed(**feed_params)
+
+
+def main(logger: logging.Logger, config: RunnerConfig):
+    """Standalone runner: load data/model, execute the strategy and build the report."""
+    if isinstance(config.data_config, ModelDataConfig):
+        is_model_data = True
+        frame, model_stats, sub_model_stats, pre_para = _load_model_data(
+            logger,
+            config.data_config,
+        )
+    elif isinstance(config.data_config, CsvDataConfig):
+        is_model_data = False
+        frame, model_stats, sub_model_stats, pre_para = _load_csv_data(
+            logger,
+            config.data_config,
+        )
+    else:
+        raise TypeError(
+            f"Unsupported data config: {type(config.data_config).__name__}"
+        )
+
+    venue_cls = _venue_for_strategy(config.strategy_config)
+    venue_params = {"margin_warn_pct": 0.95} if venue_cls is MartingaleBtVenue else None
+    feed = _build_feed(frame, config.data_config)
+    cerebro = create_backtest_cerebro(
+        venue_cls=venue_cls,
+        strategy_config=config.strategy_config,
+        broker_config=config.broker_config,
+        data=feed,
+        predict_num=pre_para.predict_num if pre_para is not None else None,
+        engine_config=config.engine_config,
+        venue_params=venue_params,
+    )
+    logger.info(
+        f"Starting backtest | data={type(config.data_config).__name__} "
+        f"| venue={venue_cls.__name__}"
+    )
+    strat = cerebro.run()[0]
+    train_config = config.data_config.train_config if is_model_data else None
+    if is_model_data and train_config is None:
+        train_config = train.TrainConfig()
+    save_path = config.report_config.save_path or os.path.join(
+        TEMPORARY_DIR,
+        "full_backtest_report.json",
+    )
+    statistics = generate_backtest_report(
+        logger,
+        strat,
+        model_stats=model_stats,
+        save_path=save_path,
+        strategy_config=config.strategy_config,
+        broker_config=config.broker_config,
+        pre_para=pre_para,
+        train_cfg=train_config,
+        sub_model_stats=sub_model_stats,
+        data_config=config.data_config,
     )
 
-    cerebro.adddata(data)
-    cerebro.broker.setcash(para.init_equity)
-    cerebro.broker.addcommissioninfo(
-        cus_comminfo.CommInfo_Cryptocurrency(commission=para.commission_pct, leverage =10)
-    )
-    # cerebro.broker.set_coc(True)  #
-
-    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, compression=1, annualize=True, factor=365)
-    cerebro.addanalyzer(btanalyzers.Returns, _name='returns' , tann=365)
-    cerebro.addanalyzer(btanalyzers.DrawDown, _name="dd")
-    cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
-    cerebro.addanalyzer(cus_analyzer.CusAnalyzer, _name="customize")
-
-    logger.info("Starting Backtest...")
-    results = cerebro.run()
-    strat = results[0]
-    # result_analyze.analyze_pnl_distribution(strat.closed_pnl)
-    # result_analyze.analyze_trade_dependency(strat.closed_pnl)
-    # 5. Result statistics
-    # UI
-    # Pack the statistics (backtest numbers merged with the model metrics)
-    statistics = generate_backtest_report(logger, strat, model_stats, save_path=os.path.join(TEMPORARY_DIR,'full_backtest_report.json'), para=para,pre_para=pre_para,train_cfg=train_cfg,
-                                           sub_model_stats=sub_model_stats)
-
-    # ========== convert to kline JSON ==========
-    candles = df_with_pred[["open_time_date_utc", "open", "high", "low", "close", "volume", "pred", "label"]].copy()
-    candles["pred"] = candles["pred"].fillna(0.0)
-    candles["label"] = candles["label"].fillna(-1).astype(int)
+    candle_columns = ["open_time_date_utc", "open", "high", "low", "close", "volume"]
+    candle_columns.extend(name for name in ("pred", "label") if name in frame.columns)
+    candles = frame[candle_columns].copy()
+    if "pred" in candles:
+        candles["pred"] = candles["pred"].fillna(0.0)
+    if "label" in candles:
+        candles["label"] = candles["label"].fillna(-1).astype(int)
     candles.rename(columns={"open_time_date_utc": "time"}, inplace=True)
     candles["time"] = candles["time"].apply(lambda dt: int(dt.timestamp()))
-    candles_json = candles.to_dict(orient="records")
+    return {"candles": candles.to_dict(orient="records"), "statistics": statistics}
 
-    return {"candles": candles_json, "statistics": statistics}
 
 def build_daily_df(daily_stats):
     """Convert daily stats list (dict with 'date', 'dd_pct', 'equity') to DataFrame."""
@@ -404,7 +510,18 @@ def summarize_rolling_calmar(rc_df: pd.DataFrame) -> dict:
     return out
 
 
-def generate_backtest_report(logger,strat, model_stats, save_path, para:StrategyPara,pre_para:BaseDefine,train_cfg:train.TrainConfig, sub_model_stats=None):
+def generate_backtest_report(
+    logger,
+    strat,
+    strategy_config: Any,
+    broker_config: BrokerConfig,
+    model_stats=None,
+    save_path=None,
+    pre_para: Optional[BaseDefine] = None,
+    train_cfg=None,
+    sub_model_stats=None,
+    data_config=None,
+):
     """
     Fixed report generator:
     1. Corrected the profit factor formula (Gross Won / Gross Lost)
@@ -413,6 +530,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     sub_model_stats: per sub-model metrics for composite tasks (TRIGGER_DIR/LONG_SHORT_OVR)
     (see ModelHandler.evaluate_sub_models); an empty dict for single model tasks.
     """
+    model_stats = model_stats or {}
     sub_model_stats = sub_model_stats or {}
 
     # ========== 1. Pull the analyzers ==========
@@ -435,10 +553,13 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     maxdd_len = dd.get("max", {}).get("len", 0)
     calmar = (cagr*100 / abs(maxdd_pct)) if maxdd_pct > 0 else 0.0
     #rolling calmar
-    daily_returns_list = strat.analyzers.customize.get_analysis()['daily_returns_list']
-    df = build_daily_df(daily_returns_list)
-    rc_df = rolling_calmar(df,window_days=180, step_days=30 )
-    rc_summary = summarize_rolling_calmar(rc_df)
+    daily_returns_list = perf.get('daily_returns_list', [])
+    if daily_returns_list:
+        df = build_daily_df(daily_returns_list)
+        rc_df = rolling_calmar(df, window_days=180, step_days=30)
+        rc_summary = summarize_rolling_calmar(rc_df)
+    else:
+        rc_summary = {"rc_n": 0}
 
     lost_longest = safe_get(trades, ["streak", "lost", "longest"], 0)
     won_longest = safe_get(trades, ["streak", "won", "longest"], 0)
@@ -498,8 +619,8 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
 
     # Averages (*100 to get percent)
     if total_trades > 0 and abs(avg_cost) > 1e-12:
-        avg_pct_gross = avg_pnl_gross / (avg_cost / 2) * para.commission_pct
-        avg_pct_net = avg_pnl_net / (avg_cost / 2) * para.commission_pct
+        avg_pct_gross = avg_pnl_gross / (avg_cost / 2) * broker_config.commission_pct
+        avg_pct_net = avg_pnl_net / (avg_cost / 2) * broker_config.commission_pct
     else:
         avg_pct_gross = 0.0
         avg_pct_net = 0.0
@@ -560,24 +681,48 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
     strategy_summary = strategy_stats.get("summary", {})
     strategy_detail = strategy_stats.get("detail", {})
 
-    params_hash = calc_params_hash(
-        strategy=para,
-        common=pre_para,
-        train=train_cfg,
+    params_snapshot = {
+        "strategy": asdict(strategy_config),
+        "broker": asdict(broker_config),
+    }
+    if data_config is not None:
+        data_snapshot = asdict(data_config)
+        data_snapshot.pop("train_config", None)
+        params_snapshot["data"] = data_snapshot
+    if pre_para is not None:
+        params_snapshot["common"] = asdict(pre_para)
+    if train_cfg is not None:
+        params_snapshot["train"] = asdict(train_cfg)
+
+    if pre_para is not None and train_cfg is not None:
+        params_hash = calc_params_hash(
+            strategy=StrategyPara(
+                strategy_config=strategy_config,
+                broker_config=broker_config,
+            ),
+            common=pre_para,
+            train=train_cfg,
+        )
+    else:
+        params_hash = param_hash(params_snapshot, length=8)
+    params_snapshot.update(
+        hash=params_hash,
+        git_commit=common.get_git_info(logger),
+    )
+    if model_stats:
+        params_snapshot["model_stats"] = {
+            "accuracy": model_stats.get("accuracy"),
+            "f1_macro": model_stats.get("f1_macro"),
+            "f1_weighted": model_stats.get("f1_weighted"),
+        }
+
+    size_param = getattr(
+        strategy_config,
+        "risk_per_trade_pct",
+        getattr(strategy_config, "base_order_pct", None),
     )
     report = {
-        f"params": {
-            f"strategy": asdict(para),
-            f"common": asdict(pre_para),
-            f"train": asdict(train_cfg),
-            f"hash": params_hash,
-            f"git_commit": common.get_git_info(logger),
-            "model_stats": {
-                "accuracy": model_stats["accuracy"],
-                "f1_macro": model_stats["f1_macro"],
-                "f1_weighted": model_stats["f1_weighted"],
-            },
-        },
+        f"params": params_snapshot,
         f"time": {
             f"start": bt.num2date(strat.datas[0].datetime.array[0]),
             f"end": bt.num2date(strat.datas[0].datetime.array[-1]),
@@ -609,7 +754,7 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
             f"avg_pos": avg_pos,
             f"max_pos": max_pos,
             f"p95_pos": p95_pos,
-            f"risk_per_trade_pct": para.risk_per_trade_pct,
+            f"risk_per_trade_pct": size_param,
         },
 
         f"trades": {
@@ -711,6 +856,10 @@ def generate_backtest_report(logger,strat, model_stats, save_path, para:Strategy
 
     logger.info("-" * 80)
 
+    if save_path:
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump({"report": report, "additional": report_additional}, f, indent=4, default=str)
+
     return (report_additional,report)
 
 if __name__ == "__main__":
@@ -719,9 +868,20 @@ if __name__ == "__main__":
     pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
     exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'simulation'),pre_para.symbol, pre_para.interval)
     logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
-    para = StrategyPara()
-    para.min_hold_bars = pre_para.predict_num
-    report = main(logger=logger, para=para, train_output_dir = train_output_dir)
+    para = StrategyPara(
+        strategy_config=MlStrategyConfig(min_hold_bars=pre_para.predict_num),
+    )
+    runner_config = RunnerConfig(
+        strategy_config=para.strategy_config,
+        broker_config=para.broker_config,
+        data_config=ModelDataConfig(
+            prep_output_dir=common.DATA_OUT_DIR,
+            train_output_dir=train_output_dir,
+            period="long",
+            train_config=train.TrainConfig(),
+        ),
+    )
+    report = main(logger, runner_config)
     append_jsonl(
         os.path.join(exp_dir, "reports.jsonl"),
         report["statistics"][1]

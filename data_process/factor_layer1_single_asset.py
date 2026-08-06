@@ -565,7 +565,7 @@ def main():
     pre_task.interval = '15m'
     train_cfg = train.TrainConfig()
     
-    csv_path = os.path.join(common.PROJECT_DATA_DIR, f"{pre_task.symbol}_{pre_task.interval}.csv")
+    csv_path = common.market_data_path(pre_task)
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Missing data: {csv_path}")
     

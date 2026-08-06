@@ -17,7 +17,7 @@ from data_process import common
 from data_process.common import FeatureFactory
 from model import model_loader
 from model import data_loader
-from trade.strategy.strategy_ml import MlSignalStrategy
+from trade.strategy.strategy_ml import MlSignalStrategy, MlStrategyConfig
 from trade.core.protocol import (
     Observation, MarketView, PositionView, AccountView, PositionDir, ActionType, Signal,
 )
@@ -88,15 +88,18 @@ class LiveBot:
         #strategy
         self.strategy = MlSignalStrategy(
             self,
-            risk_per_trade_pct=LiveConfig.risk_per_trade_pct,
-            max_layers=LiveConfig.max_layers,
-            min_hold_bars=LiveConfig.min_hold_bars,
-            allow_long=LiveConfig.allow_long,
-            allow_short=LiveConfig.allow_short,
-            prob_thresh=LiveConfig.prob_thresh,
-            atr_sl_long_mult = LiveConfig.atr_sl_long_mult,
-            atr_sl_short_mult = LiveConfig.atr_sl_short_mult,
-            max_daily_loss_pct = LiveConfig.max_daily_loss_pct,
+            config=MlStrategyConfig(
+                risk_per_trade_pct=LiveConfig.risk_per_trade_pct,
+                min_hold_bars=LiveConfig.min_hold_bars,
+                allow_long=LiveConfig.allow_long,
+                allow_short=LiveConfig.allow_short,
+                prob_thresh=LiveConfig.prob_thresh,
+                atr_sl_long_mult=LiveConfig.atr_sl_long_mult,
+                atr_sl_short_mult=LiveConfig.atr_sl_short_mult,
+                atr_tp_mult=LiveConfig.atr_tp_mult,
+                max_daily_loss_pct=LiveConfig.max_daily_loss_pct,
+            ),
+            init_equity=self.venue.get_account_equity(),
         )
 
         # 4. Warm up the data -> fill the memory cache

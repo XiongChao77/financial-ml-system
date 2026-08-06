@@ -8,9 +8,16 @@ class MaObservation(Observation):
     fast_ma: float = 0.0
     slow_ma: float = 0.0
 
+@dataclass(frozen=True)
+class MaStrategyConfig:
+    fast_period: int = 50
+    slow_period: int = 200
+    risk_per_trade_pct: float = 0.95
+
+
 class MaCrossoverStrategy(StrategyBase):
-    def __init__(self, risk_per_trade_pct: float = 0.95):
-        self.risk_per_trade_pct = risk_per_trade_pct
+    def __init__(self, config: MaStrategyConfig):
+        self.config = config
 
     def process(self, state: MaObservation) -> TradeIntent:
         # 1. Detect the crossover direction
@@ -30,7 +37,7 @@ class MaCrossoverStrategy(StrategyBase):
                 action=ActionType.OPEN,
                 target_dir=target_dir,
                 target_layers=1,
-                target_pct=self.risk_per_trade_pct * target_dir
+                target_pct=self.config.risk_per_trade_pct * target_dir
             )
         # Currently in position with the opposite direction -> reverse
         elif state.position.dir != target_dir:
@@ -38,7 +45,7 @@ class MaCrossoverStrategy(StrategyBase):
                 action=ActionType.REVERSE,
                 target_dir=target_dir,
                 target_layers=1,
-                target_pct=self.risk_per_trade_pct * target_dir
+                target_pct=self.config.risk_per_trade_pct * target_dir
             )
 
         return action

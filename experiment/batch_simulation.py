@@ -543,10 +543,16 @@ def run_one_backtest(
             min_hold_bars = i
             for (atr_sl, atr_tp_mult) in [(6, 100)]:
                 sim_para = backtest_runner.StrategyPara(
-                    allow_long=True, allow_short=True, min_hold_bars=min_hold_bars,
-                    commission_pct=0.05, init_equity=10000.0, prob_thresh=None,
-                    atr_sl_long_mult=atr_sl, atr_sl_short_mult=atr_sl,
-                    atr_tp_mult=atr_tp_mult, risk_per_trade_pct=0.1, max_daily_loss_pct=0.025,
+                    strategy_config=backtest_runner.MlStrategyConfig(
+                        allow_long=True, allow_short=True, min_hold_bars=min_hold_bars,
+                        prob_thresh=None, atr_sl_long_mult=atr_sl,
+                        atr_sl_short_mult=atr_sl, atr_tp_mult=atr_tp_mult,
+                        risk_per_trade_pct=0.1, max_daily_loss_pct=0.025,
+                    ),
+                    broker_config=backtest_runner.BrokerConfig(
+                        initial_equity=10000.0,
+                        commission_pct=0.05,
+                    ),
                 )
                 simulation_task.append(sim_para)
         logger.info(f" {simulation_task} task for each simulation_task ")
@@ -557,14 +563,21 @@ def run_one_backtest(
         sim_h = param_hash(sim_d)
         sim_result[sim_h] = {'forward': {}, 'short': {}, 'long': {}}
         for period in ['forward', 'short', 'long']:
+            runner_config = backtest_runner.RunnerConfig(
+                strategy_config=sim_task.strategy_config,
+                broker_config=sim_task.broker_config,
+                data_config=backtest_runner.ModelDataConfig(
+                    atr_ref_bars=sim_task.strategy_config.min_hold_bars,
+                    prep_output_dir=prep_output_dir,
+                    train_output_dir=fusion_dir,
+                    device=device,
+                    period=period,
+                    train_config=train_cfg,
+                ),
+            )
             sim_result[sim_h][period] = backtest_runner.main(
                 logger,
-                para=sim_task,
-                train_cfg=train_cfg,
-                prep_output_dir=prep_output_dir,
-                train_output_dir=fusion_dir,
-                device=device,
-                period=period,
+                runner_config,
             )["statistics"][1]
 
     elapsed = time.time() - t0

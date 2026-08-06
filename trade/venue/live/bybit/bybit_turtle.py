@@ -15,7 +15,7 @@ from bybit_engine import BybitEngine
 from data_process.common import setup_session_logger
 from trade.core.protocol import PositionDir, ActionType
 # TurtleStrategy is expected at this path, make sure the file exists
-from trade.strategy.strategy_turtle import TurtleStrategy 
+from trade.strategy.strategy_turtle import TurtleStrategy, TurtleStrategyConfig
 from trade.venue.live.bybit.bybit_venue import BybitVenue 
 # ================= configuration =================
 class TurtleConfig:
@@ -101,14 +101,16 @@ class BybitTurtleBot:
         # Initialize the decision engine
         self.strategy = TurtleStrategy(
             venue=self.venue,
-            entry_period=TurtleConfig.ENTRY_PERIOD,
-            exit_period=TurtleConfig.EXIT_PERIOD,
-            atr_period=TurtleConfig.ATR_PERIOD,
-            max_layers=TurtleConfig.MAX_LAYERS,
-            risk_per_unit=TurtleConfig.RISK_PER_UNIT,
-            max_daily_loss_pct=TurtleConfig.MAX_DAILY_LOSS,
-            upper_limit = TurtleConfig.UPPER_LIMIT,
-            unit_pct_scale = TurtleConfig.UNIT_PCT_SCALE,
+            config=TurtleStrategyConfig(
+                entry_period=TurtleConfig.ENTRY_PERIOD,
+                exit_period=TurtleConfig.EXIT_PERIOD,
+                atr_period=TurtleConfig.ATR_PERIOD,
+                max_layers=TurtleConfig.MAX_LAYERS,
+                risk_per_unit=TurtleConfig.RISK_PER_UNIT,
+                max_daily_loss_pct=TurtleConfig.MAX_DAILY_LOSS,
+                upper_limit=TurtleConfig.UPPER_LIMIT,
+                unit_pct_scale=TurtleConfig.UNIT_PCT_SCALE,
+            ),
         )
         
         self.last_candle_time = None

@@ -12,50 +12,46 @@ import logging,math
 # MlSignalStrategy: hardened risk control and dynamic sizing
 # ============================================================
 
+@dataclass
+class MlStrategyConfig:
+    """Static parameters owned by the ML decision strategy."""
+
+    risk_per_trade_pct: float = 0.01
+    min_hold_bars: int = 16
+    allow_long: bool = True
+    allow_short: bool = True
+    prob_thresh: Optional[float] = None
+    max_daily_loss_pct: float = 0.03
+    atr_sl_long_mult: float = 3.0
+    atr_sl_short_mult: float = 3.0
+    atr_tp_mult: float = 5.0
+    decide_version: int = 0
+
+
 class MlSignalStrategy(StrategyBase):
 
     def __init__(
         self,
         venue: VenueBase,
-        init_equity :float,
-        risk_per_trade_pct: float = 0.01,    # risk per layer
-        min_hold_bars: int = 16,
+        config: MlStrategyConfig,
+        init_equity: float,
         exist_hold_bars: int = 0,
-        allow_long: bool = True,
-        allow_short: bool = True,
-        prob_thresh: Optional[float] = None,
-        #  parameters added after RulesStrategy
-        max_daily_loss_pct: float = 0.03, # intraday circuit breaker threshold
-        atr_sl_long_mult:float = 3,
-        atr_sl_short_mult:float = 3,
-        atr_tp_mult:float = 5,
-        leverage:int = 1,
-        decide_version: int = 0
+        leverage: float = 1.0,
     ):
+        super().__init__(venue)
         self.logger = logging.getLogger("trade")
-        self.venue = venue
-        self.init_equity = init_equity
-        self.risk_per_trade_pct = risk_per_trade_pct
-        self.min_hold_bars = min_hold_bars
-        self.allow_long = allow_long
-        self.allow_short = allow_short
-        self.prob_thresh = prob_thresh
-        self.atr_sl_long_mult = atr_sl_long_mult
-        self.atr_sl_short_mult = atr_sl_short_mult
-        self.atr_tp_mult = atr_tp_mult
-        self.leverage = leverage
+        self.config = config
+        self.init_equity = float(init_equity)
+        self.leverage = max(1.0, float(leverage))
         self.pre_signal = Signal.NEUTRAL
-        self.pre_position_dir:PositionDir = PositionDir.FLAT
-        self.decide_version = decide_version
-        
-        # ---  risk control state ---
-        self.max_daily_loss_pct = max_daily_loss_pct
-        
+        self.pre_position_dir: PositionDir = PositionDir.FLAT
+
+        # --- risk control state ---
         self.day_start_equity = None
         self.last_trade_date = None
         self.is_halted_today = False
-        self.meltdown_days = 0   # number of days the intraday breaker fired
-        
+        self.meltdown_days = 0
+
         # --- statistics ---
         self.bars_since_confirming_signal = exist_hold_bars
         self.all_durations = []
@@ -72,19 +68,25 @@ class MlSignalStrategy(StrategyBase):
             self.is_halted_today = False
 
     def _calculate_unit_pct(self, target_dir: PositionDir, state: Observation, remaining_risk_budget: float) -> tuple[float, float, float]:
+        atr_pct = state.market.atr_pct
+        if atr_pct is None or not math.isfinite(atr_pct) or atr_pct <= 0:
+            self.logger.warning(
+                "ATR is unavailable; skipping the ATR-sized entry for this bar"
+            )
+            return 0, 0, 0
         if state.account.equity < self.init_equity:
             risk_equity = self.init_equity  #design for fTMO challenge
         else:
             risk_equity = state.account.equity
         if target_dir == PositionDir.POSITIVE:
-            sl_pct = state.market.atr_pct * self.atr_sl_long_mult
-            tp_pct = state.market.atr_pct * self.atr_tp_mult
-            intended_qty = (self.risk_per_trade_pct * risk_equity) / (state.market.price * sl_pct)
+            sl_pct = state.market.atr_pct * self.config.atr_sl_long_mult
+            tp_pct = state.market.atr_pct * self.config.atr_tp_mult
+            intended_qty = (self.config.risk_per_trade_pct * risk_equity) / (state.market.price * sl_pct)
             max_risk_qty  = (remaining_risk_budget * 0.8) / (state.market.price * sl_pct)
         elif target_dir == PositionDir.NEGATIVE:
-            sl_pct = state.market.atr_pct * self.atr_sl_short_mult
-            tp_pct = state.market.atr_pct * self.atr_tp_mult
-            intended_qty = (self.risk_per_trade_pct * risk_equity) / (state.market.price * sl_pct)
+            sl_pct = state.market.atr_pct * self.config.atr_sl_short_mult
+            tp_pct = state.market.atr_pct * self.config.atr_tp_mult
+            intended_qty = (self.config.risk_per_trade_pct * risk_equity) / (state.market.price * sl_pct)
             max_risk_qty  = (remaining_risk_budget * 0.8) / (state.market.price * sl_pct)
         else:
             return 0,0,0
@@ -112,7 +114,7 @@ class MlSignalStrategy(StrategyBase):
         signal = state.market.signal
         if signal == Signal.INVALID:
             signal = Signal.NEUTRAL
-        if self.prob_thresh is not None and state.market.pred_prob < self.prob_thresh:
+        if self.config.prob_thresh is not None and state.market.pred_prob < self.config.prob_thresh:
             signal = Signal.NEUTRAL
         
         # record signal
@@ -154,23 +156,27 @@ class MlSignalStrategy(StrategyBase):
 
         # trade action
         target_dir = PositionDir.FLAT
-        if signal == Signal.POSITIVE  and self.allow_long:
+        if signal == Signal.POSITIVE  and self.config.allow_long:
             target_dir = PositionDir.POSITIVE 
-        elif signal == Signal.NEGATIVE and self.allow_short:
+        elif signal == Signal.NEGATIVE and self.config.allow_short:
             target_dir = PositionDir.NEGATIVE
+
+        bars_to_close = state.market.bars_to_close
+        if bars_to_close is None or math.isnan(bars_to_close):
+            bars_to_close = math.inf
         
         if state.position.dir != PositionDir.FLAT:
             if target_dir == state.position.dir:
                 self.bars_since_confirming_signal = 0 # reset
-            elif self.bars_since_confirming_signal < self.min_hold_bars:
+            elif self.bars_since_confirming_signal < self.config.min_hold_bars:
                 target_dir = state.position.dir
             else:
                 pass
             
         # force check , in those conditions the position should be close immediately & open forbidden
         daily_loss_abs = max(0.0, self.day_start_equity - state.account.equity)
-        daily_max_loss_allowed_abs = self.day_start_equity * self.max_daily_loss_pct
-        # total_max_loss_allowed_abs = self.init_equity * self.max_daily_loss_pct
+        daily_max_loss_allowed_abs = self.day_start_equity * self.config.max_daily_loss_pct
+        # total_max_loss_allowed_abs = self.init_equity * self.config.max_daily_loss_pct
         if daily_loss_abs >= daily_max_loss_allowed_abs:
             if self.is_halted_today == False:
                 self.logger.warning(f"🚨 [MELTDOWN] 日亏损触及上限! 亏损率: {daily_loss_abs/self.day_start_equity:.2%}")
@@ -178,16 +184,16 @@ class MlSignalStrategy(StrategyBase):
                 self.meltdown_days += 1
             target_dir = PositionDir.FLAT
         elif state.position.dir == PositionDir.FLAT :
-            if target_dir != PositionDir.FLAT and state.market.bars_to_close <= self.min_hold_bars:
+            if target_dir != PositionDir.FLAT and bars_to_close <= self.config.min_hold_bars:
                 self.logger.info(
-                    f"⏳ [NO OPEN] bars_to_close={state.market.bars_to_close} < min_hold_bars={self.min_hold_bars}"
+                    f"⏳ [NO OPEN] bars_to_close={bars_to_close} < min_hold_bars={self.config.min_hold_bars}"
                 )
                 target_dir = PositionDir.FLAT
         # 2. Two bars before the close, force flat if still in position
         else:
-            if state.market.bars_to_close <= 2:
+            if bars_to_close <= 2:
                 self.logger.info(
-                    f"🔚 [CLOSE BEFORE MARKET CLOSE] bars_to_close={state.market.bars_to_close}, force close position."
+                    f"🔚 [CLOSE BEFORE MARKET CLOSE] bars_to_close={bars_to_close}, force close position."
                 )
                 target_dir = PositionDir.FLAT
 
@@ -263,7 +269,7 @@ class MlSignalStrategy(StrategyBase):
                 return
 
             durations = np.array(self.all_durations)
-            min_hold_bars = self.min_hold_bars # default 16
+            min_hold_bars = self.config.min_hold_bars # default 16
             
             # Core statistics
             avg_dur = np.mean(durations)
@@ -291,7 +297,7 @@ class MlSignalStrategy(StrategyBase):
         """
         metrics = {
             'meltdown_days': self.meltdown_days,
-            'min_hold_bars': self.min_hold_bars,
+            'min_hold_bars': self.config.min_hold_bars,
         }
         if self.all_durations:
             d = np.array(self.all_durations)
@@ -302,7 +308,7 @@ class MlSignalStrategy(StrategyBase):
                 'hold_min_bars': int(d.min()),
                 'hold_max_bars': int(d.max()),
                 'hold_p95_bars': float(np.percentile(d, 95)),
-                'hold_renewal_rate': float((d > self.min_hold_bars).mean()),
+                'hold_renewal_rate': float((d > self.config.min_hold_bars).mean()),
                 'hold_durations': self.all_durations,          # detail
             })
         if self.all_signal_streaks:

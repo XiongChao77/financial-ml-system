@@ -20,9 +20,8 @@ class TradeRole:
 
 class BtVenue(VenueBase,bt.Strategy):
     params = dict(
-        stop_loss_pct = 0.05,  # 5% stop loss
-        atr_tp_mult = 0.50, # take profit multiple (optional)
-        risk_per_trade_pct = 1,
+        strategy_config = None,  # opaque strategy-owned config; subclasses know its concrete type
+        initial_equity = None,   # runtime account baseline, not a strategy parameter
         predict_num = None,    # look-ahead horizon of the label alignment audit; None skips the audit
         margin_warn_pct = 0.8,  # margin usage warning threshold
     )
@@ -80,18 +79,28 @@ class BtVenue(VenueBase,bt.Strategy):
         """
         pred = self.line_value("pred")
         pred_prob = self.line_value("pred_prob")
+        atr_pct = self.line_value("atr_pct")
+        bars_to_close = self.line_value("bars_to_close")
         position_dir = self.current_position_dir()
         if layers is None:
             layers = 0 if position_dir == PositionDir.FLAT else 1
 
         market = MarketView(
             price=self.data.close[0],
+            open=self.data.open[0],
+            high=self.data.high[0],
+            low=self.data.low[0],
+            close=self.data.close[0],
             signal=Signal.INVALID if pred is None or np.isnan(pred) else Signal(int(pred)),
             pred_prob=0.0 if pred_prob is None or np.isnan(pred_prob) else float(pred_prob),
-            atr_pct=self.line_value("atr_pct", default=0.0),
+            atr_pct=0.0 if atr_pct is None or np.isnan(atr_pct) else float(atr_pct),
             slow_atr=self.line_value("slow_atr"),
             vol_regime=self.line_value("vol_regime"),
-            bars_to_close=self.line_value("bars_to_close"),
+            bars_to_close=(
+                float("inf")
+                if bars_to_close is None or np.isnan(bars_to_close)
+                else float(bars_to_close)
+            ),
         )
         return Observation(
             market=market,
@@ -277,7 +286,7 @@ class BtVenue(VenueBase,bt.Strategy):
             close_order = self.close(**kwargs)
             close_order.addinfo(role=TradeRole.CLOSE, close_type="full")
             self._cancel_all_live_orders() # helper: cancel every pending order
-            self.live_trades.clear() 
+            self.live_trades.clear()
         else:
             raise RuntimeError("reduce not support")
     # ----------------------------------------------------------------
@@ -330,8 +339,18 @@ class BtVenue(VenueBase,bt.Strategy):
 
     # --- subclass extension points: no need to override notify_order ---
     def on_order_filled(self, order):
-        """Fill callback hook (the martingale needs the fill price to maintain average price and layers)"""
-        pass
+        """Forward entry fills to strategies that maintain their own position ledger."""
+        is_entry = order.info.get("is_entry", False) or (
+            order.info.get("role") == TradeRole.OPEN
+        )
+        strategy = getattr(self, "strategy", None)
+        on_fill = getattr(strategy, "on_fill", None)
+        if is_entry and callable(on_fill):
+            on_fill(
+                price=order.executed.price,
+                size=order.executed.size,
+                is_buy=order.isbuy(),
+            )
 
     def order_log_extra(self, order) -> dict:
         """Subclasses may append custom fields to trade_logs (e.g. the martingale layer/avg_price)"""

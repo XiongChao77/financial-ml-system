@@ -1,28 +1,22 @@
 import backtrader as bt
-from trade.venue.bt.bt_venue import BtVenue
+from trade.venue.bt.bt_venue_base import BtVenue
 from trade.strategy.strategy_ma import MaCrossoverStrategy, MaObservation
 from trade.core.protocol import PositionDir
 from trade.core.protocol import ActionType
 
 class MaBtVenue(BtVenue):
-    params = dict(
-        fast_period=50,
-        slow_period=200,
-        risk_per_trade_pct=0.95,
-        stop_loss=0.05,  # fixed 5% stop loss
-    )
-
     def __init__(self):
         super().__init__()
+        strategy_config = self.p.strategy_config
         # Declare the indicators: backtrader handles their warm-up automatically
-        self.fast_ma = bt.ind.SMA(period=self.params.fast_period)
-        self.slow_ma = bt.ind.SMA(period=self.params.slow_period)
+        self.fast_ma = bt.ind.SMA(period=strategy_config.fast_period)
+        self.slow_ma = bt.ind.SMA(period=strategy_config.slow_period)
         
-        self.strategy = MaCrossoverStrategy(risk_per_trade_pct=self.params.risk_per_trade_pct)
+        self.strategy = MaCrossoverStrategy(config=strategy_config)
 
     def next(self):
         # Warm-up guard
-        if len(self) < self.params.slow_period:
+        if len(self) < self.strategy.config.slow_period:
             return
 
         # Assembled by the venue layer, then extended with the MA specific fields
