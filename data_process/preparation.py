@@ -112,7 +112,8 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     logger.info("Thresholds are saved in columns: 'threshold_long' and 'threshold_short'")
     logger.info(f"Long threshold range: Min={df['threshold_long'].min():.4f}, Max={df['threshold_long'].max():.4f}, Mean={df['threshold_long'].mean():.4f}")
     logger.info(f"Short threshold range: Min={df['threshold_short'].min():.4f}, Max={df['threshold_short'].max():.4f}, Mean={df['threshold_short'].mean():.4f}")
-    
+    common.log_threshold_percentiles(df, logger)
+
     for label_val, cnt in counts.items():
         label_name = "Down" if label_val == 0 else ("Up" if label_val == 2 else ("Range" if label_val == 1 else "INVALID"))
         pct_val = proportions[label_val]
@@ -149,4 +150,6 @@ if __name__ == "__main__":
         feature_conf_list = feature.FEATURE_LIST_COMMODITY
     else:
         feature_conf_list = []
+    pare_para.label_type = "BBM"
+    pare_para.predict_num = 2
     main(logger,common.FEATURE_GROUP_LIST, para= pare_para, feature_conf_list= feature_conf_list)

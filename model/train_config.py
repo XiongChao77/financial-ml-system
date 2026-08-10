@@ -67,7 +67,7 @@ class TransformerConfig(BaseModelConfig):
     model_version: int = 3
     d_model: int = 128
     nhead: int = 8
-    num_layers: int = 4
+    num_layers: int = 2
     dim_feedforward: int = 512
     dropout: float = 0.3
     attn_dropout: float = 0.1
@@ -76,7 +76,7 @@ class TransformerConfig(BaseModelConfig):
     use_alibi: bool = True
     pos_encoding: str = "none"
     cls_token: bool = False
-    readout: str = "cls" #"cls" | "meanmax" | "attn" | "mix"
+    readout: str = "meanmax" #"cls" | "meanmax" | "attn" | "mix"
     head: str = "linear"
     ffn_type: str = "swiglu"
     use_feature_weighting: bool = False
@@ -194,7 +194,7 @@ class TrainConfig:
     weight_decay: float = 5e-4
     patience: int = 8
     seed: int = 42
-    stride: int = 8
+    stride: int = 2
     use_cache: bool = False
     lambda_dir: float = 0.1  # Importance of long/short direction
     lambda_main:float = 0.7
@@ -402,9 +402,9 @@ feature_conf_list = [
     "lower_wick_pct",
 ]
 
-seq_len = 216
+seq_len = 128
 SingleModelConfig = TrainConfig(
-    model_cfg=ConvLSTMConfig(model_version=1, seq_len=seq_len),
+    model_cfg=TransformerConfig(model_version=1, seq_len=seq_len),
     feature_conf_list=feature.FEATURE_LIST_COMMODITY,
-    train_task=TrainTask.DIRECT_3CLASS,
+    train_task=TrainTask.DIRECTION,
 )

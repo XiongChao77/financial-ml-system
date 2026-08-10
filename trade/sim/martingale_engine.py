@@ -17,30 +17,31 @@ snapshot and the worse outcome is kept:
     path A: Open -> Low  -> High -> Close
     path B: Open -> High -> Low  -> Close
 
-"Worse" is ordered as (1) liquidation, (2) crossing the configured ruin-equity
-threshold, (3) lower mark-to-market equity at Close, and (4) larger position
-notional carried into the next bar. Intrabar equity and margin extrema are
+"Worse" is ordered as (1) liquidation, (2) lower mark-to-market equity at
+Close, and (3) larger position notional carried into the next bar. Ruin is a
+backtest-level capital rule; the engine only records realized grid breaks,
+liquidations and mark-to-market extrema. Intrabar equity and margin extrema are
 tracked on the selected path rather than only at the bar close.
 
 Within one leg the price moves monotonically, so events fire in strict price
-order: liquidation, then stop loss, then the next safety order on the way down;
-the take profit on the way up.  Every event re-prices the ones after it.
+order: liquidation, then full-grid break, then the next safety order on the way
+down; the take profit on the way up.  Every event re-prices the ones after it.
 
 Layer boundaries
 ----------------
-At layer ``i`` both price boundaries use the same distance from the latest
-fill: ``price_deviation_pct * deviation_step_mult ** (i - 1)``. The favourable
-boundary takes profit; the adverse boundary enters the next layer, or stops the
-cycle once the ladder is full. ``take_profit_pct`` is only the fixed cash target
-as a share of the cycle's starting balance. Before a base order is opened, the
-simulator prices the whole planned grid and rejects the cycle if any scheduled
-layer would breach the margin cap.
+At layer ``i`` both price boundaries use ``grid_deviation_pcts[i]`` from the
+explicit grid list. The favourable boundary takes profit; the adverse boundary
+enters the next layer, or stops the cycle once the list is exhausted.
+``take_profit_pct`` is only the fixed cash target as a share of the cycle's
+starting balance. Before a base order is opened, the simulator prices the whole
+planned grid and rejects the cycle if any scheduled layer would breach the
+margin cap.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 
 
 # A cycle's side.  Every price rule is written as "adverse" / "favourable"
@@ -57,44 +58,54 @@ SIDE_NAME = {LONG: "long", SHORT: "short"}
 class MartingaleParams:
     """Decision parameters of one martingale cycle."""
 
-    price_deviation_pct: float = 0.01     # next layer, adverse of the last fill
+    grid_deviation_pcts: Sequence[float] = (
+        0.01, 0.015, 0.0225, 0.03375, 0.050625,
+        0.0759375, 0.11390625, 0.170859375, 0.2562890625, 0.38443359375,
+    )
     take_profit_pct: float = 0.01         # fixed net profit / cycle start balance
-    deviation_step_mult: float = 1.0      # >1 widens each successive step
-    max_layers: int = 7
 
-    # --- stop once the ladder can no longer average down ---
-    stop_at_full_layers: bool = True      # park a stop at the next grid price
+    # --- full-grid break once the ladder can no longer average down ---
+    stop_at_full_layers: bool = True      # exit at the next grid price
 
     # --- direction ---
     initial_direction: str = "long"          # "long" or "short"
-    # Flip the side of the next cycle every time one is stopped out.  A long
+    # Flip the side of the next cycle every time one breaks.  A long
     # martingale only loses in a downtrend, so the question this answers is
     # whether following the break is better than starting the same ladder again.
-    reverse_after_stop_loss: bool = False
+    reverse_after_grid_break: bool = False
 
     # --- pause after a losing cycle ---
     # Bars to sit out after a loss.  0 keeps the default behaviour: the cycle
     # that closed cannot re-open inside its own bar, so the next base order
     # fills at the very next bar's open.  N pushes that N bars further out.
     loss_cooldown_bars: int = 0
+    # Optional maximum age of one cycle, in bars.  The backtest layer converts
+    # the user-facing day value to bars after it knows the series frequency.
+    max_cycle_bars: Optional[int] = None
 
     def __post_init__(self):
-        if not 0.0 < self.price_deviation_pct < 1.0:
-            raise ValueError("price_deviation_pct must be in (0, 1)")
+        deviations = tuple(float(item) for item in self.grid_deviation_pcts)
+        if not deviations:
+            raise ValueError("grid_deviation_pcts must not be empty")
+        if any(not 0.0 < item < 1.0 for item in deviations):
+            raise ValueError("every grid_deviation_pcts item must be in (0, 1)")
+        object.__setattr__(self, "grid_deviation_pcts", deviations)
         if not 0.0 < self.take_profit_pct < 1.0:
             raise ValueError("take_profit_pct must be in (0, 1)")
-        if self.deviation_step_mult <= 0.0:
-            raise ValueError("deviation_step_mult must be positive")
-        if self.max_layers < 1:
-            raise ValueError("max_layers must be >= 1")
         if self.loss_cooldown_bars < 0:
             raise ValueError("loss_cooldown_bars must be >= 0")
+        if self.max_cycle_bars is not None and self.max_cycle_bars < 1:
+            raise ValueError("max_cycle_bars must be >= 1 or None")
         if self.initial_direction not in ("long", "short"):
             raise ValueError("initial_direction must be 'long' or 'short'")
 
     @property
     def initial_side(self) -> int:
         return LONG if self.initial_direction == "long" else SHORT
+
+    @property
+    def layer_count(self) -> int:
+        return len(self.grid_deviation_pcts)
 
 
 @dataclass(frozen=True)
@@ -103,7 +114,7 @@ class AccountParams:
 
     All ``*_pct`` fee/margin fields are percent, i.e. ``0.05`` means 0.05%.
     Ladder and take-profit orders rest on the book (maker); the base order,
-    stop loss and forced liquidation cross the spread (taker).
+    grid break and forced liquidation cross the spread (taker).
     """
 
     initial_equity: float = 10_000.0
@@ -113,7 +124,7 @@ class AccountParams:
     maintenance_margin_pct: float = 0.5   # of position notional
     margin_usage_cap_pct: float = 0.80    # refuse orders past this share of equity
     liquidation_penalty_pct: float = 0.0  # extra fee charged on a forced close
-    ruin_equity_pct: float = 0.10         # run is dead below this share of start
+    ruin_equity_pct: float = 0.10         # ruin when balance <= peak balance * this
 
     def __post_init__(self):
         if self.initial_equity <= 0.0:
@@ -165,6 +176,7 @@ class Cycle:
     fills_in_bar: int = 0
     max_fills_in_bar: int = 0
     planned_notionals: List[float] = field(default_factory=list)
+    planned_layers: List[dict] = field(default_factory=list)
     fills: List[dict] = field(default_factory=list)  # one record per layer filled
     min_price_seen: float = float("inf")             # worst excursion while open
     max_price_seen: float = 0.0
@@ -173,8 +185,9 @@ class Cycle:
         # ``fills`` must be copied: the two candidate paths of one bar branch
         # from the same cycle and would otherwise append into a shared list.
         clone = replace(self)
-        clone.fills = list(self.fills)
+        clone.fills = [dict(row) for row in self.fills]
         clone.planned_notionals = list(self.planned_notionals)
+        clone.planned_layers = [dict(row) for row in self.planned_layers]
         return clone
 
 
@@ -246,10 +259,7 @@ class MartingaleSimulator:
         self.account = account
         maker = account.maker_rate
         taker = account.taker_rate
-        boundary_deviations = (
-            params.price_deviation_pct * params.deviation_step_mult ** i
-            for i in range(params.max_layers)
-        )
+        boundary_deviations = params.grid_deviation_pcts
         minimum_edge = min(
             deviation - (1.0 + side * deviation) * maker - taker
             for deviation in boundary_deviations
@@ -257,7 +267,7 @@ class MartingaleSimulator:
         )
         if minimum_edge <= 0.0:
             raise ValueError(
-                "price_deviation_pct must exceed round-trip fees for "
+                "every grid_deviation_pcts item must exceed round-trip fees for "
                 "target-derived sizing"
             )
         self._bar_index = -1
@@ -308,20 +318,12 @@ class MartingaleSimulator:
         return price if price > 0.0 else None
 
 
-    def ruin_threshold_price(self, state: AccountState) -> Optional[float]:
-        """Price where mark-to-market equity reaches the configured ruin level."""
-        cycle = state.cycle
-        if cycle.qty <= 0.0:
-            return None
-        ruin_level = self.account.initial_equity * self.account.ruin_equity_pct
-        if cycle.side == LONG:
-            price = (ruin_level - state.equity + cycle.cost) / cycle.qty
-        else:
-            price = (state.equity + cycle.cost - ruin_level) / cycle.qty
-        return price if price > 0.0 else None
-
     def _observe(self, state: AccountState, price: float) -> float:
-        """Record intrabar MTM equity/margin and stop at the ruin threshold."""
+        """Record intrabar MTM equity/margin.
+
+        Ruin is deliberately not checked on floating loss. It is checked only
+        after a full-grid break has been realized into account equity.
+        """
         cycle = state.cycle
         if cycle.qty > 0.0:
             cycle.min_price_seen = min(cycle.min_price_seen, price)
@@ -338,12 +340,6 @@ class MartingaleSimulator:
         state.max_margin_usage_seen = max(
             state.max_margin_usage_seen, self.margin_usage(state, price)
         )
-        ruin_level = self.account.initial_equity * self.account.ruin_equity_pct
-        if not state.bankrupt and equity <= ruin_level + 1e-12:
-            state.ruin_threshold_hit = True
-            if state.failure_equity is None:
-                state.failure_equity = equity
-                state.failure_price = price
         return equity
 
     # ---------- ladder geometry ----------
@@ -352,15 +348,15 @@ class MartingaleSimulator:
         cycle = state.cycle
         if cycle.layers <= 0 or cycle.last_entry_price <= 0.0:
             return None
-        deviation = (
-            self.params.price_deviation_pct
-            * self.params.deviation_step_mult ** (cycle.layers - 1)
-        )
+        deviation = self.params.grid_deviation_pcts[cycle.layers - 1]
         return deviation if deviation < 1.0 else None
 
     def _grid_price(self, state: AccountState) -> Optional[float]:
         """Current layer adverse boundary around the latest fill."""
         cycle = state.cycle
+        if 0 < cycle.layers <= len(cycle.planned_layers):
+            row = cycle.planned_layers[cycle.layers - 1]
+            return row.get("execution_next_adverse_price", row["next_adverse_price"])
         deviation = self._layer_deviation(state)
         if deviation is None:
             return None
@@ -370,7 +366,7 @@ class MartingaleSimulator:
         cycle = state.cycle
         if cycle.layers == 0:
             return None
-        if cycle.layers >= self.params.max_layers:
+        if cycle.layers >= self.params.layer_count:
             return None
         return self._grid_price(state)
 
@@ -378,9 +374,9 @@ class MartingaleSimulator:
         """True once the cycle can no longer average down."""
         if not self.params.stop_at_full_layers:
             return False
-        return state.cycle.layers >= self.params.max_layers
+        return state.cycle.layers >= self.params.layer_count
 
-    def stop_loss_price(self, state: AccountState) -> Optional[float]:
+    def grid_break_price(self, state: AccountState) -> Optional[float]:
         """Full-layer adverse boundary."""
         if state.cycle.qty <= 0.0 or not self._full_layer_stop_armed(state):
             return None
@@ -391,6 +387,9 @@ class MartingaleSimulator:
         cycle = state.cycle
         if cycle.qty <= 0.0:
             return None
+        if 0 < cycle.layers <= len(cycle.planned_layers):
+            row = cycle.planned_layers[cycle.layers - 1]
+            return row.get("execution_take_profit_price", row["take_profit_price"])
         deviation = self._layer_deviation(state)
         if deviation is None:
             return None
@@ -416,7 +415,7 @@ class MartingaleSimulator:
         is_base: bool,
     ) -> float:
         """Additional notional needed to net target_cash at this layer TP."""
-        deviation = self.params.price_deviation_pct * self.params.deviation_step_mult ** layer_index
+        deviation = self.params.grid_deviation_pcts[layer_index]
         if deviation >= 1.0:
             return 0.0
 
@@ -462,7 +461,7 @@ class MartingaleSimulator:
         initial_margin = (cost + notional) / self.account.leverage
         return initial_margin <= equity_after * self.account.margin_usage_cap_pct + 1e-12
 
-    def _plan_cycle(self, state: AccountState, price: float) -> Optional[List[float]]:
+    def _plan_cycle(self, state: AccountState, price: float) -> Optional[List[dict]]:
         """Plan and validate every scheduled layer before the base order opens."""
         side = state.next_side
         equity = state.equity
@@ -471,14 +470,12 @@ class MartingaleSimulator:
         cost = 0.0
         entry_fees = 0.0
         layer_price = price
-        notionals: List[float] = []
+        base_price = price
+        rows: List[dict] = []
 
-        for layer_index in range(self.params.max_layers):
+        for layer_index, deviation in enumerate(self.params.grid_deviation_pcts):
             if layer_index > 0:
-                adverse = (
-                    self.params.price_deviation_pct
-                    * self.params.deviation_step_mult ** (layer_index - 1)
-                )
+                adverse = self.params.grid_deviation_pcts[layer_index - 1]
                 if adverse >= 1.0:
                     return None
                 layer_price = layer_price * (1.0 - side * adverse)
@@ -510,13 +507,68 @@ class MartingaleSimulator:
             fee = notional * (
                 self.account.taker_rate if is_base else self.account.maker_rate
             )
+            layer_qty = notional / layer_price
+            take_profit_price = layer_price * (1.0 + side * deviation)
+            next_adverse_price = layer_price * (1.0 - side * deviation)
+            position_qty_after = qty + layer_qty
+            cumulative_cost_after = cost + notional
+            cumulative_entry_fees_after = entry_fees + fee
+            exit_notional_at_tp = position_qty_after * take_profit_price
+            gross_pnl_at_tp = side * (exit_notional_at_tp - cumulative_cost_after)
+            exit_fee_at_tp = exit_notional_at_tp * self.account.maker_rate
+            net_pnl_at_tp = (
+                gross_pnl_at_tp
+                - cumulative_entry_fees_after
+                - exit_fee_at_tp
+            )
+            layer_exit_notional_at_tp = layer_qty * take_profit_price
+            layer_gross_pnl_at_tp = side * (
+                layer_exit_notional_at_tp - notional
+            )
+            layer_exit_fee_at_tp = layer_exit_notional_at_tp * self.account.maker_rate
+            layer_net_pnl_at_tp = (
+                layer_gross_pnl_at_tp - fee - layer_exit_fee_at_tp
+            )
+            rows.append({
+                "layer": layer_index + 1,
+                "role": "base" if is_base else "safety",
+                "entry_price": layer_price,
+                "entry_price_pct_from_base": side * (layer_price / base_price - 1.0),
+                "take_profit_price": take_profit_price,
+                "take_profit_pct_from_entry": side * (
+                    take_profit_price / layer_price - 1.0
+                ),
+                "next_adverse_price": next_adverse_price,
+                "next_adverse_pct_from_entry": side * (
+                    next_adverse_price / layer_price - 1.0
+                ),
+                "grid_break_price": (
+                    next_adverse_price
+                    if self.params.stop_at_full_layers
+                    and layer_index + 1 >= self.params.layer_count
+                    else None
+                ),
+                "notional": notional,
+                "qty": layer_qty,
+                "fee": fee,
+                "cumulative_qty_after": position_qty_after,
+                "cumulative_notional_after": cumulative_cost_after,
+                "cumulative_entry_fees_after": cumulative_entry_fees_after,
+                "avg_entry_price_after": cumulative_cost_after / position_qty_after,
+                "cycle_gross_pnl_at_tp": gross_pnl_at_tp,
+                "cycle_exit_fee_at_tp": exit_fee_at_tp,
+                "cycle_net_pnl_at_tp": net_pnl_at_tp,
+                "layer_gross_pnl_at_tp": layer_gross_pnl_at_tp,
+                "layer_entry_fee": fee,
+                "layer_exit_fee_at_tp": layer_exit_fee_at_tp,
+                "layer_net_pnl_at_tp": layer_net_pnl_at_tp,
+            })
             equity -= fee
-            qty += notional / layer_price
-            cost += notional
-            entry_fees += fee
-            notionals.append(notional)
+            qty = position_qty_after
+            cost = cumulative_cost_after
+            entry_fees = cumulative_entry_fees_after
 
-        return notionals
+        return rows
 
     def target_notional(self, state: AccountState, price: float) -> float:
         """Additional notional needed to net the cycle target at the new layer TP."""
@@ -554,14 +606,11 @@ class MartingaleSimulator:
             rows = []
             failure_reason = None
 
-            for layer_index in range(self.params.max_layers):
+            for layer_index, deviation in enumerate(self.params.grid_deviation_pcts):
                 layer = layer_index + 1
                 adverse = None
                 if layer_index > 0:
-                    adverse = (
-                        self.params.price_deviation_pct
-                        * self.params.deviation_step_mult ** (layer_index - 1)
-                    )
+                    adverse = self.params.grid_deviation_pcts[layer_index - 1]
                     if adverse >= 1.0:
                         failure_reason = "adverse_step_ge_100pct"
                         rows.append({
@@ -583,10 +632,6 @@ class MartingaleSimulator:
                         })
                         break
 
-                deviation = (
-                    self.params.price_deviation_pct
-                    * self.params.deviation_step_mult ** layer_index
-                )
                 is_base = layer_index == 0
                 entry_rate = (
                     self.account.taker_rate if is_base else self.account.maker_rate
@@ -634,14 +679,56 @@ class MartingaleSimulator:
                 order_fee = required_notional * entry_rate
                 equity_mtm_before_order = equity + side * (qty * layer_price - cost)
                 equity_after_order = equity_mtm_before_order - order_fee
+                qty_after_order = qty + required_notional / layer_price
+                cost_after_order = cost + required_notional
+                entry_fees_after_order = entry_fees + order_fee
                 initial_margin_after = (
-                    (cost + required_notional) / self.account.leverage
+                    cost_after_order / self.account.leverage
                 )
                 margin_cap_amount = (
                     equity_after_order * self.account.margin_usage_cap_pct
                 )
+                next_adverse_price = layer_price * (1.0 - side * deviation)
+                grid_break_price = (
+                    next_adverse_price
+                    if self.params.stop_at_full_layers
+                    and layer >= self.params.layer_count
+                    else None
+                )
+                grid_break_exit_notional = (
+                    qty_after_order * grid_break_price
+                    if grid_break_price is not None else None
+                )
+                grid_break_exit_fee = (
+                    grid_break_exit_notional * self.account.taker_rate
+                    if grid_break_exit_notional is not None else None
+                )
+                grid_break_gross_pnl = (
+                    side * (grid_break_exit_notional - cost_after_order)
+                    if grid_break_exit_notional is not None else None
+                )
+                grid_break_net_pnl = (
+                    grid_break_gross_pnl
+                    - entry_fees_after_order
+                    - grid_break_exit_fee
+                    if grid_break_gross_pnl is not None else None
+                )
+                adverse_gross_pnl = side * (
+                    qty_after_order * next_adverse_price - cost_after_order
+                )
+                adverse_equity_mtm = (
+                    self.account.initial_equity
+                    + adverse_gross_pnl
+                    - entry_fees_after_order
+                )
+                adverse_loss_pct = (
+                    (self.account.initial_equity - adverse_equity_mtm)
+                    / self.account.initial_equity
+                )
                 row.update({
                     "take_profit_price": exit_price,
+                    "next_adverse_price": next_adverse_price,
+                    "grid_break_price": grid_break_price,
                     "incremental_return": incremental_return,
                     "existing_net_at_take_profit": existing_net_at_tp,
                     "raw_required_notional": raw_required_notional,
@@ -649,9 +736,17 @@ class MartingaleSimulator:
                     "order_fee": order_fee,
                     "equity_mtm_before_order": equity_mtm_before_order,
                     "equity_after_order": equity_after_order,
-                    "cumulative_notional_after": cost + required_notional,
+                    "cumulative_qty_after": qty_after_order,
+                    "cumulative_notional_after": cost_after_order,
+                    "cumulative_entry_fees_after": entry_fees_after_order,
                     "initial_margin_after": initial_margin_after,
                     "margin_cap_amount": margin_cap_amount,
+                    "grid_break_exit_notional": grid_break_exit_notional,
+                    "grid_break_exit_fee": grid_break_exit_fee,
+                    "grid_break_gross_pnl": grid_break_gross_pnl,
+                    "grid_break_net_pnl": grid_break_net_pnl,
+                    "adverse_equity_mtm": adverse_equity_mtm,
+                    "adverse_loss_pct": adverse_loss_pct,
                     "margin_usage_pct": (
                         initial_margin_after / equity_after_order
                         if equity_after_order > 0.0 else None
@@ -670,6 +765,11 @@ class MartingaleSimulator:
                     failure_reason = "non_positive_equity_after_order"
                 elif initial_margin_after > margin_cap_amount + 1e-12:
                     failure_reason = "margin_cap_exceeded"
+                elif (
+                    grid_break_net_pnl is not None
+                    and self.account.initial_equity + grid_break_net_pnl <= 0.0
+                ):
+                    failure_reason = "grid_break_equity_non_positive"
 
                 if failure_reason is not None:
                     row.update(status="failed", failure_reason=failure_reason)
@@ -678,14 +778,14 @@ class MartingaleSimulator:
 
                 rows.append(row)
                 equity -= order_fee
-                qty += required_notional / layer_price
-                cost += required_notional
-                entry_fees += order_fee
+                qty = qty_after_order
+                cost = cost_after_order
+                entry_fees = entry_fees_after_order
 
             name = SIDE_NAME[side]
             results[name] = {
                 "side": name,
-                "executable": failure_reason is None and len(rows) == self.params.max_layers,
+                "executable": failure_reason is None and len(rows) == self.params.layer_count,
                 "failure_layer": (
                     None if failure_reason is None else rows[-1]["layer"]
                 ),
@@ -718,19 +818,43 @@ class MartingaleSimulator:
             )
 
     # ---------- fills ----------
-    def _affordable(self, state: AccountState, notional: float, price: float) -> bool:
-        cycle = state.cycle
-        return self._affordable_position(
-            equity=state.equity,
-            side=cycle.side if cycle.qty > 0.0 else state.next_side,
-            qty=cycle.qty,
-            cost=cycle.cost,
-            notional=notional,
-            price=price,
-            is_base=cycle.qty <= 0.0,
-        )
+    def _mark_layer_boundary(
+        self,
+        state: AccountState,
+        *,
+        kind: str,
+        price: float,
+        next_layer: Optional[int] = None,
+    ):
+        """Record the first boundary reached after the currently active layer.
 
-    def _fill(self, state: AccountState, price: float, notional: float, is_base: bool):
+        This is intentionally separate from the cycle's final close.  For layer
+        ``i`` the first boundary is either its own take-profit or the adverse
+        boundary that opens ``i + 1``.  Only the final layer's adverse boundary is
+        the cycle grid break.
+        """
+        if not state.cycle.fills:
+            return
+        fill = state.cycle.fills[-1]
+        if fill.get("boundary_kind") is not None:
+            return
+        fill.update({
+            "boundary_kind": kind,
+            "boundary_bar": self._bar_index,
+            "boundary_time": self._bar_time,
+            "boundary_price": price,
+            "boundary_bars_held": self._bar_index - fill["bar"],
+            "boundary_next_layer": next_layer,
+        })
+
+    def _fill(
+        self,
+        state: AccountState,
+        price: float,
+        notional: float,
+        is_base: bool,
+        planned: Optional[dict] = None,
+    ):
         cycle = state.cycle
         fee = notional * (
             self.account.taker_rate if is_base else self.account.maker_rate
@@ -748,28 +872,125 @@ class MartingaleSimulator:
         cycle.entry_fees += fee
         cycle.last_entry_price = price
         cycle.layers += 1
+        layer_index = cycle.layers - 1
+        deviation = (
+            self.params.grid_deviation_pcts[layer_index]
+        )
+        execution_take_profit_price = price * (1.0 + cycle.side * deviation)
+        execution_next_adverse_price = price * (1.0 - cycle.side * deviation)
+        execution_exit_notional_at_tp = (
+            cycle.qty * execution_take_profit_price
+        )
+        execution_gross_pnl_at_tp = cycle.side * (
+            execution_exit_notional_at_tp - cycle.cost
+        )
+        execution_exit_fee_at_tp = (
+            execution_exit_notional_at_tp * self.account.maker_rate
+        )
+        execution_net_pnl_at_tp = (
+            execution_gross_pnl_at_tp
+            - cycle.entry_fees
+            - execution_exit_fee_at_tp
+        )
+        layer_exit_notional_at_tp = qty * execution_take_profit_price
+        execution_layer_gross_pnl_at_tp = cycle.side * (
+            layer_exit_notional_at_tp - notional
+        )
+        execution_layer_exit_fee_at_tp = (
+            layer_exit_notional_at_tp * self.account.maker_rate
+        )
+        execution_layer_net_pnl_at_tp = (
+            execution_layer_gross_pnl_at_tp
+            - fee
+            - execution_layer_exit_fee_at_tp
+        )
+        if layer_index < len(cycle.planned_layers):
+            cycle.planned_layers[layer_index].update({
+                "execution_entry_price": price,
+                "execution_take_profit_price": execution_take_profit_price,
+                "execution_next_adverse_price": execution_next_adverse_price,
+                "execution_grid_break_price": (
+                    execution_next_adverse_price
+                    if self.params.stop_at_full_layers
+                    and cycle.layers >= self.params.layer_count
+                    else None
+                ),
+                "execution_cycle_gross_pnl_at_tp": execution_gross_pnl_at_tp,
+                "execution_cycle_exit_fee_at_tp": execution_exit_fee_at_tp,
+                "execution_cycle_net_pnl_at_tp": execution_net_pnl_at_tp,
+                "execution_layer_gross_pnl_at_tp": (
+                    execution_layer_gross_pnl_at_tp
+                ),
+                "execution_layer_exit_fee_at_tp": execution_layer_exit_fee_at_tp,
+                "execution_layer_net_pnl_at_tp": execution_layer_net_pnl_at_tp,
+            })
         cycle.fills_in_bar += 1
         cycle.max_fills_in_bar = max(cycle.max_fills_in_bar, cycle.fills_in_bar)
         state.equity -= fee
         state.events += 1
-        cycle.fills.append(
-            {
-                "layer": cycle.layers,
-                "bar": self._bar_index,
-                "time": self._bar_time,
-                "price": price,
-                "qty": qty,
-                "notional": notional,
-                "fee": fee,
-                "role": "base" if is_base else "safety",
-                "avg_entry_price_after": cycle.cost / cycle.qty,
-                "position_qty_after": cycle.qty,
-                "balance_after": state.equity,
-            }
-        )
+        fill = {
+            "layer": cycle.layers,
+            "bar": self._bar_index,
+            "time": self._bar_time,
+            "price": price,
+            "qty": qty,
+            "notional": notional,
+            "fee": fee,
+            "role": "base" if is_base else "safety",
+            "avg_entry_price_after": cycle.cost / cycle.qty,
+            "position_qty_after": cycle.qty,
+            "balance_after": state.equity,
+        }
+        if planned:
+            fill.update({
+                "planned_entry_price": planned["entry_price"],
+                "planned_entry_price_pct_from_base": planned[
+                    "entry_price_pct_from_base"
+                ],
+                "planned_take_profit_price": planned["take_profit_price"],
+                "planned_take_profit_pct_from_entry": planned[
+                    "take_profit_pct_from_entry"
+                ],
+                "planned_next_adverse_price": planned["next_adverse_price"],
+                "planned_next_adverse_pct_from_entry": planned[
+                    "next_adverse_pct_from_entry"
+                ],
+                "planned_grid_break_price": planned["grid_break_price"],
+                "planned_layer_gross_pnl_at_tp": planned[
+                    "layer_gross_pnl_at_tp"
+                ],
+                "planned_layer_entry_fee": planned["layer_entry_fee"],
+                "planned_layer_exit_fee_at_tp": planned[
+                    "layer_exit_fee_at_tp"
+                ],
+                "planned_layer_net_pnl_at_tp": planned["layer_net_pnl_at_tp"],
+                "planned_cycle_gross_pnl_at_tp": planned[
+                    "cycle_gross_pnl_at_tp"
+                ],
+                "planned_cycle_exit_fee_at_tp": planned["cycle_exit_fee_at_tp"],
+                "planned_cycle_net_pnl_at_tp": planned["cycle_net_pnl_at_tp"],
+            })
+        fill.update({
+            "execution_take_profit_price": execution_take_profit_price,
+            "execution_next_adverse_price": execution_next_adverse_price,
+            "execution_grid_break_price": (
+                execution_next_adverse_price
+                if self.params.stop_at_full_layers
+                and cycle.layers >= self.params.layer_count
+                else None
+            ),
+            "execution_layer_gross_pnl_at_tp": execution_layer_gross_pnl_at_tp,
+            "execution_layer_exit_fee_at_tp": execution_layer_exit_fee_at_tp,
+            "execution_layer_net_pnl_at_tp": execution_layer_net_pnl_at_tp,
+            "execution_cycle_gross_pnl_at_tp": execution_gross_pnl_at_tp,
+            "execution_cycle_exit_fee_at_tp": execution_exit_fee_at_tp,
+            "execution_cycle_net_pnl_at_tp": execution_net_pnl_at_tp,
+        })
+        cycle.fills.append(fill)
         self._observe(state, price)
 
     def _mark_grid_infeasible(self, state: AccountState, price: float, layers: int):
+        self._mark_layer_boundary(state, kind="grid_infeasible", price=price)
         state.grid_infeasible = True
         state.unfilled_layers += max(1, layers)
         state.failure_equity = self.equity_at(state, price)
@@ -778,22 +999,29 @@ class MartingaleSimulator:
     def _open_base(self, state: AccountState, price: float) -> bool:
         planned = self._plan_cycle(state, price)
         if not planned:
-            self._mark_grid_infeasible(state, price, self.params.max_layers)
+            self._mark_grid_infeasible(state, price, self.params.layer_count)
             return False
-        state.cycle.planned_notionals = planned
-        self._fill(state, price, planned[0], is_base=True)
+        state.cycle.planned_layers = planned
+        state.cycle.planned_notionals = [row["notional"] for row in planned]
+        self._fill(state, price, planned[0]["notional"], is_base=True, planned=planned[0])
         return True
 
     def _add_layer(self, state: AccountState, price: float) -> bool:
         cycle = state.cycle
-        if cycle.layers >= len(cycle.planned_notionals):
-            self._mark_grid_infeasible(state, price, 1)
-            return False
-        notional = cycle.planned_notionals[cycle.layers]
-        if not self._affordable(state, notional, price):
-            self._mark_grid_infeasible(state, price, 1)
-            return False
-        self._fill(state, price, notional, is_base=False)
+        if cycle.layers >= len(cycle.planned_layers):
+            raise RuntimeError(
+                "planned grid exhausted before full-grid break; "
+                "this indicates inconsistent ladder state"
+            )
+        planned = cycle.planned_layers[cycle.layers]
+        notional = planned["notional"]
+        self._mark_layer_boundary(
+            state,
+            kind="adverse",
+            price=price,
+            next_layer=cycle.layers + 1,
+        )
+        self._fill(state, price, notional, is_base=False, planned=planned)
         return True
 
     # ---------- exits ----------
@@ -811,6 +1039,38 @@ class MartingaleSimulator:
             shortfall = -state.equity
             state.equity = 0.0
         net_pnl = gross_pnl - exit_fee - cycle.entry_fees
+        for fill in cycle.fills:
+            layer_exit_notional = fill["qty"] * price
+            layer_gross_pnl = cycle.side * (
+                layer_exit_notional - fill["notional"]
+            )
+            layer_exit_fee = layer_exit_notional * fee_rate
+            fill.update({
+                "exit_bar": self._bar_index,
+                "exit_time": self._bar_time,
+                "exit_price": price,
+                "exit_reason": reason,
+                "exit_fee_rate": fee_rate,
+                # Holding time in completed bars. A layer filled and closed on
+                # the same candle has zero elapsed bars, which is the least
+                # surprising definition for duration statistics.
+                "layer_bars_held": self._bar_index - fill["bar"],
+                "layer_exit_notional": layer_exit_notional,
+                "layer_gross_pnl": layer_gross_pnl,
+                "layer_entry_fee": fill["fee"],
+                "layer_exit_fee": layer_exit_fee,
+                "layer_fees": fill["fee"] + layer_exit_fee,
+                "layer_net_pnl": layer_gross_pnl - fill["fee"] - layer_exit_fee,
+                "layer_pnl_pct": (
+                    (layer_gross_pnl - fill["fee"] - layer_exit_fee)
+                    / fill["notional"]
+                    if fill["notional"] else 0.0
+                ),
+                "exit_pct_from_layer_entry": cycle.side * (
+                    price / fill["price"] - 1.0
+                ),
+            })
+        self._mark_layer_boundary(state, kind=reason, price=price)
         # Adverse is down for a long and up for a short.
         if cycle.side == LONG:
             worst_price = cycle.min_price_seen if cycle.fills else price
@@ -848,7 +1108,7 @@ class MartingaleSimulator:
                 "exit_notional": exit_notional,
                 "max_fills_in_one_bar": cycle.max_fills_in_bar,
                 "multiple_fills_same_bar": cycle.max_fills_in_bar > 1,
-                "full_layers": cycle.layers >= self.params.max_layers,
+                "full_layers": cycle.layers >= self.params.layer_count,
                 # --- pnl ---
                 "gross_pnl": gross_pnl,
                 "entry_fees": cycle.entry_fees,
@@ -876,7 +1136,7 @@ class MartingaleSimulator:
             }
         )
         state.events += 1
-        if reason == "stop_loss" and self.params.reverse_after_stop_loss:
+        if reason == "grid_break" and self.params.reverse_after_grid_break:
             state.next_side = -cycle.side
             state.reversals += 1
         if net_pnl < 0.0:
@@ -911,6 +1171,48 @@ class MartingaleSimulator:
         tolerance = max(abs(price), abs(price_now), abs(to_price)) * 1e-12
         return low - tolerance <= price <= high + tolerance
 
+    @staticmethod
+    def _crossed_at_open(side: int, open_: float, trigger: Optional[float], *, adverse: bool) -> bool:
+        """Whether the bar opens already beyond a trigger."""
+        if trigger is None:
+            return False
+        tolerance = max(abs(open_), abs(trigger)) * 1e-12
+        distance = side * (open_ - trigger)
+        return distance <= tolerance if adverse else distance >= -tolerance
+
+    def _settle_open_position(self, state: AccountState, open_: float):
+        """Settle every trigger already crossed by the opening gap.
+
+        The open has no intrabar order ambiguity. It only tells us that a
+        resting order was crossed; fills still occur at their trigger/limit
+        prices under the strict limit-order model.
+        """
+        while not state.failed and state.cycle.qty > 0.0:
+            side = state.cycle.side
+            liquidation = self.liquidation_price(state)
+            if self._crossed_at_open(side, open_, liquidation, adverse=True):
+                self._liquidate(state, liquidation)
+                return
+
+            grid_break = self.grid_break_price(state)
+            if self._crossed_at_open(side, open_, grid_break, adverse=True):
+                self._close(state, grid_break, "grid_break", self.account.taker_rate)
+                return
+
+            layer = self.next_layer_price(state)
+            if self._crossed_at_open(side, open_, layer, adverse=True):
+                if not self._add_layer(state, layer):
+                    return
+                continue
+
+            take_profit = self.take_profit_price(state)
+            if self._crossed_at_open(side, open_, take_profit, adverse=False):
+                self._close(state, take_profit, "take_profit", self.account.maker_rate)
+                return
+
+            self._observe(state, open_)
+            return
+
     def _walk_adverse(self, state: AccountState, from_price: float, to_price: float):
         """Move against the position: layers, stops and liquidation fire here.
 
@@ -921,8 +1223,7 @@ class MartingaleSimulator:
         while not state.failed and state.cycle.qty > 0.0:
             side = state.cycle.side
             liquidation = self.liquidation_price(state)
-            ruin = self.ruin_threshold_price(state)
-            stop_loss = self.stop_loss_price(state)
+            grid_break = self.grid_break_price(state)
             layer = self.next_layer_price(state)
 
             # ``-side * price`` sorts by "reached first": the highest price for
@@ -931,8 +1232,7 @@ class MartingaleSimulator:
             candidates = []
             for price, rank, kind in (
                 (liquidation, 0, "liquidation"),
-                (ruin, 1, "ruin_threshold"),
-                (stop_loss, 2, "stop_loss"),
+                (grid_break, 1, "grid_break"),
                 (layer, 3, "layer"),
             ):
                 if price is not None and self._reached(price, price_now, to_price):
@@ -949,13 +1249,8 @@ class MartingaleSimulator:
             if kind == "liquidation":
                 self._liquidate(state, price)
                 return
-            if kind == "ruin_threshold":
-                state.ruin_threshold_hit = True
-                state.failure_equity = self.equity_at(state, price)
-                state.failure_price = price
-                return
-            if kind == "stop_loss":
-                self._close(state, price, "stop_loss", self.account.taker_rate)
+            if kind == "grid_break":
+                self._close(state, price, "grid_break", self.account.taker_rate)
                 return
             if not self._add_layer(state, price):
                 return
@@ -977,10 +1272,7 @@ class MartingaleSimulator:
         if take_profit is None or side * (to_price - take_profit) < -tolerance:
             self._observe(state, to_price)
             return
-        fill_price = (
-            max(take_profit, from_price) if side == LONG
-            else min(take_profit, from_price)
-        )
+        fill_price = take_profit
         self._observe(state, fill_price)
         self._close(state, fill_price, "take_profit", self.account.maker_rate)
 
@@ -998,6 +1290,22 @@ class MartingaleSimulator:
             else:
                 self._walk_favourable(state, price_now, price)
             price_now = price
+        return state
+
+    def _close_if_cycle_timeout(self, state: AccountState, close: float) -> AccountState:
+        """Force-close a still-open cycle at bar close once its age limit is hit."""
+        limit = self.params.max_cycle_bars
+        if (
+            limit is None
+            or state.failed
+            or state.cycle.qty <= 0.0
+            or state.cycle.start_bar < 0
+        ):
+            return state
+        bars_held = self._bar_index - state.cycle.start_bar + 1
+        if bars_held >= limit:
+            self._observe(state, close)
+            self._close(state, close, "time_limit", self.account.taker_rate)
         return state
 
     # ---------- path choice ----------
@@ -1039,38 +1347,7 @@ class MartingaleSimulator:
 
         # What the open alone settles is identical on both candidate paths.
         if state.cycle.qty > 0.0:
-            # ``side * (open - trigger) <= 0`` means the open is already at or
-            # past the trigger on the adverse side, for either direction.
-            side = state.cycle.side
-            liquidation = self.liquidation_price(state)
-            liquidation_tolerance = (
-                0.0 if liquidation is None
-                else max(abs(open_), abs(liquidation)) * 1e-12
-            )
-            if liquidation is not None and side * (open_ - liquidation) <= liquidation_tolerance:
-                self._observe(state, open_)
-                self._liquidate(state, open_)
-                return state
-            self._observe(state, open_)
-            if state.ruin_threshold_hit:
-                return state
-            stop_loss = self.stop_loss_price(state)
-            # A gap through the stop fills at the open, not at the stop price:
-            # the full-layer stop is precisely the one a fast move jumps over.
-            stop_tolerance = (
-                0.0 if stop_loss is None
-                else max(abs(open_), abs(stop_loss)) * 1e-12
-            )
-            if stop_loss is not None and side * (open_ - stop_loss) <= stop_tolerance:
-                self._close(state, open_, "stop_loss", self.account.taker_rate)
-            else:
-                take_profit = self.take_profit_price(state)
-                take_profit_tolerance = (
-                    0.0 if take_profit is None
-                    else max(abs(open_), abs(take_profit)) * 1e-12
-                )
-                if take_profit is not None and side * (open_ - take_profit) >= -take_profit_tolerance:
-                    self._close(state, open_, "take_profit", self.account.maker_rate)
+            self._settle_open_position(state, open_)
         elif index > state.cooldown_until_bar:
             self._open_base(state, open_)
             self._observe(state, open_)
@@ -1089,7 +1366,10 @@ class MartingaleSimulator:
         # Keep path counters only when at least one path had a trading/risk event.
         if down_first.events == baseline_events and up_first.events == baseline_events \
                 and not down_first.failed and not up_first.failed:
-            return down_first
+            return self._close_if_cycle_timeout(down_first, close)
+
+        down_first = self._close_if_cycle_timeout(down_first, close)
+        up_first = self._close_if_cycle_timeout(up_first, close)
 
         dual_count = state.dual_path_bars + 1
         if self._path_key(up_first, close) < self._path_key(down_first, close):
