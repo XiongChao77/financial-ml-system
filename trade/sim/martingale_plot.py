@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Optional, Sequence
 
 import matplotlib
@@ -38,6 +39,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.lines import Line2D
 
 
@@ -54,8 +56,10 @@ LOSS_STYLE = {"color": "#4a3aa7", "marker": ".", "label": "Losing trade"}
 FAILURE_STYLE = {
     "ruin_threshold": {"color": "#ec835a", "marker": "v", "label": "Ruin threshold"},
     "liquidation": {"color": "#d03b3b", "marker": "X", "label": "Liquidation"},
+    "grid_infeasible": {"color": "#9b4f96", "marker": "P", "label": "Grid infeasible"},
 }
 SURVIVED = {"color": "#2a78d6", "marker": "o", "label": "Survived"}
+RESET_RUN = {"color": "#d47a16", "marker": "D", "label": "Failed, reset & continued"}
 
 # Above this many losing trades the price panel becomes an ink blot and the
 # render crawls, so it draws an evenly spaced subsample - and says so.
@@ -99,18 +103,29 @@ def _style_axis(axis, ylabel: str):
 
 
 def _failure_points(runs: Sequence[dict], bars) -> dict:
-    """Group the runs that died by cause into (time, price) arrays."""
+    """Group every account-level failure by cause into time/price arrays."""
     grouped: dict[str, dict] = {}
     for run in runs:
-        if not run.get("ruined"):
-            continue
-        reason = run.get("exit_reason", "liquidation")
-        price = run.get("failure_price")
-        if price is None or not np.isfinite(price):
-            price = float(bars.close[run["end_index"]])
-        bucket = grouped.setdefault(reason, {"time": [], "price": []})
-        bucket["time"].append(run["end_time"])
-        bucket["price"].append(float(price))
+        events = [
+            event for event in run.get("grid_failures", [])
+            if event.get("reason") != "grid_break"
+        ]
+        if not events and run.get("ruined"):
+            # Compatibility with reports created before reset/event tracking.
+            reason = run.get("exit_reason", "liquidation")
+            price = run.get("failure_price")
+            if price is None or not np.isfinite(price):
+                price = float(bars.close[run["end_index"]])
+            events = [{
+                "reason": reason,
+                "time": run["end_time"],
+                "price": price,
+            }]
+        for event in events:
+            reason = event["reason"]
+            bucket = grouped.setdefault(reason, {"time": [], "price": []})
+            bucket["time"].append(event["time"])
+            bucket["price"].append(float(event["price"]))
     return grouped
 
 
@@ -143,6 +158,42 @@ def _bucket_counts(times, edges) -> np.ndarray:
     return counts
 
 
+def _safe_time_name(value) -> str:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+    name = timestamp.strftime("%Y%m%d_%H%M%S")
+    return re.sub(r"[^0-9A-Za-z_.-]+", "_", name)
+
+
+def _trade_identity(trade: dict, position: int) -> str:
+    run_id = trade.get("run_id", trade.get("monte_carlo_run_id", "run"))
+    account = trade.get("account_sequence", "acct")
+    trade_id = trade.get("index", position + 1)
+    return f"run{run_id}_acct{account}_trade{trade_id}"
+
+
+def _event_path(directory: str, trade: dict, position: int) -> str:
+    base = f"{_safe_time_name(trade['closed_at'])}_{_trade_identity(trade, position)}"
+    return os.path.join(directory, f"{base}.png")
+
+
+def _format_duration(start, end) -> str:
+    seconds = (pd.Timestamp(end) - pd.Timestamp(start)).total_seconds()
+    if not np.isfinite(seconds) or seconds < 0.0:
+        return "n/a"
+    if seconds < 60.0:
+        return f"{seconds:.0f}s"
+    minutes = seconds / 60.0
+    if minutes < 60.0:
+        return f"{minutes:.1f}m"
+    hours = minutes / 60.0
+    if hours < 48.0:
+        return f"{hours:.2f}h"
+    days = hours / 24.0
+    return f"{days:.2f}d"
+
+
 def plot_failures(
     logger: logging.Logger,
     bars,
@@ -155,7 +206,7 @@ def plot_failures(
     buckets: int = 60,
 ) -> Optional[str]:
     """Draw the market with every losing trade and account failure marked."""
-    runs = result.get("runs", [])
+    runs = result.get("monte_carlo_runs", result.get("runs", []))
     if not runs:
         logger.warning(f"No Monte Carlo runs to plot, skipping {path}")
         return None
@@ -180,13 +231,12 @@ def plot_failures(
     figure.patch.set_facecolor(SURFACE)
 
     # ---------- 1. the market, with both kinds of loss on it ----------
-    _style_axis(price_axis, "Price (log)")
+    _style_axis(price_axis, "Market price")
     price_axis.fill_between(
         plot_time, plot_low, plot_high,
         color=PRICE_BAND, linewidth=0, alpha=0.9, zorder=1,
     )
     price_axis.plot(plot_time, plot_close, color=PRICE_LINE, linewidth=0.9, zorder=2)
-    price_axis.set_yscale("log")
 
     handles = []
     if losses["count"]:
@@ -213,7 +263,7 @@ def plot_failures(
         )
 
     # Failures go on top: two orders of magnitude rarer, and terminal.
-    for reason in ("ruin_threshold", "liquidation"):
+    for reason in ("ruin_threshold", "liquidation", "grid_infeasible"):
         group = failures.get(reason)
         if not group:
             continue
@@ -240,7 +290,8 @@ def plot_failures(
     aggregate = result.get("aggregate", {})
     price_axis.text(
         0.995, 0.02,
-        f"{aggregate.get('runs', len(runs))} runs · "
+        f"{aggregate.get('monte_carlo_runs', len(runs))} MC paths · "
+        f"{aggregate.get('runs', len(runs))} strategy runs · "
         f"{failed_total} failed ({aggregate.get('ruin_rate', 0.0) * 100:.1f}%) · "
         f"{aggregate.get('total_trades', 0)} trades",
         transform=price_axis.transAxes, ha="right", va="bottom",
@@ -252,8 +303,8 @@ def plot_failures(
     ordered = sorted(runs, key=lambda run: pd.Timestamp(run["start_time"]))
     observed = {}
     for row, run in enumerate(ordered):
-        reason = run["exit_reason"] if run.get("ruined") else None
-        style = FAILURE_STYLE.get(reason, SURVIVED) if reason else SURVIVED
+        had_failure = bool(run.get("grid_failure_count", int(run.get("ruined", False))))
+        style = RESET_RUN if had_failure else SURVIVED
         observed[style["label"]] = style
         start, end = pd.Timestamp(run["start_time"]), pd.Timestamp(run["end_time"])
         span_axis.plot(
@@ -291,7 +342,7 @@ def plot_failures(
 
     _style_axis(fail_axis, "Account failures")
     bottom = np.zeros(len(edges) - 1)
-    for reason in ("ruin_threshold", "liquidation"):
+    for reason in ("ruin_threshold", "liquidation", "grid_infeasible"):
         group = failures.get(reason)
         if not group:
             continue
@@ -318,11 +369,544 @@ def plot_failures(
     return path
 
 
+
+def _equity_plot_points(curve: dict, bars, max_points: int):
+    """Bound plotting cost while preserving every reset discontinuity."""
+    indices = np.asarray(curve["indices"], dtype=int)
+    values = np.asarray(curve.get("balances", curve["values"]), dtype=float)
+    if len(indices) != len(values):
+        raise ValueError("equity curve indices and values must have equal length")
+    if len(indices) <= max_points:
+        keep = np.arange(len(indices))
+    else:
+        keep = set(np.linspace(0, len(indices) - 1, max_points).astype(int))
+        # A reset is represented by two adjacent values at one bar. Keep both
+        # ends even when the surrounding long path is decimated.
+        repeated = np.flatnonzero(indices[1:] == indices[:-1]) + 1
+        for position in repeated:
+            keep.update((position - 1, position))
+        keep = np.asarray(sorted(keep), dtype=int)
+    return pd.to_datetime(bars.time[indices[keep]]), values[keep]
+
+
+def _numbered_path(path: str, part: int, total_parts: int) -> str:
+    if total_parts == 1:
+        return path
+    root, extension = os.path.splitext(path)
+    return f"{root}_{part:03d}{extension or '.png'}"
+
+
+def plot_equity_paths(
+    logger: logging.Logger,
+    bars,
+    result: dict,
+    path: str,
+    *,
+    curves_per_plot: int,
+    title: Optional[str] = None,
+    max_points: int = 3_000,
+) -> list[str]:
+    """Plot every Monte Carlo equity path against the same market timeline.
+
+    Paths are split into deterministic run-id groups so no simulation is
+    omitted. Each Grid Failure is visible both as an X on the market and as a
+    vertical jump from failed equity back to initial equity.
+    """
+    if curves_per_plot < 1:
+        raise ValueError("curves_per_plot must be >= 1")
+    curves = sorted(result.get("equity_curves", []), key=lambda row: row["run_id"])
+    path_summaries = result.get("monte_carlo_runs", result.get("runs", []))
+    summaries = {run["run_id"]: run for run in path_summaries}
+    if not curves:
+        logger.warning(f"No equity curves to plot, skipping {path}")
+        return []
+
+    groups = [
+        curves[offset:offset + curves_per_plot]
+        for offset in range(0, len(curves), curves_per_plot)
+    ]
+    written = []
+    color_map = plt.get_cmap("turbo")
+
+    for part, group in enumerate(groups, start=1):
+        output_path = _numbered_path(path, part, len(groups))
+        colors = color_map(np.linspace(0.04, 0.96, len(group)))
+        first_index = min(int(np.min(curve["indices"])) for curve in group)
+        last_index = max(int(np.max(curve["indices"])) for curve in group)
+        market_time, market_low, market_high, market_close = _decimate(
+            bars.time[first_index:last_index + 1],
+            bars.low[first_index:last_index + 1],
+            bars.high[first_index:last_index + 1],
+            bars.close[first_index:last_index + 1],
+            max_points,
+        )
+        market_time = pd.to_datetime(market_time)
+
+        figure, price_axis = plt.subplots(
+            figsize=(16, 8.5),
+            constrained_layout=True,
+        )
+        figure.patch.set_facecolor(SURFACE)
+        _style_axis(price_axis, "Market price")
+        equity_axis = price_axis.twinx()
+        _style_axis(equity_axis, "Trading equity / initial")
+        equity_axis.yaxis.set_label_position("right")
+        equity_axis.yaxis.tick_right()
+        equity_axis.spines["left"].set_visible(False)
+        equity_axis.spines["right"].set_visible(True)
+        equity_axis.spines["right"].set_color(GRID)
+        equity_axis.patch.set_visible(False)
+        price_axis.set_zorder(1)
+        equity_axis.set_zorder(2)
+        price_axis.fill_between(
+            market_time, market_low, market_high,
+            color=PRICE_BAND, linewidth=0, alpha=0.75, zorder=1,
+        )
+        price_axis.plot(
+            market_time, market_close,
+            color=PRICE_LINE, linewidth=0.85, zorder=2,
+        )
+
+        initial_equity = summaries[group[0]["run_id"]]["initial_equity"]
+        max_multiple = 1.0
+        min_multiple = 1.0
+
+        for curve, color in zip(group, colors):
+            run_id = curve["run_id"]
+            summary = summaries[run_id]
+            curve_time, equity = _equity_plot_points(curve, bars, max_points)
+            run_initial_equity = float(summary["initial_equity"])
+            if run_initial_equity <= 0.0:
+                raise ValueError("initial_equity must be positive for equity plot")
+            equity_multiple = equity / run_initial_equity
+            failures = summary.get("grid_failures", [])
+            if len(equity_multiple):
+                max_multiple = max(max_multiple, float(np.nanmax(equity_multiple)))
+                min_multiple = min(min_multiple, float(np.nanmin(equity_multiple)))
+            label = f"Run {run_id} ({len(failures)} failures)"
+            equity_axis.plot(
+                curve_time, equity_multiple,
+                color=color, linewidth=1.05, alpha=0.88, label=label,
+            )
+            if failures:
+                failure_time = pd.to_datetime([item["time"] for item in failures])
+                failure_equity = [
+                    item["equity_before_reset"] / run_initial_equity
+                    for item in failures
+                ]
+                reset_equity = [
+                    item["reset_equity"] / run_initial_equity
+                    for item in failures
+                ]
+                max_multiple = max(
+                    max_multiple, max(failure_equity), max(reset_equity)
+                )
+                min_multiple = min(
+                    min_multiple, min(failure_equity), min(reset_equity)
+                )
+                equity_axis.scatter(
+                    failure_time, failure_equity,
+                    color=[color], marker="X", s=42,
+                    edgecolors=SURFACE, linewidths=0.6, zorder=4,
+                )
+                equity_axis.scatter(
+                    failure_time, reset_equity,
+                    color=[color], marker="D", s=30,
+                    edgecolors=SURFACE, linewidths=0.6, zorder=4,
+                )
+                price_axis.scatter(
+                    failure_time,
+                    [item["price"] for item in failures],
+                    color=[color], marker="X", s=38,
+                    edgecolors=SURFACE, linewidths=0.6, zorder=4,
+                )
+                for item, when in zip(failures, failure_time):
+                    label_text = f"GF{item['sequence']} {item['reason']}"
+                    equity_axis.annotate(
+                        label_text,
+                        xy=(when, item["equity_before_reset"] / run_initial_equity),
+                        xytext=(5, 8),
+                        textcoords="offset points",
+                        color=color,
+                        fontsize=7,
+                        ha="left",
+                        va="bottom",
+                        arrowprops={
+                            "arrowstyle": "-",
+                            "color": color,
+                            "linewidth": 0.45,
+                            "alpha": 0.8,
+                        },
+                    )
+
+        equity_axis.axhline(
+            1.0,
+            color=INK_MUTED, linestyle="--", linewidth=0.8, alpha=0.6,
+        )
+        top = max(1.05, max_multiple * 1.08)
+        bottom = max(0.0, min(0.95, min_multiple * 0.92))
+        equity_axis.set_ylim(bottom=bottom, top=top)
+        equity_axis.legend(
+            loc="upper left", frameon=False, fontsize=8,
+            ncol=min(3, len(group)), labelcolor=INK_MUTED,
+        )
+        equity_axis.xaxis.set_major_formatter(
+            mdates.ConciseDateFormatter(mdates.AutoDateLocator())
+        )
+        price_axis.set_title(
+            (title or "Monte Carlo equity paths over market price")
+            + (f" — {part}/{len(groups)}" if len(groups) > 1 else ""),
+            color=INK, fontsize=12, loc="left", pad=8,
+        )
+
+        directory = os.path.dirname(output_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        figure.savefig(output_path, dpi=140, facecolor=SURFACE)
+        plt.close(figure)
+        written.append(output_path)
+
+    logger.info(
+        f"Equity/market charts saved: {len(written)} files, "
+        f"{len(curves)} paths, up to {curves_per_plot} paths per file"
+    )
+    return written
+
+
+ADVERSE_BOUNDARY_KINDS = {"adverse", "grid_break"}
+
+
+def _minimum_visible_cmap(name: str, source: str, low: float = 0.42):
+    """Use the darker part of a sequential cmap so single hits remain visible."""
+    base = plt.get_cmap(source)
+    return LinearSegmentedColormap.from_list(
+        name,
+        base(np.linspace(low, 1.0, 256)),
+    )
+
+
+def _adverse_boundary_points(trades: Sequence[dict]) -> pd.DataFrame:
+    """One row per layer whose own adverse boundary was reached."""
+    rows = []
+    for trade in trades:
+        for fill in trade.get("fills", ()):
+            if fill.get("boundary_kind") not in ADVERSE_BOUNDARY_KINDS:
+                continue
+            boundary_bar = fill.get("boundary_bar")
+            boundary_time = fill.get("boundary_time")
+            if boundary_bar is None or boundary_time is None:
+                continue
+            rows.append({
+                "run_id": trade.get("run_id"),
+                "trade_index": trade.get("index"),
+                "layer": int(fill["layer"]),
+                "boundary_bar": int(boundary_bar),
+                "boundary_time": pd.Timestamp(boundary_time),
+                "boundary_price": float(fill.get(
+                    "boundary_price",
+                    fill.get("execution_next_adverse_price", np.nan),
+                )),
+                "boundary_kind": fill.get("boundary_kind"),
+                "bars_held": float(fill.get("boundary_bars_held", np.nan)),
+            })
+    return pd.DataFrame(rows)
+
+
+def plot_adverse_boundaries(
+    logger: logging.Logger,
+    bars,
+    result: dict,
+    path: str,
+    *,
+    title: Optional[str] = None,
+    max_points: int = 3_000,
+    density_bins: int = 240,
+) -> Optional[str]:
+    """Market chart plus one horizontal timeline per layer's adverse hits.
+
+    Each dot is the first time that layer's own adverse boundary was reached.
+    Dot colour is the count of hits for the same layer inside the same time
+    bucket, so denser clusters appear darker.
+    """
+    points = _adverse_boundary_points(result.get("trades", ()))
+    if points.empty:
+        logger.warning(f"No adverse boundary hits to plot, skipping {path}")
+        return None
+
+    first_index = max(0, int(points["boundary_bar"].min()))
+    last_index = min(len(bars) - 1, int(points["boundary_bar"].max()))
+    market_time, market_low, market_high, market_close = _decimate(
+        bars.time[first_index:last_index + 1],
+        bars.low[first_index:last_index + 1],
+        bars.high[first_index:last_index + 1],
+        bars.close[first_index:last_index + 1],
+        max_points,
+    )
+    market_time = pd.to_datetime(market_time)
+
+    layers = np.array(sorted(points["layer"].unique()), dtype=int)
+    layer_to_y = {layer: offset for offset, layer in enumerate(layers, start=1)}
+    y_values = points["layer"].map(layer_to_y).to_numpy(dtype=float)
+
+    bin_count = max(1, min(density_bins, max(1, last_index - first_index + 1)))
+    bin_edges = np.linspace(first_index, last_index + 1, bin_count + 1)
+    time_bins = np.clip(
+        np.digitize(points["boundary_bar"].to_numpy(dtype=float), bin_edges) - 1,
+        0,
+        bin_count - 1,
+    )
+    density_keys = list(zip(points["layer"].to_numpy(dtype=int), time_bins))
+    density = {}
+    for key in density_keys:
+        density[key] = density.get(key, 0) + 1
+    density_values = np.asarray([density[key] for key in density_keys], dtype=float)
+    density_cmap = _minimum_visible_cmap("adverse_density", "Blues", low=0.46)
+    density_norm = Normalize(
+        vmin=0.0,
+        vmax=max(1.0, float(density_values.max())),
+    )
+
+    figure, (price_axis, layer_axis) = plt.subplots(
+        2, 1,
+        figsize=(16, 8.5),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.2, max(1.3, min(4.0, len(layers) * 0.28))]},
+        constrained_layout=True,
+    )
+    figure.patch.set_facecolor(SURFACE)
+    _style_axis(price_axis, "Market price")
+    _style_axis(layer_axis, "Adverse boundary layer")
+
+    price_axis.fill_between(
+        market_time, market_low, market_high,
+        color=PRICE_BAND, linewidth=0, alpha=0.75, zorder=1,
+    )
+    price_axis.plot(
+        market_time, market_close,
+        color=PRICE_LINE, linewidth=0.85, zorder=2,
+    )
+    for layer, y in layer_to_y.items():
+        layer_axis.hlines(
+            y,
+            market_time[0],
+            market_time[-1],
+            color=GRID,
+            linewidth=0.9,
+            zorder=1,
+        )
+
+    scatter = layer_axis.scatter(
+        points["boundary_time"],
+        y_values,
+        c=density_values,
+        cmap=density_cmap,
+        norm=density_norm,
+        s=13,
+        alpha=0.96,
+        linewidths=0.28,
+        edgecolors="#08306b",
+        zorder=2,
+    )
+    layer_axis.set_yticks([layer_to_y[layer] for layer in layers])
+    layer_axis.set_yticklabels([f"L{layer}" for layer in layers])
+    layer_axis.set_ylim(0.4, len(layers) + 0.6)
+    layer_axis.xaxis.set_major_formatter(
+        mdates.ConciseDateFormatter(mdates.AutoDateLocator())
+    )
+    colorbar = figure.colorbar(scatter, ax=layer_axis, pad=0.01, fraction=0.035)
+    colorbar.set_label("Hits in same layer/time bucket", color=INK_MUTED, fontsize=8)
+    colorbar.ax.tick_params(colors=INK_MUTED, labelsize=8)
+
+    kind_counts = points["boundary_kind"].value_counts().to_dict()
+    price_axis.set_title(
+        (title or "Adverse boundary hits by layer")
+        + f" | hits {len(points)} | kinds {kind_counts}",
+        color=INK,
+        fontsize=12,
+        loc="left",
+        pad=8,
+    )
+
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    figure.savefig(path, dpi=140, facecolor=SURFACE)
+    plt.close(figure)
+    logger.info(
+        f"Adverse boundary chart saved to {path} "
+        f"({len(points)} hits across {len(layers)} layers)"
+    )
+    return path
+
+
+def plot_grid_break_events(
+    logger: logging.Logger,
+    bars,
+    result: dict,
+    directory: str,
+    *,
+    context_bars: int = 200,
+    title_prefix: Optional[str] = None,
+) -> Optional[str]:
+    """Write one market-window chart for every realized full-grid break."""
+    trades = [
+        trade for trade in result.get("trades", [])
+        if trade.get("reason") == "grid_break"
+    ]
+    if not trades:
+        logger.warning(f"No grid breaks to plot, skipping {directory}")
+        return None
+    os.makedirs(directory, exist_ok=True)
+
+    times = pd.to_datetime(bars.time)
+    written = 0
+    for position, trade in enumerate(trades):
+        entry_bar = int(trade.get("entry_bar", trade.get("exit_bar", 0)))
+        exit_bar = int(trade.get("exit_bar", entry_bar))
+        if exit_bar < 0 or entry_bar >= len(bars.close):
+            continue
+        entry_bar = max(entry_bar, 0)
+        exit_bar = min(exit_bar, len(bars.close) - 1)
+        start = max(0, entry_bar - context_bars)
+        stop = min(len(bars.close), exit_bar + context_bars + 1)
+        if stop <= start:
+            continue
+
+        window_time = times[start:stop]
+        output_path = _event_path(directory, trade, position)
+        figure, axis = plt.subplots(figsize=(14, 6.8), constrained_layout=True)
+        figure.patch.set_facecolor(SURFACE)
+        _style_axis(axis, "Market price")
+        axis.fill_between(
+            window_time,
+            bars.low[start:stop],
+            bars.high[start:stop],
+            color=PRICE_BAND,
+            linewidth=0,
+            alpha=0.85,
+            zorder=1,
+            label="high-low",
+        )
+        axis.plot(
+            window_time,
+            bars.close[start:stop],
+            color=PRICE_LINE,
+            linewidth=1.1,
+            zorder=2,
+            label="close",
+        )
+
+        entry_time = times[entry_bar]
+        exit_time = times[exit_bar]
+        duration = _format_duration(
+            trade.get("opened_at", entry_time),
+            trade.get("closed_at", exit_time),
+        )
+        bars_held = trade.get("bars_held", exit_bar - entry_bar + 1)
+        axis.axvspan(entry_time, exit_time, color="#f3b35f", alpha=0.16, zorder=0)
+        axis.axvline(entry_time, color="#2a78d6", linewidth=1.2, alpha=0.85)
+        axis.axvline(exit_time, color="#d03b3b", linewidth=1.2, alpha=0.9)
+
+        fills = trade.get("fills") or []
+        fill_times = []
+        fill_prices = []
+        fill_layers = []
+        for fill in fills:
+            bar = int(fill.get("bar", entry_bar))
+            if start <= bar < stop:
+                price = float(fill.get("price", np.nan))
+                if not np.isfinite(price):
+                    continue
+                fill_times.append(times[bar])
+                fill_prices.append(price)
+                fill_layers.append(int(fill.get("layer", 0)))
+        if fill_times:
+            axis.scatter(
+                fill_times,
+                fill_prices,
+                s=26,
+                color="#2a78d6",
+                edgecolors=SURFACE,
+                linewidths=0.6,
+                zorder=4,
+                label="layer fills",
+            )
+            for fill_time, fill_price, layer in zip(fill_times, fill_prices, fill_layers):
+                axis.annotate(
+                    f"L{layer}",
+                    (fill_time, fill_price),
+                    xytext=(4, 5),
+                    textcoords="offset points",
+                    fontsize=7,
+                    color=INK_MUTED,
+                )
+
+        axis.scatter(
+            [entry_time],
+            [float(trade.get("first_entry_price", bars.close[entry_bar]))],
+            s=58,
+            marker="o",
+            color="#2a78d6",
+            edgecolors=SURFACE,
+            linewidths=0.9,
+            zorder=5,
+            label="base entry",
+        )
+        axis.scatter(
+            [exit_time],
+            [float(trade.get("exit_price", bars.close[exit_bar]))],
+            s=72,
+            marker="X",
+            color="#d03b3b",
+            edgecolors=SURFACE,
+            linewidths=0.9,
+            zorder=5,
+            label="grid break",
+        )
+
+        axis.set_title(
+            (
+                f"{title_prefix + ' | ' if title_prefix else ''}"
+                f"grid break {pd.Timestamp(trade['closed_at'])} "
+                f"| {trade.get('direction', '')} "
+                f"| held {bars_held} bars / {duration} "
+                f"| PnL {float(trade.get('net_pnl', 0.0)):.2f}"
+            ),
+            color=INK,
+            fontsize=12,
+            loc="left",
+            pad=8,
+        )
+        axis.text(
+            0.995,
+            0.02,
+            f"context {context_bars} bars · "
+            f"entry→break {duration} · "
+            f"{pd.Timestamp(entry_time)} → {pd.Timestamp(exit_time)}",
+            transform=axis.transAxes,
+            ha="right",
+            va="bottom",
+            color=INK_MUTED,
+            fontsize=8,
+        )
+        axis.legend(loc="upper left", frameon=False, fontsize=8, labelcolor=INK_MUTED)
+        locator = mdates.AutoDateLocator()
+        axis.xaxis.set_major_locator(locator)
+        axis.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+
+        figure.savefig(output_path, dpi=140, facecolor=SURFACE)
+        plt.close(figure)
+        written += 1
+
+    logger.info(f"Grid-break event charts saved: {written} files in {directory}")
+    return directory
+
+
 # ============================================================
-# Where and at what scale the stop losses pile up
+# Where and at what scale the grid breaks pile up
 # ============================================================
 # Diverging pair for the pressure map: blue (calmer than random) through a
-# neutral gray midpoint to red (more stop losses than random).  Both arms are
+# neutral gray midpoint to red (more grid breaks than random).  Both arms are
 # monotone in lightness and step-matched, so neither pole dominates the other.
 DIVERGING_LOW = ["#0d366b", "#184f95", "#256abf", "#3987e5", "#6da7ec", "#9ec5f4", "#cde2fb"]
 DIVERGING_MID = "#f0efec"
@@ -357,7 +941,7 @@ def scale_grid(min_bars: int, max_bars: int, count: int) -> np.ndarray:
 
 
 def _loss_and_exposure(runs: Sequence[dict], trades: Sequence[dict], total_bars: int):
-    """Per-bar count of stop losses, and how many runs were trading that bar.
+    """Per-bar count of grid breaks, and how many runs were trading that bar.
 
     Exposure matters: runs start at random bars and die, so a period that simply
     had more accounts alive would otherwise look like a period of more danger.
@@ -396,7 +980,7 @@ def pressure_field(
     scales: np.ndarray,
     columns: int = 900,
 ):
-    """Z(t, m): stop losses in a window of m bars, in sigmas above random.
+    """Z(t, m): grid breaks in a window of m bars, in sigmas above random.
 
     The null is a Poisson process whose rate is the pooled losses per
     active-run-bar, so Z compares each window against what that much trading
@@ -446,7 +1030,7 @@ def plot_pressure_heatmap(
     scales = scale_grid(min_scale, max_scale or max(min_scale * 2, total_bars // 8), scale_count)
     field = pressure_field(runs, trades, total_bars, scales, columns)
     if field is None:
-        logger.warning(f"No stop losses to map, skipping {path}")
+        logger.warning(f"No grid breaks to map, skipping {path}")
         return None
 
     times = pd.to_datetime(bars.time)
@@ -492,7 +1076,7 @@ def plot_pressure_heatmap(
     bar.outline.set_edgecolor(GRID)
     heat_axis.text(
         0.995, 0.03,
-        f"{int(sum(t['net_pnl'] < 0 for t in trades))} stop losses · "
+        f"{int(sum(t['net_pnl'] < 0 for t in trades))} grid breaks · "
         f"rate {field['rate'] * 1000:.2f} per 1000 run-bars · "
         f"|Z| clipped at {limit:.1f}",
         transform=heat_axis.transAxes, ha="right", va="bottom",
@@ -567,7 +1151,7 @@ def plot_cluster_scales(
     scales = scale_grid(min_scale, max_scale, scale_count)
     analysis = cluster_size_by_scale(trades, scales)
     if not analysis:
-        logger.warning(f"No stop losses to cluster, skipping {path}")
+        logger.warning(f"No grid breaks to cluster, skipping {path}")
         return None
 
     curves = pd.DataFrame(analysis["curves"])
@@ -589,7 +1173,7 @@ def plot_cluster_scales(
     )
     figure.patch.set_facecolor(SURFACE)
 
-    _style_axis(heat_axis, "Cluster size (stop losses)")
+    _style_axis(heat_axis, "Cluster size (grid breaks)")
     heat_axis.grid(False)
     mesh = heat_axis.pcolormesh(
         scales, edges[:-1], np.ma.masked_invalid(density),
@@ -597,7 +1181,7 @@ def plot_cluster_scales(
     )
     heat_axis.set_yscale("log")
     heat_axis.set_title(
-        title or "How stop losses merge into clusters as the gap allowance grows",
+        title or "How grid breaks merge into clusters as the gap allowance grows",
         color=INK, fontsize=12, loc="left", pad=8,
     )
     bar = figure.colorbar(mesh, ax=heat_axis, pad=0.01)

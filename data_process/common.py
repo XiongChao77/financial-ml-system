@@ -56,7 +56,7 @@ class MarketDataSourceConfig:
 @dataclass
 class BaseDefine(MarketDataSourceConfig):
     #label
-    label_type:str = 'FTHL' # TBM / FTHL / "TBM_TREND"
+    label_type:str = 'FTHL' # TBM / FTHL / "TBM_TREND" / ""BBM:"BINARY_BARRIER"
     # model / data
     vol_ewma_span: int  = 80
     predict_num: int = 32
@@ -72,6 +72,7 @@ stop_multiplier_rate = 0.4
 DOGE_1m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="DOGEUSDT", interval="1m", trading_type='um'
                       , label_type = 'FTHL',
                       predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=stop_multiplier_rate, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=stop_multiplier_rate)
+DOGE_5m = replace(DOGE_1m,interval="5m",)
 DOGE_15m = replace(DOGE_1m,interval="15m",)
 DOGE_30m = replace(DOGE_1m,interval="30m",)
 XLM_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="XLMUSDT", interval="30m", trading_type='um'
@@ -222,6 +223,8 @@ def attach_label(df, para = BaseDefine, label_col = 'label'):
         df = attach_triple_barrier_label(df, para=para,label_col = label_col)
     elif para.label_type == 'TBM_TREND':
         df = attach_triple_barrier_trend_label(df, para=para,label_col = label_col)
+    elif para.label_type == 'BBM':
+        df = attach_binary_barrier_label(df, para=para,label_col = label_col)
     return df
 
 def attach_fthl_label(df, para=BaseDefine, label_col='label'):
@@ -719,6 +722,236 @@ def attach_triple_barrier_trend_label(
     )
 
     return df
+
+@njit(cache=True)
+def fast_binary_barrier_kernel(close, high, low, time_sn, tp_long, tp_short, max_scan):
+    """
+    Binary Barrier kernel: a simplified triple barrier with take-profit only
+    (no stop loss, no time barrier).
+
+    For each anchor i, walk forward bar by bar until one of the two
+    take-profit barriers is touched:
+        upper = close[i] * (1 + tp_long[i])
+        lower = close[i] * (1 - tp_short[i])
+
+    - upper touched first  -> POSITIVE (2)
+    - lower touched first  -> NEGATIVE (0)
+    - both touched inside the same bar (order unknown) -> INVALID (-1)
+    - no touch until the data ends / a time gap / max_scan -> INVALID (-1)
+
+    max_scan <= 0 means "scan until the end of the data".
+
+    Returns:
+        labels:      per-anchor label
+        reach_times: number of bars from the anchor to the touching bar
+                     (-1 when INVALID)
+        scan_lens:   number of bars actually examined before stopping.
+                     For INVALID rows this is how far the scan got.
+        invalid_reasons: 0 = valid, 1 = both barriers hit in the same bar,
+                     2 = scan exhausted (data end / time gap / max_scan)
+    """
+    n = len(close)
+
+    labels = np.full(n, -1, dtype=np.int32)       # INVALID by default
+    reach_times = np.full(n, -1, dtype=np.int32)
+    scan_lens = np.zeros(n, dtype=np.int32)
+    invalid_reasons = np.full(n, 2, dtype=np.int32)   # exhausted by default
+
+    for i in range(n):
+        p0 = close[i]
+
+        upper = p0 * (1.0 + tp_long[i])
+        lower = p0 * (1.0 - tp_short[i])
+
+        limit = n - 1 - i
+        if max_scan > 0 and max_scan < limit:
+            limit = max_scan
+
+        base_sn = time_sn[i]
+
+        for j in range(1, limit + 1):
+            curr_idx = i + j
+
+            # Contiguity check: a time gap makes the forward path unusable
+            if time_sn[curr_idx] - base_sn != j:
+                break
+
+            scan_lens[i] = j
+
+            hit_up = high[curr_idx] >= upper
+            hit_dn = low[curr_idx] <= lower
+
+            if hit_up and hit_dn:
+                # Same bar touches both sides, order cannot be resolved
+                labels[i] = -1        # INVALID
+                reach_times[i] = -1
+                invalid_reasons[i] = 1
+                break
+            elif hit_up:
+                labels[i] = 2         # POSITIVE
+                reach_times[i] = j
+                invalid_reasons[i] = 0
+                break
+            elif hit_dn:
+                labels[i] = 0         # NEGATIVE
+                reach_times[i] = j
+                invalid_reasons[i] = 0
+                break
+
+    return labels, reach_times, scan_lens, invalid_reasons
+
+
+def attach_binary_barrier_label(
+    df,
+    para=BaseDefine,
+    label_col="label",
+    max_scan=0,
+    verbose=True,
+):
+    """
+    Attach Binary Barrier labels (BBM).
+
+    Simplified triple barrier: take-profit only, symmetric upper/lower
+    barriers, no stop loss and no vertical (time) barrier. Each bar is
+    scanned forward until one barrier is touched:
+
+        upper touched first -> POSITIVE
+        lower touched first -> NEGATIVE
+        both touched in the same bar (order unknown), or no touch before
+        the data ends / a time gap -> INVALID
+
+    Barrier distance comes from calculate_thresholds:
+        threshold_long  (upper) / threshold_short (lower)
+
+    max_scan: optional cap on how many bars forward to scan.
+              0 (default) means scan until the end of the data.
+    """
+
+    df = df.copy()
+
+    # 1. Calculate thresholds using the same logic as normal TBM
+    df = calculate_thresholds(df, para)
+
+    close = df["close"].values.astype(np.float64)
+    high = df["high"].values.astype(np.float64)
+    low = df["low"].values.astype(np.float64)
+
+    tp_long = df["threshold_long"].values.astype(np.float64)
+    tp_short = df["threshold_short"].values.astype(np.float64)
+
+    # 2. Bar sequence numbers, used to detect physical time gaps
+    if "open_time_sn" in df.columns:
+        time_sn = df["open_time_sn"].values.astype(np.int64)
+    else:
+        interval_ms = get_interval_ms(para.interval)
+        time_sn = (df["open_time_ms_utc"].values // interval_ms).astype(np.int64)
+
+    # 3. Run the kernel
+    labels, reach_times, scan_lens, invalid_reasons = fast_binary_barrier_kernel(
+        close, high, low, time_sn, tp_long, tp_short, int(max_scan)
+    )
+
+    # 4. Write the results back
+    df[label_col] = labels.astype(int)
+    df["reach_time"] = reach_times.astype(int)
+    # How many bars the forward scan actually consumed (meaningful for INVALID rows)
+    df["scan_len"] = scan_lens.astype(int)
+    # 0 = valid, 1 = both barriers hit in the same bar, 2 = scan exhausted
+    df["invalid_reason"] = invalid_reasons.astype(int)
+
+    if verbose:
+        print_binary_barrier_stats(df, label_col=label_col)
+
+    return df
+
+
+THRESHOLD_PERCENTILES = [1, 5, 25, 50, 75, 90, 95, 99]
+
+def log_threshold_percentiles(df, logger=None, cols=("threshold_long", "threshold_short")):
+    """
+    Log the percentile distribution of the dynamic thresholds.
+    Falls back to print() when no logger is given.
+    """
+    emit = logger.info if logger is not None else print
+
+    header = " | ".join(f"P{p}" .rjust(8) for p in THRESHOLD_PERCENTILES)
+    emit(f"{'Threshold':<18} | {header}")
+
+    for col in cols:
+        if col not in df.columns:
+            continue
+        vals = df[col].to_numpy(dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if len(vals) == 0:
+            continue
+        pcts = np.percentile(vals, THRESHOLD_PERCENTILES)
+        row = " | ".join(f"{v:8.4f}" for v in pcts)
+        emit(f"{col:<18} | {row}")
+
+def print_binary_barrier_stats(df, label_col="label"):
+    """
+    Print the Binary Barrier label distribution and reach-time percentiles
+    (P50 / P90 / P95 / P99 / max) for POSITIVE / NEGATIVE / INVALID.
+
+    For INVALID rows reach_time does not exist, so the scanned length
+    (scan_len) is reported instead - it says how far the forward scan got
+    before hitting an ambiguous bar or running out of data.
+    """
+    print("\n" + "=" * 20 + " 📊 Binary Barrier Statistics " + "=" * 20)
+
+    total = len(df)
+    if total == 0:
+        print("Empty dataframe.")
+        print("=" * 70 + "\n")
+        return
+
+    labels = df[label_col].values
+    groups = [
+        ("POSITIVE (Upper TP)", labels == int(Signal.POSITIVE), "reach_time"),
+        ("NEGATIVE (Lower TP)", labels == int(Signal.NEGATIVE), "reach_time"),
+        ("INVALID  (No/Ambig)", labels == int(Signal.INVALID), "scan_len"),
+    ]
+
+    print(f"Total Samples: {total}")
+    print("-" * 70)
+
+    # 1. Label distribution
+    print(f"{'Label Type':<22} | {'Count':>10} | {'Percentage':>10}")
+    for name, mask, _ in groups:
+        cnt = int(mask.sum())
+        print(f"{name:<22} | {cnt:>10} | {cnt / total * 100:>9.2f}%")
+
+    # Breakdown of why rows are INVALID
+    if "invalid_reason" in df.columns:
+        reason = df["invalid_reason"].values
+        inv_mask = labels == int(Signal.INVALID)
+        same_bar = int((inv_mask & (reason == 1)).sum())
+        exhausted = int((inv_mask & (reason == 2)).sum())
+        print(f"{'  - same-bar conflict':<22} | {same_bar:>10} | {same_bar / total * 100:>9.2f}%")
+        print(f"{'  - scan exhausted':<22} | {exhausted:>10} | {exhausted / total * 100:>9.2f}%")
+
+    print("-" * 70)
+
+    # 2. Reach time percentiles
+    print("⏱️ Reach Time Percentiles (Steps):")
+    print(f"{'Group':<22} | {'Count':>8} | {'Mean':>8} | {'P50':>7} | {'P90':>7} | {'P95':>7} | {'P99':>7} | {'Max':>7}")
+
+    for name, mask, col in groups:
+        if col not in df.columns:
+            continue
+        vals = df.loc[mask, col].values
+        vals = vals[vals >= 0]
+        if len(vals) == 0:
+            print(f"{name:<22} | {0:>8} | {'-':>8} | {'-':>7} | {'-':>7} | {'-':>7} | {'-':>7} | {'-':>7}")
+            continue
+        p50, p90, p95, p99 = np.percentile(vals, [50, 90, 95, 99])
+        suffix = "" if col == "reach_time" else "  (scan_len)"
+        print(
+            f"{name:<22} | {len(vals):>8} | {vals.mean():>8.2f} | "
+            f"{p50:>7.0f} | {p90:>7.0f} | {p95:>7.0f} | {p99:>7.0f} | {vals.max():>7}{suffix}"
+        )
+
+    print("=" * 70 + "\n")
 
 def print_label_performance_stats(df, para=BaseDefine):
     """

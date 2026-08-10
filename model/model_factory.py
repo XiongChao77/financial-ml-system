@@ -19,7 +19,6 @@ from model.models.generic.conv_lstm_v1 import ConvLSTM1D_V1
 from model.models.generic.transformer_v1 import Transformer1D_V1
 from model.models.generic.transformer_v2 import Transformer1D_V2
 from model.models.generic.logistic_regression import LogisticRegressionTS_V1
-from model.models.generic.logistic_regression_v2 import LogisticRegressionTS_V2
 
 # ---- dual_head: fixed trigger(2)+direction(2) heads, fused by an inference wrapper ----
 # Dedicated to the "Two-Head Three-Class" branch only; not usable as a plain
@@ -57,7 +56,6 @@ class ModelFactory:
         Transformer1D_V1,
         Transformer1D_V2,
         LogisticRegressionTS_V1,
-        LogisticRegressionTS_V2,
 
         # ---- dual_head (fixed 2+2 trigger/direction heads) ----
         TCN1D_V1,
