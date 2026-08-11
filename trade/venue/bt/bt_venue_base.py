@@ -12,6 +12,11 @@ from trade.core.protocol import (
     PositionDir, Signal, Observation, MarketView, PositionView, AccountView,
 )
 
+
+def valid_number(value) -> bool:
+    return value is not None and isinstance(value, (int, float, np.number)) and np.isfinite(value)
+
+
 class TradeRole:
     OPEN = "open"
     STOP_LOSS = "sl"
@@ -80,6 +85,8 @@ class BtVenue(VenueBase,bt.Strategy):
         pred = self.line_value("pred")
         pred_prob = self.line_value("pred_prob")
         atr_pct = self.line_value("atr_pct")
+        threshold_long = self.line_value("threshold_long")
+        threshold_short = self.line_value("threshold_short")
         bars_to_close = self.line_value("bars_to_close")
         position_dir = self.current_position_dir()
         if layers is None:
@@ -94,6 +101,16 @@ class BtVenue(VenueBase,bt.Strategy):
             signal=Signal.INVALID if pred is None or np.isnan(pred) else Signal(int(pred)),
             pred_prob=0.0 if pred_prob is None or np.isnan(pred_prob) else float(pred_prob),
             atr_pct=0.0 if atr_pct is None or np.isnan(atr_pct) else float(atr_pct),
+            threshold_long=(
+                None
+                if threshold_long is None or np.isnan(threshold_long)
+                else float(threshold_long)
+            ),
+            threshold_short=(
+                None
+                if threshold_short is None or np.isnan(threshold_short)
+                else float(threshold_short)
+            ),
             slow_atr=self.line_value("slow_atr"),
             vol_regime=self.line_value("vol_regime"),
             bars_to_close=(
@@ -155,7 +172,9 @@ class BtVenue(VenueBase,bt.Strategy):
         dt = self.data.datetime.datetime()
         dt_utc = dt.replace(tzinfo=timezone.utc)
         record = {
+            "order_ref": order.ref,
             "dt": int(dt_utc.timestamp()),
+            "date_utc": str(dt_utc.date()),
             "price": order.executed.price,
             "size": order.executed.size,
             "is_buy": order.isbuy(),
@@ -166,9 +185,84 @@ class BtVenue(VenueBase,bt.Strategy):
             "sl_price": order.info.get("sl_price", None),
             "tp_price": order.info.get("tp_price", None),
         }
+        record.update(self.order_execution_diagnostics(order))
         record.update(extra)
         self.trade_logs.append(record)
         return record
+
+    def order_execution_diagnostics(self, order) -> dict:
+        """Diagnose gap-through stops and same-bar TP/SL ambiguity for bracket exits."""
+        role = order.info.get("role", None)
+        is_long = order.info.get("is_long", None)
+        entry_ref_price = order.info.get("entry_ref_price", None)
+        sl_price = order.info.get("sl_price", None)
+        tp_price = order.info.get("tp_price", None)
+        exec_price = order.executed.price
+
+        bar_open = float(self.data.open[0])
+        bar_high = float(self.data.high[0])
+        bar_low = float(self.data.low[0])
+        bar_close = float(self.data.close[0])
+        prev_close = None
+        if len(self) > 1:
+            try:
+                prev_close = float(self.data.close[-1])
+            except IndexError:
+                prev_close = None
+
+        diagnostics = {
+            "bar_index": len(self),
+            "bar_open": bar_open,
+            "bar_high": bar_high,
+            "bar_low": bar_low,
+            "bar_close": bar_close,
+            "prev_close": prev_close,
+            "entry_ref_price": entry_ref_price,
+            "is_long": is_long,
+            "parent_ref": order.info.get("parent_ref", None),
+            "same_bar_tp_sl_hit": False,
+            "same_bar_outcome": None,
+            "gap_through_stop_pct": None,
+            "actual_stop_loss_pct": None,
+            "planned_stop_loss_pct": order.info.get("sl_pct", None),
+        }
+        if prev_close and prev_close > 0:
+            diagnostics["open_gap_pct"] = (bar_open - prev_close) / prev_close
+        else:
+            diagnostics["open_gap_pct"] = None
+
+        if is_long is None or not valid_number(entry_ref_price) or entry_ref_price <= 0:
+            return diagnostics
+
+        hit_sl = False
+        hit_tp = False
+        if valid_number(sl_price) and valid_number(tp_price):
+            if is_long:
+                hit_sl = bar_low <= sl_price
+                hit_tp = bar_high >= tp_price
+            else:
+                hit_sl = bar_high >= sl_price
+                hit_tp = bar_low <= tp_price
+
+        if role in (TradeRole.STOP_LOSS, TradeRole.TAKE_PROFIT):
+            diagnostics["same_bar_tp_sl_hit"] = bool(hit_sl and hit_tp)
+            if hit_sl and hit_tp:
+                diagnostics["same_bar_outcome"] = role
+
+        if role == TradeRole.STOP_LOSS and valid_number(sl_price) and valid_number(exec_price):
+            if is_long:
+                diagnostics["actual_stop_loss_pct"] = (entry_ref_price - exec_price) / entry_ref_price
+                diagnostics["gap_through_stop_pct"] = max(0.0, (sl_price - exec_price) / entry_ref_price)
+            else:
+                diagnostics["actual_stop_loss_pct"] = (exec_price - entry_ref_price) / entry_ref_price
+                diagnostics["gap_through_stop_pct"] = max(0.0, (exec_price - sl_price) / entry_ref_price)
+            diagnostics["gap_stop_at_open"] = (
+                (bar_open < sl_price) if is_long else (bar_open > sl_price)
+            )
+        else:
+            diagnostics["gap_stop_at_open"] = None
+
+        return diagnostics
 
     # ================================================================
     # Generic wrap-up: subclasses need not override stop() (if they do, call super().stop())
@@ -203,6 +297,7 @@ class BtVenue(VenueBase,bt.Strategy):
             'strategy': type(self).__name__,
             'max_margin_level': float(self.max_margin_level),
         }
+        metrics.update(self.order_diagnostics_summary())
         if self.all_preds:
             from sklearn.metrics import f1_score
             metrics['input_f1'] = float(
@@ -237,8 +332,86 @@ class BtVenue(VenueBase,bt.Strategy):
 
         strategy_summary, strategy_detail = self._split_metrics(payload)
         summary.update(strategy_summary)
+        detail.update(self.order_diagnostics_detail())
         detail.update(strategy_detail)
         return {'summary': summary, 'detail': detail}
+
+    def order_diagnostics_summary(self) -> dict:
+        exits = [
+            item for item in self.trade_logs
+            if item.get("role") in (TradeRole.STOP_LOSS, TradeRole.TAKE_PROFIT)
+        ]
+        stop_exits = [item for item in exits if item.get("role") == TradeRole.STOP_LOSS]
+        same_bar = [item for item in exits if item.get("same_bar_tp_sl_hit")]
+        gap_stops = [
+            item for item in stop_exits
+            if (item.get("gap_through_stop_pct") or 0.0) > 0.0
+        ]
+        stop_slippages = [
+            float(item.get("gap_through_stop_pct") or 0.0)
+            for item in stop_exits
+        ]
+        return {
+            "exit_order_count": len(exits),
+            "stop_loss_order_count": len(stop_exits),
+            "take_profit_order_count": sum(1 for item in exits if item.get("role") == TradeRole.TAKE_PROFIT),
+            "gap_through_stop_count": len(gap_stops),
+            "gap_through_stop_at_open_count": sum(1 for item in gap_stops if item.get("gap_stop_at_open")),
+            "max_gap_through_stop_pct": max(stop_slippages) if stop_slippages else 0.0,
+            "max_gap_through_stop_date": (
+                max(gap_stops, key=lambda item: item.get("gap_through_stop_pct") or 0.0).get("date_utc")
+                if gap_stops else None
+            ),
+            "same_bar_tp_sl_hit_count": len(same_bar),
+            "same_bar_tp_sl_as_stop_count": sum(1 for item in same_bar if item.get("role") == TradeRole.STOP_LOSS),
+            "same_bar_tp_sl_as_tp_count": sum(1 for item in same_bar if item.get("role") == TradeRole.TAKE_PROFIT),
+        }
+
+    def order_diagnostics_detail(self) -> dict:
+        gap_stops = [
+            item for item in self.trade_logs
+            if item.get("role") == TradeRole.STOP_LOSS
+            and (item.get("gap_through_stop_pct") or 0.0) > 0.0
+        ]
+        same_bar = [
+            item for item in self.trade_logs
+            if item.get("same_bar_tp_sl_hit")
+        ]
+        gap_stops = sorted(
+            gap_stops,
+            key=lambda item: item.get("gap_through_stop_pct") or 0.0,
+            reverse=True,
+        )
+        gap_by_day = {}
+        for item in gap_stops:
+            date_key = item.get("date_utc")
+            if date_key is None:
+                continue
+            bucket = gap_by_day.setdefault(
+                date_key,
+                {
+                    "date": date_key,
+                    "count": 0,
+                    "at_open_count": 0,
+                    "max_gap_through_stop_pct": 0.0,
+                    "sum_gap_through_stop_pct": 0.0,
+                },
+            )
+            gap_pct = float(item.get("gap_through_stop_pct") or 0.0)
+            bucket["count"] += 1
+            bucket["at_open_count"] += 1 if item.get("gap_stop_at_open") else 0
+            bucket["sum_gap_through_stop_pct"] += gap_pct
+            bucket["max_gap_through_stop_pct"] = max(bucket["max_gap_through_stop_pct"], gap_pct)
+        gap_by_day = sorted(
+            gap_by_day.values(),
+            key=lambda item: (item["max_gap_through_stop_pct"], item["count"]),
+            reverse=True,
+        )
+        return {
+            "gap_through_stop_orders": gap_stops[:50],
+            "gap_through_stop_by_day": gap_by_day,
+            "same_bar_tp_sl_orders": same_bar[:50],
+        }
 
     @staticmethod
     def _split_metrics(payload: dict):
@@ -331,7 +504,18 @@ class BtVenue(VenueBase,bt.Strategy):
 
         # 3. Order failures
         elif order.status == order.Margin:
-            self.logger.error(f"❌ 【订单失败】 保证金不足！价格: {order.created.price:.4f} | 数量: {order.created.size:.2f}")
+            order_price = float(order.created.price)
+            order_size = abs(float(order.created.size))
+            notional = order_price * order_size
+            leverage = max(float(self.leverage), 1e-12)
+            required_margin = notional / leverage
+            self.logger.error(
+                f"❌ 【订单失败】 保证金不足！"
+                f"价格: {order_price:.4f} | 数量: {order.created.size:.2f} | "
+                f"订单金额: {notional:.2f} | 需要保证金: {required_margin:.2f} | "
+                f"cash: {self.broker.getcash():.2f} | balance/value: {self.broker.getvalue():.2f} | "
+                f"leverage: {self.leverage:.2f}"
+            )
         elif order.status == order.Rejected:
             self.logger.error(f"❌ 【订单失败】 订单被拒绝！")
         elif order.status == order.Canceled:
@@ -420,7 +604,9 @@ class BtVenue(VenueBase,bt.Strategy):
                 is_long=True,
                 entry_ref_price=price,
                 sl_price=stop_price,
+                tp_price=limit_price,
                 sl_pct=stop_loss_pct,
+                tp_pct=take_profit_pct,
             )
 
             if limit_order is not None:
@@ -429,7 +615,9 @@ class BtVenue(VenueBase,bt.Strategy):
                     parent_ref=main_order.ref,
                     is_long=True,
                     entry_ref_price=price,
+                    sl_price=stop_price,
                     tp_price=limit_price,
+                    sl_pct=stop_loss_pct,
                     tp_pct=take_profit_pct,
                 )
 
@@ -479,7 +667,9 @@ class BtVenue(VenueBase,bt.Strategy):
                 is_long=False,
                 entry_ref_price=price,
                 sl_price=stop_price,
+                tp_price=limit_price,
                 sl_pct=stop_loss_pct,
+                tp_pct=take_profit_pct,
             )
 
             if limit_order is not None:
@@ -488,7 +678,9 @@ class BtVenue(VenueBase,bt.Strategy):
                     parent_ref=main_order.ref,
                     is_long=False,
                     entry_ref_price=price,
+                    sl_price=stop_price,
                     tp_price=limit_price,
+                    sl_pct=stop_loss_pct,
                     tp_pct=take_profit_pct,
                 )
 

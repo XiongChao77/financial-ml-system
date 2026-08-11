@@ -23,6 +23,38 @@ class DirectThreeClassInferenceWrapper(nn.Module):
         return logits, probabilities
 
 
+class BinaryInferenceWrapper(nn.Module):
+    """Map a single binary task model onto the shared 3-class inference contract."""
+
+    def __init__(self, model: nn.Module, task_type: str):
+        super().__init__()
+        self.model = model
+        self.task_type = task_type
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        logits = self.model(x)
+        probabilities = torch.softmax(logits, dim=1)
+        p_negative = probabilities[:, 0]
+        p_positive = probabilities[:, 1]
+        zero = torch.zeros_like(p_positive)
+
+        if self.task_type == TrainTask.DIRECTION:
+            three_class_probs = torch.stack((p_negative, zero, p_positive), dim=1)
+        elif self.task_type == TrainTask.LONG_OVR:
+            three_class_probs = torch.stack((zero, p_negative, p_positive), dim=1)
+        elif self.task_type == TrainTask.SHORT_OVR:
+            three_class_probs = torch.stack((p_positive, p_negative, zero), dim=1)
+        elif self.task_type == TrainTask.TRIGGER:
+            raise ValueError(
+                "A lone TRIGGER model predicts action/no-action but has no direction; "
+                "use TRIGGER_DIRECTION fusion or a directional binary task for backtesting."
+            )
+        else:
+            raise ValueError(f"Unsupported binary task_type: {self.task_type}")
+
+        return probabilities_to_logits(three_class_probs), three_class_probs
+
+
 class DualHeadInferenceWrapper(nn.Module):
     """Fuse a dual-head model's raw outputs for three-class inference."""
 

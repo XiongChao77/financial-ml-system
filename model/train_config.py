@@ -64,7 +64,7 @@ class LSTMConfig(BaseModelConfig):
 class TransformerConfig(BaseModelConfig):
     seq_len: int = 216     # 160 best for LSTM
     model_type: str = "transformer"
-    model_version: int = 3
+    model_version: int = 1
     d_model: int = 128
     nhead: int = 8
     num_layers: int = 2
@@ -88,7 +88,7 @@ class ConvLSTMConfig(BaseModelConfig):
     model_version: int = 1
     d_model: int = 64
     hidden_size = 64
-    conv_layers: int = 5
+    conv_layers: int = 2
     conv_kernel: int = 5
     conv_dropout: float = 0.10
     conv_dilations: str = ""
@@ -402,9 +402,9 @@ feature_conf_list = [
     "lower_wick_pct",
 ]
 
-seq_len = 128
+seq_len = 256
 SingleModelConfig = TrainConfig(
-    model_cfg=TransformerConfig(model_version=1, seq_len=seq_len),
+    model_cfg=LogisticConfig(model_version=1, seq_len=seq_len),
     feature_conf_list=feature.FEATURE_LIST_COMMODITY,
     train_task=TrainTask.DIRECTION,
 )

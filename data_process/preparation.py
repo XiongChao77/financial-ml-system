@@ -4,74 +4,10 @@ import pandas as pd
 import numpy as np
 import datetime, os, sys, re, math, json, logging
 from dataclasses import asdict
-current_work_dir = os.path.dirname(__file__) 
+current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 from data_process import feature
-
-def check_open_equals_prev_close(
-    df: pd.DataFrame,
-    logger: logging.Logger,
-    open_col: str = "open",
-    close_col: str = "close",
-    time_col: str = "open_time_date_utc",
-    tolerance: float = 1e-10
-) -> tuple[int, int, float]:
-    """
-    Check whether current candle open equals previous candle close.
-
-    Returns:
-        mismatch_count: number of rows where open != previous close
-        total_checked: number of comparable rows, normally len(df) - 1
-        mismatch_ratio: mismatch_count / total_checked
-    """
-
-    if open_col not in df.columns or close_col not in df.columns:
-        logger.warning(
-            f"Missing columns for open/prev_close check: "
-            f"{open_col=}, {close_col=}"
-        )
-        return 0, 0, 0.0
-
-    if len(df) <= 1:
-        logger.warning("Not enough rows to check open == previous close.")
-        return 0, 0, 0.0
-
-    curr_open = df[open_col].astype(float)
-    prev_close = df[close_col].shift(1).astype(float)
-
-    # The first row has no previous kline, so it is excluded
-    valid_mask = prev_close.notna()
-
-    # tolerance avoids floating point rounding errors
-    mismatch_mask = valid_mask & ((curr_open - prev_close).abs() > tolerance)
-
-    mismatch_count = int(mismatch_mask.sum())
-    total_checked = int(valid_mask.sum())
-    mismatch_ratio = mismatch_count / total_checked if total_checked > 0 else 0.0
-
-    logger.info("\n=== Open vs Previous Close Check ===")
-    logger.info(f"Total checked rows: {total_checked}")
-    logger.info(f"Mismatch count: {mismatch_count}")
-    logger.info(f"Mismatch ratio: {mismatch_ratio:.4%}")
-
-    if mismatch_count > 0:
-        sample_cols = [open_col, close_col]
-        if time_col in df.columns:
-            sample_cols = [time_col, open_col, close_col]
-
-        sample_df = df.loc[mismatch_mask, sample_cols].head(10).copy()
-        sample_df["prev_close"] = prev_close.loc[mismatch_mask].head(10).values
-        sample_df["diff"] = (
-            sample_df[open_col].astype(float) - sample_df["prev_close"].astype(float)
-        )
-
-        logger.info("First mismatched samples:")
-        logger.info(f"\n{sample_df}")
-
-    logger.info("====================================\n")
-
-    return mismatch_count, total_checked, mismatch_ratio
 
 def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine(), prep_output_dir =common.DATA_OUT_DIR ):
     file = common.market_data_path(para)
@@ -82,7 +18,12 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     # 2. Persist metadata for labeling and downstream model usage
     df = pd.read_csv(file)
     if para.market_category == 'Cryptocurrency':
-        check_open_equals_prev_close(df, logger)
+        common.validate_kline_source(
+            df,
+            interval_ms,
+            source=file,
+            logger=logger,
+        )
     df = common.clean_data_quality_auto(df,logger)  
     # 3. Pass interval_ms to label logic so it can adapt its volatility window to the real time span.
     label_col = 'label'
@@ -145,11 +86,13 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
 if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     logger, _ = common.setup_session_logger(sub_folder='data_process')
-    pare_para = common.DOGE_30m
+    pare_para = common.DOGE_1h
     if pare_para.market_category == 'Forex':
         feature_conf_list = feature.FEATURE_LIST_COMMODITY
     else:
         feature_conf_list = []
     pare_para.label_type = "BBM"
     pare_para.predict_num = 2
+    pare_para.vol_multiplier_long = 1
+    pare_para.vol_multiplier_short = 1
     main(logger,common.FEATURE_GROUP_LIST, para= pare_para, feature_conf_list= feature_conf_list)

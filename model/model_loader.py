@@ -9,6 +9,7 @@ from data_process.common import *
 from model.model_factory import ModelFactory
 from model.data_loader import TimeSeriesWindowDataset
 from model.models.fusion_wrapper import (
+    BinaryInferenceWrapper,
     DirectThreeClassInferenceWrapper,
     DualHeadInferenceWrapper,
     FusionWrapper,
@@ -111,12 +112,11 @@ class ModelHandler(MetaConfig):
         """
         Load a lone TRIGGER/DIRECTION/LONG_OVR/SHORT_OVR model.
 
-        NOTE: a single binary model has no 3-class Short/Neutral/Long signal on its
-        own (FusionWrapper only fuses a *pair* of binary models, keyed "trigger"/
-        "direction" or "long_ovr"/"short_ovr" - see model/models/fusion_wrapper.py).
-        So self.model here is the raw binary classifier, useful for direct
-        evaluate_performance-style diagnostics; it is not meant to be driven
-        through predict()/backtesting, which assumes a 3-class output.
+        Direction and OvR binary models are adapted to the common inference
+        contract: (three_class_logits, three_class_probabilities). A lone
+        TRIGGER model still cannot be a tradable signal because it has no
+        direction; BinaryInferenceWrapper raises a clear error if it is used
+        for backtesting.
         """
         files = self.task_desc["models"]["main"]
         meta_path = os.path.join(self.base_dir, files["meta"])
@@ -128,12 +128,16 @@ class ModelHandler(MetaConfig):
         self._init_config_from_meta(meta)
         self.classes = meta["classes"]  # In single mode, use classes from meta directly
 
-        # 2. Load model
-        self.model, _ = ModelFactory.load_from_checkpoint(
+        # 2. Load the raw binary model and adapt it to the shared 3-class
+        # inference contract expected by predict()/predict_with_ds().
+        raw_model, _ = ModelFactory.load_from_checkpoint(
             model_path=model_path,
             meta_path=meta_path,
             device=self.device
         )
+        raw_model.eval()
+        self.model = BinaryInferenceWrapper(raw_model, task_type=self.task_type)
+        self.model.to(self.device)
         self.model.eval()
 
     def _load_fusion_mode(self):

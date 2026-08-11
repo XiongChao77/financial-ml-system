@@ -1,7 +1,7 @@
 # Machine Learning Trading System
 
 An end-to-end quantitative trading system built around market data processing, feature engineering, machine-learning signal generation, cross-period and cross-asset backtesting, risk control, and visualization.
-
+The project is currently focused on single-asset trading strategies in cryptocurrency markets.
 ## Architecture
 
 ```mermaid
