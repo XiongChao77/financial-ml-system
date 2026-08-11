@@ -26,7 +26,7 @@ class BacktestEngineConfig:
 
 @dataclass(frozen=True)
 class ModelDataConfig:
-    atr_ref_bars: int
+    atr_ref_bars: int = 80
     prep_output_dir: str = common.DATA_OUT_DIR
     train_output_dir: str = common.TRAIN_OUT_DIR
     period: str = "long"  # short | forward | long

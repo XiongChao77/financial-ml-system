@@ -75,6 +75,7 @@ DOGE_1m = BaseDefine(market_category="Cryptocurrency", data_source="binance_publ
 DOGE_5m = replace(DOGE_1m,interval="5m",)
 DOGE_15m = replace(DOGE_1m,interval="15m",)
 DOGE_30m = replace(DOGE_1m,interval="30m",)
+DOGE_1h = replace(DOGE_1m,interval="1h",)
 XLM_30m = BaseDefine(market_category="Cryptocurrency", data_source="binance_public_data", symbol="XLMUSDT", interval="30m", trading_type='um'
                       , label_type = 'FTHL',
                       predict_num = 16,vol_ewma_span = 80, vol_multiplier_long=1.7, stop_multiplier_rate_long=None, vol_multiplier_short=1.7, stop_multiplier_rate_short=None)
@@ -1384,6 +1385,175 @@ def get_interval_ms(interval_str: str) -> int:
     
     value, unit = match.groups()
     return int(value) * units[unit]
+
+
+def validate_kline_source(
+    df: pd.DataFrame,
+    interval_ms: int,
+    *,
+    source: str = "kline source",
+    logger=None,
+) -> dict:
+    """Validate that a dataframe is one non-overlapping, contiguous K-line series.
+
+    The open-time sequence alone is not sufficient: a file can alternate hourly
+    candles with half-hour candles while still having an apparently perfect 30m
+    open-time cadence.  Therefore this validation also checks every candle's
+    close time and adjacent time ranges.
+
+    Returns a small validation summary.  Raises ``ValueError`` on any structural
+    or OHLC error so callers do not continue with contaminated market data.
+    """
+    required_columns = {
+        "open_time_ms_utc",
+        "close_time_ms_utc",
+        "open",
+        "high",
+        "low",
+        "close",
+    }
+    missing_columns = sorted(required_columns.difference(df.columns))
+    if missing_columns:
+        raise ValueError(
+            f"K-line validation failed for {source}: missing columns {missing_columns}"
+        )
+    if not isinstance(interval_ms, (int, np.integer)) or interval_ms <= 0:
+        raise ValueError(f"Invalid K-line interval_ms for {source}: {interval_ms!r}")
+    if df.empty:
+        raise ValueError(f"K-line validation failed for {source}: data is empty")
+
+    open_time = pd.to_numeric(df["open_time_ms_utc"], errors="coerce")
+    close_time = pd.to_numeric(df["close_time_ms_utc"], errors="coerce")
+    invalid_timestamp = (
+        open_time.isna()
+        | close_time.isna()
+        | (open_time % 1 != 0)
+        | (close_time % 1 != 0)
+    )
+
+    errors = []
+    samples = []
+    invalid_timestamp_count = int(invalid_timestamp.sum())
+    if invalid_timestamp_count:
+        errors.append(f"invalid timestamps={invalid_timestamp_count}")
+        samples.extend(
+            f"row={idx} open_time={df.at[idx, 'open_time_ms_utc']!r} "
+            f"close_time={df.at[idx, 'close_time_ms_utc']!r}"
+            for idx in df.index[invalid_timestamp][:3]
+        )
+
+    summary = {
+        "source": source,
+        "row_count": int(len(df)),
+        "interval_ms": int(interval_ms),
+        "invalid_timestamp_count": invalid_timestamp_count,
+        "duplicate_open_time_count": 0,
+        "out_of_order_count": 0,
+        "unexpected_spacing_count": 0,
+        "missing_candle_count": 0,
+        "invalid_duration_count": 0,
+        "overlap_count": 0,
+        "invalid_ohlc_count": 0,
+    }
+
+    if not invalid_timestamp_count:
+        open_time = open_time.astype("int64")
+        close_time = close_time.astype("int64")
+        delta = open_time.diff()
+
+        duplicate_mask = open_time.duplicated(keep=False)
+        out_of_order_mask = delta < 0
+        spacing_mask = delta.notna() & (delta != interval_ms)
+        forward_gap_mask = delta > interval_ms
+        aligned_gap_mask = forward_gap_mask & (delta % interval_ms == 0)
+        duration = close_time - open_time + 1
+        invalid_duration_mask = duration != interval_ms
+        overlap_mask = open_time.iloc[1:].to_numpy() <= close_time.iloc[:-1].to_numpy()
+
+        summary["duplicate_open_time_count"] = int(duplicate_mask.sum())
+        summary["out_of_order_count"] = int(out_of_order_mask.sum())
+        summary["unexpected_spacing_count"] = int(spacing_mask.sum())
+        summary["missing_candle_count"] = int(
+            ((delta.loc[aligned_gap_mask] // interval_ms) - 1).sum()
+        )
+        summary["invalid_duration_count"] = int(invalid_duration_mask.sum())
+        summary["overlap_count"] = int(overlap_mask.sum())
+
+        if summary["duplicate_open_time_count"]:
+            errors.append(
+                f"duplicate open times={summary['duplicate_open_time_count']}"
+            )
+        if summary["out_of_order_count"]:
+            errors.append(f"out-of-order rows={summary['out_of_order_count']}")
+        if summary["unexpected_spacing_count"]:
+            errors.append(
+                "unexpected open-time spacing="
+                f"{summary['unexpected_spacing_count']} "
+                f"(missing candles={summary['missing_candle_count']})"
+            )
+            for idx in df.index[spacing_mask][:3]:
+                pos = df.index.get_loc(idx)
+                samples.append(
+                    f"rows={df.index[pos - 1]}->{idx} "
+                    f"previous_open={int(open_time.iloc[pos - 1])} "
+                    f"current_open={int(open_time.iloc[pos])} "
+                    f"delta_ms={int(delta.iloc[pos])}"
+                )
+        if summary["invalid_duration_count"]:
+            errors.append(
+                f"invalid candle duration={summary['invalid_duration_count']}"
+            )
+            for idx in df.index[invalid_duration_mask][:3]:
+                samples.append(
+                    f"row={idx} open_time={int(open_time.loc[idx])} "
+                    f"close_time={int(close_time.loc[idx])} "
+                    f"duration_ms={int(duration.loc[idx])}"
+                )
+        if summary["overlap_count"]:
+            errors.append(f"overlapping candles={summary['overlap_count']}")
+            for pos in np.flatnonzero(overlap_mask)[:3]:
+                samples.append(
+                    f"rows={df.index[pos]}->{df.index[pos + 1]} "
+                    f"previous_close={int(close_time.iloc[pos])} "
+                    f"next_open={int(open_time.iloc[pos + 1])}"
+                )
+
+    ohlc = df[["open", "high", "low", "close"]].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    finite_ohlc = np.isfinite(ohlc.to_numpy()).all(axis=1)
+    positive_ohlc = (ohlc > 0).all(axis=1).to_numpy()
+    price_bounds = (
+        (ohlc["high"] >= ohlc[["open", "close"]].max(axis=1))
+        & (ohlc["low"] <= ohlc[["open", "close"]].min(axis=1))
+        & (ohlc["high"] >= ohlc["low"])
+    ).to_numpy()
+    invalid_ohlc_mask = ~(finite_ohlc & positive_ohlc & price_bounds)
+    summary["invalid_ohlc_count"] = int(invalid_ohlc_mask.sum())
+    if summary["invalid_ohlc_count"]:
+        errors.append(f"invalid OHLC rows={summary['invalid_ohlc_count']}")
+        for pos in np.flatnonzero(invalid_ohlc_mask)[:3]:
+            idx = df.index[pos]
+            samples.append(
+                f"row={idx} o={df.at[idx, 'open']!r} h={df.at[idx, 'high']!r} "
+                f"l={df.at[idx, 'low']!r} c={df.at[idx, 'close']!r}"
+            )
+
+    if errors:
+        message = f"K-line validation failed for {source}: " + "; ".join(errors)
+        if samples:
+            message += ". Samples: " + " | ".join(samples[:6])
+        if logger is not None:
+            logger.error(message)
+        raise ValueError(message)
+
+    if logger is not None:
+        logger.info(
+            f"K-line validation passed: source={source}, rows={len(df)}, "
+            f"interval_ms={interval_ms}, missing_candles=0, overlaps=0"
+        )
+    return summary
+
 
 def get_git_info(logger):
     repo = git.Repo(PROJECT_DIR)

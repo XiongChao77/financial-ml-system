@@ -25,7 +25,6 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from queue import Empty
 from typing import Any, Dict, Iterable, List, Optional, Tuple,Set
 from collections import defaultdict
-import numpy as np
 
 # -----------------------------------------------------------------------------
 # Project imports
@@ -35,6 +34,7 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 
 from model import train_config
 from data_process import common, preparation
+from experiment.task_constructors import construct_experiment_tasks
 from data_process.utils import (
     calc_params_hash,
     config_from_dict_train,
@@ -52,17 +52,17 @@ TRAIN_REPORTS_FILE = "train_reports.jsonl"
 SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
-MAX_SIM = 4
+MAX_SIM = 30
 SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
 INTERVAL: str = "30m"
 
 # Training mode switch:
 # - train_config.TrainTask.DIRECT_3CLASS (or TRIGGER/DIRECTION/LONG_OVR/SHORT_OVR and other single model tasks)
-#   -> the existing single model prep->train->sim pipeline (construct_task_doge)
+#   -> the existing single model prep->train->sim task constructor
 # - train_config.TrainTask.TRIGGER_DIRECTION / LONG_SHORT_OVR
-#   -> combo_model mode: sweep both sub-model roles separately (construct_task_doge_combo),
+#   -> combo_model mode: sweep both sub-model roles separately,
 #      then fuse them pairwise per (pre_key, train_compatibility) after training and backtest
-TRAIN_MODE: str = train_config.TrainTask.DIRECT_3CLASS
+TRAIN_MODE: str = train_config.TrainTask.DIRECTION
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -126,8 +126,8 @@ def build_task_spec(
                 sim_d = asdict(sim)
                 sim_h = param_hash(sim_d)
                 restored_sim = backtest_runner.StrategyPara(
-                    strategy_config=backtest_runner.MlStrategyConfig(
-                        **sim_d["strategy_config"]
+                    strategy_config=backtest_runner.strategy_config_from_dict(
+                        sim_d["strategy_config"]
                     ),
                     broker_config=backtest_runner.BrokerConfig(
                         **sim_d["broker_config"]
@@ -224,8 +224,8 @@ def filter_pending_from_spec(task_spec: Dict[str, Any], done_set: set[str]) -> D
                 sim_params = sim["params"]
                 task_hash = calc_params_hash(
                     strategy=backtest_runner.StrategyPara(
-                        strategy_config=backtest_runner.MlStrategyConfig(
-                            **sim_params["strategy_config"]
+                        strategy_config=backtest_runner.strategy_config_from_dict(
+                            sim_params["strategy_config"]
                         ),
                         broker_config=backtest_runner.BrokerConfig(
                             **sim_params["broker_config"]
@@ -338,9 +338,20 @@ def collect_param_sweep(task_spec):
             for sim in tr_node.get("sim_tasks", []):
                 collect_from_any(sim["params"], sweep["sim"])
 
+    def value_sort_key(value):
+        if isinstance(value, bool):
+            return (1, int(value))
+        if isinstance(value, (int, float)):
+            return (0, float(value))
+        if isinstance(value, str):
+            return (2, value)
+        if value is None:
+            return (3, "")
+        return (4, f"{type(value).__name__}:{value!r}")
+
     def finalize(d):
         return {
-            k: sorted(v)
+            k: sorted(v, key=value_sort_key)
             for k, v in d.items()
             if len(v) > 1
         }
@@ -351,199 +362,13 @@ def collect_param_sweep(task_spec):
         "sim": finalize(sweep["sim"]),
     }
 
-def construct_task_doge():
-    import model.train as train
-    from trade.runner import backtest_runner
-    preparation_task: List[Any] = []
-    for pn in [16,24,32]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-        for vol_multiplier in [1.8]:#1.8,1.9,2
-            for vol_ewma_span in [80]:
-                preparation_task.append(common.BaseDefine(
-                        market_category = "Cryptocurrency", data_source = "binance_public_data",
-                        vol_ewma_span = vol_ewma_span, predict_num=pn,
-                        vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=None, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=None,
-                        symbol=SYMBOL,  interval=INTERVAL, trading_type= 'um', label_type = 'FTHL', version=0 ))
-
-    training_task: List[train.TrainConfig] = []
-
-    to_remove_1 = ["open", "high",'low' ]
-    to_remove_2 = to_remove_1 + ['close','volume','number_of_trades','taker_buy_base_volume','taker_buy_quote_volume']
-    to_remove_3 = to_remove_1 + ['close','volume','taker_buy_base_volume','taker_buy_quote_volume']
-    to_remove_4 = to_remove_1 + ['close','taker_buy_base_volume','taker_buy_quote_volume']
-    to_remove_5 = to_remove_1 + ['taker_buy_base_volume','taker_buy_quote_volume']
-    feature_conf_list_1 = [f for f in train_config.feature_conf_list if f not in to_remove_1]
-    feature_conf_list_2 = [f for f in train_config.feature_conf_list if f not in to_remove_2]
-    feature_conf_list_3 = [f for f in train_config.feature_conf_list if f not in to_remove_3]
-    feature_conf_list_4 = [f for f in train_config.feature_conf_list if f not in to_remove_4]
-    feature_conf_list_5 = [f for f in train_config.feature_conf_list if f not in to_remove_5]
-    for false_trade_penalty in [1]:
-        for seq_len in [12,16,24,96,256]: #12,16,24,32
-            for flip_penalty in np.arange(0.8, 1.7, 1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
-                for miss_penalty in np.arange(0.5,2, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
-                    for stride in [2]: #2,4,8
-                        for bestf1 in [True]:
-                            for featrue_conf in [train_config.feature_conf_list]:
-                                train_conf = train.TrainConfig( use_cache = False,epochs = 100, batch_size=256,
-                                                                    feature_conf_list= featrue_conf,
-                                                            flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade_penalty = 1,
-                                                            stride = stride, patience = 8)
-                                train_conf.model_cfg = train_config.LogisticConfig(seq_len = seq_len,model_version= 1)
-                                # Single model sweep: this whole batch is trained with the task type given by TRAIN_MODE
-                                # (DIRECT_3CLASS by default; can be set to LONG_OVR etc.)
-                                train_conf.train_task = TRAIN_MODE
-                                training_task.append(train_conf)
-
-    simulation_task: List[Any] = []
-
-    for i in [12,16,24]: #16,24,30,32,36,40,44,48
-        min_hold_bars = i
-        for (atr_sl_long_mult, atr_sl_short_mult) in [(6,5),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(backtest_runner.StrategyPara(
-                strategy_config=backtest_runner.MlStrategyConfig(
-                    allow_long=True, allow_short=True, min_hold_bars=min_hold_bars,
-                    prob_thresh=None, atr_sl_long_mult=atr_sl_long_mult,
-                    atr_sl_short_mult=atr_sl_short_mult, atr_tp_mult=0.99,
-                    risk_per_trade_pct=0.4, max_daily_loss_pct=0.04,
-                ),
-                broker_config=backtest_runner.BrokerConfig(
-                    initial_equity=10000.0, commission_pct=0.05,
-                ),
-            ))
-    return preparation_task, training_task, simulation_task
-
-def construct_task_doge_combo():
-    """
-    Task construction for combo_model(TRIGGER_DIRECTION): builds a separate hyper parameter sweep
-    for each of the trigger / direction sub-task roles (two independent loops, matching the
-    "two architectures, two construct functions" convention from the Q&A -- here the two loops
-    live under a single SYMBOL and tag their own rows, instead of reusing the single model
-
-    Both roles put their TrainConfig into the same flat training_task list, distinguished only
-    by the .train_task field (TRIGGER / DIRECTION).
-    After training, run_combo_fusion_and_backtest groups them by (pre_key, train_compatibility)
-    and fuses every trigger x direction pair inside a group into a combined model, then backtests it.
-    """
-    import model.train as train
-    from trade.runner import backtest_runner
-    preparation_task: List[Any] = []
-    for pn in [16, 24, 32]:
-        for vol_multiplier in [1.8, 1.9]:
-            for vol_ewma_span in [80]:
-                preparation_task.append(common.BaseDefine(
-                        market_category = "Cryptocurrency", data_source = "binance_public_data",
-                        vol_ewma_span = vol_ewma_span, predict_num=pn,
-                        vol_multiplier_long=vol_multiplier, stop_multiplier_rate_long=None, vol_multiplier_short=vol_multiplier, stop_multiplier_rate_short=None,
-                        symbol=SYMBOL,  interval=INTERVAL, trading_type= 'um', label_type = 'FTHL', version=0 ))
-
-    training_task: List[train.TrainConfig] = []
-
-    seq_len = 24
-    stride = 2
-    # --- trigger sub-task sweep ---
-    for minority_ratio in np.arange(0.2, 0.3, 0.02).round(2):
-        for miss_penalty in np.linspace(1 / minority_ratio / 3 * 2, 1 / minority_ratio * 4, 4).round(2):
-            trig_cfg = train.TrainConfig(
-                use_cache=False, epochs=20, batch_size=256,
-                model_cfg=train_config.LogisticConfig(model_version=1, seq_len=seq_len),
-                minority_sampling_ratio=float(minority_ratio), miss_penalty=float(miss_penalty), stride=stride, patience=5,
-            )
-            trig_cfg.train_task = train_config.TrainTask.TRIGGER
-            training_task.append(trig_cfg)
-
-    # --- direction sub-task sweep ---
-    # direction labels are naturally close to balanced, no minority oversampling needed, leave minority_sampling_ratio empty (None)
-    for model_cfg in [train_config.TransformerConfig(model_version=1, seq_len=seq_len)]:
-        dir_cfg = train.TrainConfig(
-            use_cache=False, epochs=20, batch_size=256,
-            model_cfg=model_cfg, stride=stride, patience=5,
-        )
-        dir_cfg.train_task = train_config.TrainTask.DIRECTION
-        training_task.append(dir_cfg)
-
-    simulation_task: List[Any] = []
-    for i in [4, 8, 12, 16, 24]:
-        min_hold_bars = i
-        for (atr_sl_long_mult, atr_sl_short_mult) in [(6, 5), (5, 4)]:
-            simulation_task.append(backtest_runner.StrategyPara(
-                strategy_config=backtest_runner.MlStrategyConfig(
-                    allow_long=True, allow_short=True, min_hold_bars=min_hold_bars,
-                    prob_thresh=None, atr_sl_long_mult=atr_sl_long_mult,
-                    atr_sl_short_mult=atr_sl_short_mult, atr_tp_mult=0.99,
-                    risk_per_trade_pct=0.4, max_daily_loss_pct=0.04,
-                ),
-                broker_config=backtest_runner.BrokerConfig(
-                    initial_equity=10000.0, commission_pct=0.05,
-                ),
-            ))
-    return preparation_task, training_task, simulation_task
-
-def construct_task_eth():
-    import model.train as train
-    from trade.runner import backtest_runner
-    preparation_task: List[Any] = []
-
-    for cn in [12,16]:#list(range(56, 224, 8)): #[4,8,12,56,64,72,80,88,96,108,116,124,132,144,156,168,176,188]
-        for pn in [4,8,16,24]:#[4,6,8,12,16,20,24,28,32,36]: #[10,12,14,16,18]
-            for vol_multiplier in [1.8,1.9,2,2.1]:#1.8,1.9,2
-                for vol_ewma_span in [88]:
-                    preparation_task.append(common.BaseDefine(
-                            vol_ewma_span = vol_ewma_span,
-                            seq_len=cn,
-                            predict_num=pn,
-                            vol_multiplier_long=vol_multiplier,
-                            stop_multiplier_rate_long=0.2,
-                            vol_multiplier_short=vol_multiplier,
-                            stop_multiplier_rate_short=0.2,
-                            symbol=SYMBOL,   #ETHUSDT
-                            interval=INTERVAL,
-                            trading_type= 'um',
-                            version=0
-                        ))
-
-    training_task: List[train.TrainConfig] = []
-
-    for false_trade_penalty in [1]:
-        for flip_penalty in np.arange(0.9, 1.7, 0.1).round(1):# np.arange(0.2, 2.1, 0.1).round(1):
-            for miss_penalty in np.arange(0.7, 1.2, 0.1).round(1):#in np.arange(0.3, 2.1, 0.2).round(1):
-                for stride in [4,8]: #2,4,8
-                    for bestf1 in [True]:
-                        for loss_fun_version_v in [2]:
-                            training_task.append(train.TrainConfig(use_cache = False,epochs = 100, batch_size=256,
-                                                        flip_penalty = float(flip_penalty),miss_penalty = float(miss_penalty),false_trade_penalty = 1,
-                                                        stride = stride, patience = 8,lambda_main = 0.7,lambda_dir = 0.7,lambda_cost = 0.4))
-
-    simulation_task: List[Any] = []
-
-    for i in [30,32,36,38,40,44]: #16,24,30,32,36,40,44,48
-        min_hold_bars = i
-        for (atr_sl_long_mult, atr_sl_short_mult) in [(6,6),(5,4)]: #(6,5),(5,4)
-            simulation_task.append(backtest_runner.StrategyPara(
-                strategy_config=backtest_runner.MlStrategyConfig(
-                    allow_long=True, allow_short=True, min_hold_bars=min_hold_bars,
-                    prob_thresh=None, atr_sl_long_mult=atr_sl_long_mult,
-                    atr_sl_short_mult=atr_sl_short_mult,
-                    risk_per_trade_pct=0.1, max_daily_loss_pct=0.025,
-                ),
-                broker_config=backtest_runner.BrokerConfig(
-                    initial_equity=10000.0, commission_pct=0.05,
-                ),
-            ))
-    return preparation_task, training_task, simulation_task
-
 def create_task_spec(logger, exp_dir,done_set: set[str]):
     is_combo = TRAIN_MODE in train_config.COMBO_SUB_TASKS
-
-    if is_combo:
-        if SYMBOL == "DOGEUSDT":
-            preparation_task, training_task, simulation_task = construct_task_doge_combo()
-        else:
-            raise RuntimeError(f"no combo construct for {SYMBOL} yet")
-    elif SYMBOL == "DOGEUSDT":
-        preparation_task, training_task, simulation_task = construct_task_doge()
-    elif SYMBOL == "ETHUSDT":
-        preparation_task, training_task, simulation_task = construct_task_eth()
-    else:
-        raise RuntimeError(f"no construct for {SYMBOL} yet")
+    preparation_task, training_task, simulation_task = construct_experiment_tasks(
+        SYMBOL,
+        INTERVAL,
+        TRAIN_MODE,
+    )
 
     # In combo_model mode a sub-model is not a tradable strategy on its own, so no sim_tasks are attached here --
     # the real backtest tasks are generated after training for every fused pair,
@@ -639,7 +464,7 @@ def _train_task(
         pre_para = common.BaseDefine(**pre_params)
         t_cfg = _config_from_dict_train(train_params, expected_hash=tr_h)
         # Single model mode (DIRECT_3CLASS/LONG_OVR/...) and the combo_model sub-model mode share one
-        # worker: which task is trained is decided by the train_task field of the TrainConfig itself (construct_task_doge*
+        # worker: which task is trained is decided by the train_task field of the TrainConfig itself
         # tagged every row when it was built), nothing is hard coded to one task type here.
         result = train.train(logger=logger, config=t_cfg, prep_output_dir=prep_output_dir, save_dir=save_dir)
 
@@ -687,8 +512,8 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
         sim_h = sim['hash']
         sim_params = sim["params"]
         s_para = backtest_runner.StrategyPara(
-            strategy_config=backtest_runner.MlStrategyConfig(
-                **sim_params["strategy_config"]
+            strategy_config=backtest_runner.strategy_config_from_dict(
+                sim_params["strategy_config"]
             ),
             broker_config=backtest_runner.BrokerConfig(
                 **sim_params["broker_config"]
@@ -706,7 +531,9 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
                     strategy_config=s_para.strategy_config,
                     broker_config=s_para.broker_config,
                     data_config=backtest_runner.ModelDataConfig(
-                        atr_ref_bars=s_para.strategy_config.min_hold_bars,
+                        atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
+                            s_para.strategy_config
+                        ),
                         prep_output_dir=prep_dir,
                         train_output_dir=train_output_dir,
                         device="cpu",
@@ -772,14 +599,14 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
             pending_sim_hashes[train_key].discard(sim_h)
             
             # If all sim tasks for this train task have been removed
-            if not pending_sim_hashes[train_key]:
-                if os.path.exists(train_dir):
-                    try:
-                        if valid == False:
-                            shutil.rmtree(train_dir)
-                            logger.info(f"🧹 All sims finished for Train {tr_h}. Deleted: {train_dir}")
-                    except Exception as e:
-                        logger.error(f"❌ Failed to handle {train_dir}: {e}")
+            # if not pending_sim_hashes[train_key]:
+            #     if os.path.exists(train_dir):
+            #         try:
+            #             if valid == False:
+            #                 shutil.rmtree(train_dir)
+            #                 logger.info(f"🧹 All sims finished for Train {tr_h}. Deleted: {train_dir}")
+            #         except Exception as e:
+            #             logger.error(f"❌ Failed to handle {train_dir}: {e}")
 
         logger.info(f"    Sim {pre_h}/{tr_h}/{sim_h} done in {elapsed:.2f}s")
         em = eta_msg()
@@ -1001,8 +828,8 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                     raise RuntimeError(f" {train_save_dir} not exist,run valid first!")
                 sim_params = sim_task['params']
                 sim_para = backtest_runner.StrategyPara(
-                    strategy_config=backtest_runner.MlStrategyConfig(
-                        **sim_params["strategy_config"]
+                    strategy_config=backtest_runner.strategy_config_from_dict(
+                        sim_params["strategy_config"]
                     ),
                     broker_config=backtest_runner.BrokerConfig(
                         **sim_params["broker_config"]
@@ -1022,7 +849,9 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                             strategy_config=sim_para.strategy_config,
                             broker_config=sim_para.broker_config,
                             data_config=backtest_runner.ModelDataConfig(
-                                atr_ref_bars=sim_para.strategy_config.min_hold_bars,
+                                atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
+                                    sim_para.strategy_config
+                                ),
                                 prep_output_dir=sim_prep_output_dir,
                                 train_output_dir=train_save_dir,
                                 device="cpu",
@@ -1046,7 +875,9 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                                 strategy_config=sim_para.strategy_config,
                                 broker_config=sim_para.broker_config,
                                 data_config=backtest_runner.ModelDataConfig(
-                                    atr_ref_bars=sim_para.strategy_config.min_hold_bars,
+                                    atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
+                                        sim_para.strategy_config
+                                    ),
                                     prep_output_dir=sim_prep_output_dir,
                                     train_output_dir=train_save_dir,
                                     device="cpu",
@@ -1301,7 +1132,9 @@ def main():
                         strategy_config=sim_para.strategy_config,
                         broker_config=sim_para.broker_config,
                         data_config=backtest_runner.ModelDataConfig(
-                            atr_ref_bars=sim_para.strategy_config.min_hold_bars,
+                            atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
+                                sim_para.strategy_config
+                            ),
                             prep_output_dir=load_prep_output_dir,
                             train_output_dir=train_save_dir,
                             period=period,

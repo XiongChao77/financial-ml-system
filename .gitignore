@@ -18,4 +18,8 @@ launch.json
 #label_viewer
 node_modules
 data_process/label_viewer/public
-tests/
+tests/*
+!tests/test_kline_source_validation.py
+!tests/test_binance_zip_downloader_manifest.py
+*data*
+tests/*

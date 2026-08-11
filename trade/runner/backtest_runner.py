@@ -20,6 +20,7 @@ from data_process.utils import param_hash
 from model import model_loader
 from model import data_loader
 from trade.runner import cus_analyzer
+from trade.runner.analyze_backtest_report import analyze_backtest_report, plot_equity_curves
 from trade.runner.config import (
     BrokerConfig,
     BacktestEngineConfig,
@@ -32,12 +33,14 @@ from trade.venue.bt import cus_comminfo
 from model import train
 from model import train_config
 from trade.venue.bt.bt_venue_ml import MlBtVenue
+from trade.venue.bt.bt_venue_bbm import BbmBtVenue
 from trade.venue.bt.bt_venue_ma import MaBtVenue
 from trade.venue.bt.bt_venue_martingale import MartingaleBtVenue
 from trade.venue.bt.bt_venue_rules import RulesBtVenue
 from trade.venue.bt.bt_venue_turtle import TurtleBtVenue
 from trade.feed.prediction_feed import PredictionFeed
 from trade.strategy.strategy_ml import MlStrategyConfig
+from trade.strategy.strategy_bbm import BbmStrategyConfig
 from trade.strategy.strategy_ma import MaStrategyConfig
 from trade.strategy.strategy_martingale import MartingaleStrategyConfig
 from trade.strategy.strategy_rules import RulesStrategyConfig
@@ -150,6 +153,7 @@ def create_backtest_cerebro(
 def _venue_for_strategy(strategy_config):
     venue_by_config = (
         (MlStrategyConfig, MlBtVenue),
+        (BbmStrategyConfig, BbmBtVenue),
         (MartingaleStrategyConfig, MartingaleBtVenue),
         (TurtleStrategyConfig, TurtleBtVenue),
         (RulesStrategyConfig, RulesBtVenue),
@@ -159,6 +163,29 @@ def _venue_for_strategy(strategy_config):
         if isinstance(strategy_config, config_type):
             return venue_cls
     raise TypeError(f"Unsupported strategy config: {type(strategy_config).__name__}")
+
+
+def strategy_config_from_dict(params: dict):
+    params = dict(params)
+    strategy_type = params.get("strategy_type")
+    if strategy_type == "bbm":
+        return BbmStrategyConfig(**params)
+    if strategy_type in (None, "ml"):
+        params.pop("strategy_type", None)
+        return MlStrategyConfig(**params)
+    raise ValueError(f"Unsupported strategy_type: {strategy_type}")
+
+
+def atr_ref_bars_for_strategy(strategy_config, default: int = 14) -> int:
+    """
+    ModelDataConfig still needs atr_ref_bars to build the shared dataframe.
+    BBM does not use ATR or min_hold_bars, so callers should use this adapter
+    instead of reading strategy_config.min_hold_bars directly.
+    """
+    value = getattr(strategy_config, "atr_ref_bars", None)
+    if value is None:
+        value = getattr(strategy_config, "min_hold_bars", default)
+    return max(1, int(value))
 
 
 def _resolve_device(device_name):
@@ -272,6 +299,8 @@ def _build_feed(frame: pd.DataFrame, data_config):
     feed_params["atr_pct"] = (
         "stop_loss_atr_pct" if "stop_loss_atr_pct" in frame.columns else None
     )
+    for column in ("threshold_long", "threshold_short"):
+        feed_params[column] = column if column in frame.columns else None
     return PredictionFeed(**feed_params)
 
 
@@ -340,7 +369,16 @@ def main(logger: logging.Logger, config: RunnerConfig):
         candles["label"] = candles["label"].fillna(-1).astype(int)
     candles.rename(columns={"open_time_date_utc": "time"}, inplace=True)
     candles["time"] = candles["time"].apply(lambda dt: int(dt.timestamp()))
-    return {"candles": candles.to_dict(orient="records"), "statistics": statistics}
+    report_additional, report = statistics
+    # report_analysis = analyze_backtest_report(
+    #     report,
+    #     report_additional,
+    #     logger=logger,
+    # )
+    return {
+        "candles": candles.to_dict(orient="records"),
+        "statistics": statistics,
+    }
 
 
 def build_daily_df(daily_stats):
@@ -358,6 +396,16 @@ def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30
     """
     df must contain: date, equity
     """
+    if df is None or df.empty or "date" not in df.columns or "equity" not in df.columns:
+        return pd.DataFrame()
+
+    df = df[["date", "equity"]].copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["equity"] = pd.to_numeric(df["equity"], errors="coerce")
+    df = df.dropna(subset=["date", "equity"]).sort_values("date").reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame()
+
     results = []
 
     dates = df['date']
@@ -366,13 +414,16 @@ def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30
     start_idx = 0
     n = len(df)
 
-    while True:
+    while start_idx < n:
         start_date = dates.iloc[start_idx]
         end_date = start_date + pd.Timedelta(days=window_days)
 
         # Find the index where the window ends
-        end_idx = df.index[df['date'] <= end_date].max()
-        if pd.isna(end_idx) or end_idx <= start_idx:
+        candidate_idx = df.index[df['date'] <= end_date]
+        if len(candidate_idx) == 0:
+            break
+        end_idx = int(candidate_idx.max())
+        if end_idx <= start_idx:
             break
 
         eq_start = equity[start_idx]
@@ -380,14 +431,25 @@ def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30
 
         # CAGR
         years = (dates.iloc[end_idx] - dates.iloc[start_idx]).days / 365
-        if years <= 0 or eq_start <= 0:
-            start_idx += step_days
+        if years <= 0 or eq_start <= 0 or eq_end <= 0:
+            next_date = start_date + pd.Timedelta(days=step_days)
+            next_idx = df.index[df['date'] >= next_date].min()
+            if pd.isna(next_idx):
+                break
+            start_idx = int(next_idx)
             continue
 
         cagr = (eq_end / eq_start) ** (1 / years) - 1
 
         # Max drawdown (inside the window)
         window_eq = equity[start_idx:end_idx + 1]
+        if np.any(window_eq <= 0):
+            next_date = start_date + pd.Timedelta(days=step_days)
+            next_idx = df.index[df['date'] >= next_date].min()
+            if pd.isna(next_idx):
+                break
+            start_idx = int(next_idx)
+            continue
         peak = np.maximum.accumulate(window_eq)
         dd = (window_eq - peak) / peak
         max_dd = dd.min()
@@ -407,7 +469,7 @@ def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30
         next_idx = df.index[df['date'] >= next_date].min()
         if pd.isna(next_idx):
             break
-        start_idx = next_idx
+        start_idx = int(next_idx)
 
     return pd.DataFrame(results)
 
@@ -774,7 +836,6 @@ def generate_backtest_report(
             f"short_win_rate": short_win_rate,
         },
         f"strategy": strategy_summary,
-        f"trade_logs": list(getattr(strat, "trade_logs", [])),
         f"model_metrics": model_stats,
         f"sub_model_metrics": sub_model_stats,
     }
@@ -784,6 +845,7 @@ def generate_backtest_report(
             f"customize":perf,
         },
         f"strategy_detail": strategy_detail,
+        f"trade_logs": list(getattr(strat, "trade_logs", [])),
     }
 
     # common.dump_params_json(train_cfg,logger)
@@ -863,13 +925,13 @@ def generate_backtest_report(
     return (report_additional,report)
 
 if __name__ == "__main__":
-    train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.TrainTask.DIRECT_3CLASS)
+    train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.TrainTask.DIRECTION)
     start_time = time.time()
     pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
     exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'simulation'),pre_para.symbol, pre_para.interval)
     logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
     para = StrategyPara(
-        strategy_config=MlStrategyConfig(min_hold_bars=pre_para.predict_num),
+        strategy_config=BbmStrategyConfig(),
     )
     runner_config = RunnerConfig(
         strategy_config=para.strategy_config,
@@ -882,10 +944,14 @@ if __name__ == "__main__":
         ),
     )
     report = main(logger, runner_config)
-    append_jsonl(
-        os.path.join(exp_dir, "reports.jsonl"),
-        report["statistics"][1]
+    output_path = os.path.join(exp_dir, "reports.jsonl")
+    append_jsonl(output_path, report["statistics"][1])
+    plot_equity_curves(
+        report["statistics"][1],
+        exp_dir,
+        file_name="equity_curve.png",
+        logger=logger,
     )
     end_time = time.time()
     run_time = end_time - start_time
-    logger.info(f": run_time: {run_time:.4f} s")
+    logger.info(f": run_time: {run_time:.4f} s, report saved to {output_path}")

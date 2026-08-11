@@ -567,7 +567,9 @@ def run_one_backtest(
                 strategy_config=sim_task.strategy_config,
                 broker_config=sim_task.broker_config,
                 data_config=backtest_runner.ModelDataConfig(
-                    atr_ref_bars=sim_task.strategy_config.min_hold_bars,
+                    atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
+                        sim_task.strategy_config
+                    ),
                     prep_output_dir=prep_output_dir,
                     train_output_dir=fusion_dir,
                     device=device,

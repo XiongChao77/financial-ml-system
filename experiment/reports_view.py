@@ -11,6 +11,7 @@ import copy
 # Import project modules
 from data_process.common import *
 from data_process import common 
+from trade.runner.analyze_backtest_report import plot_equity_curves
 
 output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments',"selected_configs")
 os.makedirs(output_dir, exist_ok=True)
@@ -336,13 +337,13 @@ def extract_row(report, src_path):
 def basic_filter(all_results):
     ps_results_0,unselected = filter_by_criteria(all_results, period ='short', cagr=0)
     print(f"After 0-screening short: {len(ps_results_0)}, {len(ps_results_0)/len(all_results)*100:.2f}%")
-    ps_results,unselected = filter_by_criteria(ps_results_0, period ='short', cagr=0.2)
-    print(f"After pre-screening short: {len(ps_results)}, {len(ps_results)/len(ps_results_0)*100:.2f}%")
-    pf_results,unselected = filter_by_criteria(ps_results, period ='forward', cagr=0.2)
-    print(f"After pre-screening forward: {len(pf_results)}, {len(pf_results)/len(ps_results)*100:.2f}%")
-    l_results,unselected = filter_by_criteria(pf_results, period ='long', cagr=0)
-    print(f"After pre-screening long: {len(l_results)}, {len(l_results)/len(pf_results)*100:.2f}%")
-    return l_results
+    # ps_results,unselected = filter_by_criteria(ps_results_0, period ='short', cagr=0.2)
+    # print(f"After pre-screening short: {len(ps_results)}, {len(ps_results)/len(ps_results_0)*100:.2f}%")
+    # pf_results,unselected = filter_by_criteria(ps_results, period ='forward', cagr=0.2)
+    # print(f"After pre-screening forward: {len(pf_results)}, {len(pf_results)/len(ps_results)*100:.2f}%")
+    # ps_results_0,unselected = filter_by_criteria(pf_results, period ='long', cagr=0)
+    # print(f"After pre-screening long: {len(ps_results_0)}, {len(ps_results_0)/len(pf_results)*100:.2f}%")
+    return ps_results_0
 
 def filter_and_rank_strategies(data, metric, k=30, final_sort_key="l_cagr"):
     """
@@ -517,83 +518,6 @@ def compute_correlation(all_results, output_dir):
 
     print(f"📊 Dynamic-size correlation heatmap saved (Size: {fig_width:.1f}x{fig_height:.1f} in): {save_path}")
 
-def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.png", start_index=0):
-    save_path = os.path.join(output_dir, file_name)
-
-    # ===== 1. Get price background data =====
-    pere_para = all_results[0]['long']['params']['common']
-    price_file = os.path.join(
-        common.PROJECT_DATA_DIR, 
-        pere_para['trading_type'],
-        f"{pere_para['symbol']}_{pere_para['interval']}.csv"
-    )
-    
-    price_df = pd.read_csv(price_file)
-    price_df['open_time_date_utc'] = pd.to_datetime(price_df['open_time_date_utc'])
-    price_df.set_index('open_time_date_utc', inplace=True)
-    price_series = price_df['close'].sort_index()
-
-    fig, ax1 = plt.subplots(figsize=(16, 8))
-    ax1.plot(price_series.index, price_series, color='black', linewidth=0.8, alpha=0.15, label='Market Price')
-    ax1.set_ylabel('Market Price (USD)')
-    
-    ax2 = ax1.twinx()
-    ax2.set_ylabel('Continuous Strategy Equity (Normalized)')
-
-    # ===== 2. Concatenate and plot curves =====
-    # Record split timestamps for vertical lines
-    split_dates = {}
-
-    for i, r in enumerate(all_results):
-        segments = []
-        current_multiplier = 1.0
-        
-        for period in ['long', 'short', 'forward']:
-            period_data = r.get(period)
-            daily_list = common.recursive_get(period_data,'daily_loss_list')
-
-            df = pd.DataFrame(daily_list)
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.sort_values('date').set_index('date')
-            
-            # Record the start time of this phase (used to draw vertical lines)
-            if period not in split_dates:
-                split_dates[period] = df.index[0]
-            
-            returns_sequence = df['equity'] / df['equity'].iloc[0]
-            df['continuous_equity'] = returns_sequence * current_multiplier
-            segments.append(df[['continuous_equity']])
-            current_multiplier = df['continuous_equity'].iloc[-1]
-
-        full_path_df = pd.concat(segments)
-        full_path_df = full_path_df[~full_path_df.index.duplicated(keep='first')]
-        
-        ax2.plot(full_path_df.index, full_path_df['continuous_equity'], 
-                 linewidth=1.5, alpha=0.8, label=f"S{start_index + i}")
-
-    # ===== 3. Draw phase-split vertical lines =====
-    # Only draw lines, no labels, with lighter color (alpha=0.3)
-    if 'short' in split_dates:
-        s_start = split_dates['short']
-        # Use thin blue dashed line to mark transition from Long to Short
-        ax1.axvline(x=s_start, color='blue', linestyle='--', linewidth=1, alpha=0.3)
-
-    if 'forward' in split_dates:
-        f_start = split_dates['forward']
-        # Use red dashed line to mark entering the critical Forward phase
-        ax1.axvline(x=f_start, color='red', linestyle='--', linewidth=1, alpha=0.3)
-
-    # ===== 4. Legend and styling =====
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, loc='upper left', ncol=4, fontsize=8)
-
-    plt.title(f"Strategy Performance: Long (Train) -> Short (Val) -> Forward (Test)")
-    fig.tight_layout()
-    print(f"[SAVE] {save_path}")
-    plt.savefig(save_path, dpi=200)
-    plt.close()
-
 def plot_in_batches(all_results, output_dir, batch_size=5):
     total = len(all_results)
     
@@ -621,7 +545,9 @@ def main():
     exp_dir3 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','18_41_56')
     exp_dir4 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','20_17_30')
     exp_dir17= os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-08-02','20_56_16')
-    exp_dir_list = [exp_dir17]
+    exp_dir18= os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-08-11','12_19_25')
+
+    exp_dir_list = [exp_dir18]
     filter_report = None
     # filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
@@ -642,22 +568,22 @@ def main():
     print(f"Total reports loaded: {len(rows)}")
     uin_records = merge_selected(rows)
     print(f"Total uint reports: {len(uin_records)}")
-    if not filter_report:
-        analyze_holdbar(uin_records,target_key="seq_len", period ='short',metric_key="daily_freq")
-        uin_records = basic_filter(uin_records)
-        analyze_holdbar(uin_records,target_key="seq_len", period ='long',metric_key="cagr")
-        plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
-        plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
-        plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
-        save_raw_reports(uin_records,output_dir, "filtered_raw_reports.jsonl")
-        exit()
+    # if not filter_report:
+    #     analyze_holdbar(uin_records,target_key="seq_len", period ='short',metric_key="daily_freq")
+    #     uin_records = basic_filter(uin_records)
+    #     analyze_holdbar(uin_records,target_key="seq_len", period ='long',metric_key="cagr")
+    #     plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
+    #     plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
+    #     plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
+    #     save_raw_reports(uin_records,output_dir, "filtered_raw_reports.jsonl")
+    #     exit()
     analyze_holdbar(uin_records,target_key="stride",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="min_hold_bars",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="seq_len",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="vol_ewma_span", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="predict_num", period ='long',metric_key="cagr")
-    analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='long',metric_key="cagr")
-    analyze_holdbar(uin_records,target_key="atr_sl_long_mult", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="min_expected_move_pct", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="model_type", period ='long',metric_key="cagr")
     # analyze_model_performance_correlation(uin_records)
     # analyze_model_metrics_by_decile(uin_records)
     # exit()
@@ -691,6 +617,8 @@ def main():
         l_results,unselected = filter_by_criteria(l_results, period ='long', cagr=0.3,calmar = 0.5,sharpe = 0.5,rc_pos_ratio = 0.5,daily_freq = 0.1)
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.8)
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.6)
+    if symbol == 'DOGEUSDT' and interval=='30m':
+        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0)
     if symbol == 'ETHUSDT' and interval=='15m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.8,calmar = 1.2,daily_freq = 0.1,sharpe = 0.5)
     if symbol == 'ETHUSDT' and interval=='30m':
@@ -727,7 +655,7 @@ def main():
     ]
     print(f"🎯 hash fitler, {len(l_results)} -> {len(selected)}")
     stats, f_map, groups = analyze_holdbar(selected,target_key="feature_conf_list",period ='long', metric_key="cagr")
-    show_performance(sorted_selected1,output_dir,3)
+    show_performance(l_results,output_dir,3)
     # exit()
     # stable_selected1 = filter_stable(rc_median_results)
     # print(f"-------------After filter_stable: {len(stable_selected1)} reports")

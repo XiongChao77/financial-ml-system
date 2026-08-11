@@ -20,6 +20,8 @@ class PredictionFeed(bt.feeds.PandasData):
         "pred_prob",
         "label",
         "atr_pct",
+        "threshold_long",
+        "threshold_short",
         "slow_atr",
         "vol_regime",
         "bars_to_close",
@@ -28,6 +30,8 @@ class PredictionFeed(bt.feeds.PandasData):
         ("pred", -1),
         ("pred_prob", -1),
         ("atr_pct", -1),        # auto-detected by column name
+        ("threshold_long", -1), # BBM upper barrier distance
+        ("threshold_short", -1),# BBM lower barrier distance
         ("slow_atr", -1),       # auto-detected by column name
         ("vol_regime", -1),     # auto-detected by column name
         ("label", -1),
