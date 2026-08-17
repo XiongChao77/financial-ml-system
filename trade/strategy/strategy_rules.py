@@ -68,12 +68,12 @@ class RulesStrategy(StrategyBase):
     def process(self, df: pd.DataFrame, current_time: datetime, account_equity: float, 
                curr_dir: PositionDir, curr_pos_qty: float) -> TradeIntent:
         
-        if len(df) < self.config.entry_period: return TradeIntent(ActionType.HOLD)
+        if len(df) < self.config.entry_period: return TradeIntent(ActionType.NOOP)
 
         # 1. Daily risk audit and circuit breaker (sync from TurtleStrategy)
         self._update_daily_equity(current_time, account_equity)
         if self.is_halted_today:
-            return TradeIntent(ActionType.HOLD)
+            return TradeIntent(ActionType.NOOP)
 
         daily_loss_abs = max(0.0, self.day_start_equity - account_equity)
         max_loss_allowed_abs = self.day_start_equity * self.config.max_daily_loss_pct
@@ -81,7 +81,7 @@ class RulesStrategy(StrategyBase):
 
         if daily_loss_abs >= max_loss_allowed_abs:
             self.is_halted_today = True
-            self.logger.warning(f"🚨 [MELTDOWN] 日亏损触及上限! 亏损: {daily_loss_abs/self.day_start_equity:.2f}, 强平离场。| Price: {df['close'].iloc[-1]}")
+            self.logger.warning(f"🚨 [MELTDOWN] Daily loss limit reached; forced exit | Loss: {daily_loss_abs/self.day_start_equity:.2f} | Price: {df['close'].iloc[-1]}")
             self.venue.close_position()
             return TradeIntent(ActionType.CLOSE)
 
@@ -103,13 +103,13 @@ class RulesStrategy(StrategyBase):
                 self.layer_sizes, self.curr_layers = new_sizes, len(new_sizes)
             else:
                 if self.curr_layers != self.config.max_layers:
-                    self.logger.error(f"⚠️ [仓位脱节] 无法匹配层级！实际:{abs_qty:.4f}")
+                    self.logger.error(f"⚠️ [POSITION MISMATCH] Unable to match layer | Actual: {abs_qty:.4f}")
                     self.curr_layers = self.config.max_layers
 
         # 3. Core anchoring: unit sizing and dynamic stop loss (optimized)
         # Theoretical unit (from the risk percentage and 2*ATR)
         # Unit Shares = (Balance * Risk) / (2 * ATR)
-        if atr <= 0: return TradeIntent(ActionType.HOLD)
+        if atr <= 0: return TradeIntent(ActionType.NOOP)
         
         raw_unit_shares = (account_equity * self.config.risk_per_trade) / (2.0 * atr)
         
@@ -163,7 +163,7 @@ class RulesStrategy(StrategyBase):
                 self.venue.submit_order(final_unit_shares, is_buy=(curr_dir == PositionDir.POSITIVE ), stop_loss=final_sl_pct)
                 return TradeIntent(ActionType.PYRAMID)
 
-        return TradeIntent(ActionType.HOLD)
+        return TradeIntent(ActionType.NOOP)
 
     def _find_matched_layers(self, abs_qty):
         """Keeps the original two-sided layer matching logic"""
@@ -203,9 +203,9 @@ class RulesStrategy(StrategyBase):
 
         if abs(gap_price_pct) > price_gap_threshold:
             self.logger.warning(
-                f"⚠️ [价格跳空] 出现于 {curr_time_str} | 缺口: {gap_price_pct:.2%} | "
-                f"时间跨度: {prev_time_str} -> {curr_time_str} | "
-                f"价格跳变: {prev_close:.4f} (前收) -> {current_open:.4f} (今开)"
+                f"⚠️ [PRICE GAP] Detected at {curr_time_str} | Gap: {gap_price_pct:.2%} | "
+                f"Time span: {prev_time_str} -> {curr_time_str} | "
+                f"Price jump: {prev_close:.4f} (previous close) -> {current_open:.4f} (current open)"
             )
 
         if False:
@@ -222,6 +222,6 @@ class RulesStrategy(StrategyBase):
                 
                 if time_delta > expected_delta:
                     self.logger.error(
-                        f"⏰ [时间跳空/数据缺失] {current_ts} 与上一根 K 线相差 {time_delta} "
-                        f"(预期: {expected_delta})"
+                        f"⏰ [TIME GAP/MISSING DATA] {current_ts} is {time_delta} after the previous bar "
+                        f"(expected: {expected_delta})"
                     )

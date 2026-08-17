@@ -14,8 +14,8 @@ class MT5Venue(VenueBase):
         self.path = path
         
         if not mt5.initialize(path=path):
-            self.logger.error(f"❌ 初始化失败! 错误码: {mt5.last_error()}")
-            raise RuntimeError("MT5 初始化失败")
+            self.logger.error(f"❌ Initialization failed | Error code: {mt5.last_error()}")
+            raise RuntimeError("MT5 initialization failed")
         else:
             self.logger.info(f"init success | {self.magic}")
         

@@ -161,8 +161,8 @@ class RestartableMartingaleStrategy(StrategyBase):
         self.equity_curve: List[float] = []   # total equity = reserve + trade account
 
         self.logger.info(
-            f"🎲 [MARTINGALE INIT] 总资金={init_equity:.2f} | 交易账户={self.trade_base:.2f} "
-            f"| 储备账户={self.reserve:.2f} | 最大补仓={self.config.max_safety_orders} 层"
+            f"🎲 [MARTINGALE INIT] Total capital={init_equity:.2f} | Trading account={self.trade_base:.2f} "
+            f"| Reserve account={self.reserve:.2f} | Max safety orders={self.config.max_safety_orders}"
         )
 
     # ------------------------------------------------------------------
@@ -249,7 +249,7 @@ class RestartableMartingaleStrategy(StrategyBase):
         max_qty = free_margin * self.leverage / max(state.market.price, 1e-12)
         if qty > max_qty:
             self.logger.debug(
-                f"🛡️ [MARGIN CUT] layer={layer + 1} 需求 {qty:.4f} → {max_qty:.4f} "
+                f"🛡️ [MARGIN CUT] layer={layer + 1} requested {qty:.4f} → {max_qty:.4f} "
                 f"(free_margin={free_margin:.2f})"
             )
             qty = max_qty
@@ -276,9 +276,9 @@ class RestartableMartingaleStrategy(StrategyBase):
         )
         self.deaths.append(rec)
         self.logger.warning(
-            f"💀 [DEATH #{rec.index}] {state.current_time} | 本金={self.trade_base:.2f} "
-            f"→ 净值={self.trade_equity:.2f} | 亏损={loss:.2f} | 本轮已提取利润={self.swept_this_life:.2f} "
-            f"| 层数={self.cycle_layers} | 存活={rec.bars_alive} bars | 储备={self.reserve:.2f}"
+            f"💀 [DEATH #{rec.index}] {state.current_time} | Capital={self.trade_base:.2f} "
+            f"→ Equity={self.trade_equity:.2f} | Loss={loss:.2f} | Profit swept this life={self.swept_this_life:.2f} "
+            f"| Layers={self.cycle_layers} | Survived={rec.bars_alive} bars | Reserve={self.reserve:.2f}"
         )
         self._reset_cycle(ExitReason.DEATH)
         self.phase = AccountPhase.PAUSED
@@ -296,9 +296,9 @@ class RestartableMartingaleStrategy(StrategyBase):
         if draw < self.min_restart_capital or new_base <= 0:
             self.phase = AccountPhase.DEAD
             self.logger.error(
-                f"🪦 [GAME OVER] {state.current_time} | 储备={self.reserve:.2f} 已无法拨出启动资金 "
-                f"(需要 >= {self.min_restart_capital:.2f}) | 死亡次数={len(self.deaths)} "
-                f"| 累计提取利润={self.total_swept:.2f}"
+                f"🪦 [GAME OVER] {state.current_time} | Reserve={self.reserve:.2f} cannot fund another start "
+                f"(required >= {self.min_restart_capital:.2f}) | Deaths={len(self.deaths)} "
+                f"| Total swept profit={self.total_swept:.2f}"
             )
             return False
 
@@ -314,8 +314,8 @@ class RestartableMartingaleStrategy(StrategyBase):
         self.life_start_bar = self.bar_index
         self.phase = AccountPhase.RUNNING
         self.logger.warning(
-            f"🔁 [RESTART #{self.restart_count}] {state.current_time} | 拨款={draw:.2f} "
-            f"(成本={cost:.2f}) | 新交易本金={self.trade_base:.2f} | 剩余储备={self.reserve:.2f}"
+            f"🔁 [RESTART #{self.restart_count}] {state.current_time} | Allocation={draw:.2f} "
+            f"(cost={cost:.2f}) | New trading capital={self.trade_base:.2f} | Remaining reserve={self.reserve:.2f}"
         )
         return True
 
@@ -344,8 +344,8 @@ class RestartableMartingaleStrategy(StrategyBase):
         self.swept_this_life += move
         self.last_sweep_time = state.current_time
         self.logger.info(
-            f"💰 [SWEEP] {state.current_time} | 提取={move:.2f} → 储备={self.reserve:.2f} "
-            f"| 交易本金={self.trade_base:.2f} | 累计提取={self.total_swept:.2f}"
+            f"💰 [SWEEP] {state.current_time} | Swept={move:.2f} → Reserve={self.reserve:.2f} "
+            f"| Trading capital={self.trade_base:.2f} | Total swept={self.total_swept:.2f}"
         )
 
     # ------------------------------------------------------------------
@@ -436,14 +436,14 @@ class RestartableMartingaleStrategy(StrategyBase):
 
             if self.config.cycle_stop_pct is not None and unreal <= -self.trade_base * self.config.cycle_stop_pct:
                 self.logger.warning(
-                    f"🛑 [CYCLE STOP] 浮亏={unreal:.2f} >= 本金*{self.config.cycle_stop_pct:.0%} "
+                    f"🛑 [CYCLE STOP] Unrealized loss={unreal:.2f} >= capital*{self.config.cycle_stop_pct:.0%} "
                     f"| layers={self.cycle_layers}"
                 )
                 self._reset_cycle(ExitReason.CYCLE_STOP)
                 return self._emit(TradeIntent(ActionType.CLOSE, reason="cycle_stop"), state)
 
             if self.config.max_hold_bars is not None and self.cycle_bars >= self.config.max_hold_bars:
-                self.logger.debug(f"⌛ [TIMEOUT] 持仓 {self.cycle_bars} bars，强制离场")
+                self.logger.debug(f"⌛ [TIMEOUT] Held for {self.cycle_bars} bars; forcing exit")
                 self._reset_cycle(ExitReason.TIMEOUT)
                 return self._emit(TradeIntent(ActionType.CLOSE, reason="timeout"), state)
 
@@ -463,7 +463,7 @@ class RestartableMartingaleStrategy(StrategyBase):
                             ),
                             state,
                         )
-                    self.logger.debug("⚠️ [NO MARGIN] 无法继续补仓，裸抗中")
+                    self.logger.debug("⚠️ [NO MARGIN] Cannot add another safety order; holding current exposure")
             return self._emit(TradeIntent(ActionType.NOOP, reason="hold"), state)
 
         # ---------- 4. flat: sweep the profit first, then start a new cycle ----------
@@ -507,7 +507,7 @@ class RestartableMartingaleStrategy(StrategyBase):
         return action
 
     def execute_action(self, action: TradeIntent):
-        if action.action == ActionType.NOOP or action.action == ActionType.HOLD:
+        if action.action == ActionType.NOOP or action.action == ActionType.NOOP:
             return
         if action.action == ActionType.CLOSE:
             self.venue.close_position()
@@ -526,18 +526,18 @@ class RestartableMartingaleStrategy(StrategyBase):
     # Final report
     # ------------------------------------------------------------------
     def finalize(self):
-        self.logger.info("\n" + "🎲" * 5 + " 可重启马丁 结算报告 " + "🎲" * 5)
+        self.logger.info("\n" + "🎲" * 5 + " Restartable Martingale Summary " + "🎲" * 5)
         self.logger.info(
-            f"[账户] 储备={self.reserve:.2f} | 交易账户={self.trade_equity:.2f} "
-            f"| 合计={self.total_equity:.2f} | 初始={self.init_equity:.2f} "
-            f"| 总收益率={(self.total_equity / max(self.init_equity, 1e-9) - 1):.2%}"
+            f"[ACCOUNT] Reserve={self.reserve:.2f} | Trading equity={self.trade_equity:.2f} "
+            f"| Total={self.total_equity:.2f} | Initial={self.init_equity:.2f} "
+            f"| Total return={(self.total_equity / max(self.init_equity, 1e-9) - 1):.2%}"
         )
         self.logger.info(
-            f"[生命周期] 死亡={len(self.deaths)} 次 | 重启={self.restart_count} 次 "
-            f"| 暂停={self.paused_bars} bars | 最终状态={self.phase.value}"
+            f"[LIFECYCLE] Deaths={len(self.deaths)} | Restarts={self.restart_count} "
+            f"| Paused={self.paused_bars} bars | Final state={self.phase.value}"
         )
         self.logger.info(
-            f"[利润提取] 累计提取={self.total_swept:.2f} | 重启成本={self.total_restart_cost:.2f}"
+            f"[PROFIT SWEEP] Total swept={self.total_swept:.2f} | Restart cost={self.total_restart_cost:.2f}"
         )
 
         if self.deaths:
@@ -545,18 +545,18 @@ class RestartableMartingaleStrategy(StrategyBase):
             swept = np.array([d.swept for d in self.deaths])
             alive = np.array([d.bars_alive for d in self.deaths])
             self.logger.info(
-                f"[死亡分布] 平均亏损={losses.mean():.2f} | 最大={losses.max():.2f} "
-                f"| 死前平均提取={swept.mean():.2f} | 平均存活={alive.mean():.0f} bars "
-                f"| 最短存活={alive.min()} bars"
+                f"[DEATH DISTRIBUTION] Average loss={losses.mean():.2f} | Maximum={losses.max():.2f} "
+                f"| Average swept before death={swept.mean():.2f} | Average survival={alive.mean():.0f} bars "
+                f"| Minimum survival={alive.min()} bars"
             )
             edge = swept.mean() - losses.mean()
-            verdict = "✅ 正期望" if edge > 0 else "❌ 负期望"
+            verdict = "✅ Positive expectancy" if edge > 0 else "❌ Negative expectancy"
             self.logger.info(
-                f"[核心检验] E[死前提取] - E[死亡损失] = {swept.mean():.2f} - {losses.mean():.2f} "
+                f"[CORE CHECK] E[swept before death] - E[death loss] = {swept.mean():.2f} - {losses.mean():.2f} "
                 f"= {edge:.2f} → {verdict}"
             )
         else:
-            self.logger.info("[死亡分布] 回测期内交易账户未死亡。")
+            self.logger.info("[DEATH DISTRIBUTION] The trading account did not die during the backtest.")
 
         if self.cycles:
             pnls = np.array([c.pnl for c in self.cycles])
@@ -564,15 +564,15 @@ class RestartableMartingaleStrategy(StrategyBase):
             bars = np.array([c.bars for c in self.cycles])
             wins = int((pnls > 0).sum())
             self.logger.info(
-                f"[马丁轮次] n={len(self.cycles)} | 胜率={wins / len(self.cycles):.1%} "
-                f"| 平均盈亏={pnls.mean():.2f} | 最差={pnls.min():.2f} "
-                f"| 平均层数={layers.mean():.2f} | 最深={self.max_layers_seen} 层 "
-                f"| 平均持仓={bars.mean():.1f} bars"
+                f"[MARTINGALE CYCLES] n={len(self.cycles)} | Win rate={wins / len(self.cycles):.1%} "
+                f"| Average PnL={pnls.mean():.2f} | Worst={pnls.min():.2f} "
+                f"| Average layers={layers.mean():.2f} | Deepest={self.max_layers_seen} "
+                f"| Average holding period={bars.mean():.1f} bars"
             )
             reasons = {}
             for c in self.cycles:
                 reasons[c.reason] = reasons.get(c.reason, 0) + 1
-            self.logger.info(f"[离场原因] {reasons}")
+            self.logger.info(f"[EXIT REASONS] {reasons}")
         self.logger.info("=" * 60 + "\n")
 
     def report(self) -> dict:

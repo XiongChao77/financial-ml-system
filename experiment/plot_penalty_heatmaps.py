@@ -42,7 +42,7 @@ def recursive_get(data, target_key):
                 
     return None
 
-def load_and_process(path: Path, period: str = 'short') -> pd.DataFrame:
+def load_and_process(path: Path, period: str = 'forward') -> pd.DataFrame:
     """Data loading function with debug output"""
     try:
         # 1. Check if file exists
@@ -131,7 +131,7 @@ def calculate_robustness(pivot_df: pd.DataFrame):
         print(f"⚠️ Error in calculate_robustness: {e}")
         return pd.DataFrame()
 
-def plot_enhanced_heatmaps(df: pd.DataFrame, metric: str, outdir: Path, period: str = 'short'):
+def plot_enhanced_heatmaps(df: pd.DataFrame, metric: str, outdir: Path, period: str = 'forward'):
     """
     Generate three heatmaps for each metric: Mean, Max, Robustness
     """
@@ -189,13 +189,13 @@ def plot_enhanced_heatmaps(df: pd.DataFrame, metric: str, outdir: Path, period: 
     plt.savefig(os.path.join(outdir, f"detailed_analysis_{period}_{metric}.png"), dpi=150, bbox_inches="tight")
     plt.close()
 
-def save_detailed_stats(df: pd.DataFrame, outdir: Path, period: str = 'short'):
+def save_detailed_stats(df: pd.DataFrame, outdir: Path, period: str = 'forward'):
     """Generate detailed statistics CSV.
 
     Args:
         df: data DataFrame
         outdir: output directory
-        period: 'short' or 'long'
+        period: 'forward' or 'long'
     """
     for metric in ["cagr", "calmar"]:
         pivot = df.groupby(["flip_penalty", "miss_penalty"])[metric].mean().unstack()
@@ -221,8 +221,8 @@ def main():
     outdir = os.path.join(path.parent, 'heatmaps')
     os.makedirs(outdir, exist_ok=True)
 
-    # Process 'short' and 'long' periods
-    for period in ['short', 'long']:
+    # Process the full forward test set and full-history long periods.
+    for period in ['long', 'forward']:
         print(f"\n📊 Processing {period.upper()} period...")
         df = load_and_process(path, period=period)
         if df.empty:

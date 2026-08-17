@@ -24,7 +24,7 @@ class MarketScanner:
         """
         Top N USDT contracts by turnover
         """
-        self.logger.info(f"🔍 正在扫描全市场，寻找成交额 Top {top_n} 的标的...")
+        self.logger.info(f"🔍 Scanning the market for the top {top_n} instruments by turnover...")
         all_tickers = []
         cursor = ""
         
@@ -56,7 +56,7 @@ class MarketScanner:
             return sorted_tickers[:top_n]
             
         except Exception as e:
-            self.logger.error(f"❌ 扫描市场失败: {e}")
+            self.logger.error(f"❌ Market scan failed: {e}")
             return []
         
     def analyze_coin_v3(self, ticker_info):
@@ -202,9 +202,9 @@ class MarketScanner:
         
         # D. Quick trend assessment
         # Simple SMA slope check
-        trend = "震荡"
-        if z_score > 2.0: trend = "超买/拉升"
-        elif z_score < -2.0: trend = "超卖/暴跌"
+        trend = "range-bound"
+        if z_score > 2.0: trend = "overbought/rallying"
+        elif z_score < -2.0: trend = "oversold/selling off"
         elif volatility_pct < 0.5: trend = "dead fish" # too little movement
 
         return {
@@ -220,13 +220,13 @@ class MarketScanner:
     def run_report(self):
         # 1. Get the list
         top_coins = self.get_top_liquid_coins(50)
-        self.logger.info(f"✅ 锁定 Top 50 流动性标的，开始逐一评估...")
+        self.logger.info("✅ Selected the top 50 liquid instruments; starting evaluation...")
         
         results = []
         
         for i, coin in enumerate(top_coins):
             # Print the progress
-            print(f"\r⏳ 正在分析 [{i+1}/50]: {coin['symbol']} ...", end="", flush=True)
+            print(f"\r⏳ Analyzing [{i+1}/50]: {coin['symbol']} ...", end="", flush=True)
             
             metrics = self.analyze_coin_v3(coin)
             if metrics:
@@ -244,7 +244,7 @@ class MarketScanner:
         df_sorted = df.sort_values(by="Min_Stab", ascending=False)
         
         print("\n" + "="*100)
-        print("📊 市场多维扫描报告 (分段一致性版)")
+        print("📊 Multidimensional Market Scan Report (Segment Consistency)")
         print("="*100)
         
         #  Make sure these column names match the keys returned by analyze_coin exactly
@@ -255,7 +255,7 @@ class MarketScanner:
         # 5. Save the file
         filename = f"crypto_scan_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
         df_sorted.to_csv(filename, index=False)
-        self.logger.info(f"💾 报告已保存至: {filename}")
+        self.logger.info(f"💾 Report saved to: {filename}")
         
         return df_sorted
 
@@ -275,4 +275,4 @@ if __name__ == "__main__":
         scanner = MarketScanner(engine)
         scanner.run_report()
     except Exception as e:
-        print(f"请检查配置: {e}")
+        print(f"Please check the configuration: {e}")

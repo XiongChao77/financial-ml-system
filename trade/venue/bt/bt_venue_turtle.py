@@ -82,11 +82,3 @@ class TurtleBtVenue(BtVenue):
             last_entry_price = last_entry_price,
             # atr = current_atr,
         )
-
-
-    # ----------------------------------------------------------------
-    # Audit helpers
-    # ----------------------------------------------------------------
-
-    def stop(self):
-        self.logger.info(f"🚩 回测结束 | 最大保证金占用: {self.max_margin_level:.2%}")

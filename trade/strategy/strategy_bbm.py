@@ -13,12 +13,12 @@ from trade.core.venue_base import VenueBase
 class BbmStrategyConfig:
     """Strategy parameters for the Binary Barrier Model label backtest."""
 
-    strategy_type: str = "bbm"
+    compound: bool = True
     risk_per_trade_pct: float = 0.02
     allow_long: bool = True
     allow_short: bool = True
     prob_thresh: Optional[float] = None
-    min_expected_move_pct: float = 0.01 
+    min_expected_move_pct: float = 0.01
     max_daily_loss_pct: float = 0.025
 
 
@@ -54,6 +54,7 @@ class BbmSignalStrategy(StrategyBase):
         self.last_trade_date = None
         self.is_halted_today = False
         self.meltdown_days = 0
+        self.unexplained_meltdown = 0
         self.entries = 0
         self.skipped_missing_threshold = 0
         self.skipped_small_threshold = 0
@@ -62,6 +63,8 @@ class BbmSignalStrategy(StrategyBase):
     def _update_daily_state(self, current_time: datetime, account_equity: float):
         current_date = current_time.date()
         if self.last_trade_date != current_date:
+            # if current_date == datetime(2021, 4, 5).date():
+            self.logger.debug(f"new day {current_date}, equity:{account_equity}")
             self.day_start_equity = account_equity
             self.last_trade_date = current_date
             self.is_halted_today = False
@@ -85,23 +88,34 @@ class BbmSignalStrategy(StrategyBase):
             return float(long_threshold), float(short_threshold)
         return 0.0, 0.0
 
+    def _risk_equity(self, account_equity: float) -> float:
+        return account_equity if self.config.compound else self.init_equity
+
+    def _daily_loss_base(self) -> float:
+        return self.day_start_equity if self.config.compound else self.init_equity
+
+    def _daily_loss_limit(self) -> float:
+        return self._daily_loss_base() * self.config.max_daily_loss_pct
+
+    def _remaining_daily_loss(self, account_equity: float) -> float:
+        """Equity distance to the daily-loss floor, including unrealized PnL."""
+        daily_loss_floor = self.day_start_equity - self._daily_loss_limit()
+        return account_equity - daily_loss_floor
+
+    def _risk_per_trade(self, account_equity: float) -> float:
+        return self._risk_equity(account_equity) * self.config.risk_per_trade_pct
+
     def _calculate_order_qty(
         self,
         state: Observation,
         stop_loss_pct: float,
-        remaining_risk_budget: float,
     ) -> float:
         if not valid_pct(stop_loss_pct):
             return 0.0
 
-        risk_equity = max(self.init_equity, state.account.equity)
-        intended_qty = (
-            self.config.risk_per_trade_pct * risk_equity
-        ) / (state.market.price * stop_loss_pct)
-        max_risk_qty = (
-            remaining_risk_budget * 0.8
-        ) / (state.market.price * stop_loss_pct)
-        final_qty = min(intended_qty, max_risk_qty)
+        final_qty = self._risk_per_trade(state.account.equity) / (
+            state.market.price * stop_loss_pct
+        )
 
         required_margin = final_qty * state.market.price / self.leverage
         if required_margin > state.account.equity:
@@ -112,7 +126,7 @@ class BbmSignalStrategy(StrategyBase):
             return 0.0
         return final_qty
 
-    def process(self, state: Observation) -> TradeIntent:
+    def _process(self, state: Observation) -> TradeIntent:
         signal = state.market.signal
         if signal == Signal.INVALID:
             signal = Signal.NEUTRAL
@@ -121,16 +135,33 @@ class BbmSignalStrategy(StrategyBase):
 
         self._update_daily_state(state.current_time, state.account.equity)
         daily_loss_abs = max(0.0, self.day_start_equity - state.account.equity)
-        daily_max_loss_allowed_abs = self.day_start_equity * self.config.max_daily_loss_pct
+        remaining_risk_budget = self._remaining_daily_loss(state.account.equity)
 
-        if daily_loss_abs >= daily_max_loss_allowed_abs:
+        if remaining_risk_budget <= 0.0:
             if not self.is_halted_today:
+                daily_loss_pct = daily_loss_abs / self._daily_loss_base()
                 self.logger.warning(
                     "Daily loss guard triggered: "
-                    f"{daily_loss_abs / self.day_start_equity:.2%}"
+                    f"{daily_loss_pct:.2%} / {self.config.max_daily_loss_pct:.2%}"
                 )
                 self.is_halted_today = True
                 self.meltdown_days += 1
+                if self.last_action.target_dir == PositionDir.POSITIVE:
+                    if self.last_action.stop_loss_price > state.market.open:
+                        self.logger.warning("buy stop loss shft ")
+                    elif self.last_action.action == ActionType.OPEN and self.last_action.stop_loss_price > state.market.low:
+                        self.logger.warning("buy stop price cross becasue open/stop happened on the same bar ")
+                    else:
+                        self.logger.error(f"unlnow reason cause meltdown {state.current_time:%Y-%m-%d %H:%M:%S}")
+                        self.unexplained_meltdown += 1
+                elif self.last_action.target_dir == PositionDir.NEGATIVE:
+                    if self.last_action.stop_loss_price < state.market.open:
+                        self.logger.warning("sell stop loss shft ")
+                    elif self.last_action.action == ActionType.OPEN and self.last_action.stop_loss_price < state.market.high:
+                        self.logger.warning("sell stop price cross becasue open/stop happened on the same bar ")
+                    else:
+                        self.logger.error("unlnow reason cause meltdown")
+                        self.unexplained_meltdown += 1
             if state.position.dir != PositionDir.FLAT:
                 action = TradeIntent(ActionType.CLOSE)
                 self.execute_action(action)
@@ -153,13 +184,18 @@ class BbmSignalStrategy(StrategyBase):
         if not valid_pct(stop_loss_pct) or not valid_pct(take_profit_pct):
             return TradeIntent(ActionType.NOOP)
 
-        remaining_risk_budget = max(0.0, daily_max_loss_allowed_abs - daily_loss_abs)
-        order_qty = self._calculate_order_qty(state, stop_loss_pct, remaining_risk_budget)
+        risk_per_trade = self._risk_per_trade(state.account.equity)
+        if remaining_risk_budget < risk_per_trade:
+            return TradeIntent(ActionType.NOOP)
+
+        order_qty = self._calculate_order_qty(state, stop_loss_pct)
         if order_qty <= 0:
             return TradeIntent(ActionType.NOOP)
 
         action = TradeIntent(
             action=ActionType.OPEN,
+            time = state.current_time,
+            price=state.market.price,
             target_dir=target_dir,
             target_layers=1,
             order_qty=order_qty,
@@ -171,23 +207,10 @@ class BbmSignalStrategy(StrategyBase):
         self.execute_action(action)
         return action
 
-    def execute_action(self, action: TradeIntent):
-        if action.action == ActionType.NOOP:
-            return
-        if action.action == ActionType.CLOSE:
-            self.venue.close_position()
-            return
-        if action.action == ActionType.OPEN:
-            self.venue.submit_order(
-                action.order_qty,
-                is_buy=action.target_dir == PositionDir.POSITIVE,
-                stop_loss_pct=action.stop_loss_pct,
-                take_profit_pct=action.take_profit_pct,
-            )
-
     def report(self) -> dict:
         return {
             "meltdown_days": self.meltdown_days,
+            "unexplained_meltdown": self.unexplained_meltdown,
             "entries": self.entries,
             "min_expected_move_pct": self.config.min_expected_move_pct,
             "skipped_missing_threshold": self.skipped_missing_threshold,

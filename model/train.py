@@ -220,6 +220,7 @@ def train_single(
         feature_list=prepared.requested_features,
         label_col=config.data_cfg.label_col,
         seq_len=config.model_cfg.seq_len,
+        train_config=asdict(config),
     )
     logger.info(
         "Completed %s: validation_%s=%.4f test_macro_f1=%.4f",
