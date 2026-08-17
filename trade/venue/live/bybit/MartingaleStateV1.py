@@ -142,7 +142,7 @@ class MartingaleBot:
         self.setup()
 
     def setup(self):
-        self.logger.info("🚀 V10 策略启动中...")
+        self.logger.info("🚀 Starting V10 strategy...")
         self.update_wallet_balance()
         
         for cfg in self.configs:
@@ -182,14 +182,14 @@ class MartingaleBot:
         # Safety threshold: at least 0.2% net profit, or twice the fee
         if net_margin < 0.001:
             self.logger.warning("=" * 60)
-            self.logger.warning(f"⚠️  [{cfg.symbol}] 利润空间过窄警告！预计净利: {net_margin:.2%} (除去滑点可能微乎其微)")
+            self.logger.warning(f"⚠️ [{cfg.symbol}] Profit margin is too narrow | Estimated net margin: {net_margin:.2%} (may be negligible after slippage)")
             # self.logger.warning(f"   - configured take profit: {cfg.profit_target:.2%}")
             # self.logger.warning(f"   - real maker fee: {cfg.maker_fee:.4%} (both sides: {cost:.4%})")
             # self.logger.warning(f"   - expected net profit: {net_margin:.2%} (slippage may leave close to nothing)")
             # self.logger.warning("   -> suggestion: raise profit_target or upgrade the VIP tier")
             self.logger.warning("=" * 60)
         else:
-            self.logger.info(f"✅ [{cfg.symbol}] 利润模型健康 (净利空间: {net_margin:.2%})")
+            self.logger.info(f"✅ [{cfg.symbol}] Profit model is healthy | Net margin: {net_margin:.2%}")
 
     def initial_risk_report(self):
         """
@@ -202,11 +202,11 @@ class MartingaleBot:
                 
                 side = "Long" if self.is_long_account else "Short"
                 self.logger.info("=" * 115)
-                self.logger.info(f"📊 [{m.symbol} {side}] 深度回撤与净收益分析 | Maker费率: {m.conf.maker_fee:.4%}")
+                self.logger.info(f"📊 [{m.symbol} {side}] Deep-drawdown and net-return analysis | Maker fee: {m.conf.maker_fee:.4%}")
                 self.logger.info("-" * 115)
                 
                 # Add an "estimated net profit (U)" column
-                header = f"{'层级':<4} | {'成交价格':<10} | {'实时均价':<10} | {'需反弹%':<8} | {'累计持仓(U)':<12} | {'预估净利(U)'}"
+                header = f"{'Layer':<6} | {'Fill price':<10} | {'Live average':<12} | {'Rebound %':<10} | {'Total position (U)':<18} | {'Estimated net PnL (U)'}"
                 print(header)
                 print("-" * 115)
                 
@@ -243,15 +243,15 @@ class MartingaleBot:
                 loss_at_sl = abs((m.base_qty * final_layer['cum_q_factor']) * (sl_price - avg_price))
                 loss_pct = (loss_at_sl / self.total_equity) * 100
 
-                self.logger.info(f"🔍 [{m.symbol} {side}] 关键结论:")
-                self.logger.info(f"   - 均价锚点: {avg_price:.5f} ({((avg_price-p_ref)/p_ref*100):.3f}% from Ref)")
-                self.logger.info(f"   - 🎯 止盈目标: {tp_price:.5f} ({((tp_price-p_ref)/p_ref*100):.3f}% from Ref)")
-                self.logger.info(f"   - 💀 镜像止损: {sl_price:.5f} ({((sl_price-p_ref)/p_ref*100):.3f}% from Ref)")
-                self.logger.info(f"   - 💥 满仓风险: 预计损耗 {loss_at_sl:.2f} USDT ({loss_pct:.2f}% 净值)")
+                self.logger.info(f"🔍 [{m.symbol} {side}] Key findings:")
+                self.logger.info(f"   - Average-price anchor: {avg_price:.5f} ({((avg_price-p_ref)/p_ref*100):.3f}% from reference)")
+                self.logger.info(f"   - 🎯 Take-profit target: {tp_price:.5f} ({((tp_price-p_ref)/p_ref*100):.3f}% from reference)")
+                self.logger.info(f"   - 💀 Mirrored stop loss: {sl_price:.5f} ({((sl_price-p_ref)/p_ref*100):.3f}% from reference)")
+                self.logger.info(f"   - 💥 Full-position risk: estimated loss {loss_at_sl:.2f} USDT ({loss_pct:.2f}% of equity)")
                 
                 # Required bounce
                 max_rebound = abs((tp_price - (p_ref * final_layer['p_factor'])) / (p_ref * final_layer['p_factor'])) * 100
-                self.logger.info(f"   - ⚡ 生死线反弹需求: 价格触及 L{final_layer['layer']} 后需反弹 {max_rebound:.2f}% 即可获利出场")
+                self.logger.info(f"   - ⚡ Break-even rebound: after reaching L{final_layer['layer']}, price must rebound {max_rebound:.2f}% for a profitable exit")
         
         self.logger.info("=" * 105)
 
@@ -278,7 +278,7 @@ class MartingaleBot:
                     self.handle_fill(symbol,order)# call directly when test
                     # threading.Thread(target=self.handle_fill, args=(symbol,order), daemon=True).start()
                 elif order['orderStatus'] in ['Cancelled', 'Rejected']:
-                    self.logger.debug(f"ℹ️ 订单 {order['orderLinkId']} 状态变更: {order['orderStatus']}")
+                    self.logger.debug(f"ℹ️ Order {order['orderLinkId']} status changed: {order['orderStatus']}")
             else:
                 self.logger.warning(f"unecpected symbol {symbol}, close all")
                 self.engine.market_close_all(symbol)
@@ -393,7 +393,7 @@ class MartingaleBot:
             order_type="Market",             #  Market stated explicitly
             triggerDirection = 2 if self.is_long_account else 1
         )
-        self.logger.info(f"🛡️ [{m.symbol}] 镜像止损单已就位 | 价格: {params['price']} | 数量: {params['qty']}")
+        self.logger.info(f"🛡️ [{m.symbol}] Mirrored stop order is active | Price: {params['price']} | Quantity: {params['qty']}")
         
     def handle_fill(self, symbol, order):
         m = self.markets[symbol]
@@ -414,7 +414,7 @@ class MartingaleBot:
                     self.logger.warning(f"cancle newer order {order['orderLinkId']}, current version {self.version} ts {m.last_order_ts}") 
                 return
             if layer_count != m.layer_count:    # allowed, kept for robustness
-                self.logger.warning(f" 检测到跨层成交 ! layer {m.layer_count} -> {layer_count}")
+                self.logger.warning(f"Cross-layer fill detected | layer {m.layer_count} -> {layer_count}")
                 m.layer_count = layer_count
             is_inc = (m.signed_pos_qty * signed_delta) > 0 or m.signed_pos_qty == 0
             if is_inc:
@@ -438,7 +438,7 @@ class MartingaleBot:
                     m.last_result = OrderLabel.TP
                     m.last_result_updte = time.time()
                     m.loss_count = 0
-                    self.logger.info(" 止盈触发 ")
+                    self.logger.info("Take profit triggered")
                 elif label == OrderLabel.SL:
                     m.sl_count += 1  #  record the stop loss
                     if m.last_result == OrderLabel.SL:
@@ -447,7 +447,7 @@ class MartingaleBot:
                         m.loss_count = 1
                     m.last_result = OrderLabel.SL
                     m.last_result_updte = time.time()
-                    self.logger.info(" 止损触发 ")
+                    self.logger.info("Stop loss triggered")
                 if abs(m.signed_pos_qty) >= m.conf.min_qty:
                     self.logger.error("unexpected uncompleted decrease in position, please check !")
                     # self.engine.cancel_all_http(symbol)
@@ -459,7 +459,7 @@ class MartingaleBot:
                         self.logger.info(" position is 0, new order ")
                 self.engine.market_close_all(symbol)
                 self.deploy_full_martingale_grid(symbol)  #new order
-            self.logger.info(f"📊 {symbol} 仓位更新: {m.signed_pos_qty:.2f} @ {m.avg_entry_price:.4f}")
+            self.logger.info(f"📊 {symbol} position updated: {m.signed_pos_qty:.2f} @ {m.avg_entry_price:.4f}")
 
     def generate_order_link_id(self, last_order_ts =0, layer_count =0 , label = ''): 
         """Build a unique ID: V9:SYMBOL:INDEX:SIDE:TIMESTAMP"""
@@ -546,7 +546,7 @@ class MartingaleBot:
                     m.market_state = MarketState.TREND_DOWN
                     m.trend_direction = -1
                 
-                self.logger.warning(f"🚨 [{symbol}] 趋势触发: Z={z_val:.2f}, POC={concentration:.2f}")
+                self.logger.warning(f"🚨 [{symbol}] Trend trigger: Z={z_val:.2f}, POC={concentration:.2f}")
             else:
                 m.market_state = MarketState.OSCILLATION
                 m.trend_direction = 0
@@ -594,9 +594,9 @@ class MartingaleBot:
             if order_requests:
                 res = self.engine.http.place_batch_order(category="linear", request=order_requests)
                 if res.get('retCode') == 0:
-                    self.logger.info(f"✅ [{symbol}] L1-L{m.conf.max_layers} 批量布阵成功")
+                    self.logger.info(f"✅ [{symbol}] L1-L{m.conf.max_layers} batch order placement succeeded")
                 else:
-                    self.logger.error(f"❌ 批量下单失败: {res.get('retMsg')}")
+                    self.logger.error(f"❌ Batch order placement failed: {res.get('retMsg')}")
                     return
             m.layer_count = 1
 
@@ -610,7 +610,7 @@ class MartingaleBot:
         if res.get('retCode') == 0:
             return res.get('result', {}).get('list', [])
         else:
-            self.logger.error(f"❌ 批量获取订单失败: {res.get('retMsg')}")
+            self.logger.error(f"❌ Failed to fetch orders in batch: {res.get('retMsg')}")
             return []
         
     def reconcile_all_markets(self):
@@ -694,7 +694,7 @@ class MartingaleBot:
             result = True, newest_orders_index, last_layer_count, total_position
             return result     
         except Exception as e:
-            self.logger.error(f"❌ 恢复层数失败: {e}")
+            self.logger.error(f"❌ Failed to restore layer count: {e}")
             
         return result # safe default
 
@@ -779,7 +779,7 @@ class MartingaleBot:
                             elif link_id == target_sl_order_id:
                                 find_sl = True 
                         if find_tp == False:
-                            self.logger.warning(f"{symbol}  止盈单缺失，补充止盈单 ")
+                            self.logger.warning(f"{symbol} take-profit order is missing; placing a replacement")
                             self.place_tp_order(m)
                         so_order_requests = []
                         for layer in miss_so_layers.values():
@@ -787,12 +787,12 @@ class MartingaleBot:
                         if so_order_requests:
                             res = self.engine.http.place_batch_order(category="linear", request=so_order_requests)
                             if res.get('retCode') == 0:
-                                self.logger.info(f"✅ [{symbol}] L1-L{m.conf.max_layers} 批量补单成功")
+                                self.logger.info(f"✅ [{symbol}] L1-L{m.conf.max_layers} batch order replacement succeeded")
                             else:
-                                self.logger.error(f"❌ 批量补单失败: {res.get('retMsg')}")
+                                self.logger.error(f"❌ Batch order replacement failed: {res.get('retMsg')}")
                                 return
                         if find_sl == False:
-                            self.logger.warning(f"{symbol}  止损单缺失，补充止损单 ")
+                            self.logger.warning(f"{symbol} stop-loss order is missing; placing a replacement")
                             self.place_sl_order(m)     
             else:
                 self.logger.info(" no position,check market_orders first")
@@ -817,7 +817,7 @@ class MartingaleBot:
         """📊 Live status report"""
         self.update_wallet_balance()  # refresh the latest equity
         
-        self.logger.info(f"{'币种':<10} | {'层级':<4} | {'止盈次数 (分布)':<35} | {'止损':<5} | {'胜率':<8}")
+        self.logger.info(f"{'Symbol':<10} | {'Layer':<6} | {'Take-profit count (distribution)':<38} | {'Stops':<7} | {'Win rate':<8}")
         self.logger.info("-" * 110)
         
         for symbol, m in self.markets.items():

@@ -140,7 +140,7 @@ class UnifiedGridBot:
 
     def startup(self):
         """Start-up sequence"""
-        self.logger.info(f"🚀 {self.version} 动态滑窗网格启动...")
+        self.logger.info(f"🚀 Starting {self.version} dynamic sliding-window grid...")
         
         # 1. Sync the basic information
         self.update_instrument_info()
@@ -163,7 +163,7 @@ class UnifiedGridBot:
         # 4. Start the background daemon threads
         threading.Thread(target=self.run_loop, daemon=True).start()
         
-        self.logger.info("✅ 系统就绪，等待行情驱动...")
+        self.logger.info("✅ System ready; waiting for market data...")
         # Block the main thread
         while not self.stop_signal:
             time.sleep(1)
@@ -180,7 +180,7 @@ class UnifiedGridBot:
         # 1. Latest price
         res = self.engine.http.get_tickers(category=self.engine.category, symbol=symbol)
         if res.get('retCode') != 0 or not res['result']['list']:
-            self.logger.error(f"❌ [{symbol}] 体检失败: 无法获取最新价")
+            self.logger.error(f"❌ [{symbol}] Health check failed: unable to fetch the latest price")
             return
             
         last_price = float(res['result']['list'][0]['lastPrice'])
@@ -200,20 +200,20 @@ class UnifiedGridBot:
         # 4. How many ticks the gap covers
         ticks = gap_value / m.tick_size if m.tick_size > 0 else 0
         
-        self.logger.info(f"📊 [{symbol}] 网格体检报告:")
-        self.logger.info(f"   - 设定间距: {m.config.base_offset:.2%}")
-        self.logger.info(f"   - 价格间距: {gap_value:.5f} (约 {ticks:.1f} Ticks)")
-        self.logger.info(f"   - 预估单次净利: {net_profit_pct:.4f}%")
+        self.logger.info(f"📊 [{symbol}] Grid health report:")
+        self.logger.info(f"   - Configured spacing: {m.config.base_offset:.2%}")
+        self.logger.info(f"   - Price spacing: {gap_value:.5f} (about {ticks:.1f} ticks)")
+        self.logger.info(f"   - Estimated net profit per trade: {net_profit_pct:.4f}%")
         
         # 5. Risk warning
         if net_profit_pct <= 0:
-            self.logger.error(f"🚨 警告: [{symbol}] 间距太小，利润无法覆盖手续费！")
+            self.logger.error(f"🚨 Warning: [{symbol}] spacing is too narrow to cover fees")
         elif net_profit_pct < 0.05:
-            self.logger.warning(f"⚠️ 警告: [{symbol}] 利润极其微薄 ({net_profit_pct:.4f}%)，建议调大 base_offset。")
+            self.logger.warning(f"⚠️ Warning: [{symbol}] profit is extremely thin ({net_profit_pct:.4f}%); increase base_offset")
         elif ticks < 3:
-            self.logger.warning(f"⚠️ 警告: [{symbol}] 间距仅 {ticks:.1f} Ticks，极易因点差导致无法成交或滑点损失。")
+            self.logger.warning(f"⚠️ Warning: [{symbol}] spacing is only {ticks:.1f} ticks and is vulnerable to spread and slippage")
         else:
-            self.logger.info(f"✅ [{symbol}] 利润模型健康。")
+            self.logger.info(f"✅ [{symbol}] Profit model is healthy")
 
     def get_price_by_index(self, symbol, index):
         """Core formula: target price from the index"""
@@ -282,9 +282,9 @@ class UnifiedGridBot:
                 # First run: record the starting baseline
                 if self.starting_balance == 0:
                     self.starting_balance = equity
-                    self.logger.info(f"🏦 记录启动基准资金: {self.starting_balance:.2f} USDT")
+                    self.logger.info(f"🏦 Recorded starting balance: {self.starting_balance:.2f} USDT")
             except Exception as e:
-                self.logger.error(f"❌ 解析余额异常: {e}")
+                self.logger.error(f"❌ Balance parsing error: {e}")
             
     def check_account_safe(self):
         """
@@ -299,8 +299,8 @@ class UnifiedGridBot:
 
         # More than 10% (0.10) lost
         if loss_ratio >= 0.10:
-            self.logger.critical(f"🚨🚨 账户风险触发！初始: {self.starting_balance:.2f}, 当前: {self.current_balance:.2f}")
-            self.logger.critical(f"📉 总亏损比例: {loss_ratio:.2%}, 立即执行全局清仓！")
+            self.logger.critical(f"🚨🚨 Account risk triggered | Initial: {self.starting_balance:.2f}, current: {self.current_balance:.2f}")
+            self.logger.critical(f"📉 Total loss ratio: {loss_ratio:.2%}; initiating global liquidation")
             self.global_emergency_halt()
             return False
         
@@ -317,7 +317,7 @@ class UnifiedGridBot:
         # so legacy positions are cleared as well
         self.emergency_wipe_all_account_positions(use_market=True)
             
-        self.logger.critical("🛑 系统已安全关闭，账户已排空。")
+        self.logger.critical("🛑 System shut down safely; all positions are flat")
         os._exit(0)
 
     def update_instrument_info(self):
@@ -336,7 +336,7 @@ class UnifiedGridBot:
     def on_place_result(self, response):
         """Handle the WebSocket order acknowledgement"""
         if response.get('retCode') != 0:
-            self.logger.warning(f"⚠️ 下单失败回执: {response.get('retMsg')}")
+            self.logger.warning(f"⚠️ Order failure response: {response.get('retMsg')}")
         else:
             # self.logger.debug(f"order confirmed: {response.get('result', {}).get('orderId')}")
             pass
@@ -361,7 +361,7 @@ class UnifiedGridBot:
                 # Core reset
                 m.initial_price = new_price 
                 m.center_index = 0
-                self.logger.info(f"✨ [{symbol}] 重基准完成: {old_price:.4f} -> {new_price:.4f} (Index归零)")
+                self.logger.info(f"✨ [{symbol}] Rebase complete: {old_price:.4f} -> {new_price:.4f} (index reset to zero)")
             
             # 3. Re-run the grid alignment
             self.reconcile_dynamic_grid(symbol)
@@ -371,8 +371,8 @@ class UnifiedGridBot:
         Fully automatic close: maker chasing (limit) or a straight market close
         :param use_market: True uses a market order, False rests a limit order at the mark price
         """
-        mode_str = "Market (市价)" if use_market else "Maker (追价)"
-        self.logger.info(f"🧹 开始执行 {symbol} 的 {mode_str} 平仓序列...")
+        mode_str = "Market" if use_market else "Maker (price chasing)"
+        self.logger.info(f"🧹 Starting the {mode_str} close sequence for {symbol}...")
 
         for attempt in range(max_retries):
             # 1. Cancel every HTTP order of this symbol so old and new orders do not fight
@@ -382,7 +382,7 @@ class UnifiedGridBot:
             # 2. Fetch the live position data
             pos_res = self.engine.http.get_positions(category=self.engine.category, symbol=symbol)
             if pos_res.get('retCode') != 0:
-                self.logger.error(f"❌ 获取持仓失败: {pos_res.get('retMsg')}")
+                self.logger.error(f"❌ Failed to fetch positions: {pos_res.get('retMsg')}")
                 continue
 
             pos_list = pos_res.get('result', {}).get('list', [])
@@ -390,7 +390,7 @@ class UnifiedGridBot:
             active_pos = [p for p in pos_list if float(p.get('size', 0)) > 0]
 
             if not active_pos:
-                self.logger.info(f"✅ [{symbol}] 持仓已清零，平仓成功！")
+                self.logger.info(f"✅ [{symbol}] Position is flat; close succeeded")
                 return True
 
             # 3. Walk the positions and send the closing orders
@@ -420,12 +420,12 @@ class UnifiedGridBot:
                     pos_idx=p_idx,
                     callback=self.on_place_result
                 )
-                self.logger.info(f"🔄 [{symbol}] {mode_str} 尝试第 {attempt+1} 次: {side} {size}")
+                self.logger.info(f"🔄 [{symbol}] {mode_str} attempt {attempt+1}: {side} {size}")
 
             # A market order usually fills at once, a maker order needs time to be watched
             time.sleep(1.0 if use_market else 5.0) 
 
-        self.logger.error(f"❌ [{symbol}] 尝试 {max_retries} 次后仍未平仓，请检查是否有极速暴跌导致无法成交！")
+        self.logger.error(f"❌ [{symbol}] Position remains open after {max_retries} attempts; check for an extreme move preventing fills")
         return False
 
     # -------------------------------------------------------------------------
@@ -446,7 +446,7 @@ class UnifiedGridBot:
                 m.initial_price = current_price # anchor the reference price
                 m.center_index = 0              # the initial centre is 0
             
-            self.logger.info(f"🚀 [{symbol}] 动态网格启动 | 基准价(Idx=0): {current_price:.4f}")
+            self.logger.info(f"🚀 [{symbol}] Dynamic grid started | Reference price (index=0): {current_price:.4f}")
             # Place the first orders right away
             self.reconcile_dynamic_grid(symbol)
 
@@ -473,7 +473,7 @@ class UnifiedGridBot:
         valid, _, index, side, _ = self.parse_order_link_id(order_id)
         if not valid: return
 
-        self.logger.info(f"⚡ [{symbol}] 索引 {index} ({side.value}) 成交 -> 触发平移")
+        self.logger.info(f"⚡ [{symbol}] Index {index} ({side.value}) filled -> shifting grid")
 
         # 2.  Core: move the grid centre (centre follows price)
         # Whether a buy or a sell filled, the centre moves to that level
@@ -491,7 +491,7 @@ class UnifiedGridBot:
                 new_total_qty = m.current_pos_size + qty
                 m.avg_entry_price = ((m.avg_entry_price * m.current_pos_size) + (fill_price * qty)) / new_total_qty
                 m.current_pos_size = new_total_qty
-                self.logger.debug(f"📥 [{symbol}] 买入补仓，新均价: {m.avg_entry_price:.4f}")
+                self.logger.debug(f"📥 [{symbol}] Buy added; new average price: {m.avg_entry_price:.4f}")
                 
             else:
                 # Case: sell (reduce / take profit) -> book the profit
@@ -508,8 +508,8 @@ class UnifiedGridBot:
                 #  Core fix: reset the average price once the position is flat
                 if m.current_pos_size <= 0:
                     m.avg_entry_price = 0.0
-                    self.logger.info(f"✨ [{symbol}] 仓位已结清，成本均价重置")
-                self.logger.info(f"💰 [{symbol}] 获利平仓! 盈亏: {trade_profit:.4f} USDT")
+                    self.logger.info(f"✨ [{symbol}] Position fully closed; average cost reset")
+                self.logger.info(f"💰 [{symbol}] Position closed in profit | PnL: {trade_profit:.4f} USDT")
 
             # 3. Shift the centre dynamically (original logic)
             m.center_index = index
@@ -521,7 +521,7 @@ class UnifiedGridBot:
         """
         Account wide sweep: ignore the local configuration and force close every linear position
         """
-        self.logger.critical("🚨 开始执行全账户地毯式清仓（Linear 类别）...")
+        self.logger.critical("🚨 Starting account-wide liquidation for linear instruments...")
 
         # 1. Fetch every position of the account (without a symbol the API returns all of them)
         pos_res = self.engine.http.get_positions(
@@ -530,7 +530,7 @@ class UnifiedGridBot:
         )
         
         if pos_res.get('retCode') != 0:
-            self.logger.error(f"❌ 无法获取全账户持仓: {pos_res.get('retMsg')}")
+            self.logger.error(f"❌ Unable to fetch account-wide positions: {pos_res.get('retMsg')}")
             return False
 
         # 2. Keep the positions with size > 0
@@ -538,10 +538,10 @@ class UnifiedGridBot:
         active_symbols = set([p['symbol'] for p in all_pos_list if float(p.get('size', 0)) > 0])
 
         if not active_symbols:
-            self.logger.info("✅ 账户内无任何活跃持仓。")
+            self.logger.info("✅ No active positions in the account")
             return True
 
-        self.logger.warning(f"🔍 发现待处理币种: {list(active_symbols)}")
+        self.logger.warning(f"🔍 Instruments requiring action: {list(active_symbols)}")
 
         # 3. Cancel and close for every symbol found
         for sym in active_symbols:
@@ -552,7 +552,7 @@ class UnifiedGridBot:
             # It does not matter if the symbol is missing from self.markets, self.engine is enough
             self.smart_close_all_maker(sym, max_retries=5, use_market=use_market)
 
-        self.logger.critical("💀 全账户地毯式清仓执行完毕。")
+        self.logger.critical("💀 Account-wide liquidation complete")
         return True
 
     def reconcile_dynamic_grid(self, symbol):
@@ -566,7 +566,7 @@ class UnifiedGridBot:
         REBASE_THRESHOLD = cfg.max_layers
         # --- 0. Check whether a re-anchor is due ---
         if abs(m.center_index) >= REBASE_THRESHOLD:
-            self.logger.warning(f"🔄 [{symbol}] 触发重基准：当前索引 {m.center_index} 偏离过远，正在重置坐标系...")
+            self.logger.warning(f"🔄 [{symbol}] Rebase triggered: center index {m.center_index} drifted too far; resetting coordinates...")
             self.perform_rebase(symbol)
             return # the re-anchor places the orders again, so this alignment stops here
         
@@ -580,7 +580,7 @@ class UnifiedGridBot:
             # For simplicity take the sum of the absolute values (one-way / hedge compatible)
             real_pos_size = sum(abs(float(p.get('size', 0))) for p in pos_list)
         else:
-            self.logger.error(f"❌ [{symbol}] 获取持仓失败: {pos_res.get('retMsg')}")
+            self.logger.error(f"❌ [{symbol}] Failed to fetch position: {pos_res.get('retMsg')}")
             return # on a query failure skip the alignment, so we do not act on a false flat
         with m.lock:
             m.current_pos_size = real_pos_size
@@ -611,7 +611,7 @@ class UnifiedGridBot:
                 
                 # Case 1: a trend starts while flat -> shut down immediately (clear every target)
                 if m.current_pos_size == 0:
-                    self.logger.warning(f"🛑 [{symbol}] 趋势中且空仓，清空网格避险！")
+                    self.logger.warning(f"🛑 [{symbol}] Trending while flat; clearing the grid to reduce risk")
                     target_indices.clear() # this makes the diff below cancel every order
                 
                 else:
@@ -620,7 +620,7 @@ class UnifiedGridBot:
                     
                     if m.market_state == MarketState.TREND_DOWN:
                         # Downtrend: no Buy (catching a falling knife), keep Sell (cut the loss on a bounce)
-                        self.logger.warning(f"🛡️ [{symbol}] 下跌熔断：移除所有买单")
+                        self.logger.warning(f"🛡️ [{symbol}] Downtrend circuit breaker: removing all buy orders")
                         target_indices = {idx for idx in target_indices if idx > center}
                         
                     elif m.market_state == MarketState.TREND_UP:
@@ -628,7 +628,7 @@ class UnifiedGridBot:
                         # Ambiguity: while rising, Buy chases (opens) and Sell takes profit (closes).
                         # The user asked to "drop the opening direction (Buy), keep the closing one (Sell)"
                         # so we follow that instruction: remove Buy
-                        self.logger.warning(f"🛡️ [{symbol}] 上涨熔断：暂停追涨(Buy)")
+                        self.logger.warning(f"🛡️ [{symbol}] Uptrend circuit breaker: pausing momentum buys")
                         target_indices = {idx for idx in target_indices if idx > center}
             # =========================================================
 
@@ -655,7 +655,7 @@ class UnifiedGridBot:
             if not to_cancel and not to_place:
                 return # perfect state, nothing to do
 
-            self.logger.info(f"🧮 对齐: Center={center} | 撤:{list(to_cancel)} | 补:{list(to_place)}")
+            self.logger.info(f"🧮 Alignment: center={center} | Cancel={list(to_cancel)} | Place={list(to_place)}")
 
             # --- D. Cancel ---
             for idx in to_cancel:
@@ -797,7 +797,7 @@ class UnifiedGridBot:
                     m.market_state = MarketState.TREND_DOWN
                     m.trend_direction = -1
                 
-                self.logger.warning(f"🚨 [{symbol}] 趋势触发: Z={z_val:.2f}, POC={concentration:.2f}")
+                self.logger.warning(f"🚨 [{symbol}] Trend trigger: Z={z_val:.2f}, POC={concentration:.2f}")
             else:
                 m.market_state = MarketState.OSCILLATION
                 m.trend_direction = 0
@@ -840,11 +840,11 @@ class UnifiedGridBot:
             if z_score > THRESHOLD:
                 m.market_state = MarketState.TREND_UP
                 m.trend_direction = 1
-                self.logger.warning(f"📈 [{symbol}] 识别到单边上涨趋势 (Z:{z_score:.2f})")
+                self.logger.warning(f"📈 [{symbol}] One-way uptrend detected (Z:{z_score:.2f})")
             elif z_score < -THRESHOLD:
                 m.market_state = MarketState.TREND_DOWN
                 m.trend_direction = -1
-                self.logger.warning(f"📉 [{symbol}] 识别到单边下跌趋势 (Z:{z_score:.2f})")
+                self.logger.warning(f"📉 [{symbol}] One-way downtrend detected (Z:{z_score:.2f})")
             else:
                 m.market_state = MarketState.OSCILLATION
                 m.trend_direction = 0
@@ -875,7 +875,7 @@ class UnifiedGridBot:
 
         # Widen the header to fit the new columns
         print("\n" + "═"*110)
-        print(f"📊 {self.version} 实战简报 | 运行: {uptime_str} | 余额: {self.current_balance:.2f} USDT")
+        print(f"📊 {self.version} Live Summary | Uptime: {uptime_str} | Balance: {self.current_balance:.2f} USDT")
         print("─" * 110)
         
         # Adds GAP(T) -> gap in ticks, FEE(T) -> fees in ticks
@@ -910,7 +910,7 @@ class UnifiedGridBot:
                 print(f"{s:<10} | {m.center_index:<5} | {gap_ticks:>8.1f} | {fee_ticks:>8.1f} | {net_ticks:>8.1f} {status_icon} | {m.total_profit_usdt:>12.4f} | {m.profit_count:<6}")
         
         print("─" * 110)
-        print(f"📈 累计总实现利润: {total_p:.4f} USDT | COUNT {total_count}")
+        print(f"📈 Total realized profit: {total_p:.4f} USDT | Count: {total_count}")
         print("═"*110 + "\n")
     # -------------------------------------------------------------------------
     # Background loops
@@ -933,7 +933,7 @@ class UnifiedGridBot:
             time.sleep(10) # print every 10 seconds
             
             self.logger.info("-" * 40)
-            self.logger.info(f"💰 余额: {self.current_balance:.2f}")
+            self.logger.info(f"💰 Balance: {self.current_balance:.2f}")
             
             for s, m in self.markets.items():
                 # --- 0. Refresh the trend state first ---
@@ -945,7 +945,7 @@ class UnifiedGridBot:
                     high = ctr + m.config.max_layers
                     self.logger.info(f"   {s}: Center={ctr} | Range=[{low}, {high}] | BasePrice={m.initial_price:.4f}")
             self.logger.info("-" * 40)
-        self.logger.info("👋 run_loop 已退出")
+        self.logger.info("👋 run_loop exited")
         # os._exit makes sure the main process goes down with it
         os._exit(0)
 # -----------------------------------------------------------------------------
@@ -981,7 +981,7 @@ if __name__ == "__main__":
 
     # Signal handling (Ctrl+C to exit)
     def signal_handler(sig, frame):
-        print("\n👋 正在停止...")
+        print("\n👋 Stopping...")
         bot.stop_signal = True
         engine.stop()
         sys.exit(0)

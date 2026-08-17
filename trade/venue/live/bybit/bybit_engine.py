@@ -38,7 +38,7 @@ class BybitEngine:
         """
         One-shot trading environment setup: hedge mode + leverage
         """
-        print(f"🛠️  正在为 {symbol} 配置双向对冲环境...")
+        print(f"🛠️ Configuring hedge mode for {symbol}...")
         
         # 1. Try to switch to hedge mode (mode=3)
         # Note: this fails if there is an open position or a pending order
@@ -49,11 +49,11 @@ class BybitEngine:
                 mode=3 
             )
             if res.get('retCode') == 0:
-                print(f"   ✅ 模式切换成功：双向持仓已开启")
+                print("   ✅ Mode switched successfully: hedge mode enabled")
             elif res.get('retCode') == 110025:
-                print(f"   ℹ️ 模式确认：已经是双向持仓模式")
+                print("   ℹ️ Mode confirmed: hedge mode is already enabled")
         except Exception as e:
-            print(f"   ⚠️ 模式切换异常: {e}")
+            print(f"   ⚠️ Position-mode switch error: {e}")
 
         # 2. Set the leverage
         try:
@@ -63,7 +63,7 @@ class BybitEngine:
                 buyLeverage=leverage,
                 sellLeverage=leverage
             )
-            print(f"   ✅ 杠杆设置成功：{leverage}x")
+            print(f"   ✅ Leverage set successfully: {leverage}x")
         except Exception as e:
             # Bybit raises when the leverage did not change, which can usually be ignored
             pass
@@ -96,15 +96,15 @@ class BybitEngine:
             )
             
             if res.get('retCode') == 0:
-                print(f"✅ [{symbol}] 杠杆成功更新为 {leverage}x")
+                print(f"✅ [{symbol}] Leverage updated to {leverage}x")
             elif res.get('retCode') == 110043:
                 # Fallback: the query may lag, so still catch the not-modified error here
                 pass 
             else:
-                print(f"⚠️ [{symbol}] 杠杆设置失败: {res.get('retMsg')}")
+                print(f"⚠️ [{symbol}] Failed to set leverage: {res.get('retMsg')}")
                 
         except Exception as e:
-            print(f"❌ [{symbol}] 检查/设置杠杆发生异常: {e}")
+            print(f"❌ [{symbol}] Error while checking or setting leverage: {e}")
 
     # --- core trading logic ---
 
@@ -139,7 +139,7 @@ class BybitEngine:
             self.ws_trade.place_order(callback, **order_params)
             
         except Exception as e:
-            self.logger.error(f"❌ WebSocket 下单异常: {e}")
+            self.logger.error(f"❌ WebSocket order error: {e}")
 
     def start_stream(self, order_callback):
         self.ws_stream.order_stream(callback=order_callback)
@@ -157,7 +157,7 @@ class BybitEngine:
                 settleCoin="USDT"       # adding this usually clears error 110074
             )
         except Exception as e:
-            print(f"❌ [{symbol}] HTTP 全撤指令发生异常: {e}")
+            print(f"❌ [{symbol}] HTTP cancel-all request failed: {e}")
             return {"retCode": -1, "retMsg": str(e)}
     
     def stop(self):

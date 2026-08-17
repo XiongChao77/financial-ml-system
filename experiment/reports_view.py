@@ -18,53 +18,53 @@ os.makedirs(output_dir, exist_ok=True)
 TOP_K = 50
 SKIP_PERCENT = 0  # Percentage of front part to skip; 0 means no skip, select from the very beginning
 
-def analyze_short_long_correlation(selected):
+def analyze_forward_long_correlation(selected):
     """
-    Analyze linear correlation between short and long periods.
+    Analyze linear correlation between forward and long periods.
     """
 
     import numpy as np
     from scipy.stats import pearsonr, spearmanr
 
-    short_cagr = []
+    forward_cagr = []
     l_cagr = []
 
-    short_calmar = []
+    forward_calmar = []
     l_calmar = []
 
     for r in selected:
-        sc = r.get("cagr")
+        fc = r.get("cagr")
         lc = r.get("l_cagr")
-        s_cal = r.get("calmar")
+        f_cal = r.get("calmar")
         l_cal = r.get("l_calmar")
 
-        if sc is not None and lc is not None:
-            short_cagr.append(sc)
+        if fc is not None and lc is not None:
+            forward_cagr.append(fc)
             l_cagr.append(lc)
 
-        if s_cal is not None and l_cal is not None:
-            short_calmar.append(s_cal)
+        if f_cal is not None and l_cal is not None:
+            forward_calmar.append(f_cal)
             l_calmar.append(l_cal)
 
-    if len(short_cagr) < 5:
+    if len(forward_cagr) < 5:
         print("❌ Sample size too small to compute correlation")
         return
 
     print("\n" + "="*100)
-    print("📈 Short vs Long correlation analysis")
+    print("📈 Forward vs Long correlation analysis")
     print("="*100)
 
     # CAGR
-    pearson_cagr = pearsonr(short_cagr, l_cagr)
-    spearman_cagr = spearmanr(short_cagr, l_cagr)
+    pearson_cagr = pearsonr(forward_cagr, l_cagr)
+    spearman_cagr = spearmanr(forward_cagr, l_cagr)
 
     print(f"CAGR Pearson:  r = {pearson_cagr.statistic:.4f} | p = {pearson_cagr.pvalue:.4e}")
     print(f"CAGR Spearman: r = {spearman_cagr.statistic:.4f} | p = {spearman_cagr.pvalue:.4e}")
 
     # Calmar
-    if len(short_calmar) > 5:
-        pearson_calmar = pearsonr(short_calmar, l_calmar)
-        spearman_calmar = spearmanr(short_calmar, l_calmar)
+    if len(forward_calmar) > 5:
+        pearson_calmar = pearsonr(forward_calmar, l_calmar)
+        spearman_calmar = spearmanr(forward_calmar, l_calmar)
 
         print(f"\nCalmar Pearson:  r = {pearson_calmar.statistic:.4f} | p = {pearson_calmar.pvalue:.4e}")
         print(f"Calmar Spearman: r = {spearman_calmar.statistic:.4f} | p = {spearman_calmar.pvalue:.4e}")
@@ -72,9 +72,9 @@ def analyze_short_long_correlation(selected):
     print("="*100)
 
     # Quantile monotonicity test
-    print("\n🔎 Quantile monotonicity check (bucketed by short CAGR)")
+    print("\n🔎 Quantile monotonicity check (bucketed by forward CAGR)")
 
-    pairs = list(zip(short_cagr, l_cagr))
+    pairs = list(zip(forward_cagr, l_cagr))
     pairs.sort(key=lambda x: x[0])
 
     buckets = np.array_split(pairs, 5)
@@ -303,11 +303,10 @@ def extract_row(report, src_path):
     """
     Extract key fields from a single report.
     """
-    short = report.get("short", report)  # Support both separated short/long storage and merged formats
     long = report.get("long", report)
     forward = report.get("forward", report)
-    perf = short.get("performance", {})
-    params = short.get("params", {})
+    perf = forward.get("performance", {})
+    params = forward.get("params", {})
     common = params.get("common", {})
     long_perf = long.get("performance", {})
     long_params = long.get("params", {})
@@ -316,7 +315,7 @@ def extract_row(report, src_path):
     return {
         "cagr": perf.get("cagr"),
         "calmar": perf.get("calmar"),
-        "daily_freq" : short.get("trades", {}).get("daily_freq"),
+        "daily_freq" : forward.get("trades", {}).get("daily_freq"),
         "l_cagr": long_perf.get("cagr"),
         "l_calmar": long_perf.get("calmar"),
         "l_daily_freq" : long.get("trades", {}).get("daily_freq"),
@@ -328,22 +327,22 @@ def extract_row(report, src_path):
         "f_daily_freq" : forward.get("trades", {}).get("daily_freq"),
         "hash": params.get('hash',0),
         "path": src_path,
-        "short" : short,
         "long": long,
-        "forward": report.get("forward", report),
+        "forward": forward,
         "raw" : report,
     }
 
 def basic_filter(all_results):
-    ps_results_0,unselected = filter_by_criteria(all_results, period ='short', cagr=0)
-    print(f"After 0-screening short: {len(ps_results_0)}, {len(ps_results_0)/len(all_results)*100:.2f}%")
-    # ps_results,unselected = filter_by_criteria(ps_results_0, period ='short', cagr=0.2)
-    # print(f"After pre-screening short: {len(ps_results)}, {len(ps_results)/len(ps_results_0)*100:.2f}%")
-    # pf_results,unselected = filter_by_criteria(ps_results, period ='forward', cagr=0.2)
-    # print(f"After pre-screening forward: {len(pf_results)}, {len(pf_results)/len(ps_results)*100:.2f}%")
-    # ps_results_0,unselected = filter_by_criteria(pf_results, period ='long', cagr=0)
-    # print(f"After pre-screening long: {len(ps_results_0)}, {len(ps_results_0)/len(pf_results)*100:.2f}%")
-    return ps_results_0
+    forward_results, _ = filter_by_criteria(
+        all_results,
+        period='forward',
+        cagr=0,
+    )
+    print(
+        f"After 0-screening forward: {len(forward_results)}, "
+        f"{len(forward_results) / len(all_results) * 100:.2f}%"
+    )
+    return forward_results
 
 def filter_and_rank_strategies(data, metric, k=30, final_sort_key="l_cagr"):
     """
@@ -563,13 +562,13 @@ def main():
         for r in records:
             row = extract_row(r, report_file)
             rows.append(row)
-    symbol = rows[0]['short']['params']['common']['symbol']
-    interval = rows[0]['short']['params']['common']['interval']
+    symbol = rows[0]['forward']['params']['common']['symbol']
+    interval = rows[0]['forward']['params']['common']['interval']
     print(f"Total reports loaded: {len(rows)}")
     uin_records = merge_selected(rows)
     print(f"Total uint reports: {len(uin_records)}")
     # if not filter_report:
-    #     analyze_holdbar(uin_records,target_key="seq_len", period ='short',metric_key="daily_freq")
+    #     analyze_holdbar(uin_records,target_key="seq_len", period ='forward',metric_key="daily_freq")
     #     uin_records = basic_filter(uin_records)
     #     analyze_holdbar(uin_records,target_key="seq_len", period ='long',metric_key="cagr")
     #     plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
@@ -681,8 +680,8 @@ def main():
     print(f"[SAVE] {out_path} | total={len(selected)}")
 
 def filter_stable(selected):
-    results,unselected = filter_by_criteria(selected, period ='short', cagr=0.7, calmar=0, win_rate = 30  )
-    print(f"After short performance filter: {len(results)} reports")
+    results,unselected = filter_by_criteria(selected, period ='forward', cagr=0.7, calmar=0, win_rate = 30  )
+    print(f"After forward performance filter: {len(results)} reports")
     results,long_unresults = filter_by_performance(results, period ='long', min_cagr=0.7, min_calmar=0.5)#,min_rc_cagr_median = -0.2)#,min_rc_cagr_q25 = -0.2)
     print(f"After long cagr filter: {len(results)} reports")
     results,long_unresults = filter_by_performance(results, period ='long', min_rc_cagr_median = 0)
@@ -692,9 +691,9 @@ def filter_stable(selected):
     return results
 
 def filter_aggressive(selected):
-    # 1️⃣ Short must be very strong (capture current regime)
-    results, _ = filter_by_criteria( selected, period='short', cagr=1, calmar=0)
-    print(f"After short performance filter: {len(results)} reports")
+    # 1️⃣ Forward must be very strong (capture current regime)
+    results, _ = filter_by_criteria( selected, period='forward', cagr=1, calmar=0)
+    print(f"After forward performance filter: {len(results)} reports")
     # 2️⃣ Long only needs to be acceptable, not extremely stable
     results, _ = filter_by_performance( results, period='long', min_cagr=0.6, min_calmar=0.3 )
     print(f"After long performance filter: {len(results)} reports")
@@ -702,12 +701,12 @@ def filter_aggressive(selected):
     print(f"After long rc_cagr_median filter: {len(results)} reports")
     results, _ = filter_by_performance( results, period='forward', min_cagr=1, min_calmar=0.4)
     print(f"After forward performance filter: {len(results)} reports")
-    results, _ = filter_by_criteria( results, period='short', daily_freq = 0.7)
+    results, _ = filter_by_criteria( results, period='forward', daily_freq = 0.7)
     print(f"After long daily_freq filter: {len(results)} reports")
 
     return results
 
-def merge_selected_sort(*selected_lists, period ='short', sort_key=None, reverse=True):
+def merge_selected_sort(*selected_lists, period ='forward', sort_key=None, reverse=True):
     """
     Merge multiple selected lists, deduplicate by hash, then sort by sort_key.
 
@@ -825,7 +824,7 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         print("❌ Error: failed to classify valid data; please check parameters in rows input.")
     exit()
 
-def filter_by_criteria(reports, period='short', **criteria):
+def filter_by_criteria(reports, period='forward', **criteria):
     """
     Step-wise filtering function:
     - Apply each filter condition in sequence
@@ -881,7 +880,7 @@ def filter_by_criteria(reports, period='short', **criteria):
     failed = [r for r in reports if id(r) not in passed_ids]
     return passed, failed
 
-def filter_by_performance(reports, period= 'short', min_cagr=None, min_calmar=None, min_sharpe=None,min_rc_cagr_median = None, min_rc_cagr_q25 = None):
+def filter_by_performance(reports, period= 'forward', min_cagr=None, min_calmar=None, min_sharpe=None,min_rc_cagr_median = None, min_rc_cagr_q25 = None):
     """
     Filter reports based on performance metrics.
     """
@@ -910,7 +909,7 @@ def filter_by_performance(reports, period= 'short', min_cagr=None, min_calmar=No
 
 def filter_by_rc_summary(
     reports,
-    period= 'short',
+    period= 'forward',
     # —— Survival / tail risk ——
     min_rc_es_05= None,          # e.g. > -0.8
     min_rc_q05= None,            # e.g. > -0.5
@@ -978,7 +977,7 @@ def filter_by_rc_summary(
 
     return [r for r in reports if ok(r)]
 
-def filter_by_trades(reports, period= 'short', min_win_rate=35, min_daily_freq = None):
+def filter_by_trades(reports, period= 'forward', min_win_rate=35, min_daily_freq = None):
     """
     Filter reports based on trade statistics.
     """
@@ -1041,7 +1040,7 @@ def get_value_by_path(obj, path):
         return None
 
 
-def analyze_holdbar(records, target_key="min_hold_bars", period='short', metric_key="cagr"):
+def analyze_holdbar(records, target_key="min_hold_bars", period='forward', metric_key="cagr"):
     """
     Final enhanced version:
     1. Supports list-type target_key (auto sort, join, and hash).
@@ -1149,7 +1148,7 @@ def analyze_holdbar(records, target_key="min_hold_bars", period='short', metric_
     
     return analysis_results, hash_map, grouped_records
 
-def analyze_feature_regimes(records, target_key="predict_num", period='short', metric_key="cagr"):
+def analyze_feature_regimes(records, target_key="predict_num", period='forward', metric_key="cagr"):
     """
     Specifically used to analyze how different feature configuration lists affect performance.
     """

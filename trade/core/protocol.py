@@ -34,7 +34,6 @@ class ActionType(Enum):
     Trade action emitted by the strategy layer
     """
     NOOP = "noop"   # do nothing, leave every position state untouched
-    HOLD = "hold"         # do nothing
     OPEN = "open"         # open a position
     CLOSE = "close"       # close the position
     REVERSE = "reverse"   # reverse the position
@@ -54,6 +53,8 @@ class TradeIntent:
       - martingale extras                            : layer (which safety order) / reason (intent origin, for tracing)
     """
     action: ActionType
+    price: float = 0
+    time :datetime = None 
     target_dir: PositionDir = PositionDir.FLAT
     target_layers: int = 0
     target_pct: Optional[float] = None
@@ -63,6 +64,25 @@ class TradeIntent:
     layer: int = 0
     reason: str = ""
 
+    @property
+    def stop_loss_price(self) -> Optional[float]:
+        if self.price <= 0 or self.stop_loss_pct <= 0:
+            return None
+        if self.target_dir == PositionDir.POSITIVE:
+            return self.price * (1.0 - self.stop_loss_pct)
+        if self.target_dir == PositionDir.NEGATIVE:
+            return self.price * (1.0 + self.stop_loss_pct)
+        return None
+
+    @property
+    def take_profit_price(self) -> Optional[float]:
+        if self.price <= 0 or self.take_profit_pct <= 0:
+            return None
+        if self.target_dir == PositionDir.POSITIVE:
+            return self.price * (1.0 + self.take_profit_pct)
+        if self.target_dir == PositionDir.NEGATIVE:
+            return self.price * (1.0 - self.take_profit_pct)
+        return None
 
 @dataclass
 class MarketView:
@@ -87,6 +107,8 @@ class MarketView:
 class PositionView:
     """From the venue: the current position."""
     dir: PositionDir = PositionDir.FLAT
+    size:float = 0
+    price:float = 0
     layers: int = 0
 
 

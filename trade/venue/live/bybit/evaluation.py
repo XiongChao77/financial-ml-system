@@ -15,7 +15,7 @@ class BybitMarketScanner:
             res = requests.get(url, params=params, timeout=10)
             return res.json()
         except Exception as e:
-            print(f"网络异常: {e}")
+            print(f"Network error: {e}")
             return None
 
     def get_all_symbols(self):
@@ -82,7 +82,7 @@ class BybitMarketScanner:
         return direction / volatility if volatility != 0 else 1
 
     def scan(self):
-        print(f"🚀 开始扫描 Bybit (侧重路径波动与噪音分析)...")
+        print("🚀 Starting Bybit scan (focused on path volatility and noise)...")
         symbols = self.get_all_symbols()
         results = []
 
@@ -107,16 +107,16 @@ class BybitMarketScanner:
                 "er": er_val
             })
             
-            print(f"🔍 分析中: {symbol:10} | Hurst: {h_val:.3f} | 路径波动: {path_vol:.4f} | 效率比: {er_val:.4f}")
+            print(f"🔍 Analyzing: {symbol:10} | Hurst: {h_val:.3f} | Path volatility: {path_vol:.4f} | Efficiency ratio: {er_val:.4f}")
             time.sleep(0.1)
 
         # Ranking: we want a low Hurst, high path volatility and a low efficiency ratio
         # Combined score = (1/hurst) * path_vol * (1/er)
         sorted_list = sorted(results, key=lambda x: (1/x['hurst'] if x['hurst'] > 0 else 0) * x['path_vol'] * (1/x['er']), reverse=True)
 
-        print("\n" + "🏆 最终推荐：高噪音、高跳动、均值回归标的")
+        print("\n" + "🏆 Final recommendations: high-noise, high-variation, mean-reverting instruments")
         for i, item in enumerate(sorted_list[:5]):
-            print(f"TOP {i+1}: {item['symbol']} | 路径波动(抖动度): {item['path_vol']:.4f} | 噪音水平(1/ER): {1/item['er']:.2f}")
+            print(f"TOP {i+1}: {item['symbol']} | Path volatility: {item['path_vol']:.4f} | Noise level (1/ER): {1/item['er']:.2f}")
 
 if __name__ == "__main__":
     scanner = BybitMarketScanner()

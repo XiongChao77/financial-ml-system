@@ -72,8 +72,8 @@ def construct_experiment_doge(symbol: str, interval: str, train_mode):
     simulation_task: List[Any] = []
     for min_hold_bars in [12, 16, 24]:
         for atr_sl_long_mult, atr_sl_short_mult in [(6, 5), (5, 4)]:
-            simulation_task.append(backtest_runner.StrategyPara(
-                strategy_config=backtest_runner.MlStrategyConfig(
+            simulation_task.append((
+                backtest_runner.MlStrategyConfig(
                     allow_long=True,
                     allow_short=True,
                     min_hold_bars=min_hold_bars,
@@ -84,7 +84,7 @@ def construct_experiment_doge(symbol: str, interval: str, train_mode):
                     risk_per_trade_pct=0.4,
                     max_daily_loss_pct=0.04,
                 ),
-                broker_config=backtest_runner.BrokerConfig(
+                backtest_runner.BrokerConfig(
                     initial_equity=10000.0,
                     commission_pct=0.05,
                 ),
@@ -127,15 +127,15 @@ def construct_bbm_doge(symbol: str, interval: str, train_mode):
 
     simulation_task: List[Any] = []
     for min_expected_move_pct in [0.01,0.015,0.02]:
-        simulation_task.append(backtest_runner.StrategyPara(
-            strategy_config=backtest_runner.BbmStrategyConfig(
+        simulation_task.append((
+            backtest_runner.BbmStrategyConfig(
                 allow_long=True,
                 allow_short=True,
                 min_expected_move_pct=min_expected_move_pct,
                 risk_per_trade_pct=0.02,
                 max_daily_loss_pct=0.025,
             ),
-            broker_config=backtest_runner.BrokerConfig(
+            backtest_runner.BrokerConfig(
                 initial_equity=10000.0,
                 commission_pct=0.05,
             ),
@@ -204,8 +204,8 @@ def construct_experiment_doge_combo(symbol: str, interval: str):
     simulation_task: List[Any] = []
     for min_hold_bars in [4, 8, 12, 16, 24]:
         for atr_sl_long_mult, atr_sl_short_mult in [(6, 5), (5, 4)]:
-            simulation_task.append(backtest_runner.StrategyPara(
-                strategy_config=backtest_runner.MlStrategyConfig(
+            simulation_task.append((
+                backtest_runner.MlStrategyConfig(
                     allow_long=True,
                     allow_short=True,
                     min_hold_bars=min_hold_bars,
@@ -216,7 +216,7 @@ def construct_experiment_doge_combo(symbol: str, interval: str):
                     risk_per_trade_pct=0.4,
                     max_daily_loss_pct=0.04,
                 ),
-                broker_config=backtest_runner.BrokerConfig(
+                backtest_runner.BrokerConfig(
                     initial_equity=10000.0,
                     commission_pct=0.05,
                 ),
@@ -272,8 +272,8 @@ def construct_experiment_eth(symbol: str, interval: str):
     simulation_task: List[Any] = []
     for min_hold_bars in [30, 32, 36, 38, 40, 44]:
         for atr_sl_long_mult, atr_sl_short_mult in [(6, 6), (5, 4)]:
-            simulation_task.append(backtest_runner.StrategyPara(
-                strategy_config=backtest_runner.MlStrategyConfig(
+            simulation_task.append((
+                backtest_runner.MlStrategyConfig(
                     allow_long=True,
                     allow_short=True,
                     min_hold_bars=min_hold_bars,
@@ -283,7 +283,7 @@ def construct_experiment_eth(symbol: str, interval: str):
                     risk_per_trade_pct=0.1,
                     max_daily_loss_pct=0.025,
                 ),
-                broker_config=backtest_runner.BrokerConfig(
+                backtest_runner.BrokerConfig(
                     initial_equity=10000.0,
                     commission_pct=0.05,
                 ),

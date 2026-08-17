@@ -75,14 +75,14 @@ class TurtleStrategy(StrategyBase):
                curr_dir: PositionDir, curr_pos_size: float, last_entry_price: float) -> TradeIntent:
         
         if len(df) < self.config.entry_period:
-            return TradeIntent(ActionType.HOLD)
+            return TradeIntent(ActionType.NOOP)
 
         self._update_daily_equity(current_time, account_equity)
         if curr_dir == PositionDir.FLAT:
             self.curr_layers = 0
 
         if self.is_halted_today:
-            return TradeIntent(ActionType.HOLD)
+            return TradeIntent(ActionType.NOOP)
 
         # 1. Risk budget audit
         daily_loss_abs = max(0, self.day_start_equity - account_equity)
@@ -131,19 +131,43 @@ class TurtleStrategy(StrategyBase):
         final_sl_ratio = min(turtle_sl, max_sl_ratio)
 
         # 4. Decision logic (submit_order places each order on its own)
-        action = TradeIntent(ActionType.HOLD)
+        action = TradeIntent(ActionType.NOOP)
         # self.logger.info(f"entry_high {last_row['entry_high']}, entry_low: {last_row['entry_low']}, exit_low: {last_row['exit_low']}, exit_high: {last_row['exit_high']}")
         if curr_dir == PositionDir.FLAT:
             if current_price > last_row['entry_high']:
-                action = TradeIntent(ActionType.OPEN, PositionDir.POSITIVE , 1, unit_pct)
+                action = TradeIntent(
+                    action=ActionType.OPEN,
+                    price=current_price,
+                    target_dir=PositionDir.POSITIVE,
+                    target_layers=1,
+                    target_pct=unit_pct,
+                )
             elif current_price < last_row['entry_low']:
-                action = TradeIntent(ActionType.OPEN, PositionDir.NEGATIVE, 1, unit_pct)
+                action = TradeIntent(
+                    action=ActionType.OPEN,
+                    price=current_price,
+                    target_dir=PositionDir.NEGATIVE,
+                    target_layers=1,
+                    target_pct=unit_pct,
+                )
         elif self.curr_layers < self.config.max_layers:
             threshold = 0.5 * atr
             if curr_dir == PositionDir.POSITIVE  and current_price > last_entry_price + threshold:
-                action = TradeIntent(ActionType.PYRAMID, PositionDir.POSITIVE , target_layers, unit_pct)
+                action = TradeIntent(
+                    action=ActionType.PYRAMID,
+                    price=current_price,
+                    target_dir=PositionDir.POSITIVE,
+                    target_layers=target_layers,
+                    target_pct=unit_pct,
+                )
             elif curr_dir == PositionDir.NEGATIVE and current_price < last_entry_price - threshold:
-                action = TradeIntent(ActionType.PYRAMID, PositionDir.NEGATIVE, target_layers, unit_pct)
+                action = TradeIntent(
+                    action=ActionType.PYRAMID,
+                    price=current_price,
+                    target_dir=PositionDir.NEGATIVE,
+                    target_layers=target_layers,
+                    target_pct=unit_pct,
+                )
 
         # Exit
         if (curr_dir == PositionDir.POSITIVE  and current_price < last_row['exit_low']) or \
@@ -151,7 +175,7 @@ class TurtleStrategy(StrategyBase):
             action = TradeIntent(ActionType.CLOSE)
 
         # 5. Execution: handled by venue.submit_order
-        if action.action != ActionType.HOLD:
+        if action.action != ActionType.NOOP:
             if action.action == ActionType.CLOSE:
                 self.curr_layers = 0
                 self.venue.close_position()
@@ -189,9 +213,9 @@ class TurtleStrategy(StrategyBase):
 
         if abs(gap_price_pct) > price_gap_threshold:
             self.logger.warning(
-                f"⚠️ [价格跳空] 出现于 {curr_time_str} | 缺口: {gap_price_pct:.2%} | "
-                f"时间跨度: {prev_time_str} -> {curr_time_str} | "
-                f"价格跳变: {prev_close:.4f} (前收) -> {current_open:.4f} (今开)"
+                f"⚠️ [PRICE GAP] Detected at {curr_time_str} | Gap: {gap_price_pct:.2%} | "
+                f"Time span: {prev_time_str} -> {curr_time_str} | "
+                f"Price jump: {prev_close:.4f} (previous close) -> {current_open:.4f} (current open)"
             )
 
         if False:
@@ -208,6 +232,6 @@ class TurtleStrategy(StrategyBase):
                 
                 if time_delta > expected_delta:
                     self.logger.error(
-                        f"⏰ [时间跳空/数据缺失] {current_ts} 与上一根 K 线相差 {time_delta} "
-                        f"(预期: {expected_delta})"
+                        f"⏰ [TIME GAP/MISSING DATA] {current_ts} is {time_delta} after the previous bar "
+                        f"(expected: {expected_delta})"
                     )

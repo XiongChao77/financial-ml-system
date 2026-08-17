@@ -1,0 +1,33 @@
+[project]
+name = "financial-ml-system"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "backtrader>=1.9.78.123",
+    "beautifulsoup4>=4.15.0",
+    "colorlog>=6.12.0",
+    "gitpython>=3.1.59",
+    "ipykernel>=7.3.0",
+    "joblib>=1.5.3",
+    "jupyterlab>=4.6.3",
+    "lightgbm>=4.7.0",
+    "matplotlib>=3.11.1",
+    "nautilus-trader>=1.231.0",
+    "notebook>=7.6.2",
+    "numba>=0.66.0",
+    "numpy>=2.4.6",
+    "pandas>=3.0.5",
+    "plotly>=6.9.0",
+    "pyarrow>=25.0.1",
+    "pybit>=5.17.0",
+    "pytest>=9.1.1",
+    "pytorch-ignite>=0.5.5",
+    "requests>=2.34.2",
+    "scikit-learn>=1.9.0",
+    "scipy>=1.18.0",
+    "seaborn>=0.13.2",
+    "statsmodels>=0.14.6",
+    "torch>=2.13.0",
+    "tqdm>=4.70.0",
+    "xgboost>=3.4.0",
+]

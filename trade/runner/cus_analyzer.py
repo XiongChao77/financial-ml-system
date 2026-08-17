@@ -2,6 +2,11 @@ import numpy as np
 import backtrader as bt
 import math
 
+
+def _count_daily_drawdown_breaches(daily_stats, threshold: float) -> int:
+    """Count days whose drawdown magnitude is strictly greater than threshold."""
+    return sum(1 for item in daily_stats if item['dd_pct'] < -threshold)
+
 class CusAnalyzer(bt.Analyzer):
     """
     Combined risk analyzer (high cohesion version)
@@ -153,9 +158,9 @@ class CusAnalyzer(bt.Analyzer):
             }
 
         worst_day = min(self._daily_stats, key=lambda x: x['dd_pct'])
-        violation_count_4 = sum(1 for x in self._daily_stats if x['dd_pct'] < -0.04)
-        violation_count_5 = sum(1 for x in self._daily_stats if x['dd_pct'] < -0.049)
-        violation_count_3 = sum(1 for x in self._daily_stats if x['dd_pct'] < -0.029)
+        violation_count_3 = _count_daily_drawdown_breaches(self._daily_stats, 0.03)
+        violation_count_4 = _count_daily_drawdown_breaches(self._daily_stats, 0.04)
+        violation_count_5 = _count_daily_drawdown_breaches(self._daily_stats, 0.05)
 
         return {
             'max_daily_dd': worst_day['dd_pct'],

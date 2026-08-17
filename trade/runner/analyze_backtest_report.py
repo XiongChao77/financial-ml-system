@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import datetime, timezone
 import os
 from typing import Callable, Iterable
@@ -324,19 +323,6 @@ def pair_round_trips(report: dict) -> list[dict]:
                 else (entry_price - exit_price) / entry_price
             )
 
-        sl_price = entry.get("sl_price")
-        tp_price = entry.get("tp_price")
-        bar_high = to_float(entry.get("bar_high"))
-        bar_low = to_float(entry.get("bar_low"))
-        entry_bar_stop_breached = False
-        entry_bar_tp_touched = False
-        if sl_price is not None:
-            sl_price = to_float(sl_price)
-            entry_bar_stop_breached = bar_low <= sl_price if is_long else bar_high >= sl_price
-        if tp_price is not None:
-            tp_price = to_float(tp_price)
-            entry_bar_tp_touched = bar_high >= tp_price if is_long else bar_low <= tp_price
-
         rows.append({
             "entry_date": date_from_order(entry),
             "exit_date": date_from_order(order),
@@ -351,15 +337,6 @@ def pair_round_trips(report: dict) -> list[dict]:
             "estimated_commission": estimated_commission,
             "estimated_net_pnl": estimated_net_pnl,
             "price_return_pct": price_return_pct,
-            "planned_stop_loss_pct": entry.get("planned_stop_loss_pct") or entry.get("sl_pct"),
-            "sl_price": sl_price,
-            "tp_price": tp_price,
-            "entry_bar_open": entry.get("bar_open"),
-            "entry_bar_high": entry.get("bar_high"),
-            "entry_bar_low": entry.get("bar_low"),
-            "entry_bar_close": entry.get("bar_close"),
-            "entry_bar_stop_breached": entry_bar_stop_breached,
-            "entry_bar_tp_touched": entry_bar_tp_touched,
         })
 
     return rows
@@ -371,10 +348,6 @@ def focus_trade_diagnostics(report: dict, target_date: str | None, top_n: int) -
         if item["exit_date"] == target_date
     ]
     round_trips.sort(key=lambda item: item["estimated_net_pnl"])
-    entry_bar_stop_breaches = [
-        item for item in round_trips
-        if item["entry_date"] == target_date and item["entry_bar_stop_breached"]
-    ]
     return {
         "closed_trade_count": len(round_trips),
         "carry_in_trade_count": sum(item["entry_date"] != target_date for item in round_trips),
@@ -382,69 +355,6 @@ def focus_trade_diagnostics(report: dict, target_date: str | None, top_n: int) -
         "estimated_commission": sum(item["estimated_commission"] for item in round_trips),
         "estimated_net_pnl": sum(item["estimated_net_pnl"] for item in round_trips),
         "worst_trades": round_trips[:top_n],
-        "entry_bar_stop_breaches": entry_bar_stop_breaches[:top_n],
-    }
-
-
-def detail_rows(additional: dict, key: str) -> list[dict]:
-    rows = safe_get(additional, ["strategy_detail", key], []) or []
-    return rows if isinstance(rows, list) else []
-
-
-def gap_stop_orders(report: dict, additional: dict) -> list[dict]:
-    rows = detail_rows(additional, "gap_through_stop_orders")
-    if rows:
-        return rows
-    return [
-        item for item in trade_logs(report)
-        if item.get("role") == "sl" and to_float(item.get("gap_through_stop_pct"), 0.0) > 0.0
-    ]
-
-
-def same_bar_orders(report: dict, additional: dict) -> list[dict]:
-    rows = detail_rows(additional, "same_bar_tp_sl_orders")
-    if rows:
-        return rows
-    return [item for item in trade_logs(report) if item.get("same_bar_tp_sl_hit")]
-
-
-def group_gap_by_day(orders: list[dict]) -> list[dict]:
-    grouped: dict[str, dict] = {}
-    for order in orders:
-        date_key = date_from_order(order)
-        if date_key is None:
-            continue
-        row = grouped.setdefault(
-            date_key,
-            {
-                "date": date_key,
-                "count": 0,
-                "at_open_count": 0,
-                "max_gap_through_stop_pct": 0.0,
-                "sum_gap_through_stop_pct": 0.0,
-            },
-        )
-        gap_pct = to_float(order.get("gap_through_stop_pct"), 0.0)
-        row["count"] += 1
-        row["at_open_count"] += 1 if order.get("gap_stop_at_open") else 0
-        row["sum_gap_through_stop_pct"] += gap_pct
-        row["max_gap_through_stop_pct"] = max(row["max_gap_through_stop_pct"], gap_pct)
-    return sorted(
-        grouped.values(),
-        key=lambda item: (item["max_gap_through_stop_pct"], item["count"]),
-        reverse=True,
-    )
-
-
-def summarize_same_bar(orders: list[dict]) -> dict:
-    by_role = defaultdict(int)
-    for order in orders:
-        by_role[order.get("role") or order.get("same_bar_outcome") or "unknown"] += 1
-    return {
-        "count": len(orders),
-        "as_stop_loss": by_role.get("sl", 0),
-        "as_take_profit": by_role.get("tp", 0),
-        "unknown": sum(v for k, v in by_role.items() if k not in {"sl", "tp"}),
     }
 
 
@@ -459,12 +369,6 @@ def fmt_number(value, decimals: int = 2) -> str:
 
 
 def short_trade_line(trade: dict) -> str:
-    flags = []
-    if trade.get("entry_bar_stop_breached"):
-        flags.append("ENTRY_BAR_SL_BREACH")
-    if trade.get("entry_bar_tp_touched"):
-        flags.append("ENTRY_BAR_TP_TOUCH")
-    flag_text = f" flags={','.join(flags)}" if flags else ""
     return (
         f"{trade.get('side')} entry={trade.get('entry_time_utc')}@{to_float(trade.get('entry_price')):.6g} "
         f"exit={trade.get('exit_time_utc')}@{to_float(trade.get('exit_price')):.6g} "
@@ -472,70 +376,23 @@ def short_trade_line(trade: dict) -> str:
         f"move={fmt_pct(trade.get('price_return_pct'))} "
         f"gross={fmt_number(trade.get('gross_pnl'))} "
         f"est_fee={fmt_number(trade.get('estimated_commission'))} "
-        f"est_net={fmt_number(trade.get('estimated_net_pnl'))} "
-        f"planned_sl={fmt_pct(trade.get('planned_stop_loss_pct'))}"
-        f"{flag_text}"
-    )
-
-
-def short_order_line(order: dict) -> str:
-    return (
-        f"date={date_from_order(order)} "
-        f"role={order.get('role')} "
-        f"price={to_float(order.get('price')):.6g} "
-        f"entry={to_float(order.get('entry_ref_price')):.6g} "
-        f"sl={to_float(order.get('sl_price')):.6g} "
-        f"tp={to_float(order.get('tp_price')):.6g} "
-        f"bar=[o={to_float(order.get('bar_open')):.6g}, "
-        f"h={to_float(order.get('bar_high')):.6g}, "
-        f"l={to_float(order.get('bar_low')):.6g}, "
-        f"c={to_float(order.get('bar_close')):.6g}] "
-        f"open_gap={fmt_pct(order.get('open_gap_pct')) if order.get('open_gap_pct') is not None else 'NA'} "
-        f"gap_stop={fmt_pct(order.get('gap_through_stop_pct')) if order.get('gap_through_stop_pct') is not None else 'NA'} "
-        f"actual_sl={fmt_pct(order.get('actual_stop_loss_pct')) if order.get('actual_stop_loss_pct') is not None else 'NA'}"
+        f"est_net={fmt_number(trade.get('estimated_net_pnl'))}"
     )
 
 
 def analyze_record(record: dict, top_n: int = 10, focus_date: str | None = None) -> dict:
-    report = record["report"]
+    report = dict(record["report"])
     additional = record["additional"]
+    report["trade_logs"] = additional.get("trade_logs") or report.get("trade_logs") or []
     worst_day = worst_daily_loss(report)
     target_date = focus_date or worst_day.get("date")
 
-    gaps = gap_stop_orders(report, additional)
-    same_bar = same_bar_orders(report, additional)
-    gap_by_day = detail_rows(additional, "gap_through_stop_by_day") or group_gap_by_day(gaps)
-    target_gap_orders = [item for item in gaps if date_from_order(item) == target_date]
-    target_same_bar_orders = [item for item in same_bar if date_from_order(item) == target_date]
-
-    strategy_summary = report.get("strategy") or {}
     return {
         "params_hash": safe_get(report, ["params", "hash"]),
         "worst_day": worst_day,
         "focus_date": target_date,
         "focus_equity": daily_equity_context(report, target_date),
         "focus_trades": focus_trade_diagnostics(report, target_date, top_n),
-        "strategy_summary": {
-            "gap_through_stop_count": strategy_summary.get("gap_through_stop_count", len(gaps)),
-            "gap_through_stop_at_open_count": strategy_summary.get("gap_through_stop_at_open_count"),
-            "max_gap_through_stop_pct": strategy_summary.get(
-                "max_gap_through_stop_pct",
-                max((to_float(item.get("gap_through_stop_pct"), 0.0) for item in gaps), default=0.0),
-            ),
-            "max_gap_through_stop_date": strategy_summary.get("max_gap_through_stop_date"),
-            "same_bar_tp_sl_hit_count": strategy_summary.get("same_bar_tp_sl_hit_count", len(same_bar)),
-            "same_bar_tp_sl_as_stop_count": strategy_summary.get("same_bar_tp_sl_as_stop_count"),
-            "same_bar_tp_sl_as_tp_count": strategy_summary.get("same_bar_tp_sl_as_tp_count"),
-        },
-        "gap_by_day": gap_by_day[:top_n],
-        "focus_gap_orders": sorted(
-            target_gap_orders,
-            key=lambda item: to_float(item.get("gap_through_stop_pct"), 0.0),
-            reverse=True,
-        )[:top_n],
-        "same_bar_summary": summarize_same_bar(same_bar),
-        "focus_same_bar_summary": summarize_same_bar(target_same_bar_orders),
-        "focus_same_bar_orders": target_same_bar_orders[:top_n],
     }
 
 
@@ -581,62 +438,6 @@ def print_analysis(
         )
     for trade in focus_trades["worst_trades"]:
         emit(f"  focus trade {short_trade_line(trade)}")
-    for trade in focus_trades["entry_bar_stop_breaches"]:
-        emit(
-            "  ENTRY-BAR STOP BREACH: "
-            f"planned_sl={to_float(trade.get('sl_price')):.6g} "
-            f"entry_bar=[o={to_float(trade.get('entry_bar_open')):.6g}, "
-            f"h={to_float(trade.get('entry_bar_high')):.6g}, "
-            f"l={to_float(trade.get('entry_bar_low')):.6g}, "
-            f"c={to_float(trade.get('entry_bar_close')):.6g}] "
-            f"eventual_exit_role={trade.get('exit_role')} "
-            f"eventual_exit={to_float(trade.get('exit_price')):.6g}"
-        )
-
-    summary = item["strategy_summary"]
-    emit(
-        "Gap-through stops: "
-        f"count={summary['gap_through_stop_count']} "
-        f"at_open={summary['gap_through_stop_at_open_count']} "
-        f"max_gap={fmt_pct(summary['max_gap_through_stop_pct'])} "
-        f"max_gap_date={summary['max_gap_through_stop_date']}"
-    )
-    for row in item["gap_by_day"]:
-        emit(
-            "  gap_day "
-            f"date={row.get('date')} count={row.get('count')} "
-            f"at_open={row.get('at_open_count')} "
-            f"max_gap={fmt_pct(row.get('max_gap_through_stop_pct'))} "
-            f"sum_gap={fmt_pct(row.get('sum_gap_through_stop_pct'))}"
-        )
-
-    if item["focus_gap_orders"]:
-        emit("  focus gap stop orders:")
-        for order in item["focus_gap_orders"]:
-            emit(f"    {short_order_line(order)}")
-    else:
-        emit("  focus gap stop orders: none")
-
-    same_bar = item["same_bar_summary"]
-    focus_same = item["focus_same_bar_summary"]
-    emit(
-        "Same-bar TP/SL: "
-        f"count={same_bar['count']} "
-        f"as_sl={same_bar['as_stop_loss']} "
-        f"as_tp={same_bar['as_take_profit']} "
-        f"unknown={same_bar['unknown']}"
-    )
-    emit(
-        "Focus same-bar TP/SL: "
-        f"count={focus_same['count']} "
-        f"as_sl={focus_same['as_stop_loss']} "
-        f"as_tp={focus_same['as_take_profit']} "
-        f"unknown={focus_same['unknown']}"
-    )
-    if item["focus_same_bar_orders"]:
-        emit("  focus same-bar orders:")
-        for order in item["focus_same_bar_orders"]:
-            emit(f"    {short_order_line(order)}")
     emit("")
 
 

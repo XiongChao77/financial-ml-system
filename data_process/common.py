@@ -65,6 +65,8 @@ class BaseDefine(MarketDataSourceConfig):
     stop_multiplier_rate_long: Optional[float] = None
     vol_multiplier_short: float = 1.7
     stop_multiplier_rate_short: Optional[float] = None
+    tbm_take_profit_price: str = "close"  # close | high_low
+    min_expected_move_pct: float = 0.01
     version:float = 0.1
 
 vol_multiplier = 1.8
@@ -315,7 +317,7 @@ def calculate_thresholds(df, para=BaseDefine, **kwargs):
     ewma_vol = np.sqrt(ewma_var)
     # ===== 3️⃣ Scale to the prediction horizon =====
     # Assume variance scales linearly with time
-    expected_vol = ewma_vol * np.sqrt(para.predict_num)
+    expected_vol = ewma_vol
 
     df['expected_vol'] = expected_vol
 
@@ -356,8 +358,27 @@ def print_zret_statistics(df, label_col='label'):
         print(f"\nLabel {label}  count={len(sub)}")
         print(sub.describe(percentiles=[0.5,0.75,0.9,0.95,0.99]))
 
+def _tbm_take_profit_uses_high_low(para) -> bool:
+    mode = getattr(para, "tbm_take_profit_price", "close")
+    if mode == "close":
+        return False
+    if mode == "high_low":
+        return True
+    raise ValueError(
+        "tbm_take_profit_price must be 'close' or 'high_low', "
+        f"got {mode!r}"
+    )
+
+
 @njit(cache=True)
-def fast_triple_barrier_kernel(close, high, low, thresholds, window):
+def fast_triple_barrier_kernel(
+    close,
+    high,
+    low,
+    thresholds,
+    window,
+    take_profit_use_high_low=False,
+):
     n = len(close)
     labels = np.ones(n, dtype=np.int32)        # neutral (1) by default
     reach_times = np.full(n, window, dtype=np.int32) 
@@ -390,7 +411,8 @@ def fast_triple_barrier_kernel(close, high, low, thresholds, window):
             
             # --- long path ---
             if l_active:
-                if c >= l_tp:      # TP hit first
+                long_tp_price = h if take_profit_use_high_low else c
+                if long_tp_price >= l_tp:      # TP hit first
                     first_l_tp = j
                     l_active = False # target reached, stop updating
                 elif l <= l_sl:    # SL hit first
@@ -398,7 +420,8 @@ def fast_triple_barrier_kernel(close, high, low, thresholds, window):
             
             # --- short path ---
             if s_active:
-                if c <= s_tp:      # TP hit first
+                short_tp_price = l if take_profit_use_high_low else c
+                if short_tp_price <= s_tp:      # TP hit first
                     first_s_tp = j
                     s_active = False
                 elif h >= s_sl:    # SL hit first
@@ -442,7 +465,12 @@ def attach_triple_barrier_label(df, para=BaseDefine, label_col = 'label'):
     
     # 3. Call the numba accelerated kernel
     labels, reach_times = fast_triple_barrier_kernel(
-        close, high, low, thresholds, window
+        close,
+        high,
+        low,
+        thresholds,
+        window,
+        _tbm_take_profit_uses_high_low(para),
     )
     
     # 4. Write the results back
@@ -475,6 +503,7 @@ def fast_triple_barrier_trend_kernel(
     thresholds,
     window,
     conflict_policy=0,
+    take_profit_use_high_low=False,
 ):
     """
     Triple Barrier Trend Label Kernel.
@@ -548,7 +577,8 @@ def fast_triple_barrier_trend_kernel(
 
             # Long path
             if l_active:
-                if c >= l_tp:
+                long_tp_price = h if take_profit_use_high_low else c
+                if long_tp_price >= l_tp:
                     first_l_tp = j
                     l_active = False
                 elif l <= l_sl:
@@ -556,7 +586,8 @@ def fast_triple_barrier_trend_kernel(
 
             # Short path
             if s_active:
-                if c <= s_tp:
+                short_tp_price = l if take_profit_use_high_low else c
+                if short_tp_price <= s_tp:
                     first_s_tp = j
                     s_active = False
                 elif h >= s_sl:
@@ -675,6 +706,7 @@ def attach_triple_barrier_trend_label(
             thresholds=thresholds,
             window=window,
             conflict_policy=conflict_code,
+            take_profit_use_high_low=_tbm_take_profit_uses_high_low(para),
         )
     )
 
@@ -725,7 +757,16 @@ def attach_triple_barrier_trend_label(
     return df
 
 @njit(cache=True)
-def fast_binary_barrier_kernel(close, high, low, time_sn, tp_long, tp_short, max_scan):
+def fast_binary_barrier_kernel(
+    close,
+    high,
+    low,
+    time_sn,
+    tp_long,
+    tp_short,
+    max_scan,
+    min_expected_move_pct=0.0,
+):
     """
     Binary Barrier kernel: a simplified triple barrier with take-profit only
     (no stop loss, no time barrier).
@@ -749,7 +790,8 @@ def fast_binary_barrier_kernel(close, high, low, time_sn, tp_long, tp_short, max
         scan_lens:   number of bars actually examined before stopping.
                      For INVALID rows this is how far the scan got.
         invalid_reasons: 0 = valid, 1 = both barriers hit in the same bar,
-                     2 = scan exhausted (data end / time gap / max_scan)
+                     2 = scan exhausted (data end / time gap / max_scan),
+                     3 = a barrier is below min_expected_move_pct
     """
     n = len(close)
 
@@ -759,6 +801,13 @@ def fast_binary_barrier_kernel(close, high, low, time_sn, tp_long, tp_short, max
     invalid_reasons = np.full(n, 2, dtype=np.int32)   # exhausted by default
 
     for i in range(n):
+        if (
+            tp_long[i] < min_expected_move_pct
+            or tp_short[i] < min_expected_move_pct
+        ):
+            invalid_reasons[i] = 3
+            continue
+
         p0 = close[i]
 
         upper = p0 * (1.0 + tp_long[i])
@@ -809,28 +858,11 @@ def attach_binary_barrier_label(
     max_scan=0,
     verbose=True,
 ):
-    """
-    Attach Binary Barrier labels (BBM).
-
-    Simplified triple barrier: take-profit only, symmetric upper/lower
-    barriers, no stop loss and no vertical (time) barrier. Each bar is
-    scanned forward until one barrier is touched:
-
-        upper touched first -> POSITIVE
-        lower touched first -> NEGATIVE
-        both touched in the same bar (order unknown), or no touch before
-        the data ends / a time gap -> INVALID
-
-    Barrier distance comes from calculate_thresholds:
-        threshold_long  (upper) / threshold_short (lower)
-
-    max_scan: optional cap on how many bars forward to scan.
-              0 (default) means scan until the end of the data.
-    """
 
     df = df.copy()
 
-    # 1. Calculate thresholds using the same logic as normal TBM
+    # predict_num scales the expected barrier distance; only max_scan limits
+    # how many future bars may be searched.
     df = calculate_thresholds(df, para)
 
     close = df["close"].values.astype(np.float64)
@@ -849,7 +881,14 @@ def attach_binary_barrier_label(
 
     # 3. Run the kernel
     labels, reach_times, scan_lens, invalid_reasons = fast_binary_barrier_kernel(
-        close, high, low, time_sn, tp_long, tp_short, int(max_scan)
+        close,
+        high,
+        low,
+        time_sn,
+        tp_long,
+        tp_short,
+        int(max_scan),
+        float(para.min_expected_move_pct),
     )
 
     # 4. Write the results back
@@ -857,7 +896,8 @@ def attach_binary_barrier_label(
     df["reach_time"] = reach_times.astype(int)
     # How many bars the forward scan actually consumed (meaningful for INVALID rows)
     df["scan_len"] = scan_lens.astype(int)
-    # 0 = valid, 1 = both barriers hit in the same bar, 2 = scan exhausted
+    # 0 = valid, 1 = both barriers hit in the same bar, 2 = scan exhausted,
+    # 3 = threshold below min_expected_move_pct
     df["invalid_reason"] = invalid_reasons.astype(int)
 
     if verbose:
@@ -928,8 +968,10 @@ def print_binary_barrier_stats(df, label_col="label"):
         inv_mask = labels == int(Signal.INVALID)
         same_bar = int((inv_mask & (reason == 1)).sum())
         exhausted = int((inv_mask & (reason == 2)).sum())
+        below_min_move = int((inv_mask & (reason == 3)).sum())
         print(f"{'  - same-bar conflict':<22} | {same_bar:>10} | {same_bar / total * 100:>9.2f}%")
         print(f"{'  - scan exhausted':<22} | {exhausted:>10} | {exhausted / total * 100:>9.2f}%")
+        print(f"{'  - move below minimum':<22} | {below_min_move:>10} | {below_min_move / total * 100:>9.2f}%")
 
     print("-" * 70)
 
@@ -1350,6 +1392,9 @@ def setup_session_logger(sub_folder: str = None, log_file_path=None, symbol: str
     fh.setFormatter(file_formatter)
     root_logger.addHandler(fh)
     root_logger.info(f"Session Logger Initialized. Log file: {log_file_path}")
+
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
+    logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)
     return root_logger, log_file_path
 
 def get_interval_from_filename(path: str) -> str:
@@ -1554,7 +1599,6 @@ def validate_kline_source(
         )
     return summary
 
-
 def get_git_info(logger):
     repo = git.Repo(PROJECT_DIR)
     sha = repo.head.object.hexsha
@@ -1564,15 +1608,6 @@ def get_git_info(logger):
     logger.info(f"Short SHA: {short_sha}")
     logger.info(f"Commit Message: {repo.head.object.message.strip()}")
     return short_sha
-
-def save_params(path, *, strategy, common, train):
-    data = {
-        "strategy": asdict(strategy),
-        "common": asdict(common),
-        "train": asdict(train),
-    }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
 
 def build_dataclass(cls, data: dict):
     """
@@ -1607,12 +1642,6 @@ def load_common_define(path, cls):
         data = json.load(f)
 
     return build_dataclass(cls, data["common"])
-
-def load_train_config(path, cls):
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    return build_dataclass(cls, data["train"])
 
 def create_experiment_dir(base_dir, symbol, interval, now=None):
     """

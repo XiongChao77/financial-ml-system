@@ -29,7 +29,7 @@ class MaCrossoverStrategy(StrategyBase):
             target_dir = PositionDir.NEGATIVE
 
         # 2. State machine
-        action = TradeIntent(ActionType.HOLD)
+        action = TradeIntent(ActionType.NOOP)
 
         # Currently flat -> open
         if state.position.dir == PositionDir.FLAT:
