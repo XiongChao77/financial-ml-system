@@ -16,6 +16,7 @@ import logging,math
 class MlStrategyConfig:
     """Static parameters owned by the ML decision strategy."""
 
+    compound: bool = False
     risk_per_trade_pct: float = 0.01
     min_hold_bars: int = 16
     allow_long: bool = True
@@ -67,30 +68,38 @@ class MlSignalStrategy(StrategyBase):
             self.last_trade_date = current_date
             self.is_halted_today = False
 
-    def _calculate_unit_pct(self, target_dir: PositionDir, state: Observation, remaining_risk_budget: float) -> tuple[float, float, float]:
+    def _risk_equity(self, account_equity: float) -> float:
+        return account_equity if self.config.compound else self.init_equity
+
+    def _daily_loss_limit(self) -> float:
+        loss_base = self.day_start_equity if self.config.compound else self.init_equity
+        return loss_base * self.config.max_daily_loss_pct
+
+    def _remaining_daily_loss(self, account_equity: float) -> float:
+        """Equity distance to the daily-loss floor, including unrealized PnL."""
+        daily_loss_floor = self.day_start_equity - self._daily_loss_limit()
+        return account_equity - daily_loss_floor
+
+    def _risk_per_trade(self, account_equity: float) -> float:
+        return self._risk_equity(account_equity) * self.config.risk_per_trade_pct
+
+    def _calculate_unit_pct(self, target_dir: PositionDir, state: Observation) -> tuple[float, float, float]:
         atr_pct = state.market.atr_pct
         if atr_pct is None or not math.isfinite(atr_pct) or atr_pct <= 0:
             self.logger.warning(
                 "ATR is unavailable; skipping the ATR-sized entry for this bar"
             )
             return 0, 0, 0
-        if state.account.equity < self.init_equity:
-            risk_equity = self.init_equity  #design for fTMO challenge
-        else:
-            risk_equity = state.account.equity
+        risk_per_trade = self._risk_per_trade(state.account.equity)
         if target_dir == PositionDir.POSITIVE:
             sl_pct = state.market.atr_pct * self.config.atr_sl_long_mult
             tp_pct = state.market.atr_pct * self.config.atr_tp_mult
-            intended_qty = (self.config.risk_per_trade_pct * risk_equity) / (state.market.price * sl_pct)
-            max_risk_qty  = (remaining_risk_budget * 0.8) / (state.market.price * sl_pct)
         elif target_dir == PositionDir.NEGATIVE:
             sl_pct = state.market.atr_pct * self.config.atr_sl_short_mult
             tp_pct = state.market.atr_pct * self.config.atr_tp_mult
-            intended_qty = (self.config.risk_per_trade_pct * risk_equity) / (state.market.price * sl_pct)
-            max_risk_qty  = (remaining_risk_budget * 0.8) / (state.market.price * sl_pct)
         else:
             return 0,0,0
-        final_order_qty = min(intended_qty, max_risk_qty )
+        final_order_qty = risk_per_trade / (state.market.price * sl_pct)
 
         required_margin = final_order_qty * state.market.price / self.leverage
         free_margin = state.account.equity # Because are no position before open a new one, reserve not consider yet
@@ -102,8 +111,6 @@ class MlSignalStrategy(StrategyBase):
             )
             return 0, 0, 0
 
-        if final_order_qty < intended_qty:
-            self.logger.debug(f"🛡️ [BUDGET CUT] 原始建议Quantity {intended_qty:.4f} 因预算限制削减至 {final_order_qty:.4f}")
         if tp_pct > 0.9:
             self.logger.debug(f"🛡️ [TP CUT] original tp_pct {tp_pct:.4f} ,adjust to 0.9")
             tp_pct = 0.9
@@ -148,11 +155,7 @@ class MlSignalStrategy(StrategyBase):
             
         # 1. Daily risk audit and circuit breaker check
         """update daily equity"""
-        current_date = state.current_time.date()
-        if self.last_trade_date != current_date:
-            self.day_start_equity = state.account.equity
-            self.last_trade_date = current_date
-            self.is_halted_today = False
+        self._update_daily_equity(state.current_time, state.account.equity)
 
         # trade action
         target_dir = PositionDir.FLAT
@@ -175,11 +178,14 @@ class MlSignalStrategy(StrategyBase):
             
         # force check , in those conditions the position should be close immediately & open forbidden
         daily_loss_abs = max(0.0, self.day_start_equity - state.account.equity)
-        daily_max_loss_allowed_abs = self.day_start_equity * self.config.max_daily_loss_pct
-        # total_max_loss_allowed_abs = self.init_equity * self.config.max_daily_loss_pct
-        if daily_loss_abs >= daily_max_loss_allowed_abs:
+        daily_max_loss_allowed_abs = self._daily_loss_limit()
+        remaining_risk_budget = self._remaining_daily_loss(state.account.equity)
+        if remaining_risk_budget <= 0.0:
             if self.is_halted_today == False:
-                self.logger.warning(f"🚨 [MELTDOWN] 日亏损触及上限! 亏损率: {daily_loss_abs/self.day_start_equity:.2%}")
+                self.logger.warning(
+                    "🚨 [MELTDOWN] Daily loss limit reached | "
+                    f"Loss: {daily_loss_abs:.2f} / {daily_max_loss_allowed_abs:.2f}"
+                )
                 self.is_halted_today = True
                 self.meltdown_days += 1
             target_dir = PositionDir.FLAT
@@ -201,10 +207,20 @@ class MlSignalStrategy(StrategyBase):
 
         #new order
         if target_dir != PositionDir.FLAT and target_dir != state.position.dir:
-            remaining_risk_budget = max(0.0, daily_max_loss_allowed_abs - daily_loss_abs)
-            final_order_qty , sl_pct, tp_pct = self._calculate_unit_pct(target_dir, state, remaining_risk_budget)
-            if final_order_qty == 0:
+            risk_per_trade = self._risk_per_trade(state.account.equity)
+            if remaining_risk_budget < risk_per_trade:
+                self.logger.info(
+                    "🛑 [NO OPEN] remaining daily loss budget "
+                    f"{remaining_risk_budget:.2f} < risk per trade {risk_per_trade:.2f}"
+                )
                 target_dir = PositionDir.FLAT
+            else:
+                final_order_qty, sl_pct, tp_pct = self._calculate_unit_pct(
+                    target_dir,
+                    state,
+                )
+                if final_order_qty == 0:
+                    target_dir = PositionDir.FLAT
 
         # 5. Run the decision logic (packs the order information)
         if state.position.dir == PositionDir.FLAT:
@@ -212,6 +228,7 @@ class MlSignalStrategy(StrategyBase):
 
                 action = TradeIntent(
                     action=ActionType.OPEN,
+                    price=state.market.price,
                     target_dir=target_dir,
                     target_layers=1,
                     order_qty=final_order_qty,
@@ -224,6 +241,7 @@ class MlSignalStrategy(StrategyBase):
             elif target_dir != state.position.dir:
                 action = TradeIntent(
                     action=ActionType.REVERSE,
+                    price=state.market.price,
                     target_dir=target_dir,
                     target_layers=1,
                     order_qty=final_order_qty,
@@ -234,27 +252,6 @@ class MlSignalStrategy(StrategyBase):
         self.execute_action(action)
         return action
 
-    def execute_action(self, action: TradeIntent):
-        """Reworked to use the submit_order interface and pass the stop loss parameters"""
-        if action.action == ActionType.NOOP:
-            return
-
-        if action.action == ActionType.CLOSE:
-            self.venue.close_position()
-            return
-
-        is_buy = (action.target_dir == PositionDir.POSITIVE )
-        
-        # Execute the order
-        if action.action == ActionType.REVERSE:
-            # On a reverse, close everything first
-            self.venue.close_position()
-            # then open the first layer in the new direction
-            self.venue.submit_order(action.order_qty, is_buy=is_buy, stop_loss_pct=action.stop_loss_pct, take_profit_pct=action.take_profit_pct)
-            
-        elif action.action == ActionType.OPEN:
-            self.venue.submit_order(action.order_qty, is_buy=is_buy, stop_loss_pct=action.stop_loss_pct, take_profit_pct=action.take_profit_pct)
-
     def finalize(self):
         """
         Final audit at the end of the backtest
@@ -262,10 +259,10 @@ class MlSignalStrategy(StrategyBase):
         if True:
             if self.current_trade_bars > 0:
                 self.all_durations.append(self.current_trade_bars)
-            self.logger.info("=== 正在生成持仓时长分布报告 ===")
+            self.logger.info("=== Generating holding-duration report ===")
             
             if not self.all_durations:
-                self.logger.info("❌ 回测期间未产生完成的交易信号。")
+                self.logger.info("❌ No completed trade signals were generated during the backtest.")
                 return
 
             durations = np.array(self.all_durations)

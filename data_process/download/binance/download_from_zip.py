@@ -491,7 +491,7 @@ def main() -> int:
     parser.add_argument("--market", choices=VALID_MARKETS.keys(), default="um",
                         help="Market: spot, um=USDⓈ-M futures, cm=COIN-M futures. Default: um")
     parser.add_argument("--symbol", required=False, help="Symbol, e.g. BTCUSDT, DOGEUSDT",default="DOGEUSDT")
-    parser.add_argument("--interval", required=False, help="Kline interval, e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d",default="1h")
+    parser.add_argument("--interval", required=False, help="Kline interval, e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d",default="2h")
     parser.add_argument("--start", default=None, help="Start day UTC, YYYY-MM-DD. Default: earliest available date.")
     parser.add_argument(
         "--end",

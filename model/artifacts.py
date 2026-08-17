@@ -47,6 +47,7 @@ def save_single_run(
     feature_list: list[str],
     label_col: str,
     seq_len: int,
+    train_config: dict[str, Any],
 ) -> dict:
     os.makedirs(save_dir, exist_ok=True)
     copy_data_config_meta(prep_output_dir, save_dir)
@@ -54,6 +55,7 @@ def save_single_run(
     meta_path = os.path.join(save_dir, "meta.json")
     metrics_path = os.path.join(save_dir, "metrics.json")
     history_path = os.path.join(save_dir, "history.json")
+    train_config_path = os.path.join(save_dir, "train_config.json")
 
     state_source = model._orig_mod if hasattr(model, "_orig_mod") else model
     torch.save(
@@ -91,6 +93,7 @@ def save_single_run(
     }
     _write_json(metrics_path, metrics_report)
     _write_json(history_path, fit_result.history)
+    _write_json(train_config_path, train_config)
     confusion_frame(metrics).to_csv(os.path.join(save_dir, "confusion_matrix.csv"))
 
     description = {
@@ -99,6 +102,7 @@ def save_single_run(
         "models": {"main": {"model": "model.pt", "meta": "meta.json"}},
         "metrics": "metrics.json",
         "history": "history.json",
+        "train_config": "train_config.json",
         "data_config": "data_config_meta.json",
     }
     _write_json(os.path.join(save_dir, "task_description.json"), description)

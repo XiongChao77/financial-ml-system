@@ -15,6 +15,7 @@ class BrokerConfig:
     initial_equity: float = 10_000.0
     commission_pct: float = 0.05
     leverage: float = 10.0
+    margin_warn_pct: float = 0.95
 
 
 @dataclass(frozen=True)
@@ -29,10 +30,8 @@ class ModelDataConfig:
     atr_ref_bars: int = 80
     prep_output_dir: str = common.DATA_OUT_DIR
     train_output_dir: str = common.TRAIN_OUT_DIR
-    period: str = "long"  # short | forward | long
-    recent_months: int = 2
-    device: str = "auto"
-    train_config: Any = None
+    period: str = "long"  #  forward | long
+    device: str = "auto"  # 'auto'/'cuda'/'cpu'
 
     def __post_init__(self):
         if self.atr_ref_bars <= 0:
@@ -53,11 +52,6 @@ RunnerDataConfig = Union[ModelDataConfig, CsvDataConfig]
 
 
 @dataclass(frozen=True)
-class ReportConfig:
-    save_path: Optional[str] = None
-
-
-@dataclass(frozen=True)
 class RunnerConfig:
     """Complete input for the standalone backtest runner.
 
@@ -67,6 +61,6 @@ class RunnerConfig:
 
     strategy_config: Any
     data_config: RunnerDataConfig
+    save_dir: str
     broker_config: BrokerConfig = field(default_factory=BrokerConfig)
     engine_config: BacktestEngineConfig = field(default_factory=BacktestEngineConfig)
-    report_config: ReportConfig = field(default_factory=ReportConfig)

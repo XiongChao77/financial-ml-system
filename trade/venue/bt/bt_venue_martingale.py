@@ -56,7 +56,7 @@ class MartingaleBtVenue(BtVenue):
         """Both accounts wiped out -> end the backtest"""
         if not self.stopped_early:
             self.stopped_early = True
-            self.logger.error("🛑 [EXIT] 交易账户与储备账户均已清零，提前结束回测。")
+            self.logger.error("🛑 [EXIT] Trading and reserve accounts are depleted; stopping the backtest early.")
             self.env.runstop()
 
 

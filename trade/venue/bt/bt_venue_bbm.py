@@ -14,4 +14,5 @@ class BbmBtVenue(BtVenue):
 
     def next(self):
         self.collect_bar_metrics()
-        self.strategy.process(self.observe())
+        venue_observation = self.observe()
+        self.strategy.process(venue_observation)

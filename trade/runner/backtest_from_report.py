@@ -95,8 +95,8 @@ def build_runner_config(
     period_report: dict[str, Any],
     *,
     period: str,
-    save_path: str,
-) -> tuple[backtest_runner.RunnerConfig, common.BaseDefine, str | None]:
+    save_dir: str,
+) -> tuple[backtest_runner.RunnerConfig, common.BaseDefine, Any, str | None]:
     """Restore backtest_runner configuration objects from a report snapshot."""
     params = _required_dict(period_report, "params")
     strategy_params = _required_dict(params, "strategy")
@@ -127,17 +127,15 @@ def build_runner_config(
         prep_output_dir=str(prep_output_dir),
         train_output_dir=str(train_output_dir),
         period=period,
-        recent_months=int(data_params.get("recent_months", 2)),
         device=str(data_params.get("device", "cpu")),
-        train_config=train_config,
     )
     runner_config = backtest_runner.RunnerConfig(
         strategy_config=strategy_config,
         broker_config=broker_config,
         data_config=data_config,
-        report_config=backtest_runner.ReportConfig(save_path=save_path),
+        save_dir=save_dir,
     )
-    return runner_config, market_config, params.get("hash")
+    return runner_config, market_config, train_config, params.get("hash")
 
 
 def preparation_artifacts_exist(prep_output_dir: str) -> bool:
@@ -197,6 +195,7 @@ def model_artifacts_exist(train_output_dir: str) -> bool:
 def ensure_backtest_artifacts(
     config: backtest_runner.RunnerConfig,
     market_config: common.BaseDefine,
+    train_config: Any,
     logger: logging.Logger,
 ) -> bool:
     """Prepare data and train from restored report params when artifacts are absent.
@@ -220,7 +219,6 @@ def ensure_backtest_artifacts(
             "Model artifacts are missing or incomplete; rebuilding from report params: %s",
             data_config.train_output_dir,
         )
-        train_config = data_config.train_config
         if train_config is None:
             raise ValueError("The report does not contain params.train")
 
@@ -290,10 +288,10 @@ def main() -> None:
         console_level=logging.INFO,
         file_level=logging.INFO,
     )
-    runner_config, market_config, params_hash = build_runner_config(
+    runner_config, market_config, train_config, params_hash = build_runner_config(
         period_report,
         period=PERIOD,
-        save_path=os.path.join(output_dir, "full_backtest_report.json"),
+        save_dir=output_dir,
     )
 
     logger.info("Source report: %s", REPORT_PATH)
@@ -302,8 +300,7 @@ def main() -> None:
     logger.info("Params hash: %s", params_hash)
     logger.info("Prep output: %s", runner_config.data_config.prep_output_dir)
     logger.info("Train output: %s", runner_config.data_config.train_output_dir)
-    ensure_backtest_artifacts(runner_config, market_config, logger)
-    runner_config.strategy_config.
+    ensure_backtest_artifacts(runner_config, market_config, train_config, logger)
     result = backtest_runner.main(logger, runner_config)
     reports_path = os.path.join(output_dir, "reports.jsonl")
     common.append_jsonl(reports_path, result["statistics"][1])

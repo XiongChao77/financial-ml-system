@@ -15,6 +15,8 @@ class MaBtVenue(BtVenue):
         self.strategy = MaCrossoverStrategy(config=strategy_config)
 
     def next(self):
+        self.collect_bar_metrics()
+
         # Warm-up guard
         if len(self) < self.strategy.config.slow_period:
             return
@@ -34,5 +36,5 @@ class MaBtVenue(BtVenue):
         self.execute_action(action)
 
     def execute_action(self, action):
-        if action.action == ActionType.HOLD:
+        if action.action == ActionType.NOOP:
             return

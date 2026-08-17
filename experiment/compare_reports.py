@@ -43,7 +43,7 @@ def extract_cagr_calmar(reports):
     """Extract (cagr, calmar) from a list of reports, dropping the missing ones."""
     pairs = []
     for r in reports:
-        perf = r['short'].get("performance") or {}
+        perf = r['forward'].get("performance") or {}
         cagr = perf.get("cagr")
         calmar = perf.get("calmar")
         if cagr is not None and calmar is not None:

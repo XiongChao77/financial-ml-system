@@ -13,10 +13,6 @@ from trade.core.protocol import (
 )
 
 
-def valid_number(value) -> bool:
-    return value is not None and isinstance(value, (int, float, np.number)) and np.isfinite(value)
-
-
 class TradeRole:
     OPEN = "open"
     STOP_LOSS = "sl"
@@ -28,7 +24,7 @@ class BtVenue(VenueBase,bt.Strategy):
         strategy_config = None,  # opaque strategy-owned config; subclasses know its concrete type
         initial_equity = None,   # runtime account baseline, not a strategy parameter
         predict_num = None,    # look-ahead horizon of the label alignment audit; None skips the audit
-        margin_warn_pct = 0.8,  # margin usage warning threshold
+        margin_warn_pct = None,  # copied from BrokerConfig by the runner
     )
 
     def __init__(self):
@@ -121,7 +117,7 @@ class BtVenue(VenueBase,bt.Strategy):
         )
         return Observation(
             market=market,
-            position=PositionView(dir=position_dir, layers=layers),
+            position=PositionView(dir=position_dir, layers=layers, size=self.position.size, price= self.position.price ),
             account=AccountView(equity=self.broker.getvalue()),
             current_time=self.data.datetime.datetime(0),
         )
@@ -134,7 +130,7 @@ class BtVenue(VenueBase,bt.Strategy):
         margin_level = (pos_value / self.leverage) / equity
         self.max_margin_level = max(self.max_margin_level, margin_level)
         if margin_level > self.p.margin_warn_pct:
-            self.logger.warning(f"⚠️ 风险：保证金占用率 {margin_level:.2%}")
+            self.logger.warning(f"⚠️ Risk: margin utilization {margin_level:.2%}")
 
     def _collect_prediction(self):
         """Collect the (pred, label) pairs the strategy really saw, to recompute the input F1 at the end"""
@@ -185,84 +181,9 @@ class BtVenue(VenueBase,bt.Strategy):
             "sl_price": order.info.get("sl_price", None),
             "tp_price": order.info.get("tp_price", None),
         }
-        record.update(self.order_execution_diagnostics(order))
         record.update(extra)
         self.trade_logs.append(record)
         return record
-
-    def order_execution_diagnostics(self, order) -> dict:
-        """Diagnose gap-through stops and same-bar TP/SL ambiguity for bracket exits."""
-        role = order.info.get("role", None)
-        is_long = order.info.get("is_long", None)
-        entry_ref_price = order.info.get("entry_ref_price", None)
-        sl_price = order.info.get("sl_price", None)
-        tp_price = order.info.get("tp_price", None)
-        exec_price = order.executed.price
-
-        bar_open = float(self.data.open[0])
-        bar_high = float(self.data.high[0])
-        bar_low = float(self.data.low[0])
-        bar_close = float(self.data.close[0])
-        prev_close = None
-        if len(self) > 1:
-            try:
-                prev_close = float(self.data.close[-1])
-            except IndexError:
-                prev_close = None
-
-        diagnostics = {
-            "bar_index": len(self),
-            "bar_open": bar_open,
-            "bar_high": bar_high,
-            "bar_low": bar_low,
-            "bar_close": bar_close,
-            "prev_close": prev_close,
-            "entry_ref_price": entry_ref_price,
-            "is_long": is_long,
-            "parent_ref": order.info.get("parent_ref", None),
-            "same_bar_tp_sl_hit": False,
-            "same_bar_outcome": None,
-            "gap_through_stop_pct": None,
-            "actual_stop_loss_pct": None,
-            "planned_stop_loss_pct": order.info.get("sl_pct", None),
-        }
-        if prev_close and prev_close > 0:
-            diagnostics["open_gap_pct"] = (bar_open - prev_close) / prev_close
-        else:
-            diagnostics["open_gap_pct"] = None
-
-        if is_long is None or not valid_number(entry_ref_price) or entry_ref_price <= 0:
-            return diagnostics
-
-        hit_sl = False
-        hit_tp = False
-        if valid_number(sl_price) and valid_number(tp_price):
-            if is_long:
-                hit_sl = bar_low <= sl_price
-                hit_tp = bar_high >= tp_price
-            else:
-                hit_sl = bar_high >= sl_price
-                hit_tp = bar_low <= tp_price
-
-        if role in (TradeRole.STOP_LOSS, TradeRole.TAKE_PROFIT):
-            diagnostics["same_bar_tp_sl_hit"] = bool(hit_sl and hit_tp)
-            if hit_sl and hit_tp:
-                diagnostics["same_bar_outcome"] = role
-
-        if role == TradeRole.STOP_LOSS and valid_number(sl_price) and valid_number(exec_price):
-            if is_long:
-                diagnostics["actual_stop_loss_pct"] = (entry_ref_price - exec_price) / entry_ref_price
-                diagnostics["gap_through_stop_pct"] = max(0.0, (sl_price - exec_price) / entry_ref_price)
-            else:
-                diagnostics["actual_stop_loss_pct"] = (exec_price - entry_ref_price) / entry_ref_price
-                diagnostics["gap_through_stop_pct"] = max(0.0, (exec_price - sl_price) / entry_ref_price)
-            diagnostics["gap_stop_at_open"] = (
-                (bar_open < sl_price) if is_long else (bar_open > sl_price)
-            )
-        else:
-            diagnostics["gap_stop_at_open"] = None
-
-        return diagnostics
 
     # ================================================================
     # Generic wrap-up: subclasses need not override stop() (if they do, call super().stop())
@@ -277,7 +198,7 @@ class BtVenue(VenueBase,bt.Strategy):
         self.logger.info(
             f"Start Value: {self.broker.startingcash:.2f} | End Value: {self.broker.getvalue():.2f}"
         )
-        self.logger.info(f"🚩 回测结束 | 最大保证金占用: {self.max_margin_level:.2%}")
+        self.logger.info(f"🚩 Backtest complete | Peak margin utilization: {self.max_margin_level:.2%}")
 
     def print_signal_quality_report(self):
         """Input signal macro-F1 recomputed on the strategy side (matches the training metric, catches bad data)"""
@@ -297,7 +218,6 @@ class BtVenue(VenueBase,bt.Strategy):
             'strategy': type(self).__name__,
             'max_margin_level': float(self.max_margin_level),
         }
-        metrics.update(self.order_diagnostics_summary())
         if self.all_preds:
             from sklearn.metrics import f1_score
             metrics['input_f1'] = float(
@@ -327,91 +247,13 @@ class BtVenue(VenueBase,bt.Strategy):
             try:
                 payload = strategy.report() or {}
             except Exception as e:   # a statistics failure must not affect the backtest result
-                self.logger.warning(f"⚠️ strategy.report() 失败，跳过策略专属统计: {e}")
+                self.logger.warning(f"⚠️ strategy.report() failed; skipping strategy metrics: {e}")
                 payload = {}
 
         strategy_summary, strategy_detail = self._split_metrics(payload)
         summary.update(strategy_summary)
-        detail.update(self.order_diagnostics_detail())
         detail.update(strategy_detail)
         return {'summary': summary, 'detail': detail}
-
-    def order_diagnostics_summary(self) -> dict:
-        exits = [
-            item for item in self.trade_logs
-            if item.get("role") in (TradeRole.STOP_LOSS, TradeRole.TAKE_PROFIT)
-        ]
-        stop_exits = [item for item in exits if item.get("role") == TradeRole.STOP_LOSS]
-        same_bar = [item for item in exits if item.get("same_bar_tp_sl_hit")]
-        gap_stops = [
-            item for item in stop_exits
-            if (item.get("gap_through_stop_pct") or 0.0) > 0.0
-        ]
-        stop_slippages = [
-            float(item.get("gap_through_stop_pct") or 0.0)
-            for item in stop_exits
-        ]
-        return {
-            "exit_order_count": len(exits),
-            "stop_loss_order_count": len(stop_exits),
-            "take_profit_order_count": sum(1 for item in exits if item.get("role") == TradeRole.TAKE_PROFIT),
-            "gap_through_stop_count": len(gap_stops),
-            "gap_through_stop_at_open_count": sum(1 for item in gap_stops if item.get("gap_stop_at_open")),
-            "max_gap_through_stop_pct": max(stop_slippages) if stop_slippages else 0.0,
-            "max_gap_through_stop_date": (
-                max(gap_stops, key=lambda item: item.get("gap_through_stop_pct") or 0.0).get("date_utc")
-                if gap_stops else None
-            ),
-            "same_bar_tp_sl_hit_count": len(same_bar),
-            "same_bar_tp_sl_as_stop_count": sum(1 for item in same_bar if item.get("role") == TradeRole.STOP_LOSS),
-            "same_bar_tp_sl_as_tp_count": sum(1 for item in same_bar if item.get("role") == TradeRole.TAKE_PROFIT),
-        }
-
-    def order_diagnostics_detail(self) -> dict:
-        gap_stops = [
-            item for item in self.trade_logs
-            if item.get("role") == TradeRole.STOP_LOSS
-            and (item.get("gap_through_stop_pct") or 0.0) > 0.0
-        ]
-        same_bar = [
-            item for item in self.trade_logs
-            if item.get("same_bar_tp_sl_hit")
-        ]
-        gap_stops = sorted(
-            gap_stops,
-            key=lambda item: item.get("gap_through_stop_pct") or 0.0,
-            reverse=True,
-        )
-        gap_by_day = {}
-        for item in gap_stops:
-            date_key = item.get("date_utc")
-            if date_key is None:
-                continue
-            bucket = gap_by_day.setdefault(
-                date_key,
-                {
-                    "date": date_key,
-                    "count": 0,
-                    "at_open_count": 0,
-                    "max_gap_through_stop_pct": 0.0,
-                    "sum_gap_through_stop_pct": 0.0,
-                },
-            )
-            gap_pct = float(item.get("gap_through_stop_pct") or 0.0)
-            bucket["count"] += 1
-            bucket["at_open_count"] += 1 if item.get("gap_stop_at_open") else 0
-            bucket["sum_gap_through_stop_pct"] += gap_pct
-            bucket["max_gap_through_stop_pct"] = max(bucket["max_gap_through_stop_pct"], gap_pct)
-        gap_by_day = sorted(
-            gap_by_day.values(),
-            key=lambda item: (item["max_gap_through_stop_pct"], item["count"]),
-            reverse=True,
-        )
-        return {
-            "gap_through_stop_orders": gap_stops[:50],
-            "gap_through_stop_by_day": gap_by_day,
-            "same_bar_tp_sl_orders": same_bar[:50],
-        }
 
     @staticmethod
     def _split_metrics(payload: dict):
@@ -433,20 +275,20 @@ class BtVenue(VenueBase,bt.Strategy):
         """Label alignment audit summary"""
         if not (self.audit_results['long_total'] or self.audit_results['short_total']):
             return
-        self.logger.info("\n" + "🔍" * 5 + " 数据标签对齐审计 (Integrity Audit) " + "🔍" * 5)
+        self.logger.info("\n" + "🔍" * 5 + " Label Alignment Audit " + "🔍" * 5)
         for side in ['long', 'short']:
             correct = self.audit_results[f'{side}_correct']
             total = self.audit_results[f'{side}_total']
             acc = (correct / total * 100) if total > 0 else 0
             icon = "📈" if side == 'long' else "📉"
-            self.logger.info(f"{icon} {side.upper()} Label 一致性: {acc:.2f}% ({correct}/{total})")
+            self.logger.info(f"{icon} {side.upper()} label consistency: {acc:.2f}% ({correct}/{total})")
 
         total_acc = (self.audit_results['long_correct'] + self.audit_results['short_correct']) / \
                     (max(1, self.audit_results['long_total'] + self.audit_results['short_total']))
         if total_acc < 0.99:
-            self.logger.error("🚨 警告：标签一致性低于 99%！数据处理阶段可能存在 index shift。")
+            self.logger.error("🚨 Warning: label consistency is below 99%; the data pipeline may contain an index shift.")
         else:
-            self.logger.info("✅ 标签对齐校验通过。")
+            self.logger.info("✅ Label alignment check passed.")
         self.logger.info("=" * 55 + "\n")
 
     def submit_order(self, size, is_buy, stop_loss_pct=None, take_profit_pct=None):
@@ -479,27 +321,26 @@ class BtVenue(VenueBase,bt.Strategy):
 
             # 1. Is this an increase in exposure (open or pyramid)?
             # i.e. buying while long or flat, or selling while short or flat
-            is_entry = (order.isbuy() and self.position.size >= 0) or \
-                       (not order.isbuy() and self.position.size <= 0)
 
-            if is_entry:
-                type_str = "🚀 开仓/加仓 (ENTRY)"
+            if order.info['role'] == 'open':
+                type_str = "🚀 ENTRY/ADD"
             else:
                 # 2. If exposure is reduced, derive the intent from the order type and the pnl
                 if order.exectype == bt.Order.Stop:
-                    type_str = "🛡️ 硬核止损 (STOP LOSS)"
+                    type_str = "🛡️ STOP LOSS"
                 elif order.exectype == bt.Order.Limit:
-                    type_str = "🎯 自动止盈 (TAKE PROFIT)"
+                    type_str = "🎯 TAKE PROFIT"
                 else:
                     # For a market close, tell stop loss from take profit by the pnl
                     # Note: this compares the execution price with the entry average price
                     pnl = (order.executed.price - self.position.price) * self.position.size
-                    type_str = "🛑 信号止损 (SIGNAL SL)" if pnl < 0 else "🛑 信号止盈 (SIGNAL TP)"
+                    type_str = "🛑 SIGNAL SL" if pnl < 0 else "🛑 SIGNAL TP"
 
-            direction = "🟢 买入" if order.isbuy() else "🔴 卖出"
+            direction = "🟢 BUY" if order.isbuy() else "🔴 SELL"
             self.logger.debug(
-                f"✅ 【订单成交】 {direction} | 意图: {type_str} | "
-                f"价格: {order.executed.price:.4f} | 数量: {order.executed.size:.2f}"
+                f"✅ ORDER FILLED {direction} | Intent: {type_str} | "
+                f"Price: {order.executed.price:.4f} | Quantity: {order.executed.size:.2f}"
+                f"SL: {order.info['sl_price']}, TP: {order.info['tp_price']}"
             )
 
         # 3. Order failures
@@ -510,16 +351,17 @@ class BtVenue(VenueBase,bt.Strategy):
             leverage = max(float(self.leverage), 1e-12)
             required_margin = notional / leverage
             self.logger.error(
-                f"❌ 【订单失败】 保证金不足！"
-                f"价格: {order_price:.4f} | 数量: {order.created.size:.2f} | "
-                f"订单金额: {notional:.2f} | 需要保证金: {required_margin:.2f} | "
+                f"❌ ORDER FAILED: insufficient margin | "
+                f"Price: {order_price:.4f} | Quantity: {order.created.size:.2f} | "
+                f"Notional: {notional:.2f} | Required margin: {required_margin:.2f} | "
                 f"cash: {self.broker.getcash():.2f} | balance/value: {self.broker.getvalue():.2f} | "
                 f"leverage: {self.leverage:.2f}"
             )
+            self.env.runstop()
         elif order.status == order.Rejected:
-            self.logger.error(f"❌ 【订单失败】 订单被拒绝！")
+            self.logger.error("❌ ORDER FAILED: order rejected")
         elif order.status == order.Canceled:
-            self.logger.debug(f"⚠️ 【订单取消】 订单已撤单。")
+            self.logger.debug(f"⚠️ ORDER CANCELED, Role {order.info['role']}")
 
     # --- subclass extension points: no need to override notify_order ---
     def on_order_filled(self, order):
@@ -542,19 +384,26 @@ class BtVenue(VenueBase,bt.Strategy):
 
     def notify_trade(self, trade):
         """
-        Trade notification: fires only when a trade closes (whether by take profit or stop loss),
-        which is the only place with the real pnl figures.
+        Log trade-open and trade-close transitions with their corresponding times.
         """
-        # if not trade.isclosed:
-        #     return
+        direction = "🟢 LONG" if trade.long else "🔴 SHORT"
 
-        # trade.pnl: gross profit (commission excluded)
-        # trade.pnlcomm: net profit (commission included)
-        # Record the net profit (commission included)
-        self.closed_pnl.append(trade.pnlcomm)
-        # Print the net pnl including commission
-        direction = ( "🟢 多" if trade.size > 0  else "🔴 空" )
-        self.logger.debug(f"💸 交易结算 {direction} | price {trade.price} | 毛利: {trade.pnl:.2f} | 手续费: {trade.commission:.2f} | 净利: {trade.pnlcomm:.2f}")
+        if trade.justopened:
+            trade_status = "OPEN"
+            event_time = bt.num2date(trade.dtopen)
+        elif trade.isclosed:
+            trade_status = "CLOSE"
+            event_time = bt.num2date(trade.dtclose)
+            self.closed_pnl.append(trade.pnlcomm)
+        else:
+            return
+
+        self.logger.debug(
+            f"💸 Trade {trade_status} {direction} | "
+            f"time: {event_time:%Y-%m-%d %H:%M:%S} | "
+            f"price: {trade.price} | Gross PnL: {trade.pnl:.2f} | "
+            f"Commission: {trade.commission:.2f} | Net PnL: {trade.pnlcomm:.2f}"
+        )
 
         # Writing the pnl back into trade_logs above is awkward,
         # because trade_logs is per order while this callback is per round trip.

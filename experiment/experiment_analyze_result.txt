@@ -2,7 +2,7 @@ Strategy selection priorities:
     1. long term stability
     2. is the rolling median positive
     2. longest losing streak, max drawdown
-    3. pnl of the short and forward periods
+    3. pnl of the full forward test period
 
 For asset stability: DOGE performs better in the backtest, but the DOGE/ETH strategies should be validated together, the live/backtest gap may differ
 Parameters that can be fixed (only within the same symbol and the same timeframe, not transferable across symbols/timeframes):
@@ -85,5 +85,3 @@ DOGE_15m:
 DOGE_5m:
     batch_experiments\2026-02-14\DOGEUSDT_5m\07_54_32 unfinished
         the trade frequency did not rise noticeably, and cagr/calmar dropped sharply versus 15m. Not usable until the model/strategy target is reworked
-
-        

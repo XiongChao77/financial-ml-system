@@ -142,12 +142,27 @@ def param_hash(d, length=12):
     s = json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:length]
     
-def calc_params_hash(*, strategy, common, train, algo="sha1", length=8):
+def calc_params_hash(
+    *,
+    strategy_config,
+    broker_config,
+    common,
+    train,
+    algo="sha1",
+    length=8,
+):
     """
     Compute a stable hash for a parameter snapshot.
     """
     payload = {
-        "strategy": asdict(strategy),
+        # Include the concrete strategy class so different config types cannot collide.
+        "strategy": {
+            "strategy_config": {
+                "config_type": type(strategy_config).__name__,
+                **asdict(strategy_config),
+            },
+            "broker_config": asdict(broker_config),
+        },
         "common": asdict(common),
         "train": asdict(train),
     }

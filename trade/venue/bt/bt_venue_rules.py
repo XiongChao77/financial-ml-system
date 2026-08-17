@@ -72,9 +72,3 @@ class RulesBtVenue(BtVenue):
             curr_dir=curr_dir,
             curr_pos_qty=self.position.size,
         )
-    # ----------------------------------------------------------------
-    # Audit helpers
-    # ----------------------------------------------------------------
-
-    def stop(self):
-        self.logger.info(f"🚩 回测结束 | 最大保证金占用: {self.max_margin_level:.2%}")

@@ -54,7 +54,7 @@ class BybitDataFeed:
             )
             
             if res.get('retCode') != 0:
-                self.logger.error(f"获取 K 线失败: {res.get('retMsg')}")
+                self.logger.error(f"Failed to fetch candles: {res.get('retMsg')}")
                 return None
 
             # Bybit returns: [startTime, open, high, low, close, volume, turnover]
@@ -81,7 +81,7 @@ class BybitDataFeed:
             
             return df
         except Exception as e:
-            self.logger.error(f"数据处理异常: {e}")
+            self.logger.error(f"Data processing error: {e}")
             return None
 # ================= main bot logic =================
 class BybitTurtleBot:
@@ -126,13 +126,13 @@ class BybitTurtleBot:
                 mode=0 # 0: one-way position
             )
             if res.get('retCode') == 0:
-                self.logger.info(f"✅ [{self.symbol}] 成功切换为单向持仓模式")
+                self.logger.info(f"✅ [{self.symbol}] Switched to one-way position mode")
         except Exception as e:
             # Error code 110025 means it is already in the target mode, just ignore it
             if "110025" in str(e):
-                self.logger.info(f"ℹ️ [{self.symbol}] 已经是单向持仓模式，无需修改")
+                self.logger.info(f"ℹ️ [{self.symbol}] Already in one-way position mode; no change required")
             else:
-                self.logger.error(f"⚠️ 切换持仓模式失败: {e}")
+                self.logger.error(f"⚠️ Failed to switch position mode: {e}")
 
     def run_step(self):
         # 1. Fetch the data
@@ -145,7 +145,7 @@ class BybitTurtleBot:
             # Only run the logic when the timestamp changed
             return 
         
-        self.logger.info(f"📊 新 K 线闭合: {current_candle_time} | Close: {df.iloc[-1]['close']}")
+        self.logger.info(f"📊 New candle closed: {current_candle_time} | Close: {df.iloc[-1]['close']}")
         
         # 3. Read the live state
         curr_dir, _, last_price = self.venue.get_current_state()
@@ -184,7 +184,7 @@ class BybitTurtleBot:
                 self.run_step()
                 time.sleep(TurtleConfig.POLL_INTERVAL)
             except Exception as e:
-                self.logger.error(f"主循环异常: {e}", exc_info=True)
+                self.logger.error(f"Main loop error: {e}", exc_info=True)
                 time.sleep(10)
 
 if __name__ == "__main__":

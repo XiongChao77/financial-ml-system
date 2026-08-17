@@ -37,11 +37,10 @@ def extract_row(report, src_path):
         signal_return = report.get("signal_return", report)
         signal_avg_return = signal_return['0'].get("signal_avg_return", report)
         signal_count = signal_return['0'].get("signal_count", report)
-        short = simulation.get("short", report)  # Support both separated short/long storage and merged formats
         long = simulation.get("long", report)
         forward = simulation.get("forward", report)
-        perf = short.get("performance", {})
-        params = short.get("params", {})
+        perf = forward.get("performance", {})
+        params = forward.get("params", {})
         common = params.get("common", {})
         long_perf = long.get("performance", {})
         long_params = long.get("params", {})
@@ -66,7 +65,7 @@ def extract_row(report, src_path):
             "signal_count":signal_count,
             "cagr": perf.get("cagr"),
             "calmar": perf.get("calmar"),
-            "daily_freq" : short.get("trades", {}).get("daily_freq"),
+            "daily_freq" : forward.get("trades", {}).get("daily_freq"),
             "l_cagr": long_perf.get("cagr"),
             "l_calmar": long_perf.get("calmar"),
             "l_daily_freq" : long.get("trades", {}).get("daily_freq"),
@@ -78,9 +77,8 @@ def extract_row(report, src_path):
             "f_daily_freq" : forward.get("trades", {}).get("daily_freq"),
             "hash": params.get('hash',0),
             "path": src_path,
-            "short" : short,
             "long": long,
-            "forward": report.get("forward", report),
+            "forward": forward,
             "fusion_hash":fusion_hash,
             "fusion_dir":fusion_dir,
             "trigger":trigger,
@@ -427,7 +425,7 @@ def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.
         segments = []
         current_multiplier = 1.0
         
-        for period in ['long', 'short', 'forward']:
+        for period in ['long', 'forward']:
             period_data = r.get(period)
             daily_list = common.recursive_get(period_data,'daily_loss_list')
 
@@ -452,11 +450,6 @@ def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.
 
     # ===== 3. Draw phase-split vertical lines =====
     # Only draw lines, no labels, with lighter color (alpha=0.3)
-    if 'short' in split_dates:
-        s_start = split_dates['short']
-        # Use thin blue dashed line to mark transition from Long to Short
-        ax1.axvline(x=s_start, color='blue', linestyle='--', linewidth=1, alpha=0.3)
-
     if 'forward' in split_dates:
         f_start = split_dates['forward']
         # Use red dashed line to mark entering the critical Forward phase
@@ -467,7 +460,7 @@ def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.
     h2, l2 = ax2.get_legend_handles_labels()
     ax1.legend(h1 + h2, l1 + l2, loc='upper left', ncol=4, fontsize=8)
 
-    plt.title(f"Strategy Performance: Long (Train) -> Short (Val) -> Forward (Test)")
+    plt.title("Strategy Performance: Long (History) -> Forward (Full Test Set)")
     print(f"[SAVE] {save_path}")
     plt.savefig(save_path, dpi=200)
     plt.close()
@@ -782,8 +775,8 @@ def main():
                 error_count += 1
                 continue
             rows.extend(extract_row(r, report_file))
-    symbol = rows[0]['short']['params']['common']['symbol']
-    interval = rows[0]['short']['params']['common']['interval']
+    symbol = rows[0]['forward']['params']['common']['symbol']
+    interval = rows[0]['forward']['params']['common']['interval']
     print(f"Total reports loaded: {len(rows)}, {error_count} errors ")
     if len(rows) == 0 :
         raise RuntimeError("no report found")

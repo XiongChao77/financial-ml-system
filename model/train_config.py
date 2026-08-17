@@ -46,10 +46,10 @@ class LSTMConfig(BaseModelConfig):
     seq_len: int = 216     # 160 best for LSTM
     model_type: str = "lstm"
     model_version: int = 1
-    hidden_size: int = 64
-    num_layers: int = 2
+    hidden_size: int = 32
+    num_layers: int = 1
     bidirectional: bool = True
-    lstm_dropout: float = 0.4
+    lstm_dropout: float = 0.2
     head_dropout: float = 0.2
     p_drop: float = 0.3
     readout: str = ['last' , 'meanmax' , 'attn', 'mix'][3]
@@ -402,9 +402,9 @@ feature_conf_list = [
     "lower_wick_pct",
 ]
 
-seq_len = 256
+seq_len = 512
 SingleModelConfig = TrainConfig(
     model_cfg=LogisticConfig(model_version=1, seq_len=seq_len),
     feature_conf_list=feature.FEATURE_LIST_COMMODITY,
-    train_task=TrainTask.DIRECTION,
+    train_task=TrainTask.DIRECT_3CLASS,
 )
