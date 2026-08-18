@@ -87,8 +87,8 @@ class ConvLSTMConfig(BaseModelConfig):
     model_type: str = "conv_lstm"
     model_version: int = 1
     d_model: int = 64
-    hidden_size = 64
-    conv_layers: int = 2
+    hidden_size = 32
+    conv_layers: int = 1
     conv_kernel: int = 5
     conv_dropout: float = 0.10
     conv_dilations: str = ""
@@ -402,9 +402,9 @@ feature_conf_list = [
     "lower_wick_pct",
 ]
 
-seq_len = 512
+seq_len = 128
 SingleModelConfig = TrainConfig(
-    model_cfg=LogisticConfig(model_version=1, seq_len=seq_len),
+    model_cfg=ConvLSTMConfig(model_version=2, seq_len=seq_len),
     feature_conf_list=feature.FEATURE_LIST_COMMODITY,
-    train_task=TrainTask.DIRECT_3CLASS,
+    train_task=TrainTask.DUAL_HEAD_3CLASS,
 )
