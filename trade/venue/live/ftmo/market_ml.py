@@ -38,7 +38,7 @@ class LiveConfig:
     TIMEFRAME = common.BaseDefine.interval
     allow_short = True
     allow_long = True
-    min_hold_bars = common.BaseDefine.predict_num#BaseDefine.predict_num
+    fixed_hold_bars = common.BaseDefine.predict_num#BaseDefine.predict_num
     prob_thresh: float =None#0.5#None#0.45
     commission = 0.05   # 0.1 = 0.1%  .can't be 0
     cash = 10000
@@ -90,7 +90,7 @@ class LiveBot:
             self,
             config=MlStrategyConfig(
                 risk_per_trade_pct=LiveConfig.risk_per_trade_pct,
-                min_hold_bars=LiveConfig.min_hold_bars,
+                fixed_hold_bars=LiveConfig.fixed_hold_bars,
                 allow_long=LiveConfig.allow_long,
                 allow_short=LiveConfig.allow_short,
                 prob_thresh=LiveConfig.prob_thresh,

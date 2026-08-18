@@ -30,7 +30,7 @@ VOL_MULTIPLIER=2.0, 2σ, only ~4.6% of price moves exceed this threshold.
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR)
 TEMPORARY_DIR = os.path.join(PROJECT_DIR, 'output')
-if False:#platform.system().lower() != 'windows':
+if platform.system().lower() != 'windows':
     os.makedirs('/dev/shm/quant', exist_ok=True)
     if not os.path.islink(TEMPORARY_DIR):   os.symlink('/dev/shm/quant', TEMPORARY_DIR)  # Linux/Ubuntu: map temporary output to shared memory
 else:
@@ -314,11 +314,9 @@ def calculate_thresholds(df, para=BaseDefine, **kwargs):
     span = para.vol_ewma_span
     ewma_var = rs_var.ewm(span=span, adjust=False).mean()
     # Sqrt -> volatility
-    ewma_vol = np.sqrt(ewma_var)
+    expected_vol = np.sqrt(ewma_var)
     # ===== 3️⃣ Scale to the prediction horizon =====
     # Assume variance scales linearly with time
-    expected_vol = ewma_vol
-
     df['expected_vol'] = expected_vol
 
     # ===== 4️⃣ Asymmetric thresholds =====

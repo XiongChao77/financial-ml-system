@@ -88,7 +88,7 @@ backtest venue classes `*BtVenue` (`MlBtVenue` / `MartingaleBtVenue`), live venu
 On the backtest side `BtVenue.observe()` assembles it, subclasses no longer write it by hand.
 
 Parameter naming convention `<meaning>_<unit>`:
-`_pct` ratio (0-1, e.g. risk_per_trade_pct / death_equity_pct) · `_bars` bar count (min_hold_bars / max_hold_bars) ·
+`_pct` ratio (0-1, e.g. risk_per_trade_pct / death_equity_pct) · `_bars` bar count (fixed_hold_bars / max_hold_bars) ·
 `_mult` multiplier (atr_sl_long_mult / atr_tp_mult / volume_mult) · `_days` days (pause_days).
 Counters carry no suffix (max_safety_orders / max_layers). Exception: `predict_num` is a data_process preprocessing concept and keeps its original name.
 

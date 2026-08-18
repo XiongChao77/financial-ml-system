@@ -15,6 +15,12 @@ class BbmStrategyConfig:
 
     compound: bool = True
     risk_per_trade_pct: float = 0.02
+    fixed_hold_bars: Optional[int] = None
+    # Multipliers of MarketView.expected_vol, not absolute percentages.
+    threshold_long: float = 1.7
+    threshold_short: float = 1.7
+    stop_loss_long: float = 1.7
+    stop_loss_short: float = 1.7
     allow_long: bool = True
     allow_short: bool = True
     prob_thresh: Optional[float] = None
@@ -26,9 +32,10 @@ class BbmSignalStrategy(StrategyBase):
     """
     Enter from model signal and let the bracket order exit by BBM barriers.
 
-    There is intentionally no holding-duration rule here: once a position is
-    opened, later model signals do not close or reverse it. The trade exits only
-    through the attached take-profit/stop-loss bracket or the daily loss guard.
+    A configured fixed_hold_bars acts as a time barrier: once a position is
+    opened, it is closed after that many observed position bars. Later model
+    signals do not refresh the period. Before the time barrier, the attached
+    take-profit/stop-loss bracket and the daily loss guard can still exit early.
 
     Backtrader note: bracket exits are simulated from OHLC bars, so if one bar
     contains both the stop-loss and take-profit prices, the engine cannot know
@@ -59,6 +66,18 @@ class BbmSignalStrategy(StrategyBase):
         self.skipped_missing_threshold = 0
         self.skipped_small_threshold = 0
         self.skipped_size = 0
+        self.position_hold_bars = 0
+        self.previous_position_dir = PositionDir.FLAT
+
+    def _update_position_hold_bars(self, position_dir: PositionDir):
+        """Count from the observed entry without refreshing on later signals."""
+        if position_dir == PositionDir.FLAT:
+            self.position_hold_bars = 0
+        elif position_dir != self.previous_position_dir:
+            self.position_hold_bars = 1
+        else:
+            self.position_hold_bars += 1
+        self.previous_position_dir = position_dir
 
     def _update_daily_state(self, current_time: datetime, account_equity: float):
         current_date = current_time.date()
@@ -70,8 +89,15 @@ class BbmSignalStrategy(StrategyBase):
             self.is_halted_today = False
 
     def _barrier_pcts(self, target_dir: PositionDir, state: Observation) -> tuple[float, float]:
-        long_threshold = state.market.threshold_long
-        short_threshold = state.market.threshold_short
+        expected_vol = state.market.expected_vol
+        if not valid_pct(expected_vol):
+            self.skipped_missing_threshold += 1
+            return 0.0, 0.0
+
+        long_threshold = expected_vol * self.config.threshold_long
+        short_threshold = expected_vol * self.config.threshold_short
+        stop_loss_long = expected_vol * self.config.stop_loss_long
+        stop_loss_short = expected_vol * self.config.stop_loss_short
         if not valid_pct(long_threshold) or not valid_pct(short_threshold):
             self.skipped_missing_threshold += 1
             return 0.0, 0.0
@@ -83,10 +109,18 @@ class BbmSignalStrategy(StrategyBase):
             return 0.0, 0.0
 
         if target_dir == PositionDir.POSITIVE:
-            return float(short_threshold), float(long_threshold)
-        if target_dir == PositionDir.NEGATIVE:
-            return float(long_threshold), float(short_threshold)
-        return 0.0, 0.0
+            stop_loss = stop_loss_long
+            take_profit = long_threshold
+        elif target_dir == PositionDir.NEGATIVE:
+            stop_loss = stop_loss_short
+            take_profit = short_threshold
+        else:
+            return 0.0, 0.0
+
+        if not valid_pct(stop_loss):
+            self.skipped_missing_threshold += 1
+            return 0.0, 0.0
+        return float(stop_loss), float(take_profit)
 
     def _risk_equity(self, account_equity: float) -> float:
         return account_equity if self.config.compound else self.init_equity
@@ -133,6 +167,7 @@ class BbmSignalStrategy(StrategyBase):
         if self.config.prob_thresh is not None and state.market.pred_prob < self.config.prob_thresh:
             signal = Signal.NEUTRAL
 
+        self._update_position_hold_bars(state.position.dir)
         self._update_daily_state(state.current_time, state.account.equity)
         daily_loss_abs = max(0.0, self.day_start_equity - state.account.equity)
         remaining_risk_budget = self._remaining_daily_loss(state.account.equity)
@@ -168,7 +203,24 @@ class BbmSignalStrategy(StrategyBase):
                 return action
             return TradeIntent(ActionType.NOOP)
 
-        if state.position.dir != PositionDir.FLAT or self.is_halted_today:
+        if state.position.dir != PositionDir.FLAT:
+            # The fixed time barrier has priority over every model signal. Close
+            # only on this bar; after the venue reports FLAT on a later bar, the
+            # normal entry path below will use that bar's prediction.
+            if (
+                self.config.fixed_hold_bars is not None
+                and self.position_hold_bars >= self.config.fixed_hold_bars
+            ):
+                action = TradeIntent(
+                    ActionType.CLOSE,
+                    time=state.current_time,
+                    reason="fixed_hold_expired",
+                )
+                self.execute_action(action)
+                return action
+            return TradeIntent(ActionType.NOOP)
+
+        if self.is_halted_today:
             return TradeIntent(ActionType.NOOP)
 
         target_dir = PositionDir.FLAT
@@ -212,6 +264,7 @@ class BbmSignalStrategy(StrategyBase):
             "meltdown_days": self.meltdown_days,
             "unexplained_meltdown": self.unexplained_meltdown,
             "entries": self.entries,
+            "fixed_hold_bars": self.config.fixed_hold_bars,
             "min_expected_move_pct": self.config.min_expected_move_pct,
             "skipped_missing_threshold": self.skipped_missing_threshold,
             "skipped_small_threshold": self.skipped_small_threshold,

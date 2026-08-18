@@ -7,7 +7,7 @@ from data_process import common
 
 # number_of_trades and volume are highly correlated; quote_asset_volume and volume are also highly correlated.
 #taker_buy_quote_volume--taker_buy_base_volume,
-DROP_FEATURES =['threshold_long', 'stop_threshold_long','threshold_short', 'stop_threshold_short', 'label', 'trend_strength', 'open_time_ms_utc', 'open_time_date_utc',
+DROP_FEATURES =['threshold_long', 'stop_threshold_long', 'stop_loss_long', 'threshold_short', 'stop_threshold_short', 'stop_loss_short', 'label', 'trend_strength', 'open_time_ms_utc', 'open_time_date_utc',
                  'close_time_ms_utc', 'ignore' ]
 LOW_CORRELATION_FEATURES = ['number_of_trades','quote_asset_volume', 'taker_buy_quote_volume']
 

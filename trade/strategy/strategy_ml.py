@@ -18,7 +18,7 @@ class MlStrategyConfig:
 
     compound: bool = False
     risk_per_trade_pct: float = 0.01
-    min_hold_bars: int = 16
+    fixed_hold_bars: int = 16
     allow_long: bool = True
     allow_short: bool = True
     prob_thresh: Optional[float] = None
@@ -171,7 +171,7 @@ class MlSignalStrategy(StrategyBase):
         if state.position.dir != PositionDir.FLAT:
             if target_dir == state.position.dir:
                 self.bars_since_confirming_signal = 0 # reset
-            elif self.bars_since_confirming_signal < self.config.min_hold_bars:
+            elif self.bars_since_confirming_signal < self.config.fixed_hold_bars:
                 target_dir = state.position.dir
             else:
                 pass
@@ -190,9 +190,9 @@ class MlSignalStrategy(StrategyBase):
                 self.meltdown_days += 1
             target_dir = PositionDir.FLAT
         elif state.position.dir == PositionDir.FLAT :
-            if target_dir != PositionDir.FLAT and bars_to_close <= self.config.min_hold_bars:
+            if target_dir != PositionDir.FLAT and bars_to_close <= self.config.fixed_hold_bars:
                 self.logger.info(
-                    f"⏳ [NO OPEN] bars_to_close={bars_to_close} < min_hold_bars={self.config.min_hold_bars}"
+                    f"⏳ [NO OPEN] bars_to_close={bars_to_close} < fixed_hold_bars={self.config.fixed_hold_bars}"
                 )
                 target_dir = PositionDir.FLAT
         # 2. Two bars before the close, force flat if still in position
@@ -266,18 +266,18 @@ class MlSignalStrategy(StrategyBase):
                 return
 
             durations = np.array(self.all_durations)
-            min_hold_bars = self.config.min_hold_bars # default 16
+            fixed_hold_bars = self.config.fixed_hold_bars # default 16
             
             # Core statistics
             avg_dur = np.mean(durations)
             median_dur = np.median(durations)
             max_dur = np.max(durations)
             min_dur = np.min(durations)
-            # Renewal rate: share of positions held longer than min_hold_bars
-            renewal_count = np.sum(durations > min_hold_bars)
+            # Renewal rate: share of positions held longer than fixed_hold_bars
+            renewal_count = np.sum(durations > fixed_hold_bars)
             renewal_rate = renewal_count / len(durations)
 
-            self.logger.info(f"[Hold] count={len(durations)} min_hold_bars={min_hold_bars} avg={avg_dur:.1f} med={median_dur:.1f} min={min_dur} max={max_dur} renew rate={renewal_rate:.1%}")
+            self.logger.info(f"[Hold] count={len(durations)} fixed_hold_bars={fixed_hold_bars} avg={avg_dur:.1f} med={median_dur:.1f} min={min_dur} max={max_dur} renew rate={renewal_rate:.1%}")
             # Print the distribution histogram (simple ASCII)
             # self.log_histogram(durations)
 
@@ -294,7 +294,7 @@ class MlSignalStrategy(StrategyBase):
         """
         metrics = {
             'meltdown_days': self.meltdown_days,
-            'min_hold_bars': self.config.min_hold_bars,
+            'fixed_hold_bars': self.config.fixed_hold_bars,
         }
         if self.all_durations:
             d = np.array(self.all_durations)
@@ -305,7 +305,7 @@ class MlSignalStrategy(StrategyBase):
                 'hold_min_bars': int(d.min()),
                 'hold_max_bars': int(d.max()),
                 'hold_p95_bars': float(np.percentile(d, 95)),
-                'hold_renewal_rate': float((d > self.config.min_hold_bars).mean()),
+                'hold_renewal_rate': float((d > self.config.fixed_hold_bars).mean()),
                 'hold_durations': self.all_durations,          # detail
             })
         if self.all_signal_streaks:

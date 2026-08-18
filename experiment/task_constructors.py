@@ -70,13 +70,13 @@ def construct_experiment_doge(symbol: str, interval: str, train_mode):
                                 training_task.append(train_conf)
 
     simulation_task: List[Any] = []
-    for min_hold_bars in [12, 16, 24]:
+    for fixed_hold_bars in [12, 16, 24]:
         for atr_sl_long_mult, atr_sl_short_mult in [(6, 5), (5, 4)]:
             simulation_task.append((
                 backtest_runner.MlStrategyConfig(
                     allow_long=True,
                     allow_short=True,
-                    min_hold_bars=min_hold_bars,
+                    fixed_hold_bars=fixed_hold_bars,
                     prob_thresh=None,
                     atr_sl_long_mult=atr_sl_long_mult,
                     atr_sl_short_mult=atr_sl_short_mult,
@@ -202,13 +202,13 @@ def construct_experiment_doge_combo(symbol: str, interval: str):
         training_task.append(direction_config)
 
     simulation_task: List[Any] = []
-    for min_hold_bars in [4, 8, 12, 16, 24]:
+    for fixed_hold_bars in [4, 8, 12, 16, 24]:
         for atr_sl_long_mult, atr_sl_short_mult in [(6, 5), (5, 4)]:
             simulation_task.append((
                 backtest_runner.MlStrategyConfig(
                     allow_long=True,
                     allow_short=True,
-                    min_hold_bars=min_hold_bars,
+                    fixed_hold_bars=fixed_hold_bars,
                     prob_thresh=None,
                     atr_sl_long_mult=atr_sl_long_mult,
                     atr_sl_short_mult=atr_sl_short_mult,
@@ -270,13 +270,13 @@ def construct_experiment_eth(symbol: str, interval: str):
                         ))
 
     simulation_task: List[Any] = []
-    for min_hold_bars in [30, 32, 36, 38, 40, 44]:
+    for fixed_hold_bars in [30, 32, 36, 38, 40, 44]:
         for atr_sl_long_mult, atr_sl_short_mult in [(6, 6), (5, 4)]:
             simulation_task.append((
                 backtest_runner.MlStrategyConfig(
                     allow_long=True,
                     allow_short=True,
-                    min_hold_bars=min_hold_bars,
+                    fixed_hold_bars=fixed_hold_bars,
                     prob_thresh=None,
                     atr_sl_long_mult=atr_sl_long_mult,
                     atr_sl_short_mult=atr_sl_short_mult,

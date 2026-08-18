@@ -95,8 +95,7 @@ class MarketView:
     signal: Optional[Signal] = None
     pred_prob: float = 0.0
     atr_pct: float = 0.0            # current ATR (as a fraction of price)
-    threshold_long: Optional[float] = None
-    threshold_short: Optional[float] = None
+    expected_vol: Optional[float] = None
     slow_atr: Optional[float] = None
     vol_regime: Optional[float] = None
     # Optional feed value: infinity means a continuous market with no close boundary.

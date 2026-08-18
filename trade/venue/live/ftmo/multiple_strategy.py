@@ -356,7 +356,7 @@ class MasterController:
                             for hash_value,strategy in self.strategies.items():
                                 if strategy.pre_para.symbol == symbol and strategy.pre_para.interval == interval_str and strategy.pre_para.seq_len == window:
                                     try:
-                                        df_with_feature['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, strategy.st_para.min_hold_bars)
+                                        df_with_feature['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, strategy.st_para.fixed_hold_bars)
                                         df_pred, model_stats = strategy.model.predict_with_ds(ds,df_with_feature,is_live=True,diff_thresh = None)
                                         last_row = df_pred.iloc[-1]
                                         self.execute_strategy(strategy, last_row["close"], last_row["pred"], last_row["pred_prob"], last_row['stop_loss_atr_pct'])
