@@ -31,7 +31,7 @@ if False:
         broker_config=broker_config,
         save_dir=common.TEMPORARY_DIR,
         data_config=backtest_runner.ModelDataConfig(
-            atr_ref_bars=strategy_config.min_hold_bars,
+            atr_ref_bars=strategy_config.fixed_hold_bars,
             prep_output_dir=prep_output_dir,
             train_output_dir=fusion_dir,
             device="cpu",
@@ -42,7 +42,7 @@ if False:
 else:
     train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.TrainTask.DIRECT_3CLASS)
     strategy_config = backtest_runner.MlStrategyConfig(
-        min_hold_bars=48,
+        fixed_hold_bars=48,
         atr_sl_long_mult=6,
         atr_sl_short_mult=6,
         atr_tp_mult=100,
@@ -54,7 +54,7 @@ else:
         broker_config=broker_config,
         save_dir=common.TEMPORARY_DIR,
         data_config=backtest_runner.ModelDataConfig(
-            atr_ref_bars=strategy_config.min_hold_bars,
+            atr_ref_bars=strategy_config.fixed_hold_bars,
             prep_output_dir=common.DATA_OUT_DIR,
             train_output_dir=train_output_dir,
             period="long",

@@ -75,7 +75,7 @@ def load_and_process(path: Path, period: str = 'forward') -> pd.DataFrame:
                 res = {
                     "flip_penalty": recursive_get(p, "flip_penalty"),
                     "miss_penalty": recursive_get(p, "miss_penalty"),
-                    "min_hold_bars": recursive_get(p, "min_hold_bars"),
+                    "fixed_hold_bars": recursive_get(p, "fixed_hold_bars"),
                     "cagr": recursive_get(p, "cagr"),
                     "calmar": recursive_get(p, "calmar"),
                     "long_pnl": recursive_get(p, "long_pnl"),
@@ -91,7 +91,7 @@ def load_and_process(path: Path, period: str = 'forward') -> pd.DataFrame:
         # 4. Transform and filter
         processed_list = [item for item in df_raw.apply(extract_data, axis=1) if item]
         df_final = pd.DataFrame(processed_list)
-        df_final = df_final[df_final["min_hold_bars"] == 24]#[20, 24 ,28, 32,36]
+        df_final = df_final[df_final["fixed_hold_bars"] == 24]#[20, 24 ,28, 32,36]
 
 
         # 5. Debug: inspect the final DataFrame content

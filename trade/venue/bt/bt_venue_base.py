@@ -81,8 +81,7 @@ class BtVenue(VenueBase,bt.Strategy):
         pred = self.line_value("pred")
         pred_prob = self.line_value("pred_prob")
         atr_pct = self.line_value("atr_pct")
-        threshold_long = self.line_value("threshold_long")
-        threshold_short = self.line_value("threshold_short")
+        expected_vol = self.line_value("expected_vol")
         bars_to_close = self.line_value("bars_to_close")
         position_dir = self.current_position_dir()
         if layers is None:
@@ -97,15 +96,10 @@ class BtVenue(VenueBase,bt.Strategy):
             signal=Signal.INVALID if pred is None or np.isnan(pred) else Signal(int(pred)),
             pred_prob=0.0 if pred_prob is None or np.isnan(pred_prob) else float(pred_prob),
             atr_pct=0.0 if atr_pct is None or np.isnan(atr_pct) else float(atr_pct),
-            threshold_long=(
+            expected_vol=(
                 None
-                if threshold_long is None or np.isnan(threshold_long)
-                else float(threshold_long)
-            ),
-            threshold_short=(
-                None
-                if threshold_short is None or np.isnan(threshold_short)
-                else float(threshold_short)
+                if expected_vol is None or np.isnan(expected_vol)
+                else float(expected_vol)
             ),
             slow_atr=self.line_value("slow_atr"),
             vol_regime=self.line_value("vol_regime"),

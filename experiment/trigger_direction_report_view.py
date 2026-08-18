@@ -142,7 +142,7 @@ def plot_model_param_heatmaps(
             "seq_len":common.recursive_get(r, "seq_len"),
             "stride":common.recursive_get(r, "stride"),
             "predict_num":common.recursive_get(r, "predict_num"),
-            "min_hold_bars":common.recursive_get(r, "min_hold_bars"),
+            "fixed_hold_bars":common.recursive_get(r, "fixed_hold_bars"),
             "atr_sl_long_mult":common.recursive_get(r, "atr_sl_long_mult"),
             "atr_tp_mult":common.recursive_get(r, "atr_tp_mult"),
             }
@@ -782,8 +782,8 @@ def main():
         raise RuntimeError("no report found")
     os.makedirs(output_dir, exist_ok=True)
     # performance_compare_trigger(rows, output_dir)
-    x_input = 'label_type'  # min_hold_bars 
-    y_input = 'min_hold_bars'
+    x_input = 'label_type'  # fixed_hold_bars 
+    y_input = 'fixed_hold_bars'
     # max_dd_pct sharpe cagr max_hwm_duration_days calmar rc_pos_ratio
     metric = 'cagr'
     higher_is_better = True

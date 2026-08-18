@@ -192,12 +192,12 @@ def strategy_config_from_dict(params: dict):
 def atr_ref_bars_for_strategy(strategy_config, default: int = 14) -> int:
     """
     ModelDataConfig still needs atr_ref_bars to build the shared dataframe.
-    BBM does not use ATR or min_hold_bars, so callers should use this adapter
-    instead of reading strategy_config.min_hold_bars directly.
+    BBM does not use ATR or fixed_hold_bars, so callers should use this adapter
+    instead of reading strategy_config.fixed_hold_bars directly.
     """
     value = getattr(strategy_config, "atr_ref_bars", None)
     if value is None:
-        value = getattr(strategy_config, "min_hold_bars", default)
+        value = getattr(strategy_config, "fixed_hold_bars", default)
     return max(1, int(value))
 
 
@@ -302,8 +302,9 @@ def _build_feed(frame: pd.DataFrame, data_config):
     feed_params["atr_pct"] = (
         "stop_loss_atr_pct" if "stop_loss_atr_pct" in frame.columns else None
     )
-    for column in ("threshold_long", "threshold_short"):
-        feed_params[column] = column if column in frame.columns else None
+    feed_params["expected_vol"] = (
+        "expected_vol" if "expected_vol" in frame.columns else None
+    )
     return PredictionFeed(**feed_params)
 
 
@@ -937,12 +938,18 @@ def generate_backtest_report(
     return (report_additional,report)
 
 if __name__ == "__main__":
-    train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.TrainTask.DIRECTION)
+    train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.TrainTask.DUAL_HEAD_3CLASS)
     start_time = time.time()
     pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
     exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'simulation'),pre_para.symbol, pre_para.interval)
     logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
-    strategy_config = BbmStrategyConfig()
+    strategy_config = BbmStrategyConfig(fixed_hold_bars =int(pre_para.predict_num), 
+                                        threshold_long =pre_para.vol_multiplier_long,
+                                        threshold_short =pre_para.vol_multiplier_short,
+                                        stop_loss_long= pre_para.vol_multiplier_long * pre_para.stop_multiplier_rate_long,
+                                        stop_loss_short= pre_para.vol_multiplier_short * pre_para.stop_multiplier_rate_short,
+                                          )
+    # strategy_config = MlStrategyConfig(fixed_hold_bars =pre_para.predict_num )
     broker_config = BrokerConfig()
     runner_config = RunnerConfig(
         strategy_config=strategy_config,
