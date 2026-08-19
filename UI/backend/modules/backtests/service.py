@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-import json
 import math
 from pathlib import Path
 import re
@@ -24,7 +23,6 @@ from trade.runner.frontend_report_store import LATEST_BACKTEST_REPORT_PATH
 from UI.backend.modules.experiments import service as experiment_service
 
 
-_ARTIFACT_NAME = "full_backtest_report.json"
 _TIME_COLUMN_CANDIDATES = ("open_time_date_utc", "open_time_ms_utc")
 _MARKET_COLUMNS = ("open", "high", "low", "close", "volume")
 _OPTIONAL_COLUMNS = ("label", "pred")
@@ -35,7 +33,6 @@ _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_-]+$")
 class ExperimentArtifacts:
     """Resolved files needed to assemble one saved experiment detail."""
 
-    full_report: Path
     prepared_data: Path
 
 
@@ -67,13 +64,12 @@ def _load_period_backtest(
 ) -> dict[str, Any]:
     period_report = _period_report(record, period)
     artifacts = resolve_experiment_artifacts(record, period, period_report)
-    document = _read_full_report(artifacts.full_report)
-    report = document["report"]
-    additional = document["additional"]
-    _validate_report_identity(period_report, report)
+    report = json_safe_value(deepcopy(dict(period_report)))
+    additional: dict[str, Any] = {}
     candles = _load_candles(artifacts.prepared_data, report)
 
     root = experiment_service.get_reports_root()
+    report_file = resolve_under_root(root, record.source)
     return {
         "schema_version": 1,
         "source": {
@@ -82,7 +78,7 @@ def _load_period_backtest(
             "record_id": record_id,
             "strategy_number": record.strategy_number,
             "period": period,
-            "report_file": str(artifacts.full_report.relative_to(root)),
+            "report_file": str(report_file.relative_to(root)),
             "data_file": str(artifacts.prepared_data.relative_to(root)),
         },
         "candles": candles,
@@ -109,10 +105,10 @@ def _load_complete_experiment_backtest(
             "record_id": record_id,
             "strategy_number": record.strategy_number,
             "period": "all",
-            "report_files": [
+            "report_files": list(dict.fromkeys([
                 long_payload["source"]["report_file"],
                 forward_payload["source"]["report_file"],
-            ],
+            ])),
             "data_files": [
                 long_payload["source"]["data_file"],
                 forward_payload["source"]["data_file"],
@@ -141,7 +137,7 @@ def _combine_additional(
     forward_additional: Mapping[str, Any],
 ) -> dict[str, Any]:
     combined = deepcopy(dict(long_additional))
-    for key in ("trade_logs", "closed_trade_hold_bars"):
+    for key in ("trade_logs",):
         long_values = long_additional.get(key)
         forward_values = forward_additional.get(key)
         if isinstance(long_values, list) or isinstance(forward_values, list):
@@ -159,7 +155,10 @@ def _combine_reports(
     long_report: Mapping[str, Any],
     forward_report: Mapping[str, Any],
 ) -> dict[str, Any]:
-    from trade.runner.analyze_backtest_report import build_continuous_equity_path
+    from trade.runner.analyze_backtest_report import (
+        build_continuous_equity_path,
+        simulate_ftmo_challenges,
+    )
 
     combined = deepcopy(dict(long_report))
     equity_frame, _ = build_continuous_equity_path(
@@ -189,19 +188,7 @@ def _combine_reports(
     if len(returns) > 1 and float(returns.std(ddof=1)) > 0:
         sharpe = float(returns.mean() / returns.std(ddof=1) * np.sqrt(365.0))
 
-    daily_rows = []
-    previous_equity = None
-    for timestamp, value in equity.items():
-        value = float(value)
-        daily_return = 0.0 if previous_equity is None else value / previous_equity - 1.0
-        daily_rows.append(
-            {
-                "date": pd.Timestamp(timestamp).isoformat(),
-                "dd_pct": float(daily_return),
-                "equity": value,
-            }
-        )
-        previous_equity = value
+    daily_account = _combine_daily_account(long_report, forward_report)
 
     combined.setdefault("params", {}).setdefault("data", {})["period"] = "all"
     combined.setdefault("time", {})["start"] = long_report.get("time", {}).get("start")
@@ -211,14 +198,14 @@ def _combine_reports(
         report_regions = report.get("time", {}).get("regions")
         if isinstance(report_regions, Mapping):
             regions.update(deepcopy(dict(report_regions)))
-    ood_region = regions.get("ood")
-    if isinstance(ood_region, dict):
-        forward_time = forward_report.get("time", {})
-        if forward_time.get("start") is not None:
-            ood_region["start"] = forward_time["start"]
-        if forward_time.get("end") is not None:
-            ood_region["end"] = forward_time["end"]
+    ood_region = regions.setdefault("ood", {})
+    forward_time = forward_report.get("time", {})
+    if forward_time.get("start") is not None:
+        ood_region["start"] = forward_time["start"]
+    if forward_time.get("end") is not None:
+        ood_region["end"] = forward_time["end"]
     combined["time"]["regions"] = regions
+    combined["daily_account"] = daily_account
     combined.setdefault("performance", {}).update(
         {
             "start_value": start_value,
@@ -231,24 +218,89 @@ def _combine_reports(
             else 0.0,
         }
     )
-    worst_daily_return = float(returns.min()) if not returns.empty else 0.0
-    worst_daily_date = (
-        pd.Timestamp(returns.idxmin()).date().isoformat()
-        if not returns.empty
-        else None
+    worst_daily = min(
+        daily_account,
+        key=lambda row: row["intraday_drawdown_pct"],
+        default=None,
+    )
+    worst_intraday_drawdown = (
+        float(worst_daily["intraday_drawdown_pct"])
+        if worst_daily is not None
+        else 0.0
     )
     combined.setdefault("drawdown", {}).update(
         {
-            "daily_loss_list": daily_rows,
             "max_dd_pct": max_drawdown_fraction * 100.0,
             "max_dd_amt": float((running_peak - equity).max()),
-            "max_daily_dd": worst_daily_return,
-            "max_daily_date": worst_daily_date,
-            "dd_3_pct_days": int((returns < -0.03).sum()),
-            "dd_4_pct_days": int((returns < -0.04).sum()),
-            "dd_5_pct_days": int((returns < -0.05).sum()),
+            "max_daily_dd": worst_intraday_drawdown,
+            "max_daily_date": worst_daily["date"] if worst_daily else None,
+            "dd_3_pct_days": sum(
+                row["intraday_drawdown_pct"] < -0.03
+                for row in daily_account
+            ),
+            "dd_4_pct_days": sum(
+                row["intraday_drawdown_pct"] < -0.04
+                for row in daily_account
+            ),
+            "dd_5_pct_days": sum(
+                row["intraday_drawdown_pct"] < -0.05
+                for row in daily_account
+            ),
         }
     )
+    combined["ftmo_challenge"] = simulate_ftmo_challenges(combined)
+    return combined
+
+
+def _combine_daily_account(
+    *reports: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Chain period-relative daily account values into one equity scale."""
+
+    combined = []
+    current_equity = None
+    for report in reports:
+        rows = report.get("daily_account")
+        if not isinstance(rows, list) or not rows:
+            continue
+        start_value = report.get("performance", {}).get("start_value")
+        if not _is_number(start_value) or float(start_value) <= 0:
+            continue
+        if current_equity is None:
+            current_equity = float(start_value)
+        scale = current_equity / float(start_value)
+        last_end_equity = None
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            date = row.get("date")
+            if date is None:
+                continue
+            values = {
+                name: row.get(name)
+                for name in ("start_equity", "minimum_equity", "end_equity")
+            }
+            if not all(_is_number(value) for value in values.values()):
+                continue
+            start_equity = float(values["start_equity"]) * scale
+            minimum_equity = float(values["minimum_equity"]) * scale
+            end_equity = float(values["end_equity"]) * scale
+            combined.append(
+                {
+                    "date": str(date),
+                    "start_equity": start_equity,
+                    "minimum_equity": minimum_equity,
+                    "end_equity": end_equity,
+                    "intraday_drawdown_pct": (
+                        minimum_equity / start_equity - 1.0
+                        if start_equity > 0
+                        else 0.0
+                    ),
+                }
+            )
+            last_end_equity = end_equity
+        if last_end_equity is not None:
+            current_equity = last_end_equity
     return combined
 
 
@@ -272,14 +324,10 @@ def resolve_experiment_artifacts(
         raise ValueError("The selected report has no params.identity object")
 
     prep_hash = _artifact_component(identity.get("prep_hash"), "prep_hash")
-    train_hash = _artifact_component(identity.get("train_hash"), "train_hash")
-    sim_hash = _artifact_component(identity.get("sim_hash"), "sim_hash")
 
     run_root = source_file.parent
     canonical_prep = run_root / "train" / f"pre_{prep_hash}"
-    canonical_train = canonical_prep / f"train_{train_hash}"
     prep_candidates = [canonical_prep]
-    train_candidates = [canonical_train]
 
     data_params = params.get("data")
     if isinstance(data_params, Mapping):
@@ -288,21 +336,6 @@ def resolve_experiment_artifacts(
             data_params.get("prep_output_dir"),
             root,
         )
-        _append_safe_reported_directory(
-            train_candidates,
-            data_params.get("train_output_dir"),
-            root,
-        )
-
-    full_report_candidates = [
-        train_dir / f"sim_{sim_hash}" / period / _ARTIFACT_NAME
-        for train_dir in train_candidates
-    ]
-    full_report = _first_existing_file(
-        full_report_candidates,
-        root,
-        description="full backtest report",
-    )
 
     data_stem = "train_data" if period == "long" else "test_data"
     prepared_candidates = [
@@ -316,7 +349,6 @@ def resolve_experiment_artifacts(
         description=f"{period} prepared data",
     )
     return ExperimentArtifacts(
-        full_report=full_report,
         prepared_data=prepared_data,
     )
 
@@ -379,33 +411,6 @@ def _first_existing_file(
         f"Saved {description} was not found below the report root; "
         f"checked: {checked}"
     )
-
-
-def _read_full_report(path: Path) -> dict[str, Any]:
-    try:
-        with path.open("r", encoding="utf-8") as input_file:
-            document = json.load(input_file)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON in saved backtest report: {path}") from exc
-    if not isinstance(document, dict):
-        raise ValueError("The saved backtest report must be a JSON object")
-    if not isinstance(document.get("report"), dict):
-        raise ValueError("The saved backtest report has no report object")
-    if not isinstance(document.get("additional"), dict):
-        raise ValueError("The saved backtest report has no additional object")
-    return json_safe_value(document)
-
-
-def _validate_report_identity(
-    selected_report: Mapping[str, Any],
-    saved_report: Mapping[str, Any],
-) -> None:
-    selected_hash = _nested_value(selected_report, "params.hash")
-    saved_hash = _nested_value(saved_report, "params.hash")
-    if selected_hash and saved_hash and selected_hash != saved_hash:
-        raise ValueError(
-            "The saved detail artifact does not match the selected report record"
-        )
 
 
 def _load_candles(path: Path, report: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -483,15 +488,6 @@ def _report_time_bounds(report: Mapping[str, Any]) -> tuple[pd.Timestamp, pd.Tim
     return start, end
 
 
-def _nested_value(value: Mapping[str, Any], path: str) -> Any:
-    current: Any = value
-    for part in path.split("."):
-        if not isinstance(current, Mapping):
-            return None
-        current = current.get(part)
-    return current
-
-
 def _json_scalar(value: Any) -> Any:
     if value is None or value is pd.NA:
         return None
@@ -507,3 +503,11 @@ def _json_scalar(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
+
+def _is_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float, np.number))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
