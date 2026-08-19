@@ -10,6 +10,17 @@ from typing import Any, Optional, Union
 from data_process import common
 
 
+@dataclass(frozen=True)
+class ExperimentContext:
+    """Immutable source revision captured once by the process orchestrator."""
+
+    git_commit: str
+
+    def __post_init__(self):
+        if not self.git_commit:
+            raise ValueError("git_commit must not be empty")
+
+
 @dataclass
 class BrokerConfig:
     initial_equity: float = 10_000.0
@@ -35,6 +46,7 @@ class ModelDataConfig:
     train_output_dir: str = common.TRAIN_OUT_DIR
     period: str = "long"  # long | forward | all
     device: str = "auto"  # 'auto'/'cuda'/'cpu'
+    use_prediction_cache: bool = False
 
     def __post_init__(self):
         if self.atr_ref_bars <= 0:
@@ -69,5 +81,6 @@ class RunnerConfig:
     strategy_config: Any
     data_config: RunnerDataConfig
     save_dir: str
+    experiment_context: ExperimentContext
     broker_config: BrokerConfig = field(default_factory=BrokerConfig)
     engine_config: BacktestEngineConfig = field(default_factory=BacktestEngineConfig)

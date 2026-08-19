@@ -2,7 +2,10 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 import argparse
 import datetime
-import os, sys, time, json,torch
+import contextlib
+import fcntl
+import hashlib
+import os, sys, time, json, pickle, torch
 import backtrader as bt
 import backtrader.analyzers as btanalyzers
 import pandas as pd
@@ -16,7 +19,7 @@ sys.path.append(os.path.join(current_work_dir, "..",'..'))
 # Import project modules
 from data_process.common import *
 from data_process import common 
-from data_process.utils import config_from_dict_train, param_hash
+from data_process.utils import TaskIdentity, config_from_dict_train, param_hash
 from model import model_loader
 from model import data_loader
 from model.training_types import temporal_split_bounds
@@ -31,6 +34,7 @@ from trade.runner.config import (
     BrokerConfig,
     BacktestEngineConfig,
     CsvDataConfig,
+    ExperimentContext,
     ModelDataConfig,
     RunnerConfig,
 )
@@ -217,6 +221,111 @@ def _resolve_device(device_name):
 
 
 _MODEL_TIME_REGION_CACHE: dict[tuple, dict] = {}
+_PREDICTION_CACHE_SCHEMA = 2
+_PREDICTION_COLUMNS = (
+    "pred",
+    "pred_prob",
+    "prob_short",
+    "prob_neutral",
+    "prob_long",
+    "net_score",
+)
+
+
+def _prediction_artifact_files(train_output_dir: str) -> list[str]:
+    """Resolve model artifacts, including model directories referenced by a fusion run."""
+    files: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(directory: str) -> None:
+        directory = os.path.abspath(directory)
+        if directory in visited:
+            return
+        visited.add(directory)
+        description_path = os.path.join(directory, "task_description.json")
+        if os.path.isfile(description_path):
+            files.add(description_path)
+            with open(description_path, "r", encoding="utf-8") as handle:
+                description = json.load(handle)
+            for value in (description.get("models") or {}).values():
+                if isinstance(value, str):
+                    visit(os.path.join(directory, value))
+                elif isinstance(value, dict):
+                    for key in ("model", "meta"):
+                        relative_path = value.get(key)
+                        if relative_path:
+                            files.add(os.path.abspath(os.path.join(directory, relative_path)))
+        for filename in ("model.pt", "meta.json", "train_config.json"):
+            path = os.path.join(directory, filename)
+            if os.path.isfile(path):
+                files.add(path)
+
+    visit(train_output_dir)
+    return sorted(files)
+
+
+def _prediction_cache_path(data_config: ModelDataConfig, train_output_dir: str) -> str:
+    data_filenames = {
+        "long": ["train_data.csv" if common.CONF_DF == "to_csv" else "train_data.feather"],
+        "forward": ["test_data.csv" if common.CONF_DF == "to_csv" else "test_data.feather"],
+        "all": [
+            "train_data.csv" if common.CONF_DF == "to_csv" else "train_data.feather",
+            "test_data.csv" if common.CONF_DF == "to_csv" else "test_data.feather",
+        ],
+    }[data_config.period]
+    source_files = _prediction_artifact_files(train_output_dir)
+    source_files.extend(
+        os.path.join(data_config.prep_output_dir, filename)
+        for filename in data_filenames
+    )
+    signatures = []
+    for path in sorted(set(map(os.path.abspath, source_files))):
+        stat = os.stat(path)
+        signatures.append((path, stat.st_size, stat.st_mtime_ns))
+    identity = {
+        "schema": _PREDICTION_CACHE_SCHEMA,
+        "period": data_config.period,
+        "prep_output_dir": os.path.abspath(data_config.prep_output_dir),
+        "train_output_dir": os.path.abspath(train_output_dir),
+        "sources": signatures,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    return os.path.join(train_output_dir, "prediction_cache", f"{data_config.period}_{digest}.pkl")
+
+
+@contextlib.contextmanager
+def _exclusive_file_lock(lock_path: str):
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, "a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _read_prediction_cache(cache_path: str):
+    if not os.path.isfile(cache_path):
+        return None
+    with open(cache_path, "rb") as handle:
+        payload = pickle.load(handle)
+    if payload.get("schema") != _PREDICTION_CACHE_SCHEMA:
+        return None
+    return payload
+
+
+def _write_prediction_cache(cache_path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    temp_path = f"{cache_path}.{os.getpid()}.tmp"
+    try:
+        with open(temp_path, "wb") as handle:
+            pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(temp_path, cache_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 def combine_model_period_frames(
@@ -346,49 +455,19 @@ def _model_time_regions(
     return regions
 
 
-def _load_model_data(
+def _infer_prediction_payload(
     logger,
     data_config: ModelDataConfig,
     train_cfg: train_config.TrainConfig,
-):
-    pre_para: BaseDefine = common.load_pre_params_from_dir(data_config.train_output_dir)
-    logger.info(
-        f"prep_output_dir:{data_config.prep_output_dir}, "
-        f"train_output_dir:{data_config.train_output_dir}"
-    )
-
-    frame = _load_model_period_frame(data_config)
-    logger.info(
-        "Loaded model data | period=%s | bars=%d",
-        data_config.period,
-        len(frame),
-    )
-
-    # Feature artifacts can contain one Pandas block per column. Consolidate
-    # once before adding runtime columns to avoid repeated fragmented inserts.
-    frame = frame.copy()
-    frame["open_time_date_utc"] = pd.to_datetime(frame["open_time_date_utc"], utc=True)
-    interval_ms = common.get_interval_ms(pre_para.interval)
-    train_output_dir = data_config.train_output_dir
-    if not os.path.isabs(train_output_dir):
-        train_output_dir = os.path.join(PROJECT_DIR, train_output_dir)
+    frame: pd.DataFrame,
+    train_output_dir: str,
+    interval_ms: int,
+) -> dict:
     handler = model_loader.ModelHandler(
         tarin_out_path=train_output_dir,
         device=_resolve_device(data_config.device),
     )
-    time_regions = _model_time_regions(
-        data_config,
-        train_cfg,
-        handler,
-        frame,
-    )
-    logger.info(
-        "Model time regions | train=%s | valid=%s | test=%s | OOD=%s",
-        time_regions["train"]["start"],
-        time_regions["valid"]["start"],
-        time_regions["test"]["start"],
-        time_regions["ood"]["start"],
-    )
+    time_regions = _model_time_regions(data_config, train_cfg, handler, frame)
     dataset = data_loader.TimeSeriesWindowDataset(
         df=frame,
         kline_interval_ms=interval_ms,
@@ -397,25 +476,125 @@ def _load_model_data(
         seq_len=handler.seq_len,
         is_live=False,
     )
-    frame["stop_loss_atr_pct"] = common.stop_loss_atr_pct(
-        frame,
-        data_config.atr_ref_bars,
-    )
-    model_input_frame = frame
-    frame, model_stats = handler.predict_with_ds(
+    predicted_frame, model_stats = handler.predict_with_ds(
         dataset,
-        model_input_frame,
+        frame,
         is_live=False,
         diff_thresh=None,
     )
     sub_model_stats = handler.evaluate_sub_models(
-        model_input_frame,
+        frame,
         kline_interval_ms=interval_ms,
     )
-    first_valid_idx = frame["pred"].first_valid_index()
+    first_valid_idx = predicted_frame["pred"].first_valid_index()
     if first_valid_idx is None:
         raise RuntimeError("No valid predictions found in the entire dataset")
-    frame = frame.loc[first_valid_idx:].copy()
+    return {
+        "schema": _PREDICTION_CACHE_SCHEMA,
+        "predictions": predicted_frame.loc[:, list(_PREDICTION_COLUMNS)].copy(),
+        "first_valid_idx": first_valid_idx,
+        "model_stats": model_stats,
+        "sub_model_stats": sub_model_stats,
+        "time_regions": time_regions,
+    }
+
+
+def _prediction_inputs(data_config: ModelDataConfig):
+    pre_para: BaseDefine = common.load_pre_params_from_dir(data_config.train_output_dir)
+    frame = _load_model_period_frame(data_config).copy()
+    frame["open_time_date_utc"] = pd.to_datetime(frame["open_time_date_utc"], utc=True)
+    train_output_dir = data_config.train_output_dir
+    if not os.path.isabs(train_output_dir):
+        train_output_dir = os.path.join(PROJECT_DIR, train_output_dir)
+    return pre_para, frame, train_output_dir, common.get_interval_ms(pre_para.interval)
+
+
+def precompute_prediction_cache(
+    logger,
+    data_config: ModelDataConfig,
+    train_cfg: train_config.TrainConfig,
+) -> str:
+    """Generate one prediction cache before CPU backtest workers are started."""
+    pre_para, frame, train_output_dir, interval_ms = _prediction_inputs(data_config)
+    del pre_para
+    cache_path = _prediction_cache_path(data_config, train_output_dir)
+    with _exclusive_file_lock(cache_path + ".lock"):
+        payload = _read_prediction_cache(cache_path)
+        if payload is None:
+            logger.info("Generating prediction cache: %s", cache_path)
+            payload = _infer_prediction_payload(
+                logger,
+                data_config,
+                train_cfg,
+                frame,
+                train_output_dir,
+                interval_ms,
+            )
+            _write_prediction_cache(cache_path, payload)
+            logger.info("Prediction cache saved: %s", cache_path)
+        else:
+            logger.info("Prediction cache already exists: %s", cache_path)
+    return cache_path
+
+
+def _load_model_data(
+    logger,
+    data_config: ModelDataConfig,
+    train_cfg: train_config.TrainConfig,
+):
+    pre_para, frame, train_output_dir, interval_ms = _prediction_inputs(data_config)
+    logger.info(
+        f"prep_output_dir:{data_config.prep_output_dir}, "
+        f"train_output_dir:{data_config.train_output_dir}"
+    )
+    logger.info("Loaded model data | period=%s | bars=%d", data_config.period, len(frame))
+
+    if data_config.use_prediction_cache:
+        cache_path = _prediction_cache_path(data_config, train_output_dir)
+        with _exclusive_file_lock(cache_path + ".lock"):
+            try:
+                payload = _read_prediction_cache(cache_path)
+            except Exception as exc:
+                raise RuntimeError(f"Prediction cache is unreadable: {cache_path}") from exc
+            if payload is None:
+                raise FileNotFoundError(
+                    "Prediction cache is missing or incompatible; call "
+                    f"precompute_prediction_cache() before backtesting: {cache_path}"
+                )
+            logger.info("Prediction cache hit; skipping model inference: %s", cache_path)
+    else:
+        payload = _infer_prediction_payload(
+            logger,
+            data_config,
+            train_cfg,
+            frame,
+            train_output_dir,
+            interval_ms,
+        )
+
+    predictions = payload["predictions"]
+    if not predictions.index.equals(frame.index):
+        raise RuntimeError(
+            "Prediction cache index does not match the prepared market data; "
+            "refusing to use misaligned signals"
+        )
+    for column in _PREDICTION_COLUMNS:
+        frame[column] = predictions[column]
+    frame = frame.loc[payload["first_valid_idx"]:].copy()
+    model_stats = payload["model_stats"]
+    sub_model_stats = payload["sub_model_stats"]
+    time_regions = payload["time_regions"]
+    frame["stop_loss_atr_pct"] = common.stop_loss_atr_pct(
+        frame,
+        data_config.atr_ref_bars,
+    )
+    logger.info(
+        "Model time regions | train=%s | valid=%s | test=%s | OOD=%s",
+        time_regions["train"]["start"],
+        time_regions["valid"]["start"],
+        time_regions["test"]["start"],
+        time_regions["ood"]["start"],
+    )
     logger.info(
         f"Backtest range: {frame['open_time_date_utc'].min()} "
         f"to {frame['open_time_date_utc'].max()}"
@@ -467,6 +646,16 @@ def _build_feed(frame: pd.DataFrame, data_config):
 def main(logger: logging.Logger, config: RunnerConfig):
     """Standalone runner: load data/model, execute the strategy and build the report."""
     if isinstance(config.data_config, ModelDataConfig):
+        training_data_manifest = common.load_data_manifest_from_dir(
+            config.data_config.train_output_dir,
+        )
+        backtest_data_manifest = common.load_data_manifest_from_dir(
+            config.data_config.prep_output_dir,
+        )
+        data_manifest = {
+            "training": training_data_manifest,
+            "backtest": backtest_data_manifest,
+        }
         saved_train_config = _load_train_config(config.data_config.train_output_dir)
         frame, model_stats, sub_model_stats, pre_para, time_regions = _load_model_data(
             logger,
@@ -474,6 +663,7 @@ def main(logger: logging.Logger, config: RunnerConfig):
             saved_train_config,
         )
     elif isinstance(config.data_config, CsvDataConfig):
+        data_manifest = None
         saved_train_config = None
         frame, model_stats, sub_model_stats, pre_para, time_regions = _load_csv_data(
             logger,
@@ -516,6 +706,8 @@ def main(logger: logging.Logger, config: RunnerConfig):
         sub_model_stats=sub_model_stats,
         data_config=config.data_config,
         time_regions=time_regions,
+        data_manifest=data_manifest,
+        experiment_context=config.experiment_context,
     )
 
     candle_columns = ["open_time_date_utc", "open", "high", "low", "close", "volume"]
@@ -791,6 +983,8 @@ def generate_backtest_report(
     sub_model_stats=None,
     data_config=None,
     time_regions=None,
+    data_manifest=None,
+    experiment_context: Optional[ExperimentContext] = None,
 ):
     """
     Fixed report generator:
@@ -802,6 +996,8 @@ def generate_backtest_report(
     """
     model_stats = model_stats or {}
     sub_model_stats = sub_model_stats or {}
+    if experiment_context is None:
+        raise ValueError("experiment_context is required for reproducible reports")
 
     # ========== 1. Pull the analyzers ==========
     perf = strat.analyzers.customize.get_analysis()
@@ -967,19 +1163,23 @@ def generate_backtest_report(
         params_snapshot["common"] = asdict(pre_para)
     if train_cfg is not None:
         params_snapshot["train"] = asdict(train_cfg)
+    if data_manifest is not None:
+        params_snapshot["data_manifest"] = data_manifest
 
     if pre_para is not None and train_cfg is not None:
-        params_hash = calc_params_hash(
+        task_identity = TaskIdentity.from_configs(
             strategy_config=strategy_config,
             broker_config=broker_config,
             common=pre_para,
             train=train_cfg,
         )
+        params_hash = task_identity.full_hash
+        params_snapshot["identity"] = task_identity.as_dict()
     else:
-        params_hash = param_hash(params_snapshot, length=8)
+        params_hash = param_hash(params_snapshot)
     params_snapshot.update(
         hash=params_hash,
-        git_commit=common.get_git_info(logger),
+        git_commit=experiment_context.git_commit,
     )
     if model_stats:
         params_snapshot["model_stats"] = {
@@ -1166,11 +1366,12 @@ if __name__ == "__main__":
         strategy_config=strategy_config,
         broker_config=broker_config,
         save_dir=exp_dir,
+        experiment_context=ExperimentContext(git_commit=common.git_revision()),
         data_config=ModelDataConfig(
             prep_output_dir=common.DATA_OUT_DIR,
             train_output_dir=train_output_dir,
             period="all", # forward long all
-            device ='cpu'
+            device ='auto'
         ),
     )
     report = main(logger, runner_config)

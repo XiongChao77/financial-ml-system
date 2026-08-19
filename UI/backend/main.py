@@ -12,6 +12,9 @@ from model import train_config
 
 app = FastAPI()
 logger, _= common.setup_session_logger(sub_folder='backend',console_level= logging.INFO, file_level = logging.DEBUG)
+experiment_context = backtest_runner.ExperimentContext(
+    git_commit=common.git_revision(),
+)
 
 if False:
     report_file = r'/home/chao/work/quant_output/batch_train/DOGEUSDT_30m/2026-06-28/19_15_16/batch_simulation/report_view/selected_configs.jsonl'
@@ -30,6 +33,7 @@ if False:
         strategy_config=strategy_config,
         broker_config=broker_config,
         save_dir=common.TEMPORARY_DIR,
+        experiment_context=experiment_context,
         data_config=backtest_runner.ModelDataConfig(
             atr_ref_bars=strategy_config.fixed_hold_bars,
             prep_output_dir=prep_output_dir,
@@ -53,6 +57,7 @@ else:
         strategy_config=strategy_config,
         broker_config=broker_config,
         save_dir=common.TEMPORARY_DIR,
+        experiment_context=experiment_context,
         data_config=backtest_runner.ModelDataConfig(
             atr_ref_bars=strategy_config.fixed_hold_bars,
             prep_output_dir=common.DATA_OUT_DIR,
