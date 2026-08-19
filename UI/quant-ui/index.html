@@ -1,36 +1,13 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI Strategy Backtest Dashboard</title>
+    <meta name="description" content="Strategy Center for labels, backtests, and experiment analysis" />
+    <title>Strategy Center</title>
   </head>
   <body>
-    <div id="app">
-      <h2>🤖 Machine Learning Strategy Backtest Report</h2>
-
-      <div class="dashboard hidden" id="stats-panel">
-        <div class="card"><h3>Loading...</h3></div>
-      </div>
-
-      <div class="toolbar">
-          <span style="font-size: 14px; color: #666; margin-right: 10px;">Timeframe:</span>
-          <button onclick="changeTimeframe('')" class="tf-btn active">Original (15M)</button>
-          <button onclick="changeTimeframe('1h')" class="tf-btn">1 Hour</button>
-          <button onclick="changeTimeframe('4h')" class="tf-btn">4 Hours</button>
-          <button onclick="changeTimeframe('1d')" class="tf-btn">Daily</button>
-          <button id="performance-btn" class="tf-btn" onclick="toggleStats()">📊 Performance</button>
-      </div>
-
-      <div id="chart-container"></div>
-      
-      <div id="loading" style="display: none;">Loading data...</div>
-
-      <div class="scrollbar-container">
-          <input type="range" id="time-scrollbar" min="0" step="1" value="0">
-      </div>
-    </div>
-    
+    <div id="app"></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

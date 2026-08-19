@@ -39,9 +39,6 @@ PERSISTENCE_DIR = os.path.join(os.path.dirname(PROJECT_DIR),'quant_output')
 os.makedirs(PERSISTENCE_DIR, exist_ok=True)
 DATA_OUT_DIR = os.path.join(TEMPORARY_DIR, "data")
 os.makedirs(DATA_OUT_DIR, exist_ok=True)
-LABEL_VIERER_PUBLICE_DIR = os.path.join(DATA_PROCESS_DIR,'label_viewer','public')   #for label_viewer
-if not os.path.islink(LABEL_VIERER_PUBLICE_DIR):   os.symlink(DATA_OUT_DIR, LABEL_VIERER_PUBLICE_DIR)
-
 @dataclass
 class MarketDataSourceConfig:
     """Fields that uniquely locate one raw market-data file."""

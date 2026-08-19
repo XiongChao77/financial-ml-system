@@ -1,83 +1,83 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import os, sys, logging
+"""Unified Strategy Center API and frontend deployment entry point.
 
-current_work_dir = os.path.dirname(__file__) 
-sys.path.append(os.path.join(current_work_dir,'..','..'))
-from data_process import common
+Run from the repository root with::
 
-from trade.runner import backtest_runner
-from data_process import common
-from model import train_config
+    uvicorn UI.backend.main:app --host 0.0.0.0 --port 8000
 
-app = FastAPI()
-logger, _= common.setup_session_logger(sub_folder='backend',console_level= logging.INFO, file_level = logging.DEBUG)
-experiment_context = backtest_runner.ExperimentContext(
-    git_commit=common.git_revision(),
-)
+For development, Vite serves the frontend and proxies ``/api`` to this app.
+For deployment, build ``UI/quant-ui`` first and FastAPI serves its ``dist``.
+"""
 
-if False:
-    report_file = r'/home/chao/work/quant_output/batch_train/DOGEUSDT_30m/2026-06-28/19_15_16/batch_simulation/report_view/selected_configs.jsonl'
-    report = common.load_reports(report_file)
-    simulation_result = report[0]['raw'].get("simulation", report)
-    forward = simulation_result.get("forward", report)
-    sim_params = forward['params']['strategy']
-    pre_params = forward['params']['common']
-    fusion_dir = common.recursive_get(report, 'fusion_dir')
-    prep_output_dir = common.recursive_get(report, 'prep_output_dir')
-    strategy_config = backtest_runner.strategy_config_from_dict(
-        forward["params"]["strategy"],
-    )
-    broker_config = backtest_runner.BrokerConfig(**forward["params"]["broker"])
-    runner_config = backtest_runner.RunnerConfig(
-        strategy_config=strategy_config,
-        broker_config=broker_config,
-        save_dir=common.TEMPORARY_DIR,
-        experiment_context=experiment_context,
-        data_config=backtest_runner.ModelDataConfig(
-            atr_ref_bars=strategy_config.fixed_hold_bars,
-            prep_output_dir=prep_output_dir,
-            train_output_dir=fusion_dir,
-            device="cpu",
-            period="long",
-        ),
-    )
-    result = backtest_runner.main(logger, runner_config)
-else:
-    train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.TrainTask.DIRECT_3CLASS)
-    strategy_config = backtest_runner.MlStrategyConfig(
-        fixed_hold_bars=48,
-        atr_sl_long_mult=6,
-        atr_sl_short_mult=6,
-        atr_tp_mult=100,
-        max_daily_loss_pct=0.04,
-    )
-    broker_config = backtest_runner.BrokerConfig()
-    runner_config = backtest_runner.RunnerConfig(
-        strategy_config=strategy_config,
-        broker_config=broker_config,
-        save_dir=common.TEMPORARY_DIR,
-        experiment_context=experiment_context,
-        data_config=backtest_runner.ModelDataConfig(
-            atr_ref_bars=strategy_config.fixed_hold_bars,
-            prep_output_dir=common.DATA_OUT_DIR,
-            train_output_dir=train_output_dir,
-            period="long",
-        ),
-    )
-    result = backtest_runner.main(logger, runner_config)
+from __future__ import annotations
 
-candles = result["candles"]
-statistics = result["statistics"][0]  # full report
+from pathlib import Path
+from typing import Any
 
-# Allow cross-domain access (required for front-end and back-end separation)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
-@app.get("/run_backtest")
-def run_backtest():
-    return result
+from UI.backend.modules.backtests import router as backtests_router
+from UI.backend.modules.experiments import router as experiments_router
+from UI.backend.modules.labels import router as labels_router
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_DIST = PROJECT_ROOT / "UI" / "quant-ui" / "dist"
+
+
+def create_app() -> FastAPI:
+    """Build the single FastAPI application used by every UI module."""
+
+    application = FastAPI(title="Strategy Center", version="1.0")
+    application.add_middleware(GZipMiddleware, minimum_size=1_024)
+    application.include_router(experiments_router)
+    application.include_router(backtests_router)
+    application.include_router(labels_router)
+
+    @application.get("/api/health", tags=["system"])
+    def health() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "application": "Strategy Center",
+            "modules": ["experiments", "backtests", "labels"],
+            "frontend_built": (FRONTEND_DIST / "index.html").is_file(),
+        }
+
+    assets_dir = FRONTEND_DIST / "assets"
+    if assets_dir.is_dir():
+        application.mount(
+            "/assets",
+            StaticFiles(directory=assets_dir),
+            name="frontend-assets",
+        )
+
+    @application.get("/{frontend_path:path}", include_in_schema=False)
+    def frontend(frontend_path: str) -> FileResponse:
+        if frontend_path == "api" or frontend_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+
+        index_path = FRONTEND_DIST / "index.html"
+        if not index_path.is_file():
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The Strategy Center frontend has not been built. "
+                    "Run npm run build in UI/quant-ui."
+                ),
+            )
+
+        requested = (FRONTEND_DIST / frontend_path).resolve()
+        try:
+            requested.relative_to(FRONTEND_DIST.resolve())
+        except ValueError:
+            requested = index_path
+        if frontend_path and requested.is_file():
+            return FileResponse(requested)
+        return FileResponse(index_path)
+
+    return application
+
+
+app = create_app()

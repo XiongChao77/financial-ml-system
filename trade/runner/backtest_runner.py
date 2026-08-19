@@ -1,7 +1,7 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import argparse
-import datetime
+import datetime as datetime_module
 import contextlib
 import fcntl
 import hashlib
@@ -38,6 +38,7 @@ from trade.runner.config import (
     ModelDataConfig,
     RunnerConfig,
 )
+from trade.runner.frontend_report_store import write_latest_backtest_report
 from trade.venue.bt import cus_comminfo
 from model import train_config
 from trade.venue.bt.bt_venue_ml import MlBtVenue
@@ -765,10 +766,18 @@ def main(logger: logging.Logger, config: RunnerConfig):
     #     report_additional,
     #     logger=logger,
     # )
-    return {
+    result = {
+        "schema_version": 1,
+        "generated_at": datetime_module.datetime.now(
+            datetime_module.timezone.utc
+        ).isoformat(),
         "candles": candles.to_dict(orient="records"),
         "statistics": statistics,
     }
+    if config.publish_frontend_report:
+        frontend_report_path = write_latest_backtest_report(result)
+        logger.info("Frontend report published to %s", frontend_report_path)
+    return result
 
 
 def _load_train_config(train_output_dir: str) -> train_config.TrainConfig:
@@ -1402,10 +1411,11 @@ if __name__ == "__main__":
         broker_config=broker_config,
         save_dir=exp_dir,
         experiment_context=ExperimentContext(git_commit=common.git_revision()),
+        publish_frontend_report=True,
         data_config=ModelDataConfig(
             prep_output_dir=common.DATA_OUT_DIR,
             train_output_dir=train_output_dir,
-            period="long", # forward long all
+            period="all", # forward long all
             device ='auto'
         ),
     )

@@ -6,6 +6,7 @@ dependencies = [
     "backtrader>=1.9.78.123",
     "beautifulsoup4>=4.15.0",
     "colorlog>=6.12.0",
+    "fastapi>=0.115.0",
     "gitpython>=3.1.59",
     "ipykernel>=7.3.0",
     "joblib>=1.5.3",
@@ -29,5 +30,6 @@ dependencies = [
     "statsmodels>=0.14.6",
     "torch>=2.13.0",
     "tqdm>=4.70.0",
+    "uvicorn>=0.30.0",
     "xgboost>=3.4.0",
 ]

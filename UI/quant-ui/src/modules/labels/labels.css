@@ -1,0 +1,24 @@
+.labels-page { display: flex; flex-direction: column; padding: 22px 24px; overflow: hidden; }
+.labels-header { flex: 0 0 auto; }
+.labels-workspace { display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 15px; min-height: 0; flex: 1; }
+.labels-config { min-height: 0; overflow: auto; }
+.config-form { display: grid; gap: 15px; }
+.config-section { margin: 0; padding: 0 0 14px; border: 0; border-bottom: 1px solid #e8ebf2; }
+.config-section:last-child { padding-bottom: 0; border-bottom: 0; }
+.config-section legend { margin-bottom: 3px; color: #344462; font-size: 12px; font-weight: 850; }
+.config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 9px; }
+.config-field:first-child:last-child { grid-column: 1 / -1; }
+.boolean-field .field-control { width: 18px; min-height: 18px; }
+.labels-results { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 12px; min-width: 0; min-height: 0; }
+.label-chart-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; padding-bottom: 0; }
+.label-market-chart { flex: 1; }
+.label-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.label-legend span { padding: 3px 6px; border: 1px solid #e1e5ed; border-radius: 6px; background: #fafbfc; font-size: 9px; font-weight: 750; }
+.legend-negative { color: #d95561; }
+.legend-neutral { color: #737d90; font-weight: 900 !important; }
+.legend-positive { color: #21967b; }
+.legend-invalid { color: #bd851d; }
+@media (max-width: 1200px) {
+  .labels-workspace { grid-template-columns: 290px minmax(0, 1fr); }
+  .config-grid { grid-template-columns: 1fr; }
+}

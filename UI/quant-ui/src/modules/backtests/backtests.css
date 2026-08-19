@@ -1,0 +1,78 @@
+.backtests-page { padding: 22px 24px 16px; overflow: hidden; background: #f0f2f5; }
+.backtest-view { display: flex; flex-direction: column; gap: 11px; width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.backtests-header { flex: 0 0 auto; margin-bottom: 2px; }
+.backtests-title-line { display: flex; align-items: baseline; gap: 14px; }
+.backtests-title-line .page-subtitle { margin: 0; }
+.backtests-header .secondary-button { color: #fff; border-color: #075bd8; background: #075bd8; }
+.backtests-header .secondary-button:hover:not(:disabled) { color: #fff; border-color: #064db7; background: #064db7; }
+.backtests-header .secondary-button:disabled { color: rgba(255, 255, 255, 0.78); border-color: #75a7eb; background: #75a7eb; }
+.backtest-summary { grid-template-columns: repeat(5, minmax(0, 1fr)); flex: 0 0 auto; }
+.backtest-details { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 0 4px 30px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.performance-section { padding: 17px; border: 1px solid #ddd; border-radius: 7px; background: #fff; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.07); }
+.performance-section + .performance-section { margin-top: 19px; }
+.backtest-details h2 { margin: 0 0 12px; color: #4d5a72; font-size: 14px; letter-spacing: 0.055em; text-transform: uppercase; }
+.performance-subsection + .performance-subsection { margin-top: 14px; }
+.performance-subsection h3 { margin: 0 0 9px; color: #263551; font-size: 14px; }
+.detail-metric-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 8px; }
+.detail-metric { grid-column: span 3; min-width: 0; padding: 9px 10px; border: 1px solid #ddd; border-radius: 5px; background: #f8f9fa; }
+.detail-metric-lead { grid-column: span 3; border-top: 3px solid #26a69a; background: #fff; }
+.detail-metric span, .detail-metric strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-metric span { margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.detail-metric strong { font-size: 16px; }
+.detail-metric-lead strong { font-size: 17px; }
+.detail-metric-wide { grid-column: span 6; }
+.detail-metric-wide strong { overflow: visible; white-space: normal; line-height: 1.45; }
+.detail-metric-success { border-color: #a9dcd4; background: #eff9f7; }
+.detail-metric-success strong { color: #138478; }
+.detail-metric-danger { border-color: #efb7b5; background: #fff4f3; }
+.detail-metric-danger strong { color: #d94441; }
+.backtests-page .summary-card span { font-size: 11px; }
+.backtests-page .summary-card strong { font-size: 22px; }
+.backtest-toolbar { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; }
+.prediction-toolbar { justify-content: flex-start; }
+.timeframe-buttons { display: flex; align-items: center; gap: 5px; }
+.timeframe-buttons > span { margin-right: 4px; color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; }
+.timeframe-button { min-height: 32px; padding: 5px 10px; border: 1px solid #d8deea; border-radius: 7px; color: #4b566d; background: #fff; font-size: 11px; font-weight: 700; }
+.timeframe-button.active { color: #fff; border-color: var(--brand); background: var(--brand); }
+.backtest-chart-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 0; overflow: hidden; border-color: #ddd; border-radius: 7px; background: #fff; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.07); }
+.backtest-market-chart { flex: 1; }
+.backtest-subpage-header { display: flex; align-items: flex-start; gap: 13px; flex: 0 0 auto; }
+.backtest-subpage-header h1 { margin: 0; color: var(--text); font-size: 26px; line-height: 1.2; letter-spacing: -0.03em; }
+.equity-legend { position: absolute; top: 9px; left: 9px; z-index: 10; display: flex; align-items: center; gap: 5px; }
+.equity-legend span { display: inline-flex; align-items: center; gap: 6px; padding: 5px 7px; border: 1px solid #ddd; border-radius: 4px; color: #4d596d; background: rgba(255, 255, 255, 0.92); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06); font-size: 10px; font-weight: 700; }
+.legend-line { display: inline-block; width: 24px; height: 0; border-top: 2px solid #296fa8; }
+.legend-market { border-top-width: 1px; border-top-color: rgba(20, 25, 32, 0.35); }
+.legend-log { border-top-style: dashed; }
+.back-button {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid #d5dce9;
+  border-radius: 9px;
+  color: #38445f;
+  background: #fff;
+  font-size: 21px;
+  line-height: 1;
+}
+.back-button:hover { color: var(--brand); border-color: #aebbe8; background: #f6f8fc; }
+.backtest-equity-panel { position: relative; display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 0; overflow: hidden; border-color: #ddd; border-radius: 7px; background: #fff; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.07); }
+.backtest-equity-chart { position: relative; width: 100%; min-height: 0; flex: 1; }
+.equity-region-layer { position: absolute; inset: 0; z-index: 5; overflow: hidden; pointer-events: none; }
+.equity-region-line { position: absolute; top: 0; bottom: 28px; width: 0; border-left: 2px dashed; opacity: 0.72; }
+.equity-region-label { position: absolute; top: 8px; transform: translateX(-50%); padding: 2px 5px; background: rgba(255, 255, 255, 0.84); font-size: 10px; font-weight: 850; letter-spacing: 0.035em; }
+@media (max-width: 1250px) {
+  .backtest-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .detail-metric { grid-column: span 4; }
+  .detail-metric-lead { grid-column: span 3; }
+  .detail-metric-wide { grid-column: span 6; }
+}
+@media (max-width: 860px) {
+  .backtest-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .detail-metric, .detail-metric-lead { grid-column: span 6; }
+  .detail-metric-wide { grid-column: span 12; }
+  .backtests-title-line { align-items: flex-start; flex-direction: column; gap: 2px; }
+  .equity-legend { flex-wrap: wrap; }
+}
