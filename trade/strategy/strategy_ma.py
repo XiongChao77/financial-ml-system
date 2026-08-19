@@ -40,13 +40,11 @@ class MaCrossoverStrategy(StrategyBase):
                 target_layers=1,
                 target_pct=self.config.risk_per_trade_pct * target_dir
             )
-        # Currently in position with the opposite direction -> reverse
+        # Opposite signal: close now and wait for a later flat observation to open.
         elif state.position.dir != target_dir:
             action = TradeIntent(
-                action=ActionType.REVERSE,
-                target_dir=target_dir,
-                target_layers=1,
-                target_pct=self.config.risk_per_trade_pct * target_dir
+                action=ActionType.CLOSE,
+                reason="opposite_signal",
             )
 
         return action

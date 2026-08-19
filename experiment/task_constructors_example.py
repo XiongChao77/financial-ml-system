@@ -139,45 +139,46 @@ def construct_TBM_DIRECT_3CLASS_doge(symbol: str, interval: str, train_mode):
     from trade.runner import backtest_runner
 
     preparation_task: List[Any] = []
-    for pn in [32, 64]:
-        for vol_ewma_span in [40, 80, 160]: #[80,96]
-            for vol_multiplier in [8, 10, 12, 14,16]:
-                for stop_multiplier_rate in [0.3,0.4,0.5]:
-                    preparation_task.append(replace(config.DOGE_15m_TBM,
+    for pn in [64]:#, 64]:
+        for vol_ewma_span in [80,160]: #[40, 80, 160]
+            for vol_multiplier in [12]:#, [8,10, 12, 14,16]:
+                for stop_multiplier_rate in [0.4]:#,[0.3, 0.4,0.5]:
+                    preparation_task.append(replace(config.DOGE_15m_TBM, interval = interval,
                             vol_ewma_span=vol_ewma_span, predict_num=pn,
                             vol_multiplier_long=vol_multiplier, vol_multiplier_short= vol_multiplier,
                             stop_multiplier_rate_long= stop_multiplier_rate, stop_multiplier_rate_short=stop_multiplier_rate))
 
     training_task: List[train.TrainConfig] = []
-    for seq_len in [128,256]:
-        for version in [1,2]:
-            for stride in [2,4]: #[1, 2, 4]
-                for feature_conf in [feature.FEATURE_LIST_CRYPTOCURRENCY]:
-                    for model_config_type in [train_config.TransformerConfig,
-                                            #   train_config.ConvLSTMConfig, # train_config.LSTMConfig,
-                    ]:
-                        model_cfg = model_config_type(model_version=version, seq_len=seq_len)
-                        train_conf = train.TrainConfig(
-                            feature_conf_list=feature_conf,
-                            model_cfg=model_cfg,
-                            stride=stride,
-                        )
-                        train_conf.train_task = train_mode
-                        training_task.append(train_conf)
+    for seq_len in [96,128,256]: #[96, 128,256]
+        for stride in [2,4]: #[1, 2, 4]
+            for feature_conf in [feature.FEATURE_LIST_CRYPTOCURRENCY]:
+                for base_model_cfg in [
+                                        # train_config.TransformerConfig(model_version=2),
+                                          train_config.ConvLSTMConfig(model_version=1), 
+                                          train_config.LSTMConfig(model_version=1),
+                                        #   train_config.LSTMConfig(model_version=2),
+                                          train_config.LogisticConfig(model_version=1),
+                ]:
+                    train_conf = train.TrainConfig(
+                        feature_conf_list=feature_conf,
+                        model_cfg=replace(base_model_cfg,seq_len=seq_len),
+                        stride=stride,
+                        train_task=train_mode,
+                    )
+                    training_task.append(train_conf)
 
     simulation_task: List[Any] = []
-    for risk_per_trade_pct in [0.01, 0.02]:
-        for max_daily_loss_pct in [0.015, 0.025, 0.99]:
-            for fixed_hold_bars in [32,48,64]:
-                simulation_task.append(
-                    backtest_runner.BbmStrategyConfig(
-                        allow_long=True,
-                        allow_short=True,
-                        risk_per_trade_pct= risk_per_trade_pct,
-                        max_daily_loss_pct= max_daily_loss_pct,
-                        fixed_hold_bars= fixed_hold_bars,
-                    )
+    for risk_per_trade_pct,max_daily_loss_pct in [(0.01, 0.015),(0.02, 0.025),]: # (0.02, 0.99) not good
+        for fixed_hold_bars in [32,48,64]: #64>48>32
+            simulation_task.append(
+                backtest_runner.BbmStrategyConfig(
+                    allow_long=True,
+                    allow_short=True,
+                    risk_per_trade_pct= risk_per_trade_pct,
+                    max_daily_loss_pct= max_daily_loss_pct,
+                    fixed_hold_bars= fixed_hold_bars,
                 )
+            )
     return preparation_task, training_task, simulation_task
 
 def construct_experiment_doge_combo(symbol: str, interval: str):
