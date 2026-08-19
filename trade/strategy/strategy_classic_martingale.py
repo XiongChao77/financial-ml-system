@@ -431,7 +431,7 @@ class ClassicMartingaleStrategy(StrategyBase):
             )
         return result
 
-    def process(self, state: Observation) -> TradeIntent:
+    def _process(self, state: Observation) -> TradeIntent:
         if self.pessimistic and self._has_ohlc(state):
             return self._process_pessimistic_bar(state)
 

@@ -42,6 +42,369 @@ def daily_loss_rows(report: dict) -> list[dict]:
     return rows if isinstance(rows, list) else []
 
 
+_DURATION_PERCENTILES = (
+    ("p10", 0.10),
+    ("p25", 0.25),
+    ("p50", 0.50),
+    ("p75", 0.75),
+    ("p90", 0.90),
+    ("p95", 0.95),
+    ("p99", 0.99),
+)
+
+
+def _duration_summary(values) -> dict:
+    """Return JSON-safe duration statistics without inventing empty values."""
+    import numpy as np
+
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values) & (values >= 0)]
+    if not len(values):
+        return {
+            "count": 0,
+            "mean": None,
+            "min": None,
+            "max": None,
+            **{name: None for name, _ in _DURATION_PERCENTILES},
+        }
+
+    quantiles = np.quantile(
+        values,
+        [quantile for _, quantile in _DURATION_PERCENTILES],
+    )
+    return {
+        "count": int(len(values)),
+        "mean": float(values.mean()),
+        "min": float(values.min()),
+        "max": float(values.max()),
+        **{
+            name: float(value)
+            for (name, _), value in zip(_DURATION_PERCENTILES, quantiles)
+        },
+    }
+
+
+def _daily_equity_frame(report: dict):
+    """Load the report's end-of-day equity samples as a clean time series."""
+    import pandas as pd
+
+    frame = pd.DataFrame(daily_loss_rows(report))
+    if frame.empty or "date" not in frame or "equity" not in frame:
+        return pd.DataFrame(columns=["equity"])
+
+    frame = frame[["date", "equity"]].copy()
+    frame["date"] = pd.to_datetime(frame["date"], utc=True, errors="coerce")
+    frame["equity"] = pd.to_numeric(frame["equity"], errors="coerce")
+    frame = frame.dropna(subset=["date", "equity"])
+    frame = frame.sort_values("date").drop_duplicates("date", keep="last")
+    frame["date"] = frame["date"].dt.tz_convert(None)
+    return frame.set_index("date")
+
+
+def _simulate_ftmo_equity_segment(
+    equity_frame,
+    *,
+    profit_target_pct: float,
+    loss_limit_pct: float,
+) -> dict:
+    """Evaluate every daily equity sample as an independent challenge start."""
+    import numpy as np
+
+    equity = equity_frame["equity"].to_numpy(dtype=float)
+    dates = equity_frame.index
+    outcome_counts = {
+        "profit_target": 0,
+        "loss_limit": 0,
+        "unresolved": 0,
+    }
+    duration_days = {
+        "profit_target": [],
+        "loss_limit": [],
+        "resolved": [],
+        "unresolved_observed": [],
+    }
+    duration_observations = {
+        "profit_target": [],
+        "loss_limit": [],
+        "resolved": [],
+        "unresolved_observed": [],
+    }
+    valid_start_count = 0
+
+    for start_index, start_equity in enumerate(equity):
+        if not np.isfinite(start_equity) or start_equity <= 0:
+            continue
+        valid_start_count += 1
+        future = equity[start_index + 1 :]
+        future_returns = future / start_equity - 1.0
+        comparison_tolerance = np.finfo(float).eps * 8
+        upper_hits = np.flatnonzero(
+            future_returns >= profit_target_pct - comparison_tolerance
+        )
+        lower_hits = np.flatnonzero(
+            future_returns <= -loss_limit_pct + comparison_tolerance
+        )
+        upper_offset = int(upper_hits[0]) + 1 if len(upper_hits) else None
+        lower_offset = int(lower_hits[0]) + 1 if len(lower_hits) else None
+
+        if upper_offset is None and lower_offset is None:
+            outcome = "unresolved"
+            end_index = len(equity) - 1
+            elapsed_observations = end_index - start_index
+            elapsed_days = (
+                dates[end_index] - dates[start_index]
+            ).total_seconds() / 86400.0
+            duration_days["unresolved_observed"].append(elapsed_days)
+            duration_observations["unresolved_observed"].append(
+                elapsed_observations
+            )
+        else:
+            if lower_offset is None or (
+                upper_offset is not None and upper_offset < lower_offset
+            ):
+                outcome = "profit_target"
+                hit_offset = upper_offset
+            else:
+                outcome = "loss_limit"
+                hit_offset = lower_offset
+
+            hit_index = start_index + hit_offset
+            elapsed_days = (
+                dates[hit_index] - dates[start_index]
+            ).total_seconds() / 86400.0
+            duration_days[outcome].append(elapsed_days)
+            duration_days["resolved"].append(elapsed_days)
+            duration_observations[outcome].append(hit_offset)
+            duration_observations["resolved"].append(hit_offset)
+
+        outcome_counts[outcome] += 1
+
+    resolved_count = (
+        outcome_counts["profit_target"] + outcome_counts["loss_limit"]
+    )
+
+    def rate(count: int, denominator: int) -> float:
+        return float(count / denominator) if denominator else 0.0
+
+    return {
+        "start_count": valid_start_count,
+        "resolved_count": resolved_count,
+        "profit_target_count": outcome_counts["profit_target"],
+        "loss_limit_count": outcome_counts["loss_limit"],
+        "unresolved_count": outcome_counts["unresolved"],
+        "profit_target_rate": rate(
+            outcome_counts["profit_target"], valid_start_count
+        ),
+        "loss_limit_rate": rate(outcome_counts["loss_limit"], valid_start_count),
+        "unresolved_rate": rate(outcome_counts["unresolved"], valid_start_count),
+        "profit_target_rate_of_resolved": rate(
+            outcome_counts["profit_target"], resolved_count
+        ),
+        "duration_days": {
+            name: _duration_summary(values)
+            for name, values in duration_days.items()
+        },
+        "duration_observations": {
+            name: _duration_summary(values)
+            for name, values in duration_observations.items()
+        },
+    }
+
+
+def simulate_ftmo_challenges(
+    report: dict,
+    *,
+    profit_target_pct: float = 0.10,
+    loss_limit_pct: float = 0.10,
+) -> dict:
+    """Run an exhaustive historical-start FTMO barrier simulation.
+
+    Every end-of-day equity sample is treated as a possible challenge start.
+    The first later sample reaching ``+profit_target_pct`` or
+    ``-loss_limit_pct`` determines the outcome; samples with no hit before the
+    period ends are right-censored as ``unresolved``.
+
+    An ``all`` backtest is split at the OOD boundary and simulated separately,
+    so a long-period start can never use forward-period equity to finish.
+    """
+    import pandas as pd
+
+    if not 0 < profit_target_pct < 1:
+        raise ValueError("profit_target_pct must be between 0 and 1")
+    if not 0 < loss_limit_pct < 1:
+        raise ValueError("loss_limit_pct must be between 0 and 1")
+
+    equity_frame = _daily_equity_frame(report)
+    period = str(safe_get(report, ["params", "data", "period"], "backtest")).lower()
+    segments = {}
+    split_at = None
+
+    if period == "all":
+        raw_boundary = safe_get(report, ["time", "regions", "ood", "start"])
+        split_at = pd.to_datetime(raw_boundary, utc=True, errors="coerce")
+        if pd.isna(split_at):
+            raise ValueError(
+                "period='all' FTMO simulation requires time.regions.ood.start"
+            )
+        split_at = split_at.tz_convert(None).normalize()
+        segments = {
+            "long": equity_frame[equity_frame.index < split_at],
+            "forward": equity_frame[equity_frame.index >= split_at],
+        }
+    else:
+        segments[period] = equity_frame
+
+    return {
+        "method": "exhaustive_historical_start_dates",
+        "equity_resolution": "daily_close",
+        "profit_target_pct": float(profit_target_pct),
+        "loss_limit_pct": float(loss_limit_pct),
+        "split_at": split_at.isoformat() if split_at is not None else None,
+        "periods": {
+            name: _simulate_ftmo_equity_segment(
+                frame,
+                profit_target_pct=profit_target_pct,
+                loss_limit_pct=loss_limit_pct,
+            )
+            for name, frame in segments.items()
+        },
+    }
+
+
+def log_ftmo_challenge_summary(
+    result: dict,
+    logger=None,
+    *,
+    emit: Callable[[str], None] | None = None,
+) -> None:
+    """Print the compact counts and duration percentiles of a simulation."""
+    if emit is None:
+        emit = logger.info if logger is not None else print
+
+    def fmt_duration(summary: dict) -> str:
+        if not summary or not summary.get("count"):
+            return "N/A"
+        return (
+            f"P10 {summary['p10']:.1f} | P25 {summary['p25']:.1f} | "
+            f"P50 {summary['p50']:.1f} | P75 {summary['p75']:.1f} | "
+            f"P90 {summary['p90']:.1f} | P95 {summary['p95']:.1f} | "
+            f"P99 {summary['p99']:.1f}"
+        )
+
+    profit_target_pct = to_float(result.get("profit_target_pct"), 0.10) * 100
+    loss_limit_pct = to_float(result.get("loss_limit_pct"), 0.10) * 100
+    for period, stats in (result.get("periods") or {}).items():
+        emit(
+            f"FTMO MC | {period.upper():7} | Starts: {stats['start_count']} "
+            f"| +{profit_target_pct:g}%: {stats['profit_target_count']} "
+            f"({stats['profit_target_rate'] * 100:.2f}%) "
+            f"| -{loss_limit_pct:g}%: {stats['loss_limit_count']} "
+            f"({stats['loss_limit_rate'] * 100:.2f}%) "
+            f"| Unresolved: {stats['unresolved_count']} "
+            f"({stats['unresolved_rate'] * 100:.2f}%)"
+        )
+        emit(
+            f"FTMO +  | {period.upper():7} | Days: "
+            f"{fmt_duration(stats['duration_days']['profit_target'])}"
+        )
+        emit(
+            f"FTMO -  | {period.upper():7} | Days: "
+            f"{fmt_duration(stats['duration_days']['loss_limit'])}"
+        )
+
+
+def build_continuous_equity_path(
+    reports_by_period,
+    *,
+    normalize_equity: bool = False,
+):
+    """Build a continuous equity path from one or more backtest periods.
+
+    Each report contains absolute daily broker equity and its own starting
+    capital. Subsequent periods are chained by applying their equity return to
+    the previous period's ending equity. The first point is always the report's
+    starting capital (or ``1.0`` when normalization is explicitly requested).
+    """
+    import pandas as pd
+
+    segments = []
+    split_dates = {}
+    current_equity = None
+    path_start_equity = None
+    path_start_time = None
+
+    for period, report in reports_by_period:
+        daily = daily_loss_rows(report)
+        if not daily:
+            continue
+        frame = pd.DataFrame(daily)
+        if "date" not in frame or "equity" not in frame:
+            continue
+        frame["date"] = pd.to_datetime(frame["date"], utc=True).dt.tz_convert(None)
+        frame["equity"] = pd.to_numeric(frame["equity"], errors="coerce")
+        frame = frame.dropna(subset=["date", "equity"]).sort_values("date")
+        if frame.empty:
+            continue
+
+        segment_start_equity = to_float(
+            safe_get(report, ["performance", "start_value"]),
+            None,
+        )
+        if segment_start_equity is None or segment_start_equity <= 0:
+            continue
+
+        frame.set_index("date", inplace=True)
+        split_dates.setdefault(str(period), frame.index[0])
+        if current_equity is None:
+            path_start_equity = 1.0 if normalize_equity else segment_start_equity
+            current_equity = path_start_equity
+            path_start_time = safe_get(report, ["time", "start"])
+
+        frame["continuous_equity"] = (
+            frame["equity"] / segment_start_equity * current_equity
+        )
+        segments.append(frame[["continuous_equity"]])
+        current_equity = frame["continuous_equity"].iloc[-1]
+
+    if not segments:
+        return pd.DataFrame(columns=["continuous_equity"]), split_dates
+
+    full_path = pd.concat(segments).sort_index()
+    full_path = full_path[~full_path.index.duplicated(keep="first")]
+
+    # Daily rows represent end-of-day equity but only carry a calendar date.
+    # Put the exact initial-capital point immediately before the first row so
+    # the plotted curve cannot appear to start at zero (or at first-day PnL).
+    first_daily_time = full_path.index[0]
+    baseline_time = pd.to_datetime(path_start_time, utc=True, errors="coerce")
+    if pd.isna(baseline_time):
+        baseline_time = first_daily_time - pd.Timedelta(nanoseconds=1)
+    else:
+        baseline_time = baseline_time.tz_convert(None)
+        baseline_time = min(
+            baseline_time,
+            first_daily_time - pd.Timedelta(nanoseconds=1),
+        )
+    baseline = pd.DataFrame(
+        {"continuous_equity": [path_start_equity]},
+        index=pd.DatetimeIndex([baseline_time], name=full_path.index.name),
+    )
+    return pd.concat([baseline, full_path]).sort_index(), split_dates
+
+
+def time_region_boundaries(time_regions: dict) -> list[tuple[str, object]]:
+    """Parse ordered model-region starts into timezone-naive timestamps."""
+    import pandas as pd
+
+    boundaries = []
+    for name in ("train", "valid", "test", "ood"):
+        start = safe_get(time_regions, [name, "start"])
+        timestamp = pd.to_datetime(start, utc=True, errors="coerce")
+        if not pd.isna(timestamp):
+            boundaries.append((name, timestamp.tz_convert(None)))
+    return boundaries
+
+
 def plot_equity_curves(
     all_results,
     output_dir: str,
@@ -49,19 +412,28 @@ def plot_equity_curves(
     start_index: int = 0,
     *,
     price_file: str | None = None,
+    normalize_equity: bool = False,
+    equity_scale: str = "both",
     logger=None,
 ) -> str | None:
     """Plot one or more report equity curves over the underlying market price.
 
     ``all_results`` accepts either one report returned by ``backtest_runner`` or
     selected-config records containing ``long``/``short``/``forward`` reports.
-    Batch records are chained in chronological period order and normalized to a
-    starting equity of 1. The saved image path is returned.
+    Batch records are chained in chronological period order. By default the
+    curve starts at the report's absolute initial equity; callers may request a
+    starting value of 1 with ``normalize_equity=True``. By default both the
+    absolute equity (linear axis) and logarithmic equity are drawn with separate
+    right-side axes. Pass ``equity_scale="linear"`` or ``"log"`` to draw only
+    one representation. The saved image path is returned.
     """
     import matplotlib.pyplot as plt
     import pandas as pd
 
     from data_process import common
+
+    if equity_scale not in {"both", "log", "linear"}:
+        raise ValueError("equity_scale must be one of: 'both', 'log', 'linear'")
 
     results = [all_results] if isinstance(all_results, dict) else list(all_results)
     if not results:
@@ -92,6 +464,19 @@ def plot_equity_curves(
     )
     if first_report is None:
         return None
+    time_regions = next(
+        (
+            regions
+            for result in results
+            for _, report in period_reports(result)
+            if isinstance(
+                (regions := safe_get(report, ["time", "regions"])),
+                dict,
+            )
+            and regions
+        ),
+        {},
+    )
 
     if price_file is None:
         market_params = safe_get(first_report, ["params", "common"])
@@ -125,60 +510,135 @@ def plot_equity_curves(
         label="Market Price",
     )
     price_axis.set_ylabel("Market Price")
-    equity_axis = price_axis.twinx()
-    equity_axis.set_ylabel("Continuous Strategy Equity (Normalized)")
 
     split_dates = {}
-    plotted_count = 0
+    equity_paths = []
     has_multi_period_record = False
+    minimum_equity = None
     for index, result in enumerate(results):
         reports_by_period = period_reports(result)
         has_multi_period_record |= len(reports_by_period) > 1
-        segments = []
-        current_multiplier = 1.0
-        for period, report in reports_by_period:
-            daily = daily_loss_rows(report)
-            if not daily:
-                continue
-            frame = pd.DataFrame(daily)
-            if "date" not in frame or "equity" not in frame:
-                continue
-            frame["date"] = pd.to_datetime(frame["date"], utc=True).dt.tz_convert(None)
-            frame["equity"] = pd.to_numeric(frame["equity"], errors="coerce")
-            frame = frame.dropna(subset=["date", "equity"]).sort_values("date")
-            if frame.empty:
-                continue
-            frame.set_index("date", inplace=True)
-            initial_equity = frame["equity"].iloc[0]
-            if initial_equity == 0:
-                continue
-            split_dates.setdefault(period, frame.index[0])
-            frame["continuous_equity"] = (
-                frame["equity"] / initial_equity * current_multiplier
-            )
-            segments.append(frame[["continuous_equity"]])
-            current_multiplier = frame["continuous_equity"].iloc[-1]
-
-        if not segments:
-            continue
-        full_path = pd.concat(segments)
-        full_path = full_path[~full_path.index.duplicated(keep="first")]
-        params_hash = safe_get(first_report if len(results) == 1 else result, ["params", "hash"])
-        label = str(params_hash) if params_hash else f"S{start_index + index}"
-        equity_axis.plot(
-            full_path.index,
-            full_path["continuous_equity"],
-            linewidth=1.5,
-            alpha=0.8,
-            label=label,
+        full_path, result_split_dates = build_continuous_equity_path(
+            reports_by_period,
+            normalize_equity=normalize_equity,
         )
-        plotted_count += 1
+        for period, split_date in result_split_dates.items():
+            split_dates.setdefault(period, split_date)
+        if full_path.empty:
+            continue
+        path_minimum = full_path["continuous_equity"].dropna().min()
+        if pd.notna(path_minimum):
+            minimum_equity = (
+                float(path_minimum)
+                if minimum_equity is None
+                else min(minimum_equity, float(path_minimum))
+            )
+        report_for_label = reports_by_period[0][1]
+        params_hash = safe_get(report_for_label, ["params", "hash"])
+        label = str(params_hash) if params_hash else f"S{start_index + index}"
+        equity_paths.append((label, full_path))
 
-    if plotted_count == 0:
+    if not equity_paths:
         plt.close(fig)
         return None
 
-    if has_multi_period_record:
+    show_linear = equity_scale in {"both", "linear"}
+    show_log = equity_scale in {"both", "log"}
+    if equity_scale == "log" and (minimum_equity is None or minimum_equity <= 0):
+        show_log = False
+        show_linear = True
+        if logger is not None:
+            logger.warning(
+                "Equity contains zero or negative values; falling back to a linear axis"
+            )
+
+    linear_equity_axis = price_axis.twinx() if show_linear else None
+    log_equity_axis = price_axis.twinx() if show_log else None
+    if log_equity_axis is not None:
+        log_equity_axis.set_yscale("log")
+        if linear_equity_axis is not None:
+            log_equity_axis.spines["right"].set_position(("axes", 1.09))
+            log_equity_axis.patch.set_visible(False)
+
+    color_map = plt.get_cmap("tab10")
+    for path_index, (label, full_path) in enumerate(equity_paths):
+        values = full_path["continuous_equity"]
+        if linear_equity_axis is not None:
+            linear_equity_axis.plot(
+                full_path.index,
+                values,
+                color=color_map((path_index * 2) % 10),
+                linewidth=1.5,
+                alpha=0.8,
+                label=f"{label} Absolute",
+            )
+        if log_equity_axis is not None:
+            log_equity_axis.plot(
+                full_path.index,
+                values.where(values > 0),
+                color=color_map((path_index * 2 + 1) % 10),
+                linewidth=1.5,
+                alpha=0.8,
+                label=f"{label} Log",
+            )
+
+    normalized_suffix = " (Normalized)" if normalize_equity else ""
+    if linear_equity_axis is not None:
+        linear_equity_axis.set_ylabel(
+            f"Absolute Strategy Equity{normalized_suffix}",
+            color=color_map(0),
+        )
+        linear_equity_axis.tick_params(axis="y", labelcolor=color_map(0))
+    if log_equity_axis is not None:
+        log_equity_axis.set_ylabel(
+            f"Strategy Equity{normalized_suffix} (Log Scale)",
+            color=color_map(1),
+        )
+        log_equity_axis.tick_params(axis="y", labelcolor=color_map(1))
+
+    region_starts = time_region_boundaries(time_regions)
+    if region_starts:
+        region_colors = {
+            "train": "#2e8b57",
+            "valid": "#d98c00",
+            "test": "#2878b5",
+            "ood": "#c43c39",
+        }
+        for name, boundary in region_starts[1:]:
+            price_axis.axvline(
+                boundary,
+                color=region_colors[name],
+                linestyle="--",
+                linewidth=1.2,
+                alpha=0.7,
+            )
+
+        for position, (name, start) in enumerate(region_starts):
+            if position + 1 < len(region_starts):
+                end = region_starts[position + 1][1]
+            else:
+                end_value = safe_get(time_regions, [name, "end"])
+                end = pd.to_datetime(end_value, utc=True, errors="coerce")
+                end = (
+                    price_series.index.max()
+                    if pd.isna(end)
+                    else end.tz_convert(None)
+                )
+            if end <= start:
+                continue
+            midpoint = start + (end - start) / 2
+            price_axis.text(
+                midpoint,
+                0.985,
+                name.upper(),
+                transform=price_axis.get_xaxis_transform(),
+                ha="center",
+                va="top",
+                fontsize=9,
+                fontweight="bold",
+                color=region_colors[name],
+            )
+    elif has_multi_period_record:
         if "short" in split_dates:
             price_axis.axvline(
                 split_dates["short"], color="blue", linestyle="--", linewidth=1, alpha=0.3
@@ -188,22 +648,36 @@ def plot_equity_curves(
                 split_dates["forward"], color="red", linestyle="--", linewidth=1, alpha=0.3
             )
 
-    price_handles, price_labels = price_axis.get_legend_handles_labels()
-    equity_handles, equity_labels = equity_axis.get_legend_handles_labels()
+    legend_axes = [price_axis]
+    if linear_equity_axis is not None:
+        legend_axes.append(linear_equity_axis)
+    if log_equity_axis is not None:
+        legend_axes.append(log_equity_axis)
+    legend_entries = [
+        entry
+        for axis in legend_axes
+        for entry in zip(*axis.get_legend_handles_labels())
+    ]
+    legend_handles = [handle for handle, _ in legend_entries]
+    legend_labels = [label for _, label in legend_entries]
     price_axis.legend(
-        price_handles + equity_handles,
-        price_labels + equity_labels,
+        legend_handles,
+        legend_labels,
         loc="upper left",
         ncol=4,
         fontsize=8,
     )
-    title = (
-        "Strategy Performance: Long (Train) -> Short (Val) -> Forward (Test)"
-        if has_multi_period_record
-        else "Strategy Equity Curve"
-    )
+    if region_starts:
+        title = "Strategy Equity Curve: Train -> Valid -> Test -> OOD"
+    elif has_multi_period_record:
+        title = "Strategy Performance: Long -> Short -> Forward"
+    else:
+        title = "Strategy Equity Curve"
     plt.title(title)
-    fig.tight_layout()
+    if linear_equity_axis is not None and log_equity_axis is not None:
+        fig.subplots_adjust(right=0.82)
+    else:
+        fig.tight_layout()
     plt.savefig(save_path, dpi=200)
     plt.close(fig)
     if logger is not None:
@@ -386,6 +860,9 @@ def analyze_record(record: dict, top_n: int = 10, focus_date: str | None = None)
     report["trade_logs"] = additional.get("trade_logs") or report.get("trade_logs") or []
     worst_day = worst_daily_loss(report)
     target_date = focus_date or worst_day.get("date")
+    ftmo_challenge = report.get("ftmo_challenge")
+    if not isinstance(ftmo_challenge, dict):
+        ftmo_challenge = simulate_ftmo_challenges(report)
 
     return {
         "params_hash": safe_get(report, ["params", "hash"]),
@@ -393,6 +870,7 @@ def analyze_record(record: dict, top_n: int = 10, focus_date: str | None = None)
         "focus_date": target_date,
         "focus_equity": daily_equity_context(report, target_date),
         "focus_trades": focus_trade_diagnostics(report, target_date, top_n),
+        "ftmo_challenge": ftmo_challenge,
     }
 
 
@@ -438,6 +916,7 @@ def print_analysis(
         )
     for trade in focus_trades["worst_trades"]:
         emit(f"  focus trade {short_trade_line(trade)}")
+    log_ftmo_challenge_summary(item["ftmo_challenge"], emit=emit)
     emit("")
 
 

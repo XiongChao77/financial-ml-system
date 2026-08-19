@@ -131,6 +131,7 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
 
         try:
             curr_dir, curr_layers, _ = venue.get_current_state()
+            bar_time = msg.get("bar_time")
 
             state = Observation(
                 market=MarketView(
@@ -140,10 +141,19 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
                     atr_pct=msg["atr_pct"],
                     slow_atr=msg["slow_atr"],
                     vol_regime=msg["vol_regime"],
+                    bar_interval_ms=(
+                        common.get_interval_ms(pre_para.interval)
+                        if bar_time is not None
+                        else None
+                    ),
                 ),
                 position=PositionView(dir=PositionDir(curr_dir), layers=curr_layers),
                 account=AccountView(equity=venue.get_account_equity()),
-                current_time=venue.get_server_time(),
+                current_time=(
+                    pd.Timestamp(bar_time).to_pydatetime()
+                    if bar_time is not None
+                    else venue.get_server_time()
+                ),
             )
 
             action = strategy.process(state)
@@ -247,7 +257,15 @@ class MasterController:
                     window_items.last_candle_time = initial_df.iloc[-1]["open_time_date_utc"] if not initial_df.empty else None
                     self.logger.info(f"History Required: {window_items.min_bars_needed} bars")
 
-    def execute_strategy(self, strategy: StrategyHolder, current_price, pred, pred_prob, atr_pct):
+    def execute_strategy(
+        self,
+        strategy: StrategyHolder,
+        current_price,
+        pred,
+        pred_prob,
+        atr_pct,
+        bar_time=None,
+    ):
         try:
             strategy.queue.put({
                 "type": "signal",
@@ -256,7 +274,8 @@ class MasterController:
                 "pred_prob": None if pred_prob is None else float(pred_prob),
                 "atr_pct": None if atr_pct is None else float(atr_pct),
                 "slow_atr": None,
-                "vol_regime": None
+                "vol_regime": None,
+                "bar_time": bar_time,
             })
         except Exception as e:
             self.logger.error(
@@ -359,7 +378,14 @@ class MasterController:
                                         df_with_feature['stop_loss_atr_pct'] = common.stop_loss_atr_pct(df, strategy.st_para.fixed_hold_bars)
                                         df_pred, model_stats = strategy.model.predict_with_ds(ds,df_with_feature,is_live=True,diff_thresh = None)
                                         last_row = df_pred.iloc[-1]
-                                        self.execute_strategy(strategy, last_row["close"], last_row["pred"], last_row["pred_prob"], last_row['stop_loss_atr_pct'])
+                                        self.execute_strategy(
+                                            strategy,
+                                            last_row["close"],
+                                            last_row["pred"],
+                                            last_row["pred_prob"],
+                                            last_row['stop_loss_atr_pct'],
+                                            bar_time=current_candle_time,
+                                        )
 
                                     except Exception as e:
                                         self.logger.error(f"Error in strategy work {strategy.pre_para.symbol}: {e}")

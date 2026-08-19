@@ -8,6 +8,7 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 from data_process import feature
+from data_process import config
 from analyse import volatility_prediction_heatmap
 
 def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine(), prep_output_dir =common.DATA_OUT_DIR ):
@@ -87,19 +88,11 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
 if __name__ == "__main__":
 #**********column info: open_time_date_utc,open,high,low,close,volume,close_time_ms_utc,quote_asset_volume,number_of_trades,taker_buy_base_volume,taker_buy_quote_volume,ignore
     logger, _ = common.setup_session_logger(sub_folder='data_process')
-    pare_para = common.DOGE_15m
+    pare_para = config.DOGE_15m_TBM
     if pare_para.market_category == 'Forex':
         feature_conf_list = feature.FEATURE_LIST_COMMODITY
     else:
         feature_conf_list = []
-    pare_para.label_type = "TBM"
-    pare_para.predict_num = 64
-    pare_para.vol_ewma_span = 80
-    pare_para.vol_multiplier_long = 14
-    pare_para.stop_multiplier_rate_long = 0.4
-    pare_para.vol_multiplier_short = 14
-    pare_para.stop_multiplier_rate_short = 0.4
-    pare_para.min_expected_move_pct = 0
     main(logger,common.FEATURE_GROUP_LIST, para= pare_para, feature_conf_list= feature_conf_list)
     # volatility_prediction_heatmap.main(pare_para=pare_para,logger=logger,)
     # volatility_prediction_heatmap.plot_price_and_volatility(pare_para,[10,20,40,80,160],output_path=None,logger=None)

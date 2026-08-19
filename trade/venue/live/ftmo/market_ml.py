@@ -146,7 +146,7 @@ class LiveBot:
         
         if self.last_candle_time == current_candle_time:
             # Unchanged timestamp means no kline closed -> skip
-            pass#return 
+            return
             
         self.logger.info(f"✨ New Candle Closed: {current_candle_time} | Buffer Size: {len(df)}")
         
@@ -196,10 +196,11 @@ class LiveBot:
                 signal=current_signal,
                 pred_prob=float(current_prob),
                 atr_pct=last_row["atr_14"],
+                bar_interval_ms=self.interval_ms,
             ),
             position=PositionView(dir=curr_dir, layers=curr_layers),
             account=AccountView(equity=self.venue.get_account_equity()),
-            current_time=self.venue.get_server_time(),
+            current_time=pd.Timestamp(current_candle_time).to_pydatetime(),
         )
 
         self.strategy.process(state)

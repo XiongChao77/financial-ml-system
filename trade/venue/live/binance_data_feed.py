@@ -113,7 +113,7 @@ class BinanceDataFeed:
         
         if df is not None and not df.empty:
             # 3. Deduplicate and store in the cache
-            df.drop_duplicates("open_time_ms_utc", inplace=True)
+            df.drop_duplicates("open_time_ms_utc", keep="last", inplace=True)
             df.sort_values("open_time_ms_utc", inplace=True)
             df.reset_index(drop=True, inplace=True)
             
@@ -131,10 +131,12 @@ class BinanceDataFeed:
             # A fallback; initialize should really be called explicitly in start
             return None
 
-        # 1. Where the incremental fetch starts
-        # start = close time of the last cached kline + 1ms
+        # 1. Re-fetch the last cached candle as well as newer candles. Binance
+        # includes the currently open candle in REST responses, so the cached
+        # copy of that candle is only a snapshot. Starting after its close time
+        # would never replace that snapshot with the final OHLCV values.
         last_k = self.local_cache.iloc[-1]
-        start_time = int(last_k["close_time_ms"]) + 1
+        start_time = int(last_k["open_time_ms_utc"])
         
         # 2. Fetch the increment (usually 0 or 1-2 klines)
         new_df = self._fetch_range_api(start_time)
@@ -146,8 +148,15 @@ class BinanceDataFeed:
             # concat is one of the more expensive pandas operations, but (5000 rows + 1 row) is very fast
             self.local_cache = pd.concat([self.local_cache, new_df], ignore_index=True)
             
-            # 4. Safety cleanup (deduplicate + sort)
-            self.local_cache.drop_duplicates("open_time_ms_utc", inplace=True)
+            # 4. Keep the freshly fetched version when the last cached candle
+            # appears in both frames, then restore strict chronological order.
+            self.local_cache.drop_duplicates(
+                "open_time_ms_utc",
+                keep="last",
+                inplace=True,
+            )
+            self.local_cache.sort_values("open_time_ms_utc", inplace=True)
+            self.local_cache.reset_index(drop=True, inplace=True)
             
             # 5. Memory management (pruning)
             # Cut the old head off once the cache exceeds the maximum length

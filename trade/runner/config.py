@@ -22,6 +22,9 @@ class BrokerConfig:
 class BacktestEngineConfig:
     runonce: bool = False
     cheat_on_open: bool = False
+    # Fill Market orders submitted from next() at that bar's close instead of
+    # the following bar's open. This is Backtrader broker cheat-on-close mode.
+    cheat_on_close: bool = True
     max_cpus: int = 1
 
 
@@ -30,12 +33,16 @@ class ModelDataConfig:
     atr_ref_bars: int = 80
     prep_output_dir: str = common.DATA_OUT_DIR
     train_output_dir: str = common.TRAIN_OUT_DIR
-    period: str = "long"  #  forward | long
+    period: str = "long"  # long | forward | all
     device: str = "auto"  # 'auto'/'cuda'/'cpu'
 
     def __post_init__(self):
         if self.atr_ref_bars <= 0:
             raise ValueError("atr_ref_bars must be a positive integer")
+        if self.period not in {"long", "forward", "all"}:
+            raise ValueError(
+                "period must be one of: 'long', 'forward', 'all'"
+            )
 
 @dataclass(kw_only=True)
 class CsvDataConfig(common.MarketDataSourceConfig):

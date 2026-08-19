@@ -47,14 +47,14 @@ class LSTMConfig(BaseModelConfig):
     model_type: str = "lstm"
     model_version: int = 1
     hidden_size: int = 32
-    num_layers: int = 1
+    num_layers: int = 2
     bidirectional: bool = True
     lstm_dropout: float = 0.2
     head_dropout: float = 0.2
     p_drop: float = 0.3
-    readout: str = ['last' , 'meanmax' , 'attn', 'mix'][3]
+    readout: str = ['last' , 'meanmax' , 'attn', 'mix'][1]
     head: str = ['linear' , 'mlp'][0]
-    in_locked_p: float = 0.05               # V4 locked dropout on inputs
+    in_locked_p: float = 0.1               # V4 locked dropout on inputs
     out_locked_p: float = 0              # V4 locked dropout on LSTM outputs (before pooling)
     input_norm: bool = True                # V4 LayerNorm on input features
     input_proj_dim: int | None = None      # V4 optional projection before LSTM: a linear layer mapping raw feature dim (e.g. 48) to a new dim D (dim reduction)
@@ -65,7 +65,7 @@ class TransformerConfig(BaseModelConfig):
     seq_len: int = 216     # 160 best for LSTM
     model_type: str = "transformer"
     model_version: int = 1
-    d_model: int = 128
+    d_model: int = 64
     nhead: int = 8
     num_layers: int = 2
     dim_feedforward: int = 512
@@ -87,22 +87,22 @@ class ConvLSTMConfig(BaseModelConfig):
     model_type: str = "conv_lstm"
     model_version: int = 1
     d_model: int = 64
-    hidden_size = 32
+    hidden_size:int = 32
+    conv_kernel: int = 3
+    conv_dropout: float = 0.2
     conv_layers: int = 1
-    conv_kernel: int = 5
-    conv_dropout: float = 0.10
-    conv_dilations: str = ""
+    conv_dilations: tuple[int, ...] | None = None
     bidirectional: bool = True
     lstm_dropout: float = 0.2
     input_norm: bool = True
-    in_locked_p: float = 0.05
-    out_locked_p: float = 0.05
-    head_dropout: float = 0.2
-    readout: str = "mix"    # 'last'|'meanmax'|'attn'|'mix'
+    in_locked_p: float = 0.1
+    out_locked_p: float = 0.1
+    head_dropout: float = 0.3
+    readout: str = "meanmax"    # 'last'|'meanmax'|'attn'|'mix'
     head: str = "linear"    # 'linear'|'mlp'
     logit_clip: Optional[float] = None
     p_drop: Optional[float] = None
-    task_proj_dim: int = 64
+    task_proj_dim: int = 32
     use_feature_weighting: bool = False
 
 @dataclass
@@ -186,7 +186,7 @@ class TrainConfig:
         default_factory=lambda: ConvLSTMConfig(model_version=3)
     )
     data_cfg: DataConfig = field(default_factory=DataConfig)
-    feature_conf_list: List[str] = field(default_factory=lambda: feature_conf_list)
+    feature_conf_list: List[str] = field(default_factory=lambda: feature.FEATURE_LIST_CRYPTOCURRENCY)
     epochs: int = 100
     batch_size: int = 256#256
     lr: float = 3e-4
@@ -194,7 +194,7 @@ class TrainConfig:
     weight_decay: float = 5e-4
     patience: int = 8
     seed: int = 42
-    stride: int = 2
+    stride: int = 4
     use_cache: bool = False
     lambda_dir: float = 0.1  # Importance of long/short direction
     lambda_main:float = 0.7
@@ -241,170 +241,10 @@ COMBO_SUB_TASKS = {
     TrainTask.LONG_SHORT_OVR: (TrainTask.LONG_OVR, TrainTask.SHORT_OVR),
 }
 
-# feature_direction_map: feature name -> ic_direction (1 positive / -1 negative)
-# Features with direction=-1 are multiplied by -1 before training, to correlate positively with the return
-feature_direction_map = {
-    "PVT": -1,
-    "BOLL_PB_25": -1,
-    "RSI_14": -1,
-    "close": -1,
-    "KELTNER_MIDDLE_14": -1,
-    "low": -1,
-    "MOM_20_RV20": -1,
-    "DONCHIAN_POS_20": -1,
-    "high": -1,
-    "OBV": -1,
-    "MOM_20_SKIP1": -1,
-    "KELTNER_UPPER_14": -1,
-    "open": -1,
-    "DONCHIAN_DIST_L_20": -1,
-    "DONCHIAN_DIST_U_20": 1,
-    "MACD_12_26_DIF_PCT": -1,
-    "MOM_20": -1,
-    "KELTNER_LOWER_14": -1,
-    "DONCHIAN_MIDDLE_20": -1,
-    "DONCHIAN_LOWER_20": -1,
-    "DONCHIAN_UPPER_20": -1,
-    "VWAP_7": -1,
-    "MFI_25": -1,
-    "MOM_10": -1,
-    "BOLL_MIDDLE_25": -1,
-    "dist_to_high_100": 1,
-    "KDJ_K": -1,
-    "MA_BAR_S_L": -1,
-    "KDJ_D": -1,
-    "BOLL_LOWER_25": -1,
-    "KDJ_J": -1,
-    "vpin_49": 1,
-    "MA_BAR_M_L": -1,
-    "MACD_12_26_HIST_PCT": -1,
-    "BOLL_BW_25": 1,
-    "poc_bias_49": -1,
-    "BOLL_UPPER_25": -1,
-    "MACD_12_26_DIF": -1,
-    "vpin_14": 1,
-    "MOM_60": -1,
-    "D_MA_DAY_S_L": -1,
-    "id_factor_20": -1,
-    "MACD_12_26_DEA": -1,
-    "MACD_12_26_SIG_DIST": -1,
-    "VWAP_Bias_7": -1,
-    "close_pos": -1,
-    "vol_parkinson_100": 1,
-    "vol_gk_100": 1,
-    "id_factor_100": -1,
-    "dist_to_high_20": 1,
-    "skew_20": 1,
-    "D_MA_BAR_S_L": -1,
-    "er_126": 1,
-    "imbalance_14": -1,
-    "CMF_25": 1,
-    "VWAP_BIAS": -1,
-    "MACD_12_26_HIST_ACCEL": -1,
-    "vol_gk_14": 1,
-    "hurst_126": 1,
-    "atr_14": 1,
-    "vol_parkinson_14": 1,
-    "body": 1,
-    "body_pct": 1,
-    "doji_score": 1,
-    "body_mom": 1,
-    "imbalance_49": 1,
-    "max_range": 1,
-    "kurt_100": 1,
-    "MACD_12_26_HIST": 1,
-    "skew_100": 1,
-    "Vol_Trend": 1,
-    "poc_bias_14": 1,
-    "upper_wick_pct": 1,
-    "VOL_ratio_14": 1,
-    "kurt_20": 1,
-    "ATS": 1,
-    "DONCHIAN_BW_20": 1,
-    "QAV_SLOPE_49": 1,
-    "lower_wick_pct": 1,
-    "hurst_14": 1,
-    "QAV_SURGE_49": 1,
-    "lower_wick": 1,
-    "vol_regime_14": 1,
-    "wick_bias": 1,
-    "trade_density_14": 1,
-    "er_14": 1,
-    "quote_asset_volume": 1,
-    "MA_DAY_S_L": 1,
-    "number_of_trades": 1,
-    "taker_buy_quote_volume": 1,
-    "MA_WEEK_M_L": -1,
-    "VOL_MA_14": 1,
-    "trade_density_49": 1,
-    "upper_wick": 1,
-    "volume": 1,
-    "taker_buy_base_volume": 1,
-}
-
-feature_conf_list = [
-
-    # =========================
-    # Raw Market State
-    # =========================
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "number_of_trades",
-    "quote_asset_volume",
-    "taker_buy_base_volume",
-    "taker_buy_quote_volume",
-    # =========================
-    # 1) Trend / directional persistence: whether price has continuation
-    # =========================
-    "MA_WEEK_M_L",        # Long-term regime direction (core)
-    "PVT",                # Price-volume enhanced momentum
-    "dist_to_high_100",   # Breakout-style trend structure
-    "id_factor_100",
-    "id_factor_20",
-    "MFI_999",            # Extreme money flow
-    "MFI_99",
-    # =========================
-    # 2) Volatility regime: amplitude and risk environment
-    # =========================
-    "vol_gk_100",          # Long-term volatility
-    "vol_gk_14",           # Short-term volatility
-    "skew_100",
-    "kurt_100",            # Tail structure (extreme risk)
-    # "BOLL_BW_25",         # Decide after uplift testing
-    "RSI_14",              # Relative Strength Index (momentum/overheat; indirectly reflects volatility)
-    # =========================
-    # 3) Efficiency / market structure: trending vs ranging
-    # =========================
-    "er_126",              # Trend efficiency ratio (high-quality structure factor)
-    # =========================
-    # 4) Participation / liquidity: market activity
-    # =========================
-    "trade_density_14",    # Continuous participation intensity
-    "vol_event_flag_500",  # Extreme volume event (regime trigger)
-    # =========================
-    # 5) Order flow / imbalance: buy-vs-sell dominance
-    # =========================
-    "vpin_49",             # Mid-term order-flow imbalance
-    "vpin_14",             # Needs uplift testing
-    # =========================
-    # 6) Spatial / price position: where price sits within ranges/cost
-    # =========================
-    "poc_bias_600",        # Deviation from high-volume node (strong structural anchor)
-    "poc_bias_99",
-    "close_pos",           # Relative position within range
-    # =========================
-    # 7) Candlestick / path microstructure
-    # =========================
-    "upper_wick_pct",
-    "lower_wick_pct",
-]
-
-seq_len = 128
+seq_len = 96
 SingleModelConfig = TrainConfig(
-    model_cfg=ConvLSTMConfig(model_version=2, seq_len=seq_len),
-    feature_conf_list=feature.FEATURE_LIST_COMMODITY,
+    model_cfg=LSTMConfig(model_version=3, seq_len=seq_len),
+    feature_conf_list=feature.FEATURE_LIST_CRYPTOCURRENCY,
     train_task=TrainTask.DUAL_HEAD_3CLASS,
+    stride =2,
 )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -35,6 +36,39 @@ class DataSplits:
     train: TensorSplit
     validation: TensorSplit
     test: TensorSplit
+
+
+def temporal_split_bounds(
+    sample_count: int,
+    *,
+    train_ratio: float,
+    val_ratio: float,
+    purge_overlap: bool,
+    seq_len: int,
+    stride: int,
+) -> dict[str, tuple[int, int]]:
+    """Return the exact half-open sample ranges used by time-series training."""
+    train_end = int(sample_count * train_ratio)
+    validation_end = int(sample_count * (train_ratio + val_ratio))
+    purge = (
+        max(math.ceil(seq_len / max(stride, 1)) - 1, 0)
+        if purge_overlap
+        else 0
+    )
+    validation_start = train_end + purge
+    test_start = validation_end + purge
+    if not (
+        0 < train_end <= validation_start < validation_end <= test_start < sample_count
+    ):
+        raise ValueError(
+            "Dataset is too small for the requested train/validation/test split "
+            f"and purge gap ({purge} samples)"
+        )
+    return {
+        "train": (0, train_end),
+        "valid": (validation_start, validation_end),
+        "test": (test_start, sample_count),
+    }
 
 
 @dataclass
