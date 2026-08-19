@@ -370,36 +370,57 @@ def filter_and_rank_strategies(data, metric, k=30, final_sort_key="l_cagr"):
     
     return final_sorted
 
+
+_MODEL_TYPE_SHORT_NAMES = {
+    "conv_lstm": "ConvLSTM",
+    "logistic_regression": "LogReg",
+    "logistic_regression_sklearn": "LogRegSK",
+    "transformer": "Trans",
+    "xgboost": "XGB",
+    "lstm": "LSTM",
+    "mamba": "Mamba",
+    "tcn": "TCN",
+    "cnn": "CNN",
+    "svc": "SVC",
+}
+
+
+def _short_model_type(model_type):
+    """Return a compact, stable model label for console tables."""
+    if model_type is None:
+        return "-"
+    model_type = str(model_type)
+    return _MODEL_TYPE_SHORT_NAMES.get(model_type, model_type[:8])
+
+
 def show_performance(all_results,output_dir, batch_size=5):
     print("-"*20 + 'Key strategy indicators' +"-"*20)
-    print(f"{'Num':>5}"
-          f"{'Hash':>10}"
-          f"{'CAGR':>10}"
-          f"{'Sharpe':>10}"
-          f"{'Calmar':>10}"
-          f"{'Max_DD':>12}"
-          f"{'DailyFreq':>12}"
-          f"{'WinRate':>10}"
-          f"{'RC_Median':>12}"
-          f"{'RC_PosRatio':>12}"
-          f"{'MAX_DD_DAYS':>12}")
-
-    print("-" * 98)
+    header = (
+        f"{'Num':>3} {'Hash':<12} {'Model':<8} {'Ver':>3} "
+        f"{'CAGR':>7} {'Sharpe':>7} {'Calmar':>7} {'MaxDD':>7} "
+        f"{'Freq':>6} {'Win':>6} {'RCMed':>7} {'RCPos':>6} {'DDDays':>7}"
+    )
+    print(header)
+    print("-" * len(header))
 
     for i, r in enumerate(all_results):
         g = lambda k: common.recursive_get(r['long'], k)
-        g('daily_loss_list')
-        print(f"{i:>4}"
-              f"{str(g('hash')):>12}"
-              f"{g('cagr'):10.2f}"
-              f"{g('sharpe'):10.2f}"
-              f"{g('calmar'):10.2f}"
-              f"{g('max_dd_pct'):12.2f}"
-              f"{g('daily_freq'):12.2f}"
-              f"{g('win_rate'):10.2f}"
-              f"{g('rc_median'):12.2f}"
-              f"{g('rc_pos_ratio'):12.2f}"
-              f"{g('max_hwm_duration_days'):12.2f}")
+        model_cfg = (
+            r.get("long", {})
+            .get("params", {})
+            .get("train", {})
+            .get("model_cfg", {})
+        )
+        model_type = model_cfg.get("model_type", g("model_type"))
+        model_version = model_cfg.get("model_version", g("model_version"))
+        print(
+            f"{i:>3} {str(g('hash')):<12} "
+            f"{_short_model_type(model_type):<8} {str(model_version):>3} "
+            f"{g('cagr'):7.2f} {g('sharpe'):7.2f} {g('calmar'):7.2f} "
+            f"{g('max_dd_pct'):7.2f} {g('daily_freq'):6.2f} "
+            f"{g('win_rate'):6.2f} {g('rc_median'):7.2f} "
+            f"{g('rc_pos_ratio'):6.2f} {g('max_hwm_duration_days'):7.2f}"
+        )
     compute_correlation(all_results,output_dir)
     plot_in_batches(all_results,output_dir,batch_size)
 
@@ -525,28 +546,18 @@ def plot_in_batches(all_results, output_dir, batch_size=5):
         batch = all_results[i:i + batch_size]
         filename = f"batch_{i//batch_size + 1}.png"
         # ✨ Pass current loop index i as the starting number
-        plot_equity_curves(batch, output_dir, filename, start_index=i)
+        plot_equity_curves(
+            batch,
+            output_dir,
+            filename,
+            start_index=i,
+            label_by_index=True,
+        )
 
 def main():
-    exp_dir1 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-07','01_03_38')
-    exp_dir2 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-09','17_33_35')
-    exp_dir5 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-18','02_38_16')
-    exp_dir7 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-18','13_16_48')
-    exp_dir9 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-19','01_15_14')
-    exp_dir_4_17 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-04-17','23_41_02')
-    exp_dir13 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-03-20','00_30_58')
-    exp_dir16 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-04-19','09_07_32')
-    exp_dir10 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-03-19','11_00_31')
-    exp_dir10 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-03-19','11_00_31')
-    exp_dir11 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_1h','2026-03-19','11_32_26')
-    exp_dir12 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_1h','2026-03-19','11_53_49')
-    exp_dir14 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_1h','2026-04-18','19_11_25')
-    exp_dir3 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','18_41_56')
-    exp_dir4 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-03-15','20_17_30')
-    exp_dir17= os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-08-02','20_56_16')
-    exp_dir18= os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_30m','2026-08-11','12_19_25')
-
-    exp_dir_list = [exp_dir18]
+    exp_dir1 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','13_31_24')
+    exp_dir2 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','14_16_19')
+    exp_dir_list = [exp_dir2]
     filter_report = None
     # filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
@@ -583,6 +594,18 @@ def main():
     analyze_holdbar(uin_records,target_key="predict_num", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="min_expected_move_pct", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="model_type", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="model_version", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="max_daily_loss_pct", period ='long',metric_key="cagr")
+    print("*************************************")
+    analyze_holdbar(uin_records,target_key="stride",period ='forward', metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="fixed_hold_bars",period ='forward', metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="seq_len",period ='forward', metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="vol_ewma_span", period ='forward',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="predict_num", period ='forward',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="min_expected_move_pct", period ='forward',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="model_type", period ='forward',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="model_version", period ='forward',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="max_daily_loss_pct", period ='forward',metric_key="cagr")
     # analyze_model_performance_correlation(uin_records)
     # analyze_model_metrics_by_decile(uin_records)
     # exit()
@@ -591,7 +614,7 @@ def main():
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
     # exit()
-    stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="feature_conf_list",period ='long', metric_key="cagr")
+    # stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="feature_conf_list",period ='long', metric_key="cagr")
 
     if symbol == 'DOGEUSDT' and interval=='15m':
         l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.3,rc_median = 0,rc_pos_ratio = 0.8,calmar = 1.3 ,daily_freq = 0.1,sharpe = 0.6)
@@ -614,6 +637,7 @@ def main():
         l_results = merge_selected(l_results)
         l_results = sorted(l_results, key=itemgetter("l_cagr"), reverse=True)
         l_results,unselected = filter_by_criteria(l_results, period ='long', cagr=0.3,calmar = 0.5,sharpe = 0.5,rc_pos_ratio = 0.5,daily_freq = 0.1)
+        l_results,unselected = filter_by_criteria(l_results, period ='forward', cagr=0)
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.8)
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.6)
     if symbol == 'DOGEUSDT' and interval=='30m':

@@ -25,3 +25,6 @@ tests/*
 tests/*
 .venv/*
 *test*
+
+# Local experiment sweeps. Keep the tracked example as the default fallback.
+/experiment/task_constructors.py

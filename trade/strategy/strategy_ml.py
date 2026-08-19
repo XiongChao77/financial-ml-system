@@ -205,49 +205,36 @@ class MlSignalStrategy(StrategyBase):
 
         action = TradeIntent(ActionType.NOOP)
 
-        #new order
-        if target_dir != PositionDir.FLAT and target_dir != state.position.dir:
+        # A direction change is deliberately two-step: close on this bar, then
+        # wait until a later observation confirms FLAT before opening again.
+        if state.position.dir != PositionDir.FLAT:
+            if target_dir != state.position.dir:
+                action = TradeIntent(
+                    ActionType.CLOSE,
+                    reason="opposite_signal" if target_dir != PositionDir.FLAT else "flat_signal",
+                )
+        elif target_dir != PositionDir.FLAT:
             risk_per_trade = self._risk_per_trade(state.account.equity)
             if remaining_risk_budget < risk_per_trade:
                 self.logger.info(
                     "🛑 [NO OPEN] remaining daily loss budget "
                     f"{remaining_risk_budget:.2f} < risk per trade {risk_per_trade:.2f}"
                 )
-                target_dir = PositionDir.FLAT
             else:
                 final_order_qty, sl_pct, tp_pct = self._calculate_unit_pct(
                     target_dir,
                     state,
                 )
-                if final_order_qty == 0:
-                    target_dir = PositionDir.FLAT
-
-        # 5. Run the decision logic (packs the order information)
-        if state.position.dir == PositionDir.FLAT:
-            if target_dir != PositionDir.FLAT:
-
-                action = TradeIntent(
-                    action=ActionType.OPEN,
-                    price=state.market.price,
-                    target_dir=target_dir,
-                    target_layers=1,
-                    order_qty=final_order_qty,
-                    stop_loss_pct=sl_pct,
-                    take_profit_pct=tp_pct,
-                )
-        else:
-            if target_dir == PositionDir.FLAT:
-                action = TradeIntent(ActionType.CLOSE)
-            elif target_dir != state.position.dir:
-                action = TradeIntent(
-                    action=ActionType.REVERSE,
-                    price=state.market.price,
-                    target_dir=target_dir,
-                    target_layers=1,
-                    order_qty=final_order_qty,
-                    stop_loss_pct=sl_pct,
-                    take_profit_pct=tp_pct,
-                )
+                if final_order_qty > 0:
+                    action = TradeIntent(
+                        action=ActionType.OPEN,
+                        price=state.market.price,
+                        target_dir=target_dir,
+                        target_layers=1,
+                        order_qty=final_order_qty,
+                        stop_loss_pct=sl_pct,
+                        take_profit_pct=tp_pct,
+                    )
 
         self.execute_action(action)
         return action

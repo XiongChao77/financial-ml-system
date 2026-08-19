@@ -142,15 +142,11 @@ class StrategyBase(ABC):
 
         if action.action == ActionType.CLOSE:
             self.venue.close_position()
-        else:
+        elif action.action == ActionType.OPEN:
             is_buy = (action.target_dir == PositionDir.POSITIVE )
-            
-            # Execute the order
-            if action.action == ActionType.REVERSE:
-                # On a reverse, close everything first
-                self.venue.close_position()
-                # then open the first layer in the new direction
-                self.venue.submit_order(action.order_qty, is_buy=is_buy, stop_loss_pct=action.stop_loss_pct, take_profit_pct=action.take_profit_pct)
-                
-            elif action.action == ActionType.OPEN:
-                self.venue.submit_order(action.order_qty, is_buy=is_buy, stop_loss_pct=action.stop_loss_pct, take_profit_pct=action.take_profit_pct)
+            self.venue.submit_order(
+                action.order_qty,
+                is_buy=is_buy,
+                stop_loss_pct=action.stop_loss_pct,
+                take_profit_pct=action.take_profit_pct,
+            )

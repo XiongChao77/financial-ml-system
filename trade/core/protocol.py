@@ -36,7 +36,6 @@ class ActionType(Enum):
     NOOP = "noop"   # do nothing, leave every position state untouched
     OPEN = "open"         # open a position
     CLOSE = "close"       # close the position
-    REVERSE = "reverse"   # reverse the position
     PYRAMID = "pyramid"   # add to the position
 
 
