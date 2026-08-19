@@ -404,14 +404,14 @@ def equity_series(
         if record.record_id not in requested:
             continue
         period_report = record.raw.get(period, record.raw)
-        daily = _get_nested(period_report, "drawdown.daily_loss_list")
+        daily = _get_nested(period_report, "daily_account")
         points = []
         if isinstance(daily, list):
             for item in daily:
                 if not isinstance(item, Mapping):
                     continue
                 date = item.get("date")
-                equity = item.get("equity")
+                equity = item.get("end_equity")
                 if date is not None and _is_number(equity):
                     points.append({"time": str(date)[:10], "value": float(equity)})
         values = record.values(period)

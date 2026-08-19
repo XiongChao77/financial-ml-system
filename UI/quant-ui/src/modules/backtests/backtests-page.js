@@ -219,7 +219,7 @@ export async function mountBacktestsPage(container, context) {
     const [additional, report] = normalized.statistics;
     rawCandles = normalized.candles;
     rawTrades = additional?.trade_logs || [];
-    rawEquity = report?.drawdown?.daily_loss_list || [];
+    rawEquity = report?.daily_account || [];
     reportData = report || {};
     renderSummary(query('[data-role="summary"]'), report);
     renderDetails(query('[data-role="details"]'), report, additional);
@@ -470,9 +470,9 @@ function metricCard(label, value, tone = "", wide = false) {
 }
 
 function topDailyLosses(report) {
-  const rows = getByPath(report, "drawdown.daily_loss_list", []);
+  const rows = getByPath(report, "daily_account", []);
   if (!Array.isArray(rows)) return null;
-  const losses = rows.map((item) => Number(item?.dd_pct ?? item))
+  const losses = rows.map((item) => Number(item?.intraday_drawdown_pct))
     .filter((value) => Number.isFinite(value) && value < 0)
     .sort((left, right) => left - right)
     .slice(0, 10);
@@ -485,9 +485,9 @@ function minimumEquityDistance(report, additional) {
   const startValue = rawStartValue === null ? NaN : Number(rawStartValue);
   let minimumEquity = rawMinimumEquity === null ? NaN : Number(rawMinimumEquity);
   if (!Number.isFinite(minimumEquity)) {
-    const rows = getByPath(report, "drawdown.daily_loss_list", []);
+    const rows = getByPath(report, "daily_account", []);
     const equities = Array.isArray(rows)
-      ? rows.map((item) => Number(item?.equity)).filter(Number.isFinite)
+      ? rows.map((item) => Number(item?.minimum_equity)).filter(Number.isFinite)
       : [];
     minimumEquity = equities.length ? Math.min(...equities) : NaN;
   }

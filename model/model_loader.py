@@ -380,7 +380,7 @@ class ModelHandler(MetaConfig):
         self.logger.info(f"Inference complete. Valid signals: {len(final_pred)}")
         return df_out, stats
     
-    def predict_with_ds(self, ds, df, is_live=True, batch_size=2048, diff_thresh=None, min_thresh=0.3):
+    def predict_with_ds(self, ds, df, is_live=True, batch_size=512, diff_thresh=None, min_thresh=0.3):
         self.logger.info(f"Starting inference pipeline (Mode={'Live' if is_live else 'Backtest'}, diff_thresh={diff_thresh})...")
         self._validate_inference_dataset(ds)
         # Check whether any valid windows were generated (may be dropped if too short or discontinuous)

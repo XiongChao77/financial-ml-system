@@ -427,7 +427,7 @@ def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.
         
         for period in ['long', 'forward']:
             period_data = r.get(period)
-            daily_list = common.recursive_get(period_data,'daily_loss_list')
+            daily_list = period_data.get("daily_account", [])
 
             df = pd.DataFrame(daily_list)
             df['date'] = pd.to_datetime(df['date'])
@@ -437,7 +437,7 @@ def plot_equity_curves(all_results, output_dir, file_name="equity_full_combined.
             if period not in split_dates:
                 split_dates[period] = df.index[0]
             
-            returns_sequence = df['equity'] / df['equity'].iloc[0]
+            returns_sequence = df['end_equity'] / df['end_equity'].iloc[0]
             df['continuous_equity'] = returns_sequence * current_multiplier
             segments.append(df[['continuous_equity']])
             current_multiplier = df['continuous_equity'].iloc[-1]

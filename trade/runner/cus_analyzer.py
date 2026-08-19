@@ -5,7 +5,11 @@ import math
 
 def _count_daily_drawdown_breaches(daily_stats, threshold: float) -> int:
     """Count days whose drawdown magnitude is strictly greater than threshold."""
-    return sum(1 for item in daily_stats if item['dd_pct'] < -threshold)
+    return sum(
+        1
+        for item in daily_stats
+        if item["intraday_drawdown_pct"] < -threshold
+    )
 
 class CusAnalyzer(bt.Analyzer):
     """
@@ -140,14 +144,18 @@ class CusAnalyzer(bt.Analyzer):
             return
 
         if self._day_start_equity > 0:
-            dd_pct = (self._day_min_equity - self._day_start_equity) / self._day_start_equity
+            intraday_drawdown_pct = (
+                self._day_min_equity - self._day_start_equity
+            ) / self._day_start_equity
         else:
-            dd_pct = 0.0
+            intraday_drawdown_pct = 0.0
 
         self._daily_stats.append({
-            'date': str(date_obj),
-            'dd_pct': dd_pct,
-            'equity': self._day_end_equity,
+            "date": str(date_obj),
+            "start_equity": self._day_start_equity,
+            "minimum_equity": self._day_min_equity,
+            "end_equity": self._day_end_equity,
+            "intraday_drawdown_pct": intraday_drawdown_pct,
         })
 
     def _finalize_drawdown(self):
@@ -155,21 +163,25 @@ class CusAnalyzer(bt.Analyzer):
             return {
                 'max_daily_dd': 0.0,
                 'max_daily_dd_date': None,
-                'daily_dd_violation_days': 0
+                'daily_dd_violation_days': 0,
+                'daily_account': [],
             }
 
-        worst_day = min(self._daily_stats, key=lambda x: x['dd_pct'])
+        worst_day = min(
+            self._daily_stats,
+            key=lambda x: x["intraday_drawdown_pct"],
+        )
         violation_count_3 = _count_daily_drawdown_breaches(self._daily_stats, 0.03)
         violation_count_4 = _count_daily_drawdown_breaches(self._daily_stats, 0.04)
         violation_count_5 = _count_daily_drawdown_breaches(self._daily_stats, 0.05)
 
         return {
-            'max_daily_dd': worst_day['dd_pct'],
+            'max_daily_dd': worst_day['intraday_drawdown_pct'],
             'max_daily_dd_date': worst_day['date'],
             'daily_dd_violation_days': violation_count_4,
             'daily_dd_max_violation_days': violation_count_5,
             'daily_dd_max_3_violation_days': violation_count_3,
-            'daily_returns_list': self._daily_stats,
+            'daily_account': self._daily_stats,
         }
 
     # =========================================================

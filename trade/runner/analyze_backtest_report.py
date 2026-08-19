@@ -37,8 +37,8 @@ def date_from_order(order: dict) -> str | None:
         return None
 
 
-def daily_loss_rows(report: dict) -> list[dict]:
-    rows = safe_get(report, ["drawdown", "daily_loss_list"], []) or []
+def daily_account_rows(report: dict) -> list[dict]:
+    rows = report.get("daily_account") or []
     return rows if isinstance(rows, list) else []
 
 
@@ -88,17 +88,17 @@ def _daily_equity_frame(report: dict):
     """Load the report's end-of-day equity samples as a clean time series."""
     import pandas as pd
 
-    frame = pd.DataFrame(daily_loss_rows(report))
-    if frame.empty or "date" not in frame or "equity" not in frame:
+    frame = pd.DataFrame(daily_account_rows(report))
+    if frame.empty or "date" not in frame or "end_equity" not in frame:
         return pd.DataFrame(columns=["equity"])
 
-    frame = frame[["date", "equity"]].copy()
+    frame = frame[["date", "end_equity"]].copy()
     frame["date"] = pd.to_datetime(frame["date"], utc=True, errors="coerce")
-    frame["equity"] = pd.to_numeric(frame["equity"], errors="coerce")
-    frame = frame.dropna(subset=["date", "equity"])
+    frame["end_equity"] = pd.to_numeric(frame["end_equity"], errors="coerce")
+    frame = frame.dropna(subset=["date", "end_equity"])
     frame = frame.sort_values("date").drop_duplicates("date", keep="last")
     frame["date"] = frame["date"].dt.tz_convert(None)
-    return frame.set_index("date")
+    return frame.rename(columns={"end_equity": "equity"}).set_index("date")
 
 
 def _simulate_ftmo_equity_segment(
@@ -334,15 +334,15 @@ def build_continuous_equity_path(
     path_start_time = None
 
     for period, report in reports_by_period:
-        daily = daily_loss_rows(report)
+        daily = daily_account_rows(report)
         if not daily:
             continue
         frame = pd.DataFrame(daily)
-        if "date" not in frame or "equity" not in frame:
+        if "date" not in frame or "end_equity" not in frame:
             continue
         frame["date"] = pd.to_datetime(frame["date"], utc=True).dt.tz_convert(None)
-        frame["equity"] = pd.to_numeric(frame["equity"], errors="coerce")
-        frame = frame.dropna(subset=["date", "equity"]).sort_values("date")
+        frame["end_equity"] = pd.to_numeric(frame["end_equity"], errors="coerce")
+        frame = frame.dropna(subset=["date", "end_equity"]).sort_values("date")
         if frame.empty:
             continue
 
@@ -361,7 +361,7 @@ def build_continuous_equity_path(
             path_start_time = safe_get(report, ["time", "start"])
 
         frame["continuous_equity"] = (
-            frame["equity"] / segment_start_equity * current_equity
+            frame["end_equity"] / segment_start_equity * current_equity
         )
         segments.append(frame[["continuous_equity"]])
         current_equity = frame["continuous_equity"].iloc[-1]
@@ -699,7 +699,7 @@ def plot_equity_curves(
 
 def daily_equity_context(report: dict, target_date: str | None) -> dict:
     """Build the equity bridge used by the reported daily drawdown metric."""
-    rows = daily_loss_rows(report)
+    rows = daily_account_rows(report)
     index = next(
         (i for i, row in enumerate(rows) if str(row.get("date")) == target_date),
         None,
@@ -712,18 +712,17 @@ def daily_equity_context(report: dict, target_date: str | None) -> dict:
             "end_equity": None,
             "equity_change": None,
             "equity_change_pct": None,
-            "dd_pct": None,
+            "intraday_drawdown_pct": None,
         }
 
     row = rows[index]
-    start_equity = (
-        to_float(rows[index - 1].get("equity"), None)
-        if index > 0
-        else safe_get(report, ["performance", "start_value"])
+    start_equity = to_float(row.get("start_equity"), None)
+    minimum_equity = to_float(row.get("minimum_equity"), None)
+    end_equity = to_float(row.get("end_equity"), None)
+    intraday_drawdown_pct = to_float(
+        row.get("intraday_drawdown_pct"),
+        0.0,
     )
-    end_equity = to_float(row.get("equity"), None)
-    dd_pct = to_float(row.get("dd_pct"), 0.0)
-    min_equity = start_equity * (1.0 + dd_pct) if start_equity is not None else None
     equity_change = (
         end_equity - start_equity
         if start_equity is not None and end_equity is not None
@@ -737,23 +736,30 @@ def daily_equity_context(report: dict, target_date: str | None) -> dict:
     return {
         "date": target_date,
         "start_equity": start_equity,
-        "min_equity": min_equity,
+        "min_equity": minimum_equity,
         "end_equity": end_equity,
         "equity_change": equity_change,
         "equity_change_pct": equity_change_pct,
-        "dd_pct": dd_pct,
+        "intraday_drawdown_pct": intraday_drawdown_pct,
     }
 
 
 def worst_daily_loss(report: dict) -> dict:
-    rows = daily_loss_rows(report)
+    rows = daily_account_rows(report)
     if not rows:
         return {
             "date": safe_get(report, ["drawdown", "max_daily_date"]),
-            "dd_pct": safe_get(report, ["drawdown", "max_daily_dd"], 0.0),
-            "equity": None,
+            "intraday_drawdown_pct": safe_get(
+                report,
+                ["drawdown", "max_daily_dd"],
+                0.0,
+            ),
+            "end_equity": None,
         }
-    return min(rows, key=lambda item: to_float(item.get("dd_pct"), 0.0))
+    return min(
+        rows,
+        key=lambda item: to_float(item.get("intraday_drawdown_pct"), 0.0),
+    )
 
 
 def trade_logs(report: dict) -> list[dict]:
@@ -896,7 +902,9 @@ def print_analysis(
     worst = item["worst_day"]
     emit(
         "Worst daily loss: "
-        f"date={worst.get('date')} dd={fmt_pct(worst.get('dd_pct'))} equity={worst.get('equity')}"
+        f"date={worst.get('date')} "
+        f"dd={fmt_pct(worst.get('intraday_drawdown_pct'))} "
+        f"equity={worst.get('end_equity')}"
     )
     emit(f"Focus date: {item['focus_date']}")
 
