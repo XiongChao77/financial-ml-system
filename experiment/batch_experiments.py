@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import argparse,shutil
 import copy
-import hashlib
 import json
 import logging
 import multiprocessing as mp
 import os
 import sys
 import time
+import traceback
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from queue import Empty
 from typing import Any, Dict, Iterable, List, Optional, Tuple,Set
@@ -36,12 +36,12 @@ from model import train_config
 from data_process import common, preparation
 from experiment.task_constructors import construct_experiment_tasks
 from data_process.utils import (
-    calc_params_hash,
+    TaskIdentity,
     config_from_dict_train,
     json_safe,
     load_selected_configs,
-    param_hash,
 )
+from trade.runner.config import ExperimentContext
 
 # NOTE: train/simulation are imported lazily inside the process that needs them.
 #       This avoids CUDA / heavy imports in workers.
@@ -62,7 +62,12 @@ INTERVAL: str = "30m"
 # - train_config.TrainTask.TRIGGER_DIRECTION / LONG_SHORT_OVR
 #   -> combo_model mode: sweep both sub-model roles separately,
 #      then fuse them pairwise per (pre_key, train_compatibility) after training and backtest
-TRAIN_MODE: str = train_config.TrainTask.DIRECTION
+TRAIN_MODE: str = train_config.TrainTask.DIRECT_3CLASS
+
+
+class ExperimentTaskError(RuntimeError):
+    """A child stage failed; the complete experiment must stop."""
+
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
@@ -107,7 +112,7 @@ def build_task_spec(
     for pre in preparation_task:
         pre_d = asdict(pre)
         pre_d.pop("prep_output_dir", None)
-        pre_h = param_hash(pre_d)
+        pre_h = TaskIdentity.prep_hash_for(pre_d)
         _assert_hash_roundtrip("prep", pre_d, common.BaseDefine(**pre_d), pre_h)
 
         node_pre = spec.setdefault(pre_h, {"params": json_safe(pre_d), "train": {}})
@@ -115,27 +120,33 @@ def build_task_spec(
         for tr in training_task:
             tr_d = asdict(tr)
             tr_d.pop("save_dir", None)
-            tr_h = param_hash(tr_d)
+            tr_h = TaskIdentity.train_hash_for(tr_d)
             _config_from_dict_train(json_safe(tr_d), expected_hash=tr_h)
 
             node_tr = node_pre["train"].setdefault(tr_h, {"params": json_safe(tr_d), "sim_tasks": []})
 
             # de-dup sim tasks by hash
             existing = {s["hash"] for s in node_tr["sim_tasks"]}
-            for strategy_config, broker_config in simulation_task:
-                sim_d = _simulation_params(strategy_config, broker_config)
-                sim_h = param_hash(sim_d)
+            for strategy_config in simulation_task:
+                sim_d = _simulation_params(strategy_config)
+                identity = TaskIdentity.from_params(prep=pre_d, train=tr_d, sim=sim_d)
+                sim_h = identity.sim_hash
                 _assert_sim_hash_roundtrip(
                     sim_d,
                     strategy_config=backtest_runner.strategy_config_from_dict(
                         sim_d["strategy_config"],
                     ),
-                    broker_config=backtest_runner.BrokerConfig(**sim_d["broker_config"]),
                     expected_hash=sim_h,
                 )
                 if sim_h in existing:
                     continue
-                node_tr["sim_tasks"].append({"hash": sim_h, "params": json_safe(sim_d)})
+                node_tr["sim_tasks"].append(
+                    {
+                        "hash": sim_h,
+                        "identity": identity.as_dict(),
+                        "params": json_safe(sim_d),
+                    }
+                )
                 existing.add(sim_h)
     return spec
 
@@ -179,7 +190,11 @@ def _assert_hash_roundtrip(kind: str, original: Dict[str, Any], restored_obj: An
     model_cfg/data_cfg skip.
     """
     restored_d = json_safe(asdict(restored_obj))
-    actual_hash = param_hash(restored_d)
+    hash_functions = {
+        "prep": TaskIdentity.prep_hash_for,
+        "train": TaskIdentity.train_hash_for,
+    }
+    actual_hash = hash_functions[kind](restored_d)
     if actual_hash != expected_hash:
         before = json_safe(original)
         mismatched = {
@@ -193,10 +208,12 @@ def _assert_hash_roundtrip(kind: str, original: Dict[str, Any], restored_obj: An
         )
 
 
-def _simulation_params(strategy_config: Any, broker_config: Any) -> Dict[str, Any]:
+def _simulation_params(strategy_config: Any) -> Dict[str, Any]:
+    from trade.runner import backtest_runner
+
     return {
         "strategy_config": backtest_runner.strategy_config_to_dict(strategy_config),
-        "broker_config": asdict(broker_config),
+        "broker_config": asdict(backtest_runner.BrokerConfig()),
     }
 
 
@@ -204,11 +221,10 @@ def _assert_sim_hash_roundtrip(
     original: Dict[str, Any],
     *,
     strategy_config: Any,
-    broker_config: Any,
     expected_hash: str,
 ) -> None:
-    restored = json_safe(_simulation_params(strategy_config, broker_config))
-    actual_hash = param_hash(restored)
+    restored = json_safe(_simulation_params(strategy_config))
+    actual_hash = TaskIdentity.sim_hash_for(restored)
     if actual_hash != expected_hash:
         raise ValueError(
             f"sim params failed hash round-trip: expected {expected_hash!r}, "
@@ -245,17 +261,18 @@ def filter_pending_from_spec(task_spec: Dict[str, Any], done_set: set[str]) -> D
             sim_pending = []
             for sim in tr_node.get("sim_tasks", []):
                 sim_params = sim["params"]
-                task_hash = calc_params_hash(
-                    strategy_config=backtest_runner.strategy_config_from_dict(
-                        sim_params["strategy_config"],
-                    ),
-                    broker_config=backtest_runner.BrokerConfig(
-                        **sim_params["broker_config"],
-                    ),
-                    common=common.BaseDefine(**pre_params),
-                    train=_config_from_dict_train(train_params, expected_hash=tr_h),
+                identity = TaskIdentity.from_params(
+                    prep=pre_params,
+                    train=train_params,
+                    sim=sim_params,
                 )
-                if task_hash not in done_set:
+                saved_identity = sim.get("identity")
+                if saved_identity is not None and saved_identity != identity.as_dict():
+                    raise ValueError(
+                        f"Task identity mismatch for {pre_h}/{tr_h}/{sim['hash']}: "
+                        f"stored={saved_identity}, calculated={identity.as_dict()}"
+                    )
+                if identity.full_hash not in done_set:
                     sim_pending.append(sim)
 
             if sim_pending:
@@ -437,9 +454,10 @@ def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Que
                 preparation.main(logger, para=para, prep_output_dir=prep_dir)
             except Exception:
                 logger.exception(f"Prep failed: {pre_h}")
-                # still notify main so it can terminate early
-                train_queue.put(("prep_failed", pre_h, time.time() - t0, []))
-                continue
+                train_queue.put(
+                    ("prep_failed", pre_h, time.time() - t0, traceback.format_exc())
+                )
+                return
 
             elapsed = time.time() - t0
 
@@ -460,6 +478,32 @@ def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Que
                 )
 
             train_queue.put(("prep_done", pre_h, elapsed, train_items))
+
+
+def _precompute_backtest_predictions(
+    logger: logging.Logger,
+    *,
+    prep_output_dir: str,
+    train_output_dir: str,
+    train_cfg: Any,
+    device: str,
+) -> None:
+    from trade.runner import backtest_runner
+
+    for period in ("long", "forward"):
+        cache_path = backtest_runner.precompute_prediction_cache(
+            logger,
+            backtest_runner.ModelDataConfig(
+                atr_ref_bars=1,
+                prep_output_dir=prep_output_dir,
+                train_output_dir=train_output_dir,
+                period=period,
+                device=device,
+                use_prediction_cache=True,
+            ),
+            train_cfg,
+        )
+        logger.info("Precomputed %s prediction cache: %s", period, cache_path)
 
 
 def _train_task(
@@ -487,7 +531,24 @@ def _train_task(
         # Single model mode (DIRECT_3CLASS/LONG_OVR/...) and the combo_model sub-model mode share one
         # worker: which task is trained is decided by the train_task field of the TrainConfig itself
         # tagged every row when it was built), nothing is hard coded to one task type here.
-        result = train.train(logger=logger, config=t_cfg, prep_output_dir=prep_output_dir, save_dir=save_dir)
+        result = train.train(
+            logger=logger,
+            config=t_cfg,
+            prep_output_dir=prep_output_dir,
+            save_dir=save_dir,
+        )
+
+        if sim_tasks:
+            # Re-load the just-saved checkpoint in this same training process. If CUDA
+            # is available this reuses the process's existing CUDA context; sim workers
+            # remain CPU-only and are forbidden from filling a missing cache.
+            _precompute_backtest_predictions(
+                logger,
+                prep_output_dir=prep_output_dir,
+                train_output_dir=save_dir,
+                train_cfg=t_cfg,
+                device="auto",
+            )
 
         # IMPORTANT: enqueue sims BEFORE reporting train_done (so main can safely send None after last train_done)
         for sim in sim_tasks:
@@ -510,9 +571,25 @@ def _train_task(
         train_result_queue.put(("train_done", pre_h, tr_h, time.time() - t0, train_report))
     except Exception:
         logger.exception(f"Train failed: {pre_h}/{tr_h}")
-        train_result_queue.put(("train_failed", pre_h, tr_h, time.time() - t0, None))
+        train_result_queue.put(
+            (
+                "train_failed",
+                pre_h,
+                tr_h,
+                time.time() - t0,
+                None,
+                traceback.format_exc(),
+            )
+        )
 
-def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Queue, reports_path: str, temp_dir: str):
+def _worker_sim(
+    worker_log_file: str,
+    task_queue: mp.Queue,
+    result_queue: mp.Queue,
+    reports_path: str,
+    temp_dir: str,
+    experiment_context: ExperimentContext,
+):
     logger = _worker_logger(worker_log_file)
 
     from trade.runner import backtest_runner
@@ -542,6 +619,22 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
 
         t0 = time.time()
         try:
+            identity = TaskIdentity.from_params(
+                prep=pre_params,
+                train=train_params,
+                sim=sim_params,
+            )
+            if identity.prep_hash != pre_h or identity.sim_hash != sim_h:
+                raise ValueError(
+                    f"Queued task identity mismatch: queued={pre_h}/{tr_h}/{sim_h}, "
+                    f"calculated={identity.as_dict()}"
+                )
+            stored_identity = sim.get("identity")
+            if stored_identity is not None and stored_identity != identity.as_dict():
+                raise ValueError(
+                    f"Stored task identity mismatch: stored={stored_identity}, "
+                    f"calculated={identity.as_dict()}"
+                )
             report_stat = None
             report = {'long': {}, 'forward': {}, 'pass': False, **(extra_report_fields or {})}
             def run_period(period):
@@ -559,18 +652,37 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
                         prep_output_dir=prep_dir,
                         train_output_dir=train_output_dir,
                         device="cpu",
+                        use_prediction_cache=True,
                         period=period,
                     ),
+                    experiment_context=experiment_context,
                 )
                 return backtest_runner.main(logger, runner_config)["statistics"][1]
 
             report['long'] = run_period('long')
             report['forward'] = run_period('forward')
+            for period in ("long", "forward"):
+                report_identity = report[period]["params"].get("identity")
+                if report_identity != identity.as_dict():
+                    raise ValueError(
+                        f"{period} report identity mismatch: report={report_identity}, "
+                        f"task={identity.as_dict()}"
+                    )
             report['pass'] = report['long']["performance"]["cagr"] > 0
             report_stat = report
         except Exception:
             logger.exception(f"Sim failed: {pre_h}/{tr_h}/{sim_h}")
-            report_stat = None
+            result_queue.put(
+                (
+                    "sim_failed",
+                    pre_h,
+                    tr_h,
+                    sim_h,
+                    time.time() - t0,
+                    traceback.format_exc(),
+                )
+            )
+            return
 
         elapsed = time.time() - t0
         result_queue.put(("sim_done", pre_h, tr_h, sim_h, elapsed, report_stat, reports_path, train_output_dir))
@@ -579,6 +691,13 @@ def _worker_sim(worker_log_file: str, task_queue: mp.Queue, result_queue: mp.Que
 # -----------------------------------------------------------------------------
 # Result handling
 # -----------------------------------------------------------------------------
+def _hardlink_tree(source_dir: str, target_dir: str) -> None:
+    """Materialize a strategy artifact tree without duplicating model files."""
+    if os.path.exists(target_dir):
+        shutil.rmtree(target_dir)
+    shutil.copytree(source_dir, target_dir, copy_function=os.link)
+
+
 def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger: logging.Logger, eta_msg,pending_sim_hashes: Dict[Tuple[str, str], Set[str]],temp_dir: str, valid:bool,task_spec) -> None:
     while True:
         try:
@@ -589,8 +708,14 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
         if not msg:
             continue
         typ = msg[0]
+        if typ == "sim_failed":
+            _, pre_h, tr_h, sim_h, elapsed, error = msg
+            raise ExperimentTaskError(
+                f"Simulation failed after {elapsed:.2f}s for "
+                f"{pre_h}/{tr_h}/{sim_h}:\n{error}"
+            )
         if typ != "sim_done":
-            continue
+            raise ExperimentTaskError(f"Unexpected simulation result: {msg!r}")
 
         _, pre_h, tr_h, sim_h, elapsed, report_stat, rp, train_dir = msg
         stats["simulation"]["time"] += elapsed
@@ -601,10 +726,8 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
             if valid == True:
                 strategy_hash = report_stat['forward']['params']['hash']
                 target_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', strategy_hash)
-                if os.path.exists(target_dir):
-                    shutil.rmtree(target_dir)
-                shutil.copytree(train_dir, target_dir)
-                logger.info(f"🚀 Successfully moved artifacts: {tr_h} -> {strategy_hash} {target_dir}")
+                _hardlink_tree(train_dir, target_dir)
+                logger.info(f"🚀 Hardlinked artifacts: {tr_h} -> {strategy_hash} {target_dir}")
         # 2. Hash-based cleanup and deletion logic
         train_key = (pre_h, tr_h)
         if train_key in pending_sim_hashes:
@@ -817,21 +940,49 @@ def _setup_root_logger(exp_dir: str) -> logging.Logger:
     logger.setLevel(logging.INFO)
     return logger
 
-def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, Any] = {}):
+
+def _assert_experiment_revision(
+    context: ExperimentContext,
+    *,
+    check_git_clean: bool = True,
+) -> None:
+    current_commit = common.git_revision(require_clean=check_git_clean)
+    if current_commit != context.git_commit:
+        raise RuntimeError(
+            "Git state changed while the experiment was running: "
+            f"started={context.git_commit}, current={current_commit}"
+        )
+
+def train_and_cross_test(
+    logger: logging.Logger,
+    output_dir,
+    experiment_context: ExperimentContext,
+    task_spec: Optional[Dict[str, Any]] = None,
+):
     from trade.runner import backtest_runner
+
+    task_spec = task_spec or {}
+    def ensure_prepared(pre_para, prep_output_dir):
+        manifest_path = common.get_data_manifest_path_in_dir(prep_output_dir)
+        if not os.path.isfile(manifest_path):
+            preparation.main(
+                logger,
+                para=pre_para,
+                prep_output_dir=prep_output_dir,
+            )
+
     #data prepare
     results = {}
     for pre_h, pre_node in task_spec.items():
         pre_params = pre_node["params"]
         pre_para = common.BaseDefine(**pre_params)
         prep_output_dir = os.path.join(output_dir,'prep',f'{pre_para.symbol}_{pre_para.interval}')
-        if not os.path.exists(prep_output_dir):
-            preparation.main(logger, para=pre_para, prep_output_dir=prep_output_dir)
-            time.sleep(1)
+        ensure_prepared(pre_para, prep_output_dir)
         original_symbol = pre_para.symbol
         original_interval = pre_para.interval
         for tr_h, tr_node in pre_node["train"].items():
             train_params = tr_node["params"]
+            train_cfg = _config_from_dict_train(train_params, expected_hash=tr_h)
             for sim_task in tr_node['sim_tasks']:
                 hash_value =  sim_task['hash']
                 strategy_hash = sim_task['strategy_hash']
@@ -852,9 +1003,22 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                         t_pre_para.symbol = symbol
                         t_pre_para.interval = original_interval
                         sim_prep_output_dir = os.path.join(output_dir,'prep',f'{t_pre_para.symbol}_{t_pre_para.interval}')
-                        if not os.path.exists(sim_prep_output_dir):
-                            preparation.main(logger, para=t_pre_para, prep_output_dir=sim_prep_output_dir)
-                            time.sleep(1)
+                        ensure_prepared(t_pre_para, sim_prep_output_dir)
+                        data_config = backtest_runner.ModelDataConfig(
+                            atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
+                                strategy_config
+                            ),
+                            prep_output_dir=sim_prep_output_dir,
+                            train_output_dir=train_save_dir,
+                            device="cpu",
+                            use_prediction_cache=True,
+                            period="long",
+                        )
+                        backtest_runner.precompute_prediction_cache(
+                            logger,
+                            data_config,
+                            train_cfg,
+                        )
                         runner_config = backtest_runner.RunnerConfig(
                             strategy_config=strategy_config,
                             broker_config=broker_config,
@@ -864,15 +1028,8 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                                 strategy_hash,
                                 f"{t_pre_para.symbol}_{t_pre_para.interval}",
                             ),
-                            data_config=backtest_runner.ModelDataConfig(
-                                atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
-                                    strategy_config
-                                ),
-                                prep_output_dir=sim_prep_output_dir,
-                                train_output_dir=train_save_dir,
-                                device="cpu",
-                                period="long",
-                            ),
+                            data_config=data_config,
+                            experiment_context=experiment_context,
                         )
                         result = backtest_runner.main(logger, runner_config)["statistics"][1]
                         results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
@@ -883,9 +1040,22 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                             t_pre_para.symbol = original_symbol
                             t_pre_para.interval = interval
                             sim_prep_output_dir = os.path.join(output_dir,'prep',f'{t_pre_para.symbol}_{t_pre_para.interval}')
-                            if not os.path.exists(sim_prep_output_dir):
-                                preparation.main(logger, para=t_pre_para, prep_output_dir=sim_prep_output_dir)
-                                time.sleep(1)
+                            ensure_prepared(t_pre_para, sim_prep_output_dir)
+                            data_config = backtest_runner.ModelDataConfig(
+                                atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
+                                    strategy_config
+                                ),
+                                prep_output_dir=sim_prep_output_dir,
+                                train_output_dir=train_save_dir,
+                                device="cpu",
+                                use_prediction_cache=True,
+                                period="long",
+                            )
+                            backtest_runner.precompute_prediction_cache(
+                                logger,
+                                data_config,
+                                train_cfg,
+                            )
                             runner_config = backtest_runner.RunnerConfig(
                                 strategy_config=strategy_config,
                                 broker_config=broker_config,
@@ -895,15 +1065,8 @@ def train_and_cross_test(logger:logging.Logger,output_dir,task_spec: Dict[str, A
                                     strategy_hash,
                                     f"{t_pre_para.symbol}_{t_pre_para.interval}",
                                 ),
-                                data_config=backtest_runner.ModelDataConfig(
-                                    atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
-                                        strategy_config
-                                    ),
-                                    prep_output_dir=sim_prep_output_dir,
-                                    train_output_dir=train_save_dir,
-                                    device="cpu",
-                                    period="long",
-                                ),
+                                data_config=data_config,
+                                experiment_context=experiment_context,
                             )
                             result = backtest_runner.main(logger, runner_config)["statistics"][1]
                             results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
@@ -925,6 +1088,7 @@ def run_combo_fusion_and_backtest(
     reports_path: str,
     sim_task_queue: mp.Queue,
     sim_result_queue: mp.Queue,
+    sim_workers: List[mp.Process],
     valid: bool = False,
 ):
     """
@@ -1005,9 +1169,7 @@ def run_combo_fusion_and_backtest(
             "pre_h": pre_h, "compat": compat,
             f"{role_1}_tr_h": r1["tr_h"], f"{role_2}_tr_h": r2["tr_h"],
         }
-        fusion_hash = hashlib.sha1(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()[:12]
+        fusion_hash = TaskIdentity.train_hash_for({"fusion": payload})
 
         if fusion_hash in done_fusion_hashes:
             logger.info(f"[combo fuse] skip fusion_hash={fusion_hash} (already in reports)")
@@ -1022,6 +1184,16 @@ def run_combo_fusion_and_backtest(
         else:
             train.fusion_long_short_ovr(logger, r1["save_dir"], r2["save_dir"], fusion_dir)
 
+        # A fused model only exists after both training processes finish. Build
+        # its cache here on CPU before any sim worker can observe the task.
+        _precompute_backtest_predictions(
+            logger,
+            prep_output_dir=_prep_output_dir(temp_dir, pre_h),
+            train_output_dir=fusion_dir,
+            train_cfg=_config_from_dict_train(r1["train_params"]),
+            device="cpu",
+        )
+
         # The backtest stage is identical to the single model mode (a fused directory is just an ordinary
         # train_output_dir as far as backtest_runner.main is concerned), so instead of calling backtest_runner.main
         # sequentially here, every sim_task is pushed into the same sim_task_queue the single model mode uses and
@@ -1033,13 +1205,20 @@ def run_combo_fusion_and_backtest(
             role_1: {"tr_h": r1["tr_h"], "metrics": r1["metrics"], "train_params": r1["train_params"]},
             role_2: {"tr_h": r2["tr_h"], "metrics": r2["metrics"], "train_params": r2["train_params"]},
         }
-        for strategy_config, broker_config in simulation_task:
-            sim_d = json_safe(_simulation_params(strategy_config, broker_config))
-            sim_h = param_hash(sim_d)
+        for strategy_config in simulation_task:
+            sim_d = json_safe(_simulation_params(strategy_config))
+            identity = TaskIdentity.from_params(
+                prep=r1["pre_params"],
+                train=r1["train_params"],
+                sim=sim_d,
+            )
+            sim_h = identity.sim_hash
             pending_sim_hashes.setdefault((pre_h, fusion_hash), set()).add(sim_h)
             sim_task_queue.put((
                 pre_h, r1["pre_params"], fusion_hash, r1["train_params"],
-                {"hash": sim_h, "params": sim_d}, fusion_dir, extra_report_fields,
+                {"hash": sim_h, "identity": identity.as_dict(), "params": sim_d},
+                fusion_dir,
+                extra_report_fields,
             ))
             n_sim_total += 1
 
@@ -1055,6 +1234,12 @@ def run_combo_fusion_and_backtest(
     def _no_eta():
         return ""
     while stats["simulation"]["count"] < n_sim_total:
+        for process in sim_workers:
+            if process.exitcode not in (None, 0):
+                raise ExperimentTaskError(
+                    f"combo simulation process {process.name} exited "
+                    f"with code {process.exitcode}"
+                )
         _drain_sim_results(sim_result_queue, stats, logger, _no_eta, pending_sim_hashes, temp_dir, valid, {})
         if stats["simulation"]["count"] < n_sim_total:
             time.sleep(0.5)
@@ -1062,54 +1247,50 @@ def run_combo_fusion_and_backtest(
 
 def main():
     parser = argparse.ArgumentParser(description="Batch experiments: prep -> train -> sim (with resume)")
-    parser.add_argument("-p", "--prep", action="store_true", help="Execute data preparation stage")
-    parser.add_argument("-t", "--train", action="store_true", help="Execute model training stage")
-    parser.add_argument("-s", "--sim", action="store_true", help="Execute backtest simulation stage")
-    parser.add_argument("-n", "--new", action="store_true",  help="new train")
     parser.add_argument("-a", "--add", type=str, help="add more to exist expirement")
     parser.add_argument("-v", "--valid", action="store_true", default=False, help="Rerun selected_configs.jsonl then compare")
     parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
     parser.add_argument("-c", "--cross_test", action="store_true", default=False, help="crosss test")
     parser.add_argument("-l", "--load", action="store_true", default=False, help="load condidate configs for verification,befor applying to market")
+    parser.add_argument("--check-git-clean", action=argparse.BooleanOptionalAction, default=True,
+        help=( "Require a clean Git working tree throughout the experiment " "(disable with --no-check-git-clean)"),
+    )
 
     args = parser.parse_args()
-    run_all = args.new
+    experiment_context = ExperimentContext(
+        git_commit=common.git_revision(require_clean=args.check_git_clean),
+    )
 
     if TRAIN_MODE in train_config.COMBO_SUB_TASKS and (
         args.resume or args.add or args.valid or args.cross_test or args.load
     ):
-        print(
-            "❌ combo_model 模式 (TRAIN_MODE=TRIGGER_DIRECTION/LONG_SHORT_OVR) 暂不支持 "
+        raise ValueError(
+            "combo_model 模式 (TRAIN_MODE=TRIGGER_DIRECTION/LONG_SHORT_OVR) 暂不支持 "
             "--resume/--add/--valid/--cross_test/--load，这些流程假设的是单模型模式下 "
             "sim_tasks 直接挂在训练节点上的 spec 形状。请用不带这些参数的全新实验跑一遍。"
         )
-        return
 
     # ---------------- resolve exp_dir ----------------
     if args.resume:
         exp_dir = os.path.join(common.PERSISTENCE_DIR, args.resume)
         if not os.path.exists(exp_dir):
-            print(f"❌ Error: Resume directory not found: {exp_dir}")
-            return
+            raise FileNotFoundError(f"Resume directory not found: {exp_dir}")
     elif args.add:
         exp_dir = os.path.join(common.PERSISTENCE_DIR, args.add)
         if not os.path.exists(exp_dir):
-            print(f"❌ Error: add directory not found: {exp_dir}")
-            return 
+            raise FileNotFoundError(f"Add directory not found: {exp_dir}")
     elif args.valid:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs")
         os.makedirs(exp_dir, exist_ok=True)
         if not os.path.exists(selected_configs):
-            print(f"❌ Error: valid file not found: {selected_configs}")
-            return
+            raise FileNotFoundError(f"Valid config file not found: {selected_configs}")
     elif args.cross_test:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         exp_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "selected_configs", "cross_test")
         os.makedirs(exp_dir, exist_ok=True)
         if not os.path.exists(selected_configs):
-            print(f"❌ Error: select file not found: {selected_configs}")
-            return
+            raise FileNotFoundError(f"Selected config file not found: {selected_configs}")
     elif args.load:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         records = common.load_selected_configs(selected_configs)  # just to validate file and format
@@ -1118,7 +1299,9 @@ def main():
         exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "load_configs")
         os.makedirs(exp_dir, exist_ok=True)
         logger = _setup_root_logger(exp_dir)
-        common.get_git_info(logger)
+        logger.info("Experiment Git commit: %s", experiment_context.git_commit)
+        if not args.check_git_clean:
+            logger.warning("Git clean-worktree checks are disabled for this experiment")
         begin_time = time.time()
         results = []
         for r in records:
@@ -1131,14 +1314,34 @@ def main():
                 **params["params"]["broker"],
             )
             pre_para =common.BaseDefine(**params["params"]["common"])
+            train_cfg = _config_from_dict_train(params["params"]["train"])
             load_prep_output_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "load_configs",'prep',f'{pre_para.symbol}_{pre_para.interval}')
             strategy_hash = params["params"]['hash']
             #prepare train output for market
             train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', strategy_hash)
             if not os.path.exists(train_save_dir):
-                logger.info(f"skip {strategy_hash}, tarin data not found {train_save_dir}")
-                continue
+                raise FileNotFoundError(
+                    f"Training artifact not found for {strategy_hash}: {train_save_dir}"
+                )
             preparation.main(logger, para=pre_para,prep_output_dir = load_prep_output_dir)
+            cached_data_configs = {}
+            for period in ("long", "forward"):
+                data_config = backtest_runner.ModelDataConfig(
+                    atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
+                        strategy_config
+                    ),
+                    prep_output_dir=load_prep_output_dir,
+                    train_output_dir=train_save_dir,
+                    device="cpu",
+                    use_prediction_cache=True,
+                    period=period,
+                )
+                backtest_runner.precompute_prediction_cache(
+                    logger,
+                    data_config,
+                    train_cfg,
+                )
+                cached_data_configs[period] = data_config
             last_cagr = 0
             for risk_per_trade_pct in [0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
                 result = {}
@@ -1155,14 +1358,8 @@ def main():
                             str(risk_per_trade_pct),
                             period,
                         ),
-                        data_config=backtest_runner.ModelDataConfig(
-                            atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
-                                strategy_config
-                            ),
-                            prep_output_dir=load_prep_output_dir,
-                            train_output_dir=train_save_dir,
-                            period=period,
-                        ),
+                        data_config=cached_data_configs[period],
+                        experiment_context=experiment_context,
                     )
                     return backtest_runner.main(logger, runner_config)["statistics"][1]
 
@@ -1182,6 +1379,10 @@ def main():
             for report in results:
                 f.write(json.dumps(report, ensure_ascii=False, default=str) + "\n")
         logger.info(f"✅ Completed in {time.time() - begin_time:.2f}s , saved to {output_path}")
+        _assert_experiment_revision(
+            experiment_context,
+            check_git_clean=args.check_git_clean,
+        )
         exit(0)
     else:
         exp_dir = common.create_experiment_dir(
@@ -1191,7 +1392,9 @@ def main():
         )
 
     logger = _setup_root_logger(exp_dir)
-    common.get_git_info(logger)
+    logger.info("Experiment Git commit: %s", experiment_context.git_commit)
+    if not args.check_git_clean:
+        logger.warning("Git clean-worktree checks are disabled for this experiment")
 
     begin_time = time.time()
     reports_path = os.path.join(exp_dir, REPORTS_FILE)
@@ -1228,12 +1431,25 @@ def main():
         n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
         logger.info(f"📥 Loaded from {selected_configs}")
         logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim}")
-        train_and_cross_test(logger,exp_dir,task_spec)
+        train_and_cross_test(
+            logger,
+            exp_dir,
+            experiment_context,
+            task_spec,
+        )
+        _assert_experiment_revision(
+            experiment_context,
+            check_git_clean=args.check_git_clean,
+        )
         exit()
     else:
         task_spec, combo_simulation_task = create_task_spec(logger, exp_dir, None)
     if not task_spec:
         logger.info("✅ No pending tasks.")
+        _assert_experiment_revision(
+            experiment_context,
+            check_git_clean=args.check_git_clean,
+        )
         return
 
     logger.info(f"🚀 Pipeline: MAX_PREP={MAX_PREP}, train={MAX_TRAIN}, MAX_SIM={MAX_SIM}")
@@ -1266,7 +1482,17 @@ def main():
     if not is_combo:
         for i in range(MAX_SIM):
             worker_log = os.path.join(exp_dir, f"sim_{i}.log")
-            p = mp.Process(target=_worker_sim, args=(worker_log, sim_task_queue, sim_result_queue, reports_path, temp_dir))
+            p = mp.Process(
+                target=_worker_sim,
+                args=(
+                    worker_log,
+                    sim_task_queue,
+                    sim_result_queue,
+                    reports_path,
+                    temp_dir,
+                    experiment_context,
+                ),
+            )
             p.start()
             sim_workers.append(p)
     run_task_spec(
@@ -1304,7 +1530,17 @@ def main():
         combo_sim_workers = []
         for i in range(MAX_SIM):
             worker_log = os.path.join(exp_dir, f"combo_sim_{i}.log")
-            p = mp.Process(target=_worker_sim, args=(worker_log, combo_sim_task_queue, combo_sim_result_queue, reports_path, temp_dir))
+            p = mp.Process(
+                target=_worker_sim,
+                args=(
+                    worker_log,
+                    combo_sim_task_queue,
+                    combo_sim_result_queue,
+                    reports_path,
+                    temp_dir,
+                    experiment_context,
+                ),
+            )
             p.start()
             combo_sim_workers.append(p)
 
@@ -1317,8 +1553,14 @@ def main():
                 reports_path=reports_path,
                 sim_task_queue=combo_sim_task_queue,
                 sim_result_queue=combo_sim_result_queue,
+                sim_workers=combo_sim_workers,
                 valid=args.valid,
             )
+        except BaseException:
+            for p in combo_sim_workers:
+                if p.is_alive():
+                    p.terminate()
+            raise
         finally:
             _send_none_to_workers(combo_sim_task_queue, MAX_SIM)
             for p in combo_sim_workers:
@@ -1332,6 +1574,10 @@ def main():
     hours, remainder = divmod(elapsed, 3600)
     minutes, seconds = divmod(remainder, 60)
 
+    _assert_experiment_revision(
+        experiment_context,
+        check_git_clean=args.check_git_clean,
+    )
     logger.info(f"✅ Completed in {int(hours)}h {int(minutes)}m {seconds:.2f}s")
 
     logger.info("=" * 40)
@@ -1381,7 +1627,19 @@ def run_task_spec(
                 alive.append(p)
             else:
                 p.join(timeout=0)
+                if p.exitcode:
+                    raise ExperimentTaskError(
+                        f"Training process {p.name} exited with code {p.exitcode}"
+                    )
         train_procs = alive
+
+    def _check_worker_processes():
+        for stage, processes in (("prep", prep_workers), ("simulation", sim_workers)):
+            for process in processes:
+                if process.exitcode not in (None, 0):
+                    raise ExperimentTaskError(
+                        f"{stage} process {process.name} exited with code {process.exitcode}"
+                    )
 
     def _drain_train_results():
         nonlocal sim_nones_sent
@@ -1392,10 +1650,14 @@ def run_task_spec(
                 break
             if not msg:
                 continue
-            typ, pre_h, tr_h, elapsed, train_report = msg
+            typ, pre_h, tr_h, elapsed, train_report, *details = msg
             if typ == "train_failed":
-                logger.error(f"❌ Train failed for {pre_h}/{tr_h}, aborting.")
-                raise RuntimeError("train_failed")
+                error = details[0] if details else "no traceback returned"
+                raise ExperimentTaskError(
+                    f"Training failed after {elapsed:.2f}s for {pre_h}/{tr_h}:\n{error}"
+                )
+            if typ != "train_done":
+                raise ExperimentTaskError(f"Unexpected training result: {msg!r}")
 
             stats["train"]["time"] += float(elapsed)
             stats["train"]["count"] += 1
@@ -1422,6 +1684,7 @@ def run_task_spec(
     # main loop: consume prep_done -> spawn train processes -> enqueue sims; also drain sim results
     try:
         while stats["preparation"]["count"] < n_prep or stats["train"]["count"] < n_train or stats["simulation"]["count"] < n_sim:
+            _check_worker_processes()
             # consume prep->train messages
             try:
                 msg = train_task_queue.get(timeout=0.2)
@@ -1431,8 +1694,11 @@ def run_task_spec(
             if msg is not None:
                 typ, pre_h, elapsed, train_items = msg
                 if typ == "prep_failed":
-                    logger.error(f"❌ Prep failed for {pre_h}, aborting.")
-                    break
+                    raise ExperimentTaskError(
+                        f"Preparation failed after {elapsed:.2f}s for {pre_h}:\n{train_items}"
+                    )
+                if typ != "prep_done":
+                    raise ExperimentTaskError(f"Unexpected preparation result: {msg!r}")
 
                 stats["preparation"]["time"] += float(elapsed)
                 stats["preparation"]["count"] += 1
@@ -1447,18 +1713,13 @@ def run_task_spec(
         # final drains
         _drain_train_results()
         _drain_sim_results(sim_result_queue, stats, logger, eta_msg, pending_sim_hashes, temp_dir, valid, task_spec)
-    except RuntimeError:
-        pass
     finally:
-        # best-effort shutdown
-        for p in train_procs:
-            p.join(timeout=5)
+        # Stop the entire process tree immediately on either success or failure.
+        for p in train_procs + prep_workers + sim_workers:
             if p.is_alive():
                 p.terminate()
-        for p in prep_workers + sim_workers:
+        for p in train_procs + prep_workers + sim_workers:
             p.join(timeout=5)
-            if p.is_alive():
-                p.terminate()
 
 def _load_task_from_configs(path: str) -> Dict[str, Any]:
     """
@@ -1473,7 +1734,17 @@ def _load_task_from_configs(path: str) -> Dict[str, Any]:
         r_hash = params['hash']
         pre_conf =  common.recursive_get(params, "common")
         tr_conf  =   common.recursive_get(params, "train")
-        sim_conf =  common.recursive_get(params, "strategy")
+        strategy_conf = common.recursive_get(params, "strategy")
+        broker_conf = common.recursive_get(params, "broker")
+        if strategy_conf and "strategy_config" in strategy_conf:
+            sim_conf = strategy_conf
+        elif strategy_conf and broker_conf:
+            sim_conf = {
+                "strategy_config": strategy_conf,
+                "broker_config": broker_conf,
+            }
+        else:
+            sim_conf = None
 
         if not pre_conf or not tr_conf or not sim_conf:
             continue
@@ -1481,9 +1752,14 @@ def _load_task_from_configs(path: str) -> Dict[str, Any]:
         if "prep_output_dir" in pre_conf or "save_dir" in tr_conf:
             raise ValueError("Unexpected prep_output_dir/save_dir in config params")
 
-        pre_h = param_hash(pre_conf)
-        tr_h = param_hash(tr_conf)
-        sim_h = param_hash(sim_conf)
+        identity = TaskIdentity.from_params(
+            prep=pre_conf,
+            train=tr_conf,
+            sim=sim_conf,
+        )
+        pre_h = identity.prep_hash
+        tr_h = identity.train_hash
+        sim_h = identity.sim_hash
 
         if pre_h in task_spec:
             print(f"⚠️  Warning: duplicate prep config hash {pre_h} in {path}")
@@ -1492,7 +1768,14 @@ def _load_task_from_configs(path: str) -> Dict[str, Any]:
 
         existing = {s["hash"] for s in node_tr["sim_tasks"]}
         if sim_h not in existing:
-            node_tr["sim_tasks"].append({"hash": sim_h, "params": json_safe(sim_conf),"strategy_hash":r_hash})
+            node_tr["sim_tasks"].append(
+                {
+                    "hash": sim_h,
+                    "identity": identity.as_dict(),
+                    "params": json_safe(sim_conf),
+                    "strategy_hash": r_hash,
+                }
+            )
 
     return task_spec
 
