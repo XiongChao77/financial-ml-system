@@ -19,8 +19,14 @@ from data_process import common
 from data_process.utils import config_from_dict_train, param_hash
 from model import model_loader
 from model import data_loader
+from model.training_types import temporal_split_bounds
 from trade.runner import cus_analyzer
-from trade.runner.analyze_backtest_report import analyze_backtest_report, plot_equity_curves
+from trade.runner.analyze_backtest_report import (
+    analyze_backtest_report,
+    log_ftmo_challenge_summary,
+    plot_equity_curves,
+    simulate_ftmo_challenges,
+)
 from trade.runner.config import (
     BrokerConfig,
     BacktestEngineConfig,
@@ -100,6 +106,7 @@ def create_backtest_cerebro(
     broker_config: BrokerConfig,
     data: bt.feed.DataBase,
     predict_num: Optional[int] = None,
+    bar_interval_ms: Optional[int] = None,
     engine_config: Optional[BacktestEngineConfig] = None,
 ) -> bt.Cerebro:
     """Create the shared Backtrader runtime and preserve the original analyzers."""
@@ -113,11 +120,13 @@ def create_backtest_cerebro(
         strategy_config=strategy_config,
         initial_equity=broker_config.initial_equity,
         margin_warn_pct=broker_config.margin_warn_pct,
+        bar_interval_ms=bar_interval_ms,
     )
     if predict_num is not None:
         params["predict_num"] = predict_num
     cerebro.addstrategy(venue_cls, **params)
     cerebro.adddata(data)
+    cerebro.broker.set_coc(engine_config.cheat_on_close)
     cerebro.broker.setcash(broker_config.initial_equity)
     cerebro.broker.addcommissioninfo(
         cus_comminfo.CommInfo_Cryptocurrency(commission=broker_config.commission_pct, leverage=broker_config.leverage,)
@@ -207,19 +216,153 @@ def _resolve_device(device_name):
     return torch.device(device_name) if isinstance(device_name, str) else device_name
 
 
-def _load_model_data(logger, data_config: ModelDataConfig):
+_MODEL_TIME_REGION_CACHE: dict[tuple, dict] = {}
+
+
+def combine_model_period_frames(
+    long_frame: pd.DataFrame,
+    forward_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    """Join prepared long/forward data into one strict chronological frame."""
+    time_column = "open_time_date_utc"
+    if time_column not in long_frame.columns or time_column not in forward_frame.columns:
+        raise ValueError(f"Both model periods must contain {time_column!r}")
+    if long_frame.empty or forward_frame.empty:
+        raise ValueError("Both long and forward periods must contain data")
+
+    long_columns = list(long_frame.columns)
+    if set(long_columns) != set(forward_frame.columns):
+        missing = sorted(set(long_columns) - set(forward_frame.columns))
+        extra = sorted(set(forward_frame.columns) - set(long_columns))
+        raise ValueError(
+            "long/forward columns do not match "
+            f"(missing in forward={missing}, extra in forward={extra})"
+        )
+
+    long_part = long_frame.copy()
+    forward_part = forward_frame[long_columns].copy()
+    long_part[time_column] = pd.to_datetime(long_part[time_column], utc=True)
+    forward_part[time_column] = pd.to_datetime(forward_part[time_column], utc=True)
+    if (
+        not long_part[time_column].is_monotonic_increasing
+        or not long_part[time_column].is_unique
+    ):
+        raise ValueError("long period timestamps are not strictly increasing")
+    if (
+        not forward_part[time_column].is_monotonic_increasing
+        or not forward_part[time_column].is_unique
+    ):
+        raise ValueError("forward period timestamps are not strictly increasing")
+    if long_part[time_column].iloc[-1] >= forward_part[time_column].iloc[0]:
+        raise ValueError("long and forward periods overlap or duplicate timestamps")
+
+    return pd.concat([long_part, forward_part], ignore_index=True)
+
+
+def _load_model_period_frame(data_config: ModelDataConfig) -> pd.DataFrame:
+    if data_config.period == "long":
+        return common.load_train_df_from_dir(data_config.prep_output_dir)
+    if data_config.period == "forward":
+        return common.load_test_df_from_dir(data_config.prep_output_dir)
+    if data_config.period == "all":
+        return combine_model_period_frames(
+            common.load_train_df_from_dir(data_config.prep_output_dir),
+            common.load_test_df_from_dir(data_config.prep_output_dir),
+        )
+    raise ValueError(f"Unsupported model data period: {data_config.period}")
+
+
+def _model_time_regions(
+    data_config: ModelDataConfig,
+    train_cfg: train_config.TrainConfig,
+    handler: model_loader.ModelHandler,
+    current_frame: pd.DataFrame,
+) -> dict[str, dict[str, Any]]:
+    """Calculate the exact train/valid/test/OOD timestamp regions."""
+    data_cfg = train_cfg.data_cfg
+    cache_key = (
+        os.path.abspath(data_config.prep_output_dir),
+        tuple(handler.feature_cols),
+        handler.label_col,
+        handler.seq_len,
+        train_cfg.stride,
+        data_cfg.train_ratio,
+        data_cfg.val_ratio,
+        data_cfg.purge_overlap,
+    )
+    cached = _MODEL_TIME_REGION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    train_frame = (
+        current_frame
+        if data_config.period == "long"
+        else common.load_train_df_from_dir(data_config.prep_output_dir)
+    )
+    ood_frame = (
+        current_frame
+        if data_config.period == "forward"
+        else common.load_test_df_from_dir(data_config.prep_output_dir)
+    )
+    valid_indices = data_loader.valid_window_end_indices(
+        train_frame,
+        feature_cols=handler.feature_cols,
+        label_col=handler.label_col,
+        seq_len=handler.seq_len,
+        stride=train_cfg.stride,
+    )
+    bounds = temporal_split_bounds(
+        len(valid_indices),
+        train_ratio=data_cfg.train_ratio,
+        val_ratio=data_cfg.val_ratio,
+        purge_overlap=data_cfg.purge_overlap,
+        seq_len=handler.seq_len,
+        stride=train_cfg.stride,
+    )
+
+    def as_iso(value) -> str:
+        return pd.Timestamp(value).isoformat()
+
+    def sample_time(sample_position: int) -> str:
+        row_index = valid_indices[sample_position]
+        return as_iso(train_frame.loc[row_index, "open_time_date_utc"])
+
+    regions = {
+        name: {
+            "start": sample_time(start),
+            "end": sample_time(end - 1),
+            "sample_count": end - start,
+        }
+        for name, (start, end) in bounds.items()
+    }
+    ood_times = pd.to_datetime(ood_frame["open_time_date_utc"], utc=True)
+    if ood_times.empty:
+        raise ValueError("OOD dataset is empty; cannot calculate plot boundaries")
+    regions["ood"] = {
+        "start": as_iso(ood_times.iloc[0]),
+        "end": as_iso(ood_times.iloc[-1]),
+    }
+    _MODEL_TIME_REGION_CACHE[cache_key] = regions
+    return regions
+
+
+def _load_model_data(
+    logger,
+    data_config: ModelDataConfig,
+    train_cfg: train_config.TrainConfig,
+):
     pre_para: BaseDefine = common.load_pre_params_from_dir(data_config.train_output_dir)
     logger.info(
         f"prep_output_dir:{data_config.prep_output_dir}, "
         f"train_output_dir:{data_config.train_output_dir}"
     )
 
-    if data_config.period in ("forward"):
-        frame = common.load_test_df_from_dir(data_config.prep_output_dir)
-    elif data_config.period == "long":
-        frame = common.load_train_df_from_dir(data_config.prep_output_dir)
-    else:
-        raise ValueError(f"Unsupported model data period: {data_config.period}")
+    frame = _load_model_period_frame(data_config)
+    logger.info(
+        "Loaded model data | period=%s | bars=%d",
+        data_config.period,
+        len(frame),
+    )
 
     # Feature artifacts can contain one Pandas block per column. Consolidate
     # once before adding runtime columns to avoid repeated fragmented inserts.
@@ -232,6 +375,19 @@ def _load_model_data(logger, data_config: ModelDataConfig):
     handler = model_loader.ModelHandler(
         tarin_out_path=train_output_dir,
         device=_resolve_device(data_config.device),
+    )
+    time_regions = _model_time_regions(
+        data_config,
+        train_cfg,
+        handler,
+        frame,
+    )
+    logger.info(
+        "Model time regions | train=%s | valid=%s | test=%s | OOD=%s",
+        time_regions["train"]["start"],
+        time_regions["valid"]["start"],
+        time_regions["test"]["start"],
+        time_regions["ood"]["start"],
     )
     dataset = data_loader.TimeSeriesWindowDataset(
         df=frame,
@@ -264,7 +420,7 @@ def _load_model_data(logger, data_config: ModelDataConfig):
         f"Backtest range: {frame['open_time_date_utc'].min()} "
         f"to {frame['open_time_date_utc'].max()}"
     )
-    return frame, model_stats, sub_model_stats, pre_para
+    return frame, model_stats, sub_model_stats, pre_para, time_regions
 
 
 def _load_csv_data(logger, data_config: CsvDataConfig):
@@ -280,7 +436,7 @@ def _load_csv_data(logger, data_config: CsvDataConfig):
         data_config.atr_ref_bars,
     )
     logger.info(f"Loaded {len(frame)} bars from {data_path}")
-    return frame, {}, {}, None
+    return frame, {}, {}, None, None
 
 
 def _build_feed(frame: pd.DataFrame, data_config):
@@ -312,13 +468,14 @@ def main(logger: logging.Logger, config: RunnerConfig):
     """Standalone runner: load data/model, execute the strategy and build the report."""
     if isinstance(config.data_config, ModelDataConfig):
         saved_train_config = _load_train_config(config.data_config.train_output_dir)
-        frame, model_stats, sub_model_stats, pre_para = _load_model_data(
+        frame, model_stats, sub_model_stats, pre_para, time_regions = _load_model_data(
             logger,
             config.data_config,
+            saved_train_config,
         )
     elif isinstance(config.data_config, CsvDataConfig):
         saved_train_config = None
-        frame, model_stats, sub_model_stats, pre_para = _load_csv_data(
+        frame, model_stats, sub_model_stats, pre_para, time_regions = _load_csv_data(
             logger,
             config.data_config,
         )
@@ -335,6 +492,9 @@ def main(logger: logging.Logger, config: RunnerConfig):
         broker_config=config.broker_config,
         data=feed,
         predict_num=pre_para.predict_num if pre_para is not None else None,
+        bar_interval_ms=common.get_interval_ms(
+            pre_para.interval if pre_para is not None else config.data_config.interval
+        ),
         engine_config=config.engine_config,
     )
     logger.info(
@@ -355,6 +515,7 @@ def main(logger: logging.Logger, config: RunnerConfig):
         train_cfg=saved_train_config,
         sub_model_stats=sub_model_stats,
         data_config=config.data_config,
+        time_regions=time_regions,
     )
 
     candle_columns = ["open_time_date_utc", "open", "high", "low", "close", "volume"]
@@ -587,6 +748,37 @@ def summarize_rolling_calmar(rc_df: pd.DataFrame) -> dict:
     return out
 
 
+def summarize_holding_periods(hold_bars) -> dict:
+    """Summarize the exact Backtrader bar lengths of closed trades."""
+    keys = ("p10", "p25", "p50", "p75", "p90", "p95", "p99")
+    empty = {
+        "count": 0,
+        "mean": 0.0,
+        "min": 0,
+        "max": 0,
+        **{key: 0.0 for key in keys},
+    }
+    if not hold_bars:
+        return empty
+
+    bars = np.asarray(hold_bars, dtype=float)
+    bars = bars[np.isfinite(bars) & (bars >= 0)]
+    if not len(bars):
+        return empty
+
+    quantiles = np.quantile(
+        bars,
+        [0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99],
+    )
+    return {
+        "count": int(len(bars)),
+        "mean": float(bars.mean()),
+        "min": int(bars.min()),
+        "max": int(bars.max()),
+        **{key: float(value) for key, value in zip(keys, quantiles)},
+    }
+
+
 def generate_backtest_report(
     logger,
     strat,
@@ -598,6 +790,7 @@ def generate_backtest_report(
     train_cfg=None,
     sub_model_stats=None,
     data_config=None,
+    time_regions=None,
 ):
     """
     Fixed report generator:
@@ -668,6 +861,10 @@ def generate_backtest_report(
     total_won = safe_get(trades, ["won", "total"], 0)
     total_lost = safe_get(trades, ["lost", "total"], 0)
     win_rate = (total_won / total_trades) if total_trades > 0 else 0.0
+    closed_trade_hold_bars = list(
+        getattr(strat, "closed_trade_hold_bars", [])
+    )
+    holding_period_stats = summarize_holding_periods(closed_trade_hold_bars)
 
     # [fix 1] correct profit factor computation
     # PF = total gross profit / abs(total gross loss)
@@ -801,6 +998,7 @@ def generate_backtest_report(
         f"time": {
             f"start": bt.num2date(strat.datas[0].datetime.array[0]),
             f"end": bt.num2date(strat.datas[0].datetime.array[-1]),
+            f"regions": time_regions or {},
         },
 
         f"performance": {
@@ -836,6 +1034,7 @@ def generate_backtest_report(
             f"total": total_trades,
             f"daily_freq": daily_trades,
             f"win_rate": win_rate,
+            f"holding_period_bars": holding_period_stats,
             f"lost_longest": lost_longest,
             f"won_longest": won_longest,
             f"avg_pnl_gross": avg_pnl_gross,
@@ -852,6 +1051,7 @@ def generate_backtest_report(
         f"model_metrics": model_stats,
         f"sub_model_metrics": sub_model_stats,
     }
+    report["ftmo_challenge"] = simulate_ftmo_challenges(report)
 
     report_additional = {
         f"raw_analyzer":{
@@ -859,6 +1059,7 @@ def generate_backtest_report(
         },
         f"strategy_detail": strategy_detail,
         f"trade_logs": list(getattr(strat, "trade_logs", [])),
+        f"closed_trade_hold_bars": closed_trade_hold_bars,
     }
 
     # common.dump_params_json(train_cfg,logger)
@@ -912,6 +1113,16 @@ def generate_backtest_report(
         f"| won_longest: {report['trades']['won_longest']}"
     )
 
+    hold = report["trades"]["holding_period_bars"]
+    logger.info(
+        f"HOLD PCT| P10: {hold['p10']:.2f} | P25: {hold['p25']:.2f} "
+        f"| P50: {hold['p50']:.2f} "
+        f"| P75: {hold['p75']:.2f} | P90: {hold['p90']:.2f} "
+        f"| P95: {hold['p95']:.2f} | P99: {hold['p99']:.2f} bars"
+    )
+
+    log_ftmo_challenge_summary(report["ftmo_challenge"], logger=logger)
+
     logger.info(
         f"PNL($)  | Avg Gross: {report['trades']['avg_pnl_gross']:.2f}"
         f"({report['trades']['avg_pct_gross']:.3f}%) "
@@ -938,7 +1149,7 @@ def generate_backtest_report(
     return (report_additional,report)
 
 if __name__ == "__main__":
-    train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.TrainTask.DUAL_HEAD_3CLASS)
+    train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.SingleModelConfig.train_task)
     start_time = time.time()
     pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
     exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'simulation'),pre_para.symbol, pre_para.interval)
@@ -958,8 +1169,8 @@ if __name__ == "__main__":
         data_config=ModelDataConfig(
             prep_output_dir=common.DATA_OUT_DIR,
             train_output_dir=train_output_dir,
-            period="long",
-            device ='auto'
+            period="all", # forward long all
+            device ='cpu'
         ),
     )
     report = main(logger, runner_config)
@@ -969,6 +1180,7 @@ if __name__ == "__main__":
         report["statistics"][1],
         exp_dir,
         file_name="equity_curve.png",
+        normalize_equity=False,
         logger=logger,
     )
     end_time = time.time()

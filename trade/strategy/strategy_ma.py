@@ -17,9 +17,10 @@ class MaStrategyConfig:
 
 class MaCrossoverStrategy(StrategyBase):
     def __init__(self, config: MaStrategyConfig):
+        super().__init__(venue=None)
         self.config = config
 
-    def process(self, state: MaObservation) -> TradeIntent:
+    def _process(self, state: MaObservation) -> TradeIntent:
         # 1. Detect the crossover direction
         # Golden cross: fast > slow
         if state.fast_ma > state.slow_ma:

@@ -31,7 +31,7 @@ REPORT_PATH = (
     "selected_configs.jsonl"
 )
 REPORT_LINE_INDEX = 0  # Zero-based index of the non-empty JSONL record.
-PERIOD = "long"  # short | forward | long
+PERIOD = "long"  # short | forward | long | all
 
 
 def load_jsonl_record(path: str, record_index: int) -> dict[str, Any]:
@@ -70,17 +70,20 @@ def load_jsonl_record(path: str, record_index: int) -> dict[str, Any]:
 
 def select_period_report(record: dict[str, Any], period: str) -> dict[str, Any]:
     """Accept both selected-config wrappers and standalone backtest reports."""
-    if period not in {"short", "forward", "long"}:
+    if period not in {"short", "forward", "long", "all"}:
         raise ValueError(f"Unsupported PERIOD: {period!r}")
 
-    period_report = record.get(period)
+    # An existing selected-config record normally only contains long/forward.
+    # Either one carries the same model/data parameters needed to rerun "all".
+    source_period = "long" if period == "all" else period
+    period_report = record.get(source_period)
     if isinstance(period_report, dict) and isinstance(period_report.get("params"), dict):
         return period_report
     if isinstance(record.get("params"), dict):
         return record
 
     raise KeyError(
-        f"The selected record contains neither {period!r}.params nor top-level params"
+        f"The selected record contains neither {source_period!r}.params nor top-level params"
     )
 
 

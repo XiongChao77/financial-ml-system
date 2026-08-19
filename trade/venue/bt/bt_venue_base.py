@@ -25,6 +25,7 @@ class BtVenue(VenueBase,bt.Strategy):
         initial_equity = None,   # runtime account baseline, not a strategy parameter
         predict_num = None,    # look-ahead horizon of the label alignment audit; None skips the audit
         margin_warn_pct = None,  # copied from BrokerConfig by the runner
+        bar_interval_ms = None,  # exact data cadence for strategy continuity checks
     )
 
     def __init__(self):
@@ -33,6 +34,7 @@ class BtVenue(VenueBase,bt.Strategy):
         # shape: [{'id': id, 'stop': stop_ord, 'limit': limit_ord, 'size': size}, ...]
         self.live_trades = []
         self.closed_pnl = []
+        self.closed_trade_hold_bars = []
 
         # === generic venue level metrics (shared by every strategy) ===
         self.trade_logs = []          # per-order fill log, used by the frontend/report
@@ -103,6 +105,7 @@ class BtVenue(VenueBase,bt.Strategy):
             ),
             slow_atr=self.line_value("slow_atr"),
             vol_regime=self.line_value("vol_regime"),
+            bar_interval_ms=self.p.bar_interval_ms,
             bars_to_close=(
                 float("inf")
                 if bars_to_close is None or np.isnan(bars_to_close)
@@ -389,6 +392,7 @@ class BtVenue(VenueBase,bt.Strategy):
             trade_status = "CLOSE"
             event_time = bt.num2date(trade.dtclose)
             self.closed_pnl.append(trade.pnlcomm)
+            self.closed_trade_hold_bars.append(int(trade.barlen))
         else:
             return
 

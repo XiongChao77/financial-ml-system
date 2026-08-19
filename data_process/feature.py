@@ -15,41 +15,21 @@ class FeatureBase(ABC):
         self.kline_interval_ms:int = kwargs.get('kline_interval_ms', None)
     # Note: using variance vs. mean as denominator scales small vs. large moves differently.
 
-    def _apply_squashing(self, vals, scale, method):
-            """
-            Unified long-tail squashing operator.
-            vals: standardized values after (X - mu) / sigma.
-            scale: linear-region radius; larger values delay squashing.
-            """
-            if method is None:
-                # If no squashing is requested, just return (fast path).
-                return vals #if (scale == 1.0 or scale == None) else (vals / scale)
-            # 1. Dynamically determine trust radius S
-            if scale is None:
-                # Use percentile of |vals| as S, representing e.g. 90–95% mass region.
-                scale = np.nanpercentile(np.abs(vals), 95, keepdims=True)
-                # print(f"***********************{self.__class__.__name__} scale is {scale}*******************")
-                # scale = np.maximum(scale, 1.0) # floor at 1 to avoid amplifying noise when volatility is tiny
-            else:
-                scale = scale
-            if method == 'tanh':
-                # tanh(1.0) ≈ 0.76, so using raw scale is fine
-                adj_scale = scale / 1.0 
-                # print(f"***********************{self.__class__.__name__} tanh adj_scale is {adj_scale}*******************")
-                result = np.tanh(vals / adj_scale)
-            elif method == 'log':
-                # Symmetric log1p squashing
-                adj_scale = scale #* 1.22 
-                # print(f"***********************{self.__class__.__name__} log adj_scale is {adj_scale}*******************")
-                result = np.sign(vals) * np.log1p(np.abs(vals / adj_scale))
+    def _apply_squashing(self, vals, scale=1.0, method=None):
+        """Apply optional fixed-scale long-tail compression to standardized values."""
+        if scale is None:
+            raise ValueError("scale must not be None")
+        if not np.isscalar(scale) or not np.isfinite(scale) or scale <= 0:
+            raise ValueError(f"scale must be a positive finite scalar, got {scale!r}")
+        scale = float(scale)
 
-            # for pct in range(50, 100,5):
-            #     result_m = np.nanpercentile(np.abs(result), pct, keepdims=True)
-            #     print(f"***********************{self.__class__.__name__} {pct} scale result is {result_m}*******************")
-            # for pct in range(96, 100,1):
-            #     result_m = np.nanpercentile(np.abs(result), pct, keepdims=True)
-            #     print(f"***********************{self.__class__.__name__} {pct} scale result is {result_m}*******************")
-            return result # method=None keeps linear output
+        if method is None:
+            return vals
+        if method == 'tanh':
+            return np.tanh(vals / scale)
+        if method == 'log':
+            return np.sign(vals) * np.log1p(np.abs(vals / scale))
+        raise ValueError(f"Unsupported squashing method: {method!r}")
 
     def _get_target_indices(self, feature_cols: list[str], target_feature_cols: list[str]):
         """
@@ -71,7 +51,7 @@ class FeatureBase(ABC):
                 
         return valid_indices, valid_names
 
-    def _normalize_z_score(self, X, feature_cols, target_feature_cols, feature_base, factory, scale=None, method=None):
+    def _normalize_z_score(self, X, feature_cols, target_feature_cols, feature_base, factory, scale=1.0, method=None):
         target_indices, _ = self._get_target_indices(feature_cols, target_feature_cols)
         if not target_indices:
             return
@@ -86,7 +66,7 @@ class FeatureBase(ABC):
         # 2. Apply scaling and long-tail squashing
         X[:, :, target_indices] = self._apply_squashing(standardized, scale, method)
 
-    def _normalize_z_score_group(self, X, feature_cols, target_feature_cols, factory, scale=None, method=None):
+    def _normalize_z_score_group(self, X, feature_cols, target_feature_cols, factory, scale=1.0, method=None):
         """
         Group Z-Score normalization.
         Treat a feature group as a whole and compute a shared mean/std across time + feature axes.
@@ -113,7 +93,7 @@ class FeatureBase(ABC):
         X[:, :, target_indices] = self._apply_squashing(standardized, scale, method)
 
     #method 'tanh'/'log'
-    def _normalize_signal_group(self, X, feature_cols, target_feature_cols, factory, scale=None, method=None):
+    def _normalize_signal_group(self, X, feature_cols, target_feature_cols, factory, scale=1.0, method=None):
         """
         Zero-anchored group scaling:
         - Center around 0 and apply symmetric squashing.
@@ -132,7 +112,7 @@ class FeatureBase(ABC):
 
         X[:, :, target_indices] = self._apply_squashing(standardized, scale, method)
 
-    def _normalize_z_score_rel(self, X, feature_cols, target_feature_cols, feature_base, factory, scale=None, method=None):
+    def _normalize_z_score_rel(self, X, feature_cols, target_feature_cols, feature_base, factory, scale=1.0, method=None):
         target_indices, _ = self._get_target_indices(feature_cols, target_feature_cols)
         if not target_indices:
             return
@@ -145,49 +125,6 @@ class FeatureBase(ABC):
             0.0
         )
         X[:, :, target_indices] = self._apply_squashing(standardized, scale, method)
-
-    def _normalize_winsorized_z_score_group(self, X, feature_cols, target_feature_cols, feature_base, factory):
-        target_indices, _ = self._get_target_indices(feature_cols, target_feature_cols)
-        if not target_indices:
-            return
-        vals = X[:, :, target_indices]
-        
-        # 1. Pre-winsorize: clip raw values to 1%–99% percentiles to limit spikes.
-        p_low = np.nanpercentile(vals, 1, axis=1, keepdims=True)
-        p_high = np.nanpercentile(vals, 99, axis=1, keepdims=True)
-        np.clip(vals, p_low, p_high, out=vals)
-        
-        mu_base, sigma_base = factory.get_base_stats(feature_base)
-        denom = sigma_base[:, :, np.newaxis] 
-        mu_self = np.nanmean(vals, axis=1, keepdims=True)
-        X[:, :, target_indices] = np.where(
-            denom > EPS,
-            (vals - mu_self) / denom,
-            0.0
-        )
-
-    def _normalize_winsorized_z_score(self, X, feature_cols, target_feature_cols, factory):
-        target_indices, _ = self._get_target_indices(feature_cols, target_feature_cols)
-        if not target_indices:
-            return
-        vals = X[:, :, target_indices]
-        
-        # 1. Pre-winsorize: clip raw values to 1%–99% percentiles before computing stats
-        # This prevents extreme spikes from inflating the standard deviation
-        p_low = np.nanpercentile(vals, 1, axis=1, keepdims=True)
-        p_high = np.nanpercentile(vals, 99, axis=1, keepdims=True)
-        vals_clipped = np.clip(vals, p_low, p_high)
-        
-        # 2. Compute stats from clipped values
-        mu_win = np.nanmean(vals_clipped, axis=1, keepdims=True)
-        sigma_win = np.nanstd(vals_clipped, axis=1, keepdims=True)
-        
-        # 3. Normalize using stats from clipped data
-        X[:, :, target_indices] = np.where(
-            sigma_win > EPS,
-            (vals_clipped - mu_win) / sigma_win,
-            0.0
-        )
 
     def _normalize_signal(
         self, X, feature_cols, target_feature_cols, feature_base, factory
@@ -367,13 +304,13 @@ class FeatureMACD(FeatureBase):
         # Use zero-anchored group scaling
         self._normalize_signal_group(
             X, feature_cols, self.macd_pct_group, 
-            factory=factory, scale=None, method='log'
+            factory=factory, scale=1.0, method='log'
         )
         
         # 3. SIG_DIST (scale separately; ratio-of-ratio)
         self._normalize_signal_group(
             X, feature_cols, self.sig_dist, 
-            factory=factory, scale=None, method='log'
+            factory=factory, scale=1.0, method='log'
         )
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
@@ -1256,16 +1193,26 @@ class FeatureOrderFlow(FeatureBase):
         imbalance_feats = [f for f in self.features if 'imbalance_' in f]
         self._normalize_z_score_group(X, feature_cols, imbalance_feats, factory, method='tanh')
 
-        # 2. Trade density: long-tailed with mean ~1.0; apply log compression
+        # 2. VPIN: non-negative order-flow dispersion; normalize the windows
+        # together so their relative magnitudes are retained.
+        vpin_feats = [f for f in self.features if 'vpin_' in f]
+        self._normalize_z_score_group(X, feature_cols, vpin_feats, factory, method='tanh')
+
+        # 3. Trade density is a ratio whose neutral value is 1. Use a bounded
+        # log-ratio so 1 -> 0, reciprocal deviations are symmetric, and a zero
+        # trade count cannot create a very large negative input.
         density_features = [f for f in self.features if 'trade_density_' in f]
         for f in density_features:
             if f in feature_cols:
                 idx = feature_cols.index(f)
-                X[:, :, idx] = np.log1p(X[:, :, idx])
+                log_ratio = np.log(np.maximum(X[:, :, idx], EPS))
+                X[:, :, idx] = np.tanh(log_ratio)
 
-        # 3. POC bias: price deviation; normalize as a relative price signal
+        # 4. POC bias is already log(close / VWAP) when generated. Preserve its
+        # zero anchor and only scale the group; applying log again would compress
+        # the signal twice.
         poc_feats = [f for f in self.features if 'poc_bias_' in f]
-        self._normalize_signal_group(X, feature_cols, poc_feats, factory, method='log')
+        self._normalize_signal_group(X, feature_cols, poc_feats, factory, method=None)
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
         return int(int(max(max(self.windows), max(self.poc_bias_step)))* 1.5)
@@ -1314,7 +1261,7 @@ class FeatureClassicFactors(FeatureBase):
         # 2. ID factor: naturally in [-1, 1] with 0 as balance
         id_feats = [f for f in self.features if 'id_factor' in f]
         # No shift needed; z-score helps enhance signal strength
-        self._normalize_signal_group(X, feature_cols, id_feats, factory)
+        self._normalize_signal_group(X, feature_cols, id_feats, factory, method = None)
 
         # 3. Dist to high: positive and long-tailed; apply log compression
         dist_feats = [f for f in self.features if 'dist_to_high' in f]
@@ -1395,21 +1342,21 @@ class FeatureMomentum(FeatureBase):
         # 1) plain momentum as one group
         self._normalize_signal_group(
             X, feature_cols, self.mom_cols,
-            factory=factory, scale=None, method="log"
+            factory=factory, scale=1.0, method="log"
         )
 
         # 2) skip momentum (if any) - keep separate group (slightly different distribution)
         if self.skip_cols:
             self._normalize_signal_group(
                 X, feature_cols, self.skip_cols,
-                factory=factory, scale=None, method="log"
+                factory=factory, scale=1.0, method="log"
             )
 
         # 3) vol-adjusted momentum (if any) - separate group
         if self.vol_adj_cols:
             self._normalize_signal_group(
                 X, feature_cols, self.vol_adj_cols,
-                factory=factory, scale=None, method="log"
+                factory=factory, scale=1.0, method="log"
             )
 
     def _min_history_request(self, kline_interval_ms: int = None) -> int:
@@ -2002,6 +1949,66 @@ FEATURE_LIST_COMMODITY = [
     # "poc_bias_600",        # Deviation from high-volume node (strong structural anchor)
     # "poc_bias_99",
     # "close_pos",           # Relative position within range
+    # =========================
+    # 7) Candlestick / path microstructure
+    # =========================
+    "upper_wick_pct",
+    "lower_wick_pct",
+]
+
+FEATURE_LIST_CRYPTOCURRENCY = [
+
+    # =========================
+    # Raw Market State
+    # =========================
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    # "number_of_trades",        # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # "quote_asset_volume",      # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # "taker_buy_base_volume",   # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # "taker_buy_quote_volume",  # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # =========================
+    # 1) Trend / directional persistence: whether price has continuation
+    # =========================
+    "MA_WEEK_M_L",        # Long-term regime direction (core)
+    # "PVT",              # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "dist_to_high_100",   # Breakout-style trend structure
+    "id_factor_100",
+    "id_factor_20",
+    # "MFI_999",          # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # "MFI_99",           # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # =========================
+    # 2) Volatility regime: amplitude and risk environment
+    # =========================
+    "vol_gk_100",          # Long-term volatility
+    "vol_gk_14",           # Short-term volatility
+    "skew_100",
+    "kurt_100",            # Tail structure (extreme risk)
+    # "BOLL_BW_25",         # Decide after uplift testing
+    "RSI_14",              # Relative Strength Index (momentum/overheat; indirectly reflects volatility)
+    # =========================
+    # 3) Efficiency / market structure: trending vs ranging
+    # =========================
+    "er_126",              # Trend efficiency ratio (high-quality structure factor)
+    # =========================
+    # 4) Participation / liquidity: market activity
+    # =========================
+    # "trade_density_14",  # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # "vol_event_flag_500",  # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # =========================
+    # 5) Order flow / imbalance: buy-vs-sell dominance
+    # =========================
+    # "vpin_49",           # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # "vpin_14",           # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # =========================
+    # 6) Spatial / price position: where price sits within ranges/cost
+    # =========================
+    # "poc_bias_600",      # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # "poc_bias_99",       # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    # "close_pos",         # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
     # =========================
     # 7) Candlestick / path microstructure
     # =========================

@@ -98,6 +98,8 @@ class MarketView:
     expected_vol: Optional[float] = None
     slow_atr: Optional[float] = None
     vol_regime: Optional[float] = None
+    # Exact feed cadence used by StrategyBase to detect missing/duplicate bars.
+    bar_interval_ms: Optional[int] = None
     # Optional feed value: infinity means a continuous market with no close boundary.
     bars_to_close: Optional[float] = inf
 

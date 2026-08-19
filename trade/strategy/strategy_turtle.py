@@ -71,7 +71,7 @@ class TurtleStrategy(StrategyBase):
             self.last_trade_date = current_date
             self.is_halted_today = False
 
-    def process(self, df: pd.DataFrame, current_time: datetime, account_equity: float, 
+    def _process(self, df: pd.DataFrame, current_time: datetime, account_equity: float,
                curr_dir: PositionDir, curr_pos_size: float, last_entry_price: float) -> TradeIntent:
         
         if len(df) < self.config.entry_period:
@@ -189,9 +189,7 @@ class TurtleStrategy(StrategyBase):
         return action
     
     def _check_gaps(self, df: pd.DataFrame, current_time: datetime):
-        """
-        Detect price gaps and time gaps
-        """
+        """Detect price gaps; StrategyBase checks timestamp continuity."""
         if len(df) < 2:
             return
 
@@ -217,21 +215,3 @@ class TurtleStrategy(StrategyBase):
                 f"Time span: {prev_time_str} -> {curr_time_str} | "
                 f"Price jump: {prev_close:.4f} (previous close) -> {current_open:.4f} (current open)"
             )
-
-        if False:
-            # --- 2. Time gap detection ---
-            # Definition: does the interval between this kline and the previous one match expectation (e.g. 4h)
-            # Note: the df index must be of datetime type
-            current_ts = last_row.name if isinstance(last_row.name, datetime) else current_time
-            prev_ts = prev_row.name
-            
-            if isinstance(current_ts, datetime) and isinstance(prev_ts, datetime):
-                time_delta = current_ts - prev_ts
-                # Per the setup in simulation_typical.py the expected interval is usually 4 hours
-                expected_delta = pd.Timedelta(hours=4) 
-                
-                if time_delta > expected_delta:
-                    self.logger.error(
-                        f"⏰ [TIME GAP/MISSING DATA] {current_ts} is {time_delta} after the previous bar "
-                        f"(expected: {expected_delta})"
-                    )

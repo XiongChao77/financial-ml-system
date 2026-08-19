@@ -25,6 +25,7 @@ class CusAnalyzer(bt.Analyzer):
         self._curr_date = None
         self._day_start_equity = self.strategy.broker.getvalue()
         self._day_min_equity = self._day_start_equity
+        self._day_end_equity = self._day_start_equity
 
         # --- 3. global minimum equity state ---
         self._global_min_equity = self.strategy.broker.getvalue()
@@ -128,9 +129,11 @@ class CusAnalyzer(bt.Analyzer):
             self._curr_date = dt
             self._day_start_equity = current_equity
             self._day_min_equity = current_equity
+            self._day_end_equity = current_equity
         else:
             if current_equity < self._day_min_equity:
                 self._day_min_equity = current_equity
+            self._day_end_equity = current_equity
 
     def _record_day(self, date_obj):
         if date_obj is None:
@@ -141,12 +144,10 @@ class CusAnalyzer(bt.Analyzer):
         else:
             dd_pct = 0.0
 
-        day_end_equity = self.strategy.broker.getvalue()
-
         self._daily_stats.append({
             'date': str(date_obj),
             'dd_pct': dd_pct,
-            'equity': day_end_equity,
+            'equity': self._day_end_equity,
         })
 
     def _finalize_drawdown(self):

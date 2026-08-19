@@ -14,7 +14,7 @@ class BbmStrategyConfig:
     """Strategy parameters for the Binary Barrier Model label backtest."""
 
     compound: bool = True
-    risk_per_trade_pct: float = 0.02
+    risk_per_trade_pct: float = 0.025
     fixed_hold_bars: Optional[int] = None
     # Multipliers of MarketView.expected_vol, not absolute percentages.
     threshold_long: float = 1.7
@@ -25,7 +25,7 @@ class BbmStrategyConfig:
     allow_short: bool = True
     prob_thresh: Optional[float] = None
     min_expected_move_pct: float = 0.01
-    max_daily_loss_pct: float = 0.025
+    max_daily_loss_pct: float = 0.027
 
 
 class BbmSignalStrategy(StrategyBase):
@@ -181,7 +181,12 @@ class BbmSignalStrategy(StrategyBase):
                 )
                 self.is_halted_today = True
                 self.meltdown_days += 1
-                if self.last_action.target_dir == PositionDir.POSITIVE:
+                if self.last_action is None:
+                    self.logger.error(
+                        "unknown reason caused meltdown: no previous trade action"
+                    )
+                    self.unexplained_meltdown += 1
+                elif self.last_action.target_dir == PositionDir.POSITIVE:
                     if self.last_action.stop_loss_price > state.market.open:
                         self.logger.warning("buy stop loss shft ")
                     elif self.last_action.action == ActionType.OPEN and self.last_action.stop_loss_price > state.market.low:

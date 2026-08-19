@@ -112,6 +112,7 @@ class BybitTurtleBot:
                 unit_pct_scale=TurtleConfig.UNIT_PCT_SCALE,
             ),
         )
+        self.strategy.bar_interval_ms = TurtleConfig.TIMEFRAME * 60 * 1000
         
         self.last_candle_time = None
         self.stop_signal = False
@@ -161,7 +162,7 @@ class BybitTurtleBot:
         # Note: StrategyBase calls venue.submit_order internally to place orders
         self.strategy.process(
             df=df,
-            current_time=pd.to_datetime(datetime.now()), # or use the server time
+            current_time=pd.Timestamp(current_candle_time).to_pydatetime(),
             account_equity=equity,
             curr_dir=curr_dir,
             curr_pos_size=curr_pos_size_pct,

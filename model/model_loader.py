@@ -143,6 +143,7 @@ class ModelHandler(MetaConfig):
     def _load_fusion_mode(self):
         sub_models_map = self.task_desc["models"]
         loaded_sub_models = {}
+        shared_input_signature = None
         
         # 2. Load all sub-models
         for name, path in sub_models_map.items():
@@ -157,7 +158,22 @@ class ModelHandler(MetaConfig):
                 sub_model_meta = json.load(f)
                 self.sub_model_conf[name] = MetaConfig()
                 self.sub_model_conf[name]._init_config_from_meta(sub_model_meta)
-                self._init_config_from_meta(sub_model_meta)
+                conf = self.sub_model_conf[name]
+                input_signature = (
+                    tuple(conf.feature_cols),
+                    conf.seq_len,
+                    conf.label_col,
+                )
+                if shared_input_signature is None:
+                    shared_input_signature = input_signature
+                    self._init_config_from_meta(sub_model_meta)
+                elif input_signature != shared_input_signature:
+                    raise ValueError(
+                        "Fusion sub-model input schemas differ; a shared input "
+                        "tensor cannot be used safely. "
+                        f"model={name}, expected={shared_input_signature}, "
+                        f"actual={input_signature}"
+                    )
             self.sub_model_task_type[name] = task_desc.get("task_type")
 
             self.logger.info(f"   🔄 Loading sub-model '{name}'...")
@@ -180,7 +196,7 @@ class ModelHandler(MetaConfig):
         Composite tasks (TRIGGER_DIRECTION/LONG_SHORT_OVR) only: on the given df (usually the backtest range),
         run every sub-model separately and compute its metrics, instead of only looking at the fused 3-class result.
 
-        The label mapping reuses model.tasks.strategies.BinaryTask.transform_split, so it matches the binary task
+        The label mapping reuses model.tasks.strategies.BinaryTask.dataset_split, so it matches the binary task
         definitions used during training (trigger: is there an action; direction: long/short; long_ovr/short_ovr: OvR)
         exactly, instead of inventing a mapping on the spot.
 
@@ -214,7 +230,7 @@ class ModelHandler(MetaConfig):
                 results[name] = {}
                 continue
 
-            transformed = BinaryTask(sub_task_type, TrainConfig(), self.device).transform_split(
+            transformed = BinaryTask(sub_task_type, TrainConfig(), self.device).dataset_split(
                 TensorSplit(ds.X, ds.y, ds.returns)
             )
             X_t, y_t = transformed.X, transformed.y
@@ -358,6 +374,7 @@ class ModelHandler(MetaConfig):
                 y_true = df_valid[self.label_col].values.astype(int)
                 y_pred = df_valid['pred'].values.astype(int)
                 stats = self.evaluate_performance(y_true, y_pred)
+                self._log_performance_summary(stats)
         stats['feature_config'] = self.raw_config
         stats['feature_cols']   = self.feature_cols
         self.logger.info(f"Inference complete. Valid signals: {len(final_pred)}")
@@ -365,6 +382,7 @@ class ModelHandler(MetaConfig):
     
     def predict_with_ds(self, ds, df, is_live=True, batch_size=2048, diff_thresh=None, min_thresh=0.3):
         self.logger.info(f"Starting inference pipeline (Mode={'Live' if is_live else 'Backtest'}, diff_thresh={diff_thresh})...")
+        self._validate_inference_dataset(ds)
         # Check whether any valid windows were generated (may be dropped if too short or discontinuous)
         if len(ds) == 0:
             self.logger.warning("No valid windows generated after continuity check!")
@@ -448,13 +466,45 @@ class ModelHandler(MetaConfig):
                 y_true = df_valid[self.label_col].values.astype(int)
                 y_pred = df_valid['pred'].values.astype(int)
                 stats = self.evaluate_performance(y_true, y_pred)
-                # self.logger.info("f1_score (macro): {:.4f}".format(stats.get("f1_macro", 0.0)))
                 self.logger.info("\n" + classification_report(y_true, y_pred, digits=4, zero_division=0))
+                self._log_performance_summary(stats)
                 self.logger.info(f"Label distribution (true): {stats.get('label_proportions_true', {})}")
         stats['feature_config'] = self.raw_config
         stats['feature_cols']   = self.feature_cols
         self.logger.info(f"Inference complete. Valid signals: {len(final_pred)}")
         return df_out, stats
+
+    def _validate_inference_dataset(self, ds) -> None:
+        """Require exact feature identity/order before accepting a prebuilt dataset."""
+        expected_features = list(self.feature_cols)
+        actual_features = getattr(ds, "feature_names", None)
+        if actual_features is None:
+            raise ValueError(
+                "Inference dataset does not expose feature_names; exact model "
+                "input compatibility cannot be verified"
+            )
+        actual_features = list(actual_features)
+        if actual_features != expected_features:
+            missing = [name for name in expected_features if name not in actual_features]
+            unexpected = [name for name in actual_features if name not in expected_features]
+            raise ValueError(
+                "Inference dataset feature schema mismatch; refusing to infer. "
+                f"missing={missing}, unexpected={unexpected}, "
+                f"expected_order={expected_features}, actual_order={actual_features}"
+            )
+
+        inputs = getattr(ds, "X", None)
+        if inputs is None or inputs.ndim != 3:
+            shape = None if inputs is None else tuple(inputs.shape)
+            raise ValueError(
+                f"Inference dataset must expose X with shape [N, T, F], got {shape}"
+            )
+        if inputs.shape[1] != self.seq_len or inputs.shape[2] != len(expected_features):
+            raise ValueError(
+                "Inference dataset tensor shape is incompatible with model metadata: "
+                f"expected [N, {self.seq_len}, {len(expected_features)}], "
+                f"got {tuple(inputs.shape)}"
+            )
     
     def scan_thresholds(self, df, kline_interval_ms, thresholds=[0.05, 0.1, 0.15, 0.2, 0.25, 0.3], batch_size=1024):
         """
@@ -579,6 +629,15 @@ class ModelHandler(MetaConfig):
         print("="*80 + "\n")
         
         return df_res
+
+    def _log_performance_summary(self, stats: dict) -> None:
+        """Log the headline metrics using the same keys stored in backtest JSON."""
+        self.logger.info(
+            "Backtest model metrics | Accuracy: %.4f | Macro-F1: %.4f | Weighted-F1: %.4f",
+            stats["accuracy"],
+            stats["f1_macro"],
+            stats["f1_weighted"],
+        )
 
     def evaluate_performance(self, y_true, y_pred):
         """

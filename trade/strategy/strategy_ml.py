@@ -116,7 +116,7 @@ class MlSignalStrategy(StrategyBase):
             tp_pct = 0.9
         return final_order_qty , sl_pct,tp_pct
 
-    def process(self, state: Observation) -> TradeIntent:
+    def _process(self, state: Observation) -> TradeIntent:
         # singal preprocesss
         signal = state.market.signal
         if signal == Signal.INVALID:
