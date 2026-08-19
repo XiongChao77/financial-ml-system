@@ -84,3 +84,6 @@ class RunnerConfig:
     experiment_context: ExperimentContext
     broker_config: BrokerConfig = field(default_factory=BrokerConfig)
     engine_config: BacktestEngineConfig = field(default_factory=BacktestEngineConfig)
+    # Batch workers leave this disabled so concurrent runs never overwrite the
+    # user-facing single-strategy report.
+    publish_frontend_report: bool = False
