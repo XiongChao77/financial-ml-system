@@ -18,20 +18,21 @@ Main behavior:
     - After all expected ZIP files are present, aggregate and validate the CSV.
 
 Examples:
-    # Spot DOGEUSDT 30m, automatically find earliest available day, download to latest completed UTC day
-    python download_binance_vision_klines_v2.py --symbol DOGEUSDT --interval 30m
+    # Download multiple symbols and intervals (Cartesian product)
+    python download_from_zip.py --symbols DOGEUSDT BTCUSDT --intervals 15m 30m
 
     # Spot DOGEUSDT 30m, explicit range
-    python download_binance_vision_klines_v2.py --symbol DOGEUSDT --interval 30m --start 2021-01-01 --end 2021-12-31
+    python download_from_zip.py --symbols DOGEUSDT --intervals 30m --start 2021-01-01 --end 2021-12-31
 
     # Binance USDⓈ-M futures / UM futures
-    python download_binance_vision_klines_v2.py --market um --symbol DOGEUSDT --interval 30m
+    python download_from_zip.py --market um --symbols DOGEUSDT --intervals 30m
 
 Output:
     <out_dir>/<market>/<symbol>/<interval>/
         download_info.json
-        <symbol>_<interval>.csv
         zips/<symbol>-<interval>-YYYY-MM-DD.zip
+
+    The validated CSV is moved to common.market_data_path(para).
 """
 
 import argparse
@@ -40,6 +41,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import zipfile
@@ -486,34 +488,17 @@ def write_output_csv(path: Path, rows: list[list[str]]) -> None:
     os.replace(tmp_path, path)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Download Binance Vision daily kline ZIP files and merge into one CSV.")
-    parser.add_argument("--market", choices=VALID_MARKETS.keys(), default="um",
-                        help="Market: spot, um=USDⓈ-M futures, cm=COIN-M futures. Default: um")
-    parser.add_argument("--symbol", required=False, help="Symbol, e.g. BTCUSDT, DOGEUSDT",default="DOGEUSDT")
-    parser.add_argument("--interval", required=False, help="Kline interval, e.g. 1m, 5m, 15m, 30m, 1h, 4h, 1d",default="2h")
-    parser.add_argument("--start", default=None, help="Start day UTC, YYYY-MM-DD. Default: earliest available date.")
-    parser.add_argument(
-        "--end",
-        default=None,
-        help="End day UTC, YYYY-MM-DD. Default: latest completed UTC day (yesterday).",
-    )
-    parser.add_argument(
-        "--out-dir",
-        "--dir",
-        dest="out_dir",
-        default=str(Path(__file__).resolve().parent / "data"),
-        help="Base output directory. Default: ./data beside this script.",
-    )
-    parser.add_argument("--show-missing", action="store_true", help="Print every missing ZIP URL/date, not only summary.")
-    args = parser.parse_args()
-
+def download_symbol_interval(
+    args: argparse.Namespace,
+    session: requests.Session,
+    symbol: str,
+    interval: str,
+) -> Path:
+    """Download and validate one symbol/interval, then move its CSV to the canonical path."""
     market = args.market
-    symbol = args.symbol.upper()
-    interval = args.interval
+    symbol = symbol.upper()
 
     interval_ms = interval_to_ms(interval)
-    session = make_session()
     base_output_dir = Path(args.out_dir).expanduser().resolve()
     output_dir = build_output_dir(base_output_dir, market, symbol, interval)
     zip_dir = output_dir / ZIP_DIRNAME
@@ -722,7 +707,7 @@ def main() -> int:
 
     if not all_rows:
         print("❌ No kline rows downloaded. Check symbol, interval, market, and date range.")
-        return 1
+        raise RuntimeError("No kline rows were found after aggregation.")
 
     raw_df = pd.DataFrame(all_rows, columns=OUTPUT_COLUMNS)
     validation = common.validate_kline_source(
@@ -738,8 +723,18 @@ def main() -> int:
     # Only replace the formal CSV after all structural checks pass.
     write_output_csv(out_path, merged_rows)
 
+    para = common.MarketDataSourceConfig(
+        market_category="Cryptocurrency",
+        data_source="binance_public_data",
+        symbol=symbol,
+        interval=interval,
+        trading_type=market,
+    )
+    market_data_path = Path(common.market_data_path(para)).expanduser().resolve()
+
     info.update({
         "csv_file": out_path.name,
+        "market_data_path": str(market_data_path),
         "schema_version": 2,
         "data_source": "binance_vision",
         "base_url": BASE_URL,
@@ -786,10 +781,74 @@ def main() -> int:
     print(f"Missing candles      : {validation['missing_candle_count']}")
     print(f"Overlapping candles  : {validation['overlap_count']}")
     print(f"Info file            : {info_path}")
-    print(f"Output CSV           : {out_path}")
+    market_data_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(out_path), str(market_data_path))
+
+    print(f"Output CSV           : {market_data_path}")
     print("=" * 80)
     print("✅ K-line source validation passed.")
 
+    return market_data_path
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Download Binance Vision daily kline ZIP files and merge into CSV files.")
+    parser.add_argument("--market", choices=VALID_MARKETS.keys(), default="um",
+                        help="Market: spot, um=USDⓈ-M futures, cm=COIN-M futures. Default: um")
+    parser.add_argument(
+        "--symbols",
+        "--symbol",
+        nargs="+",
+        default=["AAVEUSDT", "XLMUSDT"],
+        help="One or more symbols, e.g. --symbols BTCUSDT DOGEUSDT",
+    )
+    parser.add_argument(
+        "--intervals",
+        "--interval",
+        nargs="+",
+        default=["5m","15m","30m","1h","2h","4h"],
+        help="One or more intervals, e.g. --intervals 15m 30m 1h",
+    )
+    parser.add_argument("--start", default=None, help="Start day UTC, YYYY-MM-DD. Default: earliest available date.")
+    parser.add_argument(
+        "--end",
+        default=None,
+        help="End day UTC, YYYY-MM-DD. Default: latest completed UTC day (yesterday).",
+    )
+    parser.add_argument(
+        "--out-dir",
+        "--dir",
+        dest="out_dir",
+        default=str(Path(__file__).resolve().parent / "data"),
+        help="ZIP cache and audit directory. Validated CSV files are moved to common.market_data_path().",
+    )
+    parser.add_argument("--show-missing", action="store_true", help="Print every missing ZIP URL/date, not only summary.")
+    args = parser.parse_args()
+
+    symbols = list(dict.fromkeys(symbol.upper() for symbol in args.symbols))
+    intervals = list(dict.fromkeys(args.intervals))
+    total_tasks = len(symbols) * len(intervals)
+    failures: list[tuple[str, str, str]] = []
+
+    with make_session() as session:
+        task_number = 0
+        for symbol in symbols:
+            for interval in intervals:
+                task_number += 1
+                print(f"\n[Task {task_number}/{total_tasks}] {symbol} {interval}")
+                try:
+                    destination = download_symbol_interval(args, session, symbol, interval)
+                    print(f"✅ Completed {symbol} {interval}: {destination}")
+                except Exception as exc:
+                    failures.append((symbol, interval, str(exc)))
+                    print(f"❌ Failed {symbol} {interval}: {exc}")
+
+    print(f"\nCompleted {total_tasks - len(failures)}/{total_tasks} download task(s).")
+    if failures:
+        print("Failed tasks:")
+        for symbol, interval, error in failures:
+            print(f"  - {symbol} {interval}: {error}")
+        return 1
     return 0
 
 

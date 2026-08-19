@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import logging
-import math
-import os
+import os,sys
 import random
+import time
 from dataclasses import asdict, dataclass
 
 import numpy as np
 import torch
 
+current_work_dir = os.path.dirname(__file__)
+sys.path.append(os.path.join(current_work_dir,'..'))
 from data_process import common
 from model.artifacts import save_fusion_run, save_single_run
 from model.data_loader import TimeSeriesWindowDataset
@@ -21,11 +23,10 @@ from model.train_config import (
     SingleModelConfig,
     TrainConfig,
     TrainTask,
-    feature_direction_map,
 )
 from model.tasks.strategies import TaskStrategy
 from model.trainer import build_trainer
-from model.training_types import DataSplits, TensorSplit
+from model.training_types import DataSplits, TensorSplit, temporal_split_bounds
 
 
 @dataclass(frozen=True)
@@ -53,44 +54,19 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def apply_feature_direction(
-    inputs: torch.Tensor,
-    feature_names: list[str],
-    direction_map: dict[str, int],
-    logger: logging.Logger,
-) -> None:
-    indices = [
-        index
-        for index, feature_name in enumerate(feature_names)
-        if direction_map.get(feature_name, 1) == -1
-    ]
-    if indices:
-        inputs[:, :, indices] *= -1
-        logger.info("Flipped %d features according to ic_direction", len(indices))
-
-
 def split_by_time(
     dataset: TimeSeriesWindowDataset,
     data_config: DataConfig,
 ) -> DataSplits:
     """Split once on the original timeline; every task derives from these splits."""
-    sample_count = len(dataset)
-    train_end = int(sample_count * data_config.train_ratio)
-    validation_end = int(sample_count * (data_config.train_ratio + data_config.val_ratio))
-
-    purge = 0
-    if data_config.purge_overlap:
-        purge = max(math.ceil(dataset.seq_len / max(dataset.stride, 1)) - 1, 0)
-
-    validation_start = train_end + purge
-    test_start = validation_end + purge
-    if not (
-        0 < train_end <= validation_start < validation_end <= test_start < sample_count
-    ):
-        raise ValueError(
-            "Dataset is too small for the requested train/validation/test split "
-            f"and purge gap ({purge} samples)"
-        )
+    bounds = temporal_split_bounds(
+        len(dataset),
+        train_ratio=data_config.train_ratio,
+        val_ratio=data_config.val_ratio,
+        purge_overlap=data_config.purge_overlap,
+        seq_len=dataset.seq_len,
+        stride=dataset.stride,
+    )
 
     def make(start: int, end: int) -> TensorSplit:
         return TensorSplit(
@@ -100,9 +76,9 @@ def split_by_time(
         )
 
     return DataSplits(
-        train=make(0, train_end),
-        validation=make(validation_start, validation_end),
-        test=make(test_start, sample_count),
+        train=make(*bounds["train"]),
+        validation=make(*bounds["valid"]),
+        test=make(*bounds["test"]),
     )
 
 
@@ -129,12 +105,6 @@ def prepare_data(
         use_cache=config.use_cache,
         show_feature_distribution=True,
     )
-    directions = {
-        feature_name: feature_direction_map.get(feature_name, 1)
-        for feature_name in requested_features
-    }
-    apply_feature_direction(dataset.X, dataset.feature_names, directions, logger)
-
     splits = split_by_time(dataset, config.data_cfg)
     logger.info(
         "Prepared %d samples: train=%d validation=%d test=%d, features=%d",
@@ -315,9 +285,13 @@ def train(
 
 
 if __name__ == "__main__":
+    started_at = time.perf_counter()
     session_logger, _ = common.setup_session_logger(sub_folder="train", file_level=logging.DEBUG)
-    train(
-        config=SingleModelConfig,
-        save_dir=os.path.join(common.TRAIN_OUT_DIR, SingleModelConfig.train_task),
-        logger=session_logger,
-    )
+    try:
+        train(
+            config=SingleModelConfig,
+            save_dir=os.path.join(common.TRAIN_OUT_DIR, SingleModelConfig.train_task),
+            logger=session_logger,
+        )
+    finally:
+        session_logger.info("Total run time: %.2f s", time.perf_counter() - started_at)

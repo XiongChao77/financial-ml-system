@@ -14,7 +14,6 @@ from model.models.generic.xgboost_model import XGBoostAdapter
 from model.models.generic.sklearn_adapter import SVCAdapter, LogisticRegressionSklearnAdapter
 from model.models.generic.lstm import LSTM1D_V1
 from model.models.generic.lstm_v2 import LSTM1D_V2
-from model.models.generic.lstm_v5 import LSTM1D_V5
 from model.models.generic.conv_lstm_v1 import ConvLSTM1D_V1
 from model.models.generic.transformer_v1 import Transformer1D_V1
 from model.models.generic.transformer_v2 import Transformer1D_V2
@@ -26,8 +25,6 @@ from model.models.generic.logistic_regression import LogisticRegressionTS_V1
 from model.models.dual_head.tcn_v1 import TCN1D_V1
 from model.models.dual_head.mamba_v1 import Mamba1D_V1
 from model.models.dual_head.lstm_v3 import LSTM1D_V3
-from model.models.dual_head.lstm_v4 import LSTM1D_V4
-from model.models.dual_head.conv_lstm_v2 import ConvLSTM1D_V2
 from model.models.dual_head.conv_lstm_v3 import ConvLSTM1D_V3
 from model.models.dual_head.cnn import CNN1D_V1
 from model.models.dual_head.transformer_v3 import Transformer1D_V3
@@ -51,7 +48,6 @@ class ModelFactory:
         LogisticRegressionSklearnAdapter,
         LSTM1D_V1,
         LSTM1D_V2,
-        LSTM1D_V5,
         ConvLSTM1D_V1,
         Transformer1D_V1,
         Transformer1D_V2,
@@ -61,8 +57,6 @@ class ModelFactory:
         TCN1D_V1,
         Mamba1D_V1,
         LSTM1D_V3,  #good
-        LSTM1D_V4,  #good
-        ConvLSTM1D_V2,
         ConvLSTM1D_V3,
         CNN1D_V1,
         Transformer1D_V3,

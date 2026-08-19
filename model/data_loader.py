@@ -11,6 +11,105 @@ DROP_FEATURES =['threshold_long', 'stop_threshold_long', 'stop_loss_long', 'thre
                  'close_time_ms_utc', 'ignore' ]
 LOW_CORRELATION_FEATURES = ['number_of_trades','quote_asset_volume', 'taker_buy_quote_volume']
 
+
+def validate_required_feature_columns(
+        df: pd.DataFrame,
+        feature_cols: List[str],
+) -> None:
+    """Fail fast when model input columns are absent or ambiguous."""
+    if df is None:
+        raise ValueError("Feature input DataFrame must not be None")
+    if feature_cols is None:
+        raise ValueError("Required feature list must not be None")
+
+    duplicated_requirements = sorted({
+        name for name in feature_cols if feature_cols.count(name) > 1
+    })
+    if duplicated_requirements:
+        raise ValueError(
+            "Required feature list contains duplicates: "
+            f"{duplicated_requirements}"
+        )
+
+    missing = [name for name in feature_cols if name not in df.columns]
+    if missing:
+        raise ValueError(
+            "Missing required model features; inference/training is aborted: "
+            f"{missing}"
+        )
+
+    duplicate_input_columns = set(df.columns[df.columns.duplicated()])
+    ambiguous = [name for name in feature_cols if name in duplicate_input_columns]
+    if ambiguous:
+        raise ValueError(
+            "Input DataFrame contains duplicate required feature columns: "
+            f"{ambiguous}"
+        )
+
+
+def valid_window_end_indices(
+        df: pd.DataFrame,
+        feature_cols: List[str],
+        label_col: Optional[str],
+        seq_len: int,
+        stride: int = 1,
+) -> np.ndarray:
+    """Return valid window-end row indices without materializing feature windows.
+
+    This mirrors ``TimeSeriesWindowDataset`` cleaning, continuity, label and
+    stride rules.  It is intended for metadata such as exact time-split
+    boundaries, where constructing the full ``[N, T, F]`` tensor would waste a
+    large amount of memory.
+    """
+    validate_required_feature_columns(df, feature_cols)
+    if seq_len < 3:
+        raise ValueError("seq_len must be at least 3 for the continuity checks")
+    if stride < 1:
+        raise ValueError("stride must be at least 1")
+
+    clean_features = [c for c in feature_cols if c not in DROP_FEATURES]
+    cols = clean_features + (
+        [label_col] if label_col and label_col in df.columns else []
+    ) + ["open_time_sn"]
+    if "trend_strength" in df.columns and "trend_strength" not in cols:
+        cols.append("trend_strength")
+
+    frame = df[cols].copy()
+    frame["orig_index"] = df.index
+    complete_rows = frame.notna().all(axis=1)
+    if not complete_rows.any():
+        raise RuntimeError(
+            "No complete rows found while calculating valid window indices"
+        )
+    first_valid_label = complete_rows.idxmax()
+    first_valid_pos = frame.index.get_loc(first_valid_label)
+    frame = frame.iloc[first_valid_pos:].copy()
+    frame.dropna(
+        subset=[column for column in frame.columns if column != "trend_strength"],
+        inplace=True,
+    )
+    frame.reset_index(drop=True, inplace=True)
+
+    window_count = (len(frame) - seq_len) // stride + 1
+    if window_count <= 0:
+        return np.asarray([], dtype=df.index.dtype)
+
+    starts = np.arange(window_count, dtype=np.int64) * stride
+    ends = starts + seq_len - 1
+    timestamps = frame["open_time_sn"].to_numpy(dtype=np.int64)
+    global_continuous = (
+        timestamps[ends] - timestamps[starts] <= seq_len - 1
+    )
+    tail_continuous = timestamps[ends] - timestamps[ends - 2] <= 2
+
+    label_valid = np.ones(window_count, dtype=bool)
+    if label_col and label_col in frame.columns:
+        label_valid = (
+            frame[label_col].to_numpy()[ends] != common.Signal.INVALID
+        )
+    valid = global_continuous & tail_continuous & label_valid
+    return frame["orig_index"].to_numpy()[ends][valid]
+
 # ====================================================================
 # --- 2. TimeSeriesWindowDataset CLASS ---
 # ====================================================================
@@ -39,9 +138,7 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
         self.time_col = 'open_time_sn'
         self.factory = common.FeatureFactory(self.kline_interval_ms)
 
-        missing = set(feature_cols) - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing features: {list(missing)}")
+        validate_required_feature_columns(df, feature_cols)
         if 'atr_14' in feature_cols:
             raise RuntimeError("atr_14 is used for strategy now , can't be normalize")
         if self.is_live == True:
@@ -202,18 +299,28 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             raise RuntimeError("❌ [Data Clean] Error: no complete rows found! Please check feature computation logic.")
 
         # --- Part 2: remove NaNs in the middle or tail (abnormal gaps) ---
-        before_gap_clean = len(df_work)
         exclude_nan_check_cols = ["trend_strength"] #"trend_strength" is not feature
-        nan_check_cols = [ c for c in df_work.columns if c not in exclude_nan_check_cols ]
-        df_work.dropna(subset=nan_check_cols, inplace=True)
-        after_gap_clean = len(df_work)
-        
-        gap_count = before_gap_clean - after_gap_clean
-        if gap_count > 0:
-            # Middle gaps usually indicate data quality issues; keep as WARNING/ERROR
-            self.logger.error(f"🚨 [Step 2] Found and removed abnormal middle/tail gaps: {gap_count} rows! Please check data completeness.")
-        else:
-            self.logger.debug("✅ [Step 2] No middle gaps found.")
+        nan_check_cols = [c for c in cols if c not in exclude_nan_check_cols]
+        numeric_values = df_work[nan_check_cols].apply(
+            pd.to_numeric,
+            errors="coerce",
+        )
+        invalid_values = ~np.isfinite(numeric_values.to_numpy(dtype=np.float64))
+        if invalid_values.any():
+            invalid_rows = np.flatnonzero(invalid_values.any(axis=1))
+            invalid_columns = [
+                column
+                for column_index, column in enumerate(nan_check_cols)
+                if invalid_values[:, column_index].any()
+            ]
+            source_rows = df_work.index[invalid_rows[:5]].tolist()
+            raise ValueError(
+                "Required model inputs contain missing/non-finite values after "
+                "the initial warmup; refusing to drop rows silently. "
+                f"columns={invalid_columns}, count={len(invalid_rows)}, "
+                f"sample_rows={source_rows}"
+            )
+        self.logger.debug("✅ [Step 2] No middle/tail missing feature values found.")
 
         # --- Final index reset ---
         df_work.reset_index(drop=True, inplace=True)
@@ -322,6 +429,16 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
     ) -> None:
         """Normalization and conversion to Tensors."""
         self.factory.normalize(X_filtered, self.feature_names)
+        if not np.isfinite(X_filtered).all():
+            invalid_locations = np.argwhere(~np.isfinite(X_filtered))
+            sample_index, time_index, feature_index = invalid_locations[0]
+            raise ValueError(
+                "Feature normalization produced a missing/non-finite model input; "
+                "inference/training is aborted. "
+                f"feature={self.feature_names[int(feature_index)]}, "
+                f"sample={int(sample_index)}, time_step={int(time_index)}, "
+                f"invalid_count={len(invalid_locations)}"
+            )
 
         self.X = torch.from_numpy(X_filtered)
         self.y = torch.from_numpy(y_filtered).long()

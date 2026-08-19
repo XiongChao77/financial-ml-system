@@ -383,7 +383,7 @@ class RestartableMartingaleStrategy(StrategyBase):
     # ------------------------------------------------------------------
     # Main decision
     # ------------------------------------------------------------------
-    def process(self, state: Observation) -> TradeIntent:
+    def _process(self, state: Observation) -> TradeIntent:
         self.bar_index += 1
         self._sync(state)
         self.equity_curve.append(self.total_equity)

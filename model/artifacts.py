@@ -58,9 +58,20 @@ def save_single_run(
     train_config_path = os.path.join(save_dir, "train_config.json")
 
     state_source = model._orig_mod if hasattr(model, "_orig_mod") else model
+    meta = state_source.export_meta(
+        feature_cols=feature_names,
+        label_col=label_col,
+        classes=metrics["labels"],
+        seq_len=seq_len,
+        task_type=task_type,
+    )
+    meta["arch_hash"] = state_source.architecture_hash(meta)
+
     torch.save(
         {
             "state_dict": state_source.state_dict(),
+            "architecture": state_source.identity(),
+            "arch_hash": meta["arch_hash"],
             "feature_list": feature_list,
             "classes": metrics["labels"],
             "channel": len(feature_names),
@@ -74,13 +85,6 @@ def save_single_run(
         model_path,
     )
 
-    meta = model.export_meta(
-        feature_cols=feature_names,
-        label_col=label_col,
-        classes=metrics["labels"],
-        seq_len=seq_len,
-        task_type=task_type,
-    )
     _write_json(meta_path, meta)
     metrics_report = {
         "task_type": task_type,
