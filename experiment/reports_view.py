@@ -460,16 +460,15 @@ def sort_by_correlation_diversity(all_results):
     return sorted_results
 
 def build_return_series(report):
-    g = lambda k: common.recursive_get(report['long'], k)
-    daily = g('daily_loss_list')
+    daily = report["long"].get("daily_account", [])
 
     df = pd.DataFrame(daily)
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values('date')
     df.set_index('date', inplace=True)
 
-    # Use equity to compute daily returns
-    df['ret'] = df['equity'].pct_change()
+    # Use end-of-day equity to compute daily returns.
+    df['ret'] = df['end_equity'].pct_change()
 
     return df['ret'].dropna()
 

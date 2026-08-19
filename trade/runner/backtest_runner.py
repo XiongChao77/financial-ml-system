@@ -499,6 +499,7 @@ def _infer_prediction_payload(
     frame: pd.DataFrame,
     train_output_dir: str,
     interval_ms: int,
+    inference_batch_size: int = 512,
 ) -> dict:
     handler = model_loader.ModelHandler(
         tarin_out_path=train_output_dir,
@@ -517,11 +518,13 @@ def _infer_prediction_payload(
         dataset,
         frame,
         is_live=False,
+        batch_size=inference_batch_size,
         diff_thresh=None,
     )
     sub_model_stats = handler.evaluate_sub_models(
         frame,
         kline_interval_ms=interval_ms,
+        batch_size=inference_batch_size,
     )
     first_valid_idx = predicted_frame["pred"].first_valid_index()
     if first_valid_idx is None:
@@ -550,6 +553,8 @@ def precompute_prediction_cache(
     logger,
     data_config: ModelDataConfig,
     train_cfg: train_config.TrainConfig,
+    *,
+    inference_batch_size: int,
 ) -> str:
     """Generate one prediction cache before CPU backtest workers are started."""
     pre_para, frame, train_output_dir, interval_ms = _prediction_inputs(data_config)
@@ -566,6 +571,7 @@ def precompute_prediction_cache(
                 frame,
                 train_output_dir,
                 interval_ms,
+                inference_batch_size,
             )
             _write_prediction_cache(cache_path, payload)
             logger.info("Prediction cache saved: %s", cache_path)
@@ -733,8 +739,10 @@ def main(logger: logging.Logger, config: RunnerConfig):
         f"| venue={venue_cls.__name__}"
     )
     strat = cerebro.run()[0]
-    os.makedirs(config.save_dir, exist_ok=True)
-    save_path = os.path.join(config.save_dir, "full_backtest_report.json")
+    save_path = None
+    if config.persist_full_report:
+        os.makedirs(config.save_dir, exist_ok=True)
+        save_path = os.path.join(config.save_dir, "full_backtest_report.json")
     statistics = generate_backtest_report(
         logger,
         strat,
@@ -799,7 +807,7 @@ def _load_train_config(train_output_dir: str) -> train_config.TrainConfig:
 
 
 def build_daily_df(daily_stats):
-    """Convert daily stats list (dict with 'date', 'dd_pct', 'equity') to DataFrame."""
+    """Convert daily account summaries to a date-sorted DataFrame."""
     if not daily_stats:
         return pd.DataFrame()
     df = pd.DataFrame(daily_stats)
@@ -811,22 +819,22 @@ def build_daily_df(daily_stats):
 # 6 months (180 or 365 recommended for crypto)
 def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30):
     """
-    df must contain: date, equity
+    df must contain: date, end_equity
     """
-    if df is None or df.empty or "date" not in df.columns or "equity" not in df.columns:
+    if df is None or df.empty or "date" not in df.columns or "end_equity" not in df.columns:
         return pd.DataFrame()
 
-    df = df[["date", "equity"]].copy()
+    df = df[["date", "end_equity"]].copy()
     df["date"] = pd.to_datetime(df["date"])
-    df["equity"] = pd.to_numeric(df["equity"], errors="coerce")
-    df = df.dropna(subset=["date", "equity"]).sort_values("date").reset_index(drop=True)
+    df["end_equity"] = pd.to_numeric(df["end_equity"], errors="coerce")
+    df = df.dropna(subset=["date", "end_equity"]).sort_values("date").reset_index(drop=True)
     if df.empty:
         return pd.DataFrame()
 
     results = []
 
     dates = df['date']
-    equity = df['equity'].values
+    equity = df['end_equity'].values
 
     start_idx = 0
     n = len(df)
@@ -1068,9 +1076,9 @@ def generate_backtest_report(
     maxdd_len = dd.get("max", {}).get("len", 0)
     calmar = (cagr*100 / abs(maxdd_pct)) if maxdd_pct > 0 else 0.0
     #rolling calmar
-    daily_returns_list = perf.get('daily_returns_list', [])
-    if daily_returns_list:
-        df = build_daily_df(daily_returns_list)
+    daily_account = perf.get("daily_account", [])
+    if daily_account:
+        df = build_daily_df(daily_account)
         rc_df = rolling_calmar(df, window_days=180, step_days=30)
         rc_summary = summarize_rolling_calmar(rc_df)
     else:
@@ -1168,17 +1176,16 @@ def generate_backtest_report(
     # ============================================================
     # === [added: robust risk statistics] only this block changed, to support the Top-N display ===
     # ============================================================
-    daily_returns_list = perf.get('daily_returns_list', []) # requires CusAnalyzer to expose this list (list of dicts)
+    daily_account = perf.get("daily_account", [])
     top_10_str = "N/A"
     robust_max_loss = 0.0
     
-    if daily_returns_list:
-        # Keep the negative returns and sort them (worst first)
-        # daily_returns_list is now a list of dicts, each carrying a 'dd_pct' field
+    if daily_account:
+        # Keep negative intraday drawdowns and sort them worst first.
         losses_values = []
-        for item in daily_returns_list:
+        for item in daily_account:
             if isinstance(item, dict):
-                val = item.get('dd_pct', 0)
+                val = item.get("intraday_drawdown_pct", 0)
             else:
                 val = item
             if val < 0:
@@ -1230,12 +1237,6 @@ def generate_backtest_report(
         hash=params_hash,
         git_commit=experiment_context.git_commit,
     )
-    if model_stats:
-        params_snapshot["model_stats"] = {
-            "accuracy": model_stats.get("accuracy"),
-            "f1_macro": model_stats.get("f1_macro"),
-            "f1_weighted": model_stats.get("f1_weighted"),
-        }
 
     size_param = getattr(
         strategy_config,
@@ -1244,6 +1245,7 @@ def generate_backtest_report(
     )
     report = {
         f"params": params_snapshot,
+        f"daily_account": daily_account,
         f"time": {
             f"start": bt.num2date(strat.datas[0].datetime.array[0]),
             f"end": bt.num2date(strat.datas[0].datetime.array[-1]),
@@ -1260,7 +1262,6 @@ def generate_backtest_report(
             f"rc_summary":rc_summary,
         },
         f"drawdown": {
-            f"daily_loss_list": daily_returns_list,          # list
             f"max_dd_pct": maxdd_pct,
             f"max_dd_amt": maxdd_amt,
             f"max_daily_dd": max_daily_dd,
@@ -1302,13 +1303,14 @@ def generate_backtest_report(
     }
     report["ftmo_challenge"] = simulate_ftmo_challenges(report)
 
+    persisted_perf = dict(perf)
+    persisted_perf.pop("daily_account", None)
     report_additional = {
         f"raw_analyzer":{
-            f"customize":perf,
+            f"customize": persisted_perf,
         },
         f"strategy_detail": strategy_detail,
         f"trade_logs": list(getattr(strat, "trade_logs", [])),
-        f"closed_trade_hold_bars": closed_trade_hold_bars,
     }
 
     # common.dump_params_json(train_cfg,logger)
@@ -1393,7 +1395,13 @@ def generate_backtest_report(
 
     if save_path:
         with open(save_path, "w", encoding="utf-8") as f:
-            json.dump({"report": report, "additional": report_additional}, f, indent=4, default=str)
+            json.dump(
+                {"report": report, "additional": report_additional},
+                f,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
 
     return (report_additional,report)
 

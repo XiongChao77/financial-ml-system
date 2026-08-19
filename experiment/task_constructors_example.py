@@ -16,6 +16,22 @@ from data_process import feature
 from model import train_config
 from dataclasses import replace
 from data_process import config
+
+# Local batch runtime configuration. Copy this file to task_constructors.py and
+# customize that ignored file without changing tracked source files.
+MAX_PREP = 1
+MAX_TRAIN = 4  # Maximum concurrent train processes; each train uses its own process.
+MAX_SIM = 25
+INFERENCE_BATCH_SIZE = 256
+SYMBOL: str = "DOGEUSDT"  # ETHUSDT or DOGEUSDT
+INTERVAL: str = "15m"
+
+# Training mode switch:
+# - DIRECT_3CLASS (or another single-model task) uses prep -> train -> sim.
+# - TRIGGER_DIRECTION / LONG_SHORT_OVR sweeps both roles separately, then
+#   fuses compatible model pairs for backtesting.
+TRAIN_MODE: str = train_config.TrainTask.DIRECT_3CLASS
+
 # -----------------------------------------------------------------------------
 # prep -> train -> simulation constructors (experiment/batch_experiments.py)
 # -----------------------------------------------------------------------------

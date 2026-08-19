@@ -35,11 +35,11 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 from model import train_config
 from data_process import common, preparation
 try:
-    from experiment.task_constructors import construct_experiment_tasks
+    from experiment import task_constructors as experiment_tasks
 except ModuleNotFoundError as exc:
     if exc.name != "experiment.task_constructors":
         raise
-    from experiment.task_constructors_example import construct_experiment_tasks
+    from experiment import task_constructors_example as experiment_tasks
 from data_process.utils import (
     TaskIdentity,
     config_from_dict_train,
@@ -55,19 +55,15 @@ TASKS_SPEC_FILE = "tasks_spec.json"
 REPORTS_FILE = "reports.jsonl"
 TRAIN_REPORTS_FILE = "train_reports.jsonl"
 SELECTED_FILE = "selected_configs.jsonl"
-MAX_PREP = 1
-MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
-MAX_SIM = 25
-SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
-INTERVAL: str = "15m"
 
-# Training mode switch:
-# - train_config.TrainTask.DIRECT_3CLASS (or TRIGGER/DIRECTION/LONG_OVR/SHORT_OVR and other single model tasks)
-#   -> the existing single model prep->train->sim task constructor
-# - train_config.TrainTask.TRIGGER_DIRECTION / LONG_SHORT_OVR
-#   -> combo_model mode: sweep both sub-model roles separately,
-#      then fuse them pairwise per (pre_key, train_compatibility) after training and backtest
-TRAIN_MODE: str = train_config.TrainTask.DIRECT_3CLASS
+construct_experiment_tasks = experiment_tasks.construct_experiment_tasks
+MAX_PREP = experiment_tasks.MAX_PREP
+MAX_TRAIN = experiment_tasks.MAX_TRAIN
+MAX_SIM = experiment_tasks.MAX_SIM
+INFERENCE_BATCH_SIZE = experiment_tasks.INFERENCE_BATCH_SIZE
+SYMBOL = experiment_tasks.SYMBOL
+INTERVAL = experiment_tasks.INTERVAL
+TRAIN_MODE = experiment_tasks.TRAIN_MODE
 
 
 class ExperimentTaskError(RuntimeError):
@@ -309,16 +305,12 @@ def load_pending_tasks(exp_dir: str, done_set: set[str]) -> Tuple[Dict[str, Any]
 
 def _create_output_dirs(task_spec: Dict[str, Any], temp_dir: str) -> None:
     """
-    Create prep/train/sim output dirs for all pending tasks.
+    Create prep/train output dirs for all pending tasks.
     """
     for pre_h, pre_node in task_spec.items():
         os.makedirs(_prep_output_dir(temp_dir, pre_h), exist_ok=True)
-        for tr_h, tr_node in pre_node["train"].items():
+        for tr_h in pre_node["train"]:
             os.makedirs(_train_output_dir(temp_dir, pre_h, tr_h), exist_ok=True)
-            for sim_task in tr_node.get("sim_tasks", []):
-                sim_h = sim_task.get("hash")
-                if sim_h:
-                    os.makedirs(_sim_output_dir(temp_dir, pre_h, tr_h, sim_h), exist_ok=True)
 
 
 # -----------------------------------------------------------------------------
@@ -511,6 +503,7 @@ def _precompute_backtest_predictions(
                 use_prediction_cache=True,
             ),
             train_cfg,
+            inference_batch_size=INFERENCE_BATCH_SIZE,
         )
         logger.info("Precomputed %s prediction cache: %s", period, cache_path)
 
@@ -665,6 +658,7 @@ def _worker_sim(
                         period=period,
                     ),
                     experiment_context=experiment_context,
+                    persist_full_report=False,
                 )
                 return backtest_runner.main(logger, runner_config)["statistics"][1]
 
@@ -677,6 +671,7 @@ def _worker_sim(
                         f"{period} report identity mismatch: report={report_identity}, "
                         f"task={identity.as_dict()}"
                     )
+            _assert_period_parameters_match(report["long"], report["forward"])
             report['pass'] = report['long']["performance"]["cagr"] > 0
             report_stat = report
         except Exception:
@@ -695,6 +690,35 @@ def _worker_sim(
 
         elapsed = time.time() - t0
         result_queue.put(("sim_done", pre_h, tr_h, sim_h, elapsed, report_stat, reports_path, train_output_dir))
+
+
+def _assert_period_parameters_match(
+    long_report: Dict[str, Any],
+    forward_report: Dict[str, Any],
+) -> None:
+    """Require complete period reports to differ only by data.period."""
+
+    normalized = []
+    for expected_period, report in (
+        ("long", long_report),
+        ("forward", forward_report),
+    ):
+        params = report.get("params")
+        if not isinstance(params, dict):
+            raise ValueError(f"{expected_period} report has no params object")
+        params = copy.deepcopy(params)
+        data = params.get("data")
+        if not isinstance(data, dict) or data.get("period") != expected_period:
+            raise ValueError(
+                f"{expected_period} report has invalid params.data.period"
+            )
+        data.pop("period")
+        normalized.append(params)
+
+    if normalized[0] != normalized[1]:
+        raise ValueError(
+            "Long and forward report parameters differ outside params.data.period"
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -1027,6 +1051,7 @@ def train_and_cross_test(
                             logger,
                             data_config,
                             train_cfg,
+                            inference_batch_size=INFERENCE_BATCH_SIZE,
                         )
                         runner_config = backtest_runner.RunnerConfig(
                             strategy_config=strategy_config,
@@ -1039,6 +1064,7 @@ def train_and_cross_test(
                             ),
                             data_config=data_config,
                             experiment_context=experiment_context,
+                            persist_full_report=False,
                         )
                         result = backtest_runner.main(logger, runner_config)["statistics"][1]
                         results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
@@ -1064,6 +1090,7 @@ def train_and_cross_test(
                                 logger,
                                 data_config,
                                 train_cfg,
+                                inference_batch_size=INFERENCE_BATCH_SIZE,
                             )
                             runner_config = backtest_runner.RunnerConfig(
                                 strategy_config=strategy_config,
@@ -1076,6 +1103,7 @@ def train_and_cross_test(
                                 ),
                                 data_config=data_config,
                                 experiment_context=experiment_context,
+                                persist_full_report=False,
                             )
                             result = backtest_runner.main(logger, runner_config)["statistics"][1]
                             results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
@@ -1268,7 +1296,7 @@ def main():
     parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
     parser.add_argument("-c", "--cross_test", action="store_true", default=False, help="crosss test")
     parser.add_argument("-l", "--load", action="store_true", default=False, help="load condidate configs for verification,befor applying to market")
-    parser.add_argument("--check-git-clean", action=argparse.BooleanOptionalAction, default=False,
+    parser.add_argument("--check-git-clean", action=argparse.BooleanOptionalAction, default=True,
         help=( "Require a clean Git working tree throughout the experiment " "(disable with --no-check-git-clean)"),
     )
 
@@ -1356,6 +1384,7 @@ def main():
                     logger,
                     data_config,
                     train_cfg,
+                    inference_batch_size=INFERENCE_BATCH_SIZE,
                 )
                 cached_data_configs[period] = data_config
             last_cagr = 0
@@ -1376,6 +1405,7 @@ def main():
                         ),
                         data_config=cached_data_configs[period],
                         experiment_context=experiment_context,
+                        persist_full_report=False,
                     )
                     return backtest_runner.main(logger, runner_config)["statistics"][1]
 

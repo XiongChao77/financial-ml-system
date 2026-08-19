@@ -87,3 +87,6 @@ class RunnerConfig:
     # Batch workers leave this disabled so concurrent runs never overwrite the
     # user-facing single-strategy report.
     publish_frontend_report: bool = False
+    # Standalone runs keep a self-contained detail artifact. Batch experiments
+    # use reports.jsonl as their canonical output and disable this duplicate.
+    persist_full_report: bool = True

@@ -244,7 +244,7 @@ function normalizeEquityPoints(rawPoints, report) {
   if (Array.isArray(rawPoints)) {
     rawPoints.forEach((point) => {
       const time = normalizeTimestamp(point?.time ?? point?.date);
-      const value = Number(point?.value ?? point?.equity);
+      const value = Number(point?.value ?? point?.end_equity);
       if (Number.isFinite(time) && Number.isFinite(value)) {
         byTime.set(time, { time, value });
       }
