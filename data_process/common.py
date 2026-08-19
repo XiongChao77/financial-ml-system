@@ -1,12 +1,12 @@
 from enum import IntEnum,Enum
 from functools import lru_cache
 from dataclasses import dataclass
-import logging,math,re,git
+import hashlib,logging,math,re,git
 import pandas as pd
 import numpy as np
 import os, colorlog , logging, json,platform
 from dataclasses import asdict, is_dataclass,fields,replace
-from typing import Optional
+from typing import Literal, Optional
 from datetime import datetime
 from data_process.utils import *
 from data_process.feature import *
@@ -65,7 +65,7 @@ class BaseDefine(MarketDataSourceConfig):
     stop_multiplier_rate_long: Optional[float] = None
     vol_multiplier_short: float = 1.7
     stop_multiplier_rate_short: Optional[float] = None
-    tbm_take_profit_price: str = "close"  # close | high_low
+    tbm_take_profit_price: Optional[Literal["close", "high_low"]] = None
     min_expected_move_pct: float = 0.01
     version:float = 0.1
 
@@ -156,6 +156,52 @@ def load_test_df_from_dir(base_dir: str) -> pd.DataFrame:
 
 def get_data_config_path_in_dir(base_dir: str) -> str:
     return _data_path_in_dir(base_dir, "data_config_meta.json")
+
+
+DATA_MANIFEST_FILENAME = "data_manifest.json"
+
+
+def get_data_manifest_path_in_dir(base_dir: str) -> str:
+    return _data_path_in_dir(base_dir, DATA_MANIFEST_FILENAME)
+
+
+def get_train_data_path_in_dir(base_dir: str) -> str:
+    return _data_path_in_dir(
+        base_dir,
+        "train_data.csv" if CONF_DF == "to_csv" else "train_data.feather",
+    )
+
+
+def get_test_data_path_in_dir(base_dir: str) -> str:
+    return _data_path_in_dir(
+        base_dir,
+        "test_data.csv" if CONF_DF == "to_csv" else "test_data.feather",
+    )
+
+
+def sha256_file(path: str, chunk_size: int = 4 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def data_manifest_id(payload: dict) -> str:
+    canonical = json.dumps(
+        json_safe(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def load_data_manifest_from_dir(base_dir: str) -> dict:
+    """Load provenance recorded by preparation without validating its contents."""
+    manifest_path = get_data_manifest_path_in_dir(base_dir)
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 def load_pre_params_from_dir(base_dir: str) -> BaseDefine:
     """Load interval settings from data_config_meta.json under base_dir (no global paths; multiprocessing-friendly)."""
@@ -356,7 +402,12 @@ def print_zret_statistics(df, label_col='label'):
         print(sub.describe(percentiles=[0.5,0.75,0.9,0.95,0.99]))
 
 def _tbm_take_profit_uses_high_low(para) -> bool:
-    mode = getattr(para, "tbm_take_profit_price", "close")
+    mode = para.tbm_take_profit_price
+    if mode is None:
+        raise ValueError(
+            "tbm_take_profit_price is required when label_type is "
+            f"{para.label_type!r}; use 'close' or 'high_low'"
+        )
     if mode == "close":
         return False
     if mode == "high_low":
@@ -1509,6 +1560,11 @@ def validate_kline_source(
     if df.empty:
         raise ValueError(f"K-line validation failed for {source}: data is empty")
 
+    def format_utc_ms(value: int) -> str:
+        return pd.to_datetime(value, unit="ms", utc=True).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+
     open_time = pd.to_numeric(df["open_time_ms_utc"], errors="coerce")
     close_time = pd.to_numeric(df["close_time_ms_utc"], errors="coerce")
     invalid_timestamp = (
@@ -1580,11 +1636,25 @@ def validate_kline_source(
             )
             for idx in df.index[spacing_mask][:3]:
                 pos = df.index.get_loc(idx)
+                previous_open = int(open_time.iloc[pos - 1])
+                current_open = int(open_time.iloc[pos])
+                delta_ms = int(delta.iloc[pos])
+                if delta_ms > interval_ms and delta_ms % interval_ms == 0:
+                    missing_count = delta_ms // interval_ms - 1
+                    first_missing = previous_open + interval_ms
+                    last_missing = current_open - interval_ms
+                    gap_detail = (
+                        f"missing_range={format_utc_ms(first_missing)} -> "
+                        f"{format_utc_ms(last_missing)} "
+                        f"missing_count={missing_count}"
+                    )
+                else:
+                    gap_detail = "missing_range=unaligned_spacing"
                 samples.append(
                     f"rows={df.index[pos - 1]}->{idx} "
-                    f"previous_open={int(open_time.iloc[pos - 1])} "
-                    f"current_open={int(open_time.iloc[pos])} "
-                    f"delta_ms={int(delta.iloc[pos])}"
+                    f"previous_open={format_utc_ms(previous_open)} ({previous_open}) "
+                    f"current_open={format_utc_ms(current_open)} ({current_open}) "
+                    f"{gap_detail} delta_ms={delta_ms}"
                 )
         if summary["invalid_duration_count"]:
             errors.append(
@@ -1641,15 +1711,16 @@ def validate_kline_source(
         )
     return summary
 
-def get_git_info(logger):
+def git_revision(*, require_clean: bool = False) -> str:
+    """Return the repository revision, optionally requiring an entirely clean tree."""
     repo = git.Repo(PROJECT_DIR)
-    sha = repo.head.object.hexsha
-    short_sha = repo.git.rev_parse(sha, short=8)
-    
-    logger.info(f"Full SHA: {sha}")
-    logger.info(f"Short SHA: {short_sha}")
-    logger.info(f"Commit Message: {repo.head.object.message.strip()}")
-    return short_sha
+    if require_clean and repo.is_dirty(untracked_files=True):
+        status = repo.git.status("--short")
+        raise RuntimeError(
+            "Git working tree is not clean; commit or remove all staged, unstaged, "
+            f"and untracked changes before starting an experiment:\n{status}"
+        )
+    return repo.head.object.hexsha
 
 def build_dataclass(cls, data: dict):
     """

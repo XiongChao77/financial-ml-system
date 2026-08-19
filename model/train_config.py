@@ -243,8 +243,8 @@ COMBO_SUB_TASKS = {
 
 seq_len = 96
 SingleModelConfig = TrainConfig(
-    model_cfg=LSTMConfig(model_version=3, seq_len=seq_len),
+    model_cfg=TransformerConfig(model_version=2, seq_len=seq_len),
     feature_conf_list=feature.FEATURE_LIST_CRYPTOCURRENCY,
-    train_task=TrainTask.DUAL_HEAD_3CLASS,
-    stride =2,
+    train_task=TrainTask.DIRECT_3CLASS,
+    stride =4,
 )

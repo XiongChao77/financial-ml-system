@@ -137,6 +137,9 @@ def build_runner_config(
         broker_config=broker_config,
         data_config=data_config,
         save_dir=save_dir,
+        experiment_context=backtest_runner.ExperimentContext(
+            git_commit=common.git_revision(),
+        ),
     )
     return runner_config, market_config, train_config, params.get("hash")
 

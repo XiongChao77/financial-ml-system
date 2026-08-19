@@ -1,14 +1,9 @@
-import json, os, subprocess
+import json, os
 import hashlib
-import shutil
-import sys
 from dataclasses import asdict, is_dataclass,dataclass
 import numpy as np
-from datetime import datetime
-from typing import Dict, Iterable, List
+from typing import Any, Dict
 import pandas as pd
-
-current_work_dir = os.path.dirname(__file__)
 
 def stop_loss_atr_pct(df: pd.DataFrame, holdbar: int) -> pd.Series:
     length = max(10, round(0.8 * holdbar))
@@ -30,85 +25,6 @@ def stop_loss_atr_pct(df: pd.DataFrame, holdbar: int) -> pd.Series:
     atr = tr.ewm(alpha=1/length, adjust=False, min_periods=length).mean()
 
     return atr / close
-
-def auto_git_commit(logger):
-    """
-    Check for uncommitted changes and auto-run git add/commit if any exist.
-    """
-    try:
-        # 1. Check workspace status
-        status = subprocess.check_output(["git", "status", "--porcelain"]).decode().strip()
-        
-        if not status:
-            logger.info("✅ Git workspace is clean. No auto-commit needed.")
-            return
-
-        # 2. Changes found -> auto commit
-        logger.info("📝 Detected uncommitted changes. Performing auto-commit...")
-        
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        commit_msg = f"Auto-commit before experiment"
-        
-        # Run: git add .
-        subprocess.run(["git", "add", "."], check=True)
-        # Run: git commit
-        subprocess.run(["git", "commit", "-m", commit_msg], check=True)
-        
-        # Log the latest commit hash for traceability
-        new_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
-        logger.info(f"🚀 Auto-commit successful. Commit hash: {new_hash}")
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"❌ Auto-commit failed: {e}")
-    except Exception as e:
-        logger.error(f"⚠️ Unexpected error during git operation: {e}")
-
-def get_data_metadata_hash(data_files: List[str]) -> str:
-    """
-    Generate a metadata hash from file name, size, and mtime.
-    """
-    m = hashlib.md5()
-    for f_path in sorted(data_files):
-        if not os.path.exists(f_path):
-            continue
-        stat = os.stat(f_path)
-        # file name + size + modified time
-        info = f"{os.path.basename(f_path)}|{stat.st_size}|{stat.st_mtime}"
-        m.update(info.encode('utf-8'))
-    return m.hexdigest()
-
-def create_git_tag(tag_prefix="exp"):
-    """
-    Create an annotated git tag for the current commit (experiment marker).
-    """
-    tag_name = f"{tag_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    try:
-        subprocess.run(["git", "tag", "-a", tag_name, "-m", f"Experiment started at {tag_name}"], check=True)
-        return tag_name
-    except Exception as e:
-        return f"tag_failed_{str(e)}"
-
-def isolate_and_relaunch(exp_dir: str, ignore_patterns: List[str]):
-    """
-    Copy the project into an experiment directory and relaunch from the new location.
-    """
-    src_dir = os.path.abspath(os.path.join(current_work_dir, ".."))
-    # Create a subfolder under exp_dir to store source code
-    dst_dir = os.path.join(exp_dir, "source_code")
-    
-    if os.path.exists(dst_dir):
-        return # Already in an isolated environment; do not copy again
-    
-    print(f"📦 Isolating codebase to: {dst_dir}")
-    shutil.copytree(src_dir, dst_dir, ignore=shutil.ignore_patterns(*ignore_patterns))
-    
-    # Build relaunch command
-    new_script_path = os.path.join(dst_dir, "experiment", os.path.basename(__file__))
-    new_args = [sys.executable, new_script_path] + sys.argv[1:] + ["--is_isolated"]
-    
-    # Relaunch and exit the current process
-    subprocess.run(new_args)
-    sys.exit(0)
 
 def safe_get(d, keys, default=0):
     """Safely get nested dict values (avoid KeyError)."""
@@ -137,41 +53,82 @@ def json_safe(x):
 
     return x
 
-def param_hash(d, length=12):
+TASK_HASH_LENGTH = 12
+
+
+def param_hash(d, length=TASK_HASH_LENGTH):
     """Compute a stable hash for a parameter dict (used to identify parameter combinations)."""
     s = json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:length]
-    
-def calc_params_hash(
-    *,
-    strategy_config,
-    broker_config,
-    common,
-    train,
-    algo="sha1",
-    length=8,
-):
+
+
+@dataclass(frozen=True)
+class TaskIdentity:
+    """Canonical identity for every stage of one experiment task.
+
+    Component hashes identify reusable artifacts. ``full_hash`` identifies the
+    complete prep/train/simulation combination and is the hash written into the
+    backtest report. All hashes use the same algorithm and length.
     """
-    Compute a stable hash for a parameter snapshot.
-    """
-    payload = {
-        # Include the concrete strategy class so different config types cannot collide.
-        "strategy": {
-            "strategy_config": {
-                "config_type": type(strategy_config).__name__,
-                **asdict(strategy_config),
+
+    prep_hash: str
+    train_hash: str
+    sim_hash: str
+    full_hash: str
+
+    @staticmethod
+    def prep_hash_for(params: Dict[str, Any]) -> str:
+        return param_hash(json_safe(params))
+
+    @staticmethod
+    def train_hash_for(params: Dict[str, Any]) -> str:
+        return param_hash(json_safe(params))
+
+    @staticmethod
+    def sim_hash_for(params: Dict[str, Any]) -> str:
+        return param_hash(json_safe(params))
+
+    @classmethod
+    def from_params(
+        cls,
+        *,
+        prep: Dict[str, Any],
+        train: Dict[str, Any],
+        sim: Dict[str, Any],
+    ) -> "TaskIdentity":
+        prep_params = json_safe(prep)
+        train_params = json_safe(train)
+        sim_params = json_safe(sim)
+        return cls(
+            prep_hash=cls.prep_hash_for(prep_params),
+            train_hash=cls.train_hash_for(train_params),
+            sim_hash=cls.sim_hash_for(sim_params),
+            full_hash=param_hash(
+                {
+                    "prep": prep_params,
+                    "train": train_params,
+                    "sim": sim_params,
+                }
+            ),
+        )
+
+    @classmethod
+    def from_configs(cls, *, strategy_config, broker_config, common, train) -> "TaskIdentity":
+        return cls.from_params(
+            prep=asdict(common),
+            train=asdict(train),
+            sim={
+                "strategy_config": {
+                    "config_type": type(strategy_config).__name__,
+                    **asdict(strategy_config),
+                },
+                "broker_config": asdict(broker_config),
             },
-            "broker_config": asdict(broker_config),
-        },
-        "common": asdict(common),
-        "train": asdict(train),
-    }
+        )
 
-    # canonical JSON: sorted keys, no extra whitespace
-    s = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    h = hashlib.new(algo, s.encode("utf-8")).hexdigest()
+    def as_dict(self) -> Dict[str, str]:
+        return asdict(self)
 
-    return h[:length] if length else h
 
 def load_selected_configs(path):
     """

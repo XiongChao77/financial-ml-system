@@ -19,7 +19,7 @@ def _write_json(path: str, payload: Any) -> None:
 
 
 def copy_data_config_meta(source_dir: str, target_dir: str) -> str:
-    """Copy data_config_meta.json into an artifact dir.
+    """Copy preparation config and its data provenance record into an artifact dir.
 
     Downstream consumers (e.g. trade.runner.backtest_runner) read the preparation params
     straight from the training output dir, so every artifact dir must carry its
@@ -32,6 +32,10 @@ def copy_data_config_meta(source_dir: str, target_dir: str) -> str:
     target = common.get_data_config_path_in_dir(target_dir)
     if os.path.abspath(source) != os.path.abspath(target):
         shutil.copyfile(source, target)
+    manifest_source = common.get_data_manifest_path_in_dir(source_dir)
+    manifest_target = common.get_data_manifest_path_in_dir(target_dir)
+    if os.path.abspath(manifest_source) != os.path.abspath(manifest_target):
+        shutil.copyfile(manifest_source, manifest_target)
     return target
 
 
@@ -108,6 +112,7 @@ def save_single_run(
         "history": "history.json",
         "train_config": "train_config.json",
         "data_config": "data_config_meta.json",
+        "data_manifest": common.DATA_MANIFEST_FILENAME,
     }
     _write_json(os.path.join(save_dir, "task_description.json"), description)
     return metrics_report
@@ -144,6 +149,7 @@ def save_fusion_run(
             for role, directory in role_directories.items()
         },
         "data_config": "data_config_meta.json",
+        "data_manifest": common.DATA_MANIFEST_FILENAME,
     }
     _write_json(os.path.join(fusion_dir, "task_description.json"), description)
     return description

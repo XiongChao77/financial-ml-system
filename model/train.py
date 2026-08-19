@@ -89,6 +89,13 @@ def prepare_data(
     cache_dir: str,
     logger: logging.Logger,
 ) -> PreparedData:
+    data_manifest = common.load_data_manifest_from_dir(prep_output_dir)
+    logger.info(
+        "Loaded prepared data provenance: data_id=%s, time=%s -> %s",
+        data_manifest["data_id"],
+        data_manifest["time"]["start"],
+        data_manifest["time"]["end"],
+    )
     frame = common.load_train_df_from_dir(prep_output_dir)
     preparation = common.load_pre_params_from_dir(prep_output_dir)
     interval_ms = common.get_interval_ms(preparation.interval)
