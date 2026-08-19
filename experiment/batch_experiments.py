@@ -34,7 +34,12 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 
 from model import train_config
 from data_process import common, preparation
-from experiment.task_constructors import construct_experiment_tasks
+try:
+    from experiment.task_constructors import construct_experiment_tasks
+except ModuleNotFoundError as exc:
+    if exc.name != "experiment.task_constructors":
+        raise
+    from experiment.task_constructors_example import construct_experiment_tasks
 from data_process.utils import (
     TaskIdentity,
     config_from_dict_train,
@@ -52,9 +57,9 @@ TRAIN_REPORTS_FILE = "train_reports.jsonl"
 SELECTED_FILE = "selected_configs.jsonl"
 MAX_PREP = 1
 MAX_TRAIN = 4  # max concurrent train processes (each train runs in its own process)
-MAX_SIM = 30
+MAX_SIM = 25
 SYMBOL: str = "DOGEUSDT"    #ETHUSDT DOGEUSDT
-INTERVAL: str = "30m"
+INTERVAL: str = "15m"
 
 # Training mode switch:
 # - train_config.TrainTask.DIRECT_3CLASS (or TRIGGER/DIRECTION/LONG_OVR/SHORT_OVR and other single model tasks)
@@ -116,6 +121,10 @@ def build_task_spec(
         _assert_hash_roundtrip("prep", pre_d, common.BaseDefine(**pre_d), pre_h)
 
         node_pre = spec.setdefault(pre_h, {"params": json_safe(pre_d), "train": {}})
+        pre_strategy_configs = [
+            backtest_runner.strategy_config_for_preparation(strategy_config, pre)
+            for strategy_config in simulation_task
+        ]
 
         for tr in training_task:
             tr_d = asdict(tr)
@@ -127,7 +136,7 @@ def build_task_spec(
 
             # de-dup sim tasks by hash
             existing = {s["hash"] for s in node_tr["sim_tasks"]}
-            for strategy_config in simulation_task:
+            for strategy_config in pre_strategy_configs:
                 sim_d = _simulation_params(strategy_config)
                 identity = TaskIdentity.from_params(prep=pre_d, train=tr_d, sim=sim_d)
                 sim_h = identity.sim_hash
@@ -1206,7 +1215,14 @@ def run_combo_fusion_and_backtest(
             role_2: {"tr_h": r2["tr_h"], "metrics": r2["metrics"], "train_params": r2["train_params"]},
         }
         for strategy_config in simulation_task:
-            sim_d = json_safe(_simulation_params(strategy_config))
+            pre_para = common.BaseDefine(**r1["pre_params"])
+            effective_strategy_config = (
+                backtest_runner.strategy_config_for_preparation(
+                    strategy_config,
+                    pre_para,
+                )
+            )
+            sim_d = json_safe(_simulation_params(effective_strategy_config))
             identity = TaskIdentity.from_params(
                 prep=r1["pre_params"],
                 train=r1["train_params"],
@@ -1252,7 +1268,7 @@ def main():
     parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
     parser.add_argument("-c", "--cross_test", action="store_true", default=False, help="crosss test")
     parser.add_argument("-l", "--load", action="store_true", default=False, help="load condidate configs for verification,befor applying to market")
-    parser.add_argument("--check-git-clean", action=argparse.BooleanOptionalAction, default=True,
+    parser.add_argument("--check-git-clean", action=argparse.BooleanOptionalAction, default=False,
         help=( "Require a clean Git working tree throughout the experiment " "(disable with --no-check-git-clean)"),
     )
 

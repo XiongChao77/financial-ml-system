@@ -10,7 +10,7 @@ import backtrader as bt
 import backtrader.analyzers as btanalyzers
 import pandas as pd
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any, Optional, Type
 
 current_work_dir = os.path.dirname(__file__)
@@ -200,6 +200,42 @@ def strategy_config_from_dict(params: dict):
     if config_type is None:
         raise ValueError(f"Unsupported strategy config type: {config_type_name}")
     return config_type(**params)
+
+
+def strategy_config_for_preparation(strategy_config, pre_para: Optional[BaseDefine]):
+    """Return the effective strategy config implied by preparation settings.
+
+    A TBM label and ``BbmStrategyConfig`` share the same volatility barriers.
+    Those four barrier multipliers are therefore preparation-derived values,
+    not independent strategy sweep parameters.
+    """
+    if (
+        pre_para is None
+        or pre_para.label_type != "TBM"
+        or not isinstance(strategy_config, BbmStrategyConfig)
+    ):
+        return strategy_config
+
+    if (
+        pre_para.stop_multiplier_rate_long is None
+        or pre_para.stop_multiplier_rate_short is None
+    ):
+        raise ValueError(
+            "TBM with BbmStrategyConfig requires both preparation stop "
+            "multiplier rates"
+        )
+
+    return replace(
+        strategy_config,
+        threshold_long=pre_para.vol_multiplier_long,
+        threshold_short=pre_para.vol_multiplier_short,
+        stop_loss_long=(
+            pre_para.vol_multiplier_long * pre_para.stop_multiplier_rate_long
+        ),
+        stop_loss_short=(
+            pre_para.vol_multiplier_short * pre_para.stop_multiplier_rate_short
+        ),
+    )
 
 
 def atr_ref_bars_for_strategy(strategy_config, default: int = 14) -> int:
@@ -674,11 +710,15 @@ def main(logger: logging.Logger, config: RunnerConfig):
             f"Unsupported data config: {type(config.data_config).__name__}"
         )
 
-    venue_cls = _venue_for_strategy(config.strategy_config)
+    strategy_config = strategy_config_for_preparation(
+        config.strategy_config,
+        pre_para,
+    )
+    venue_cls = _venue_for_strategy(strategy_config)
     feed = _build_feed(frame, config.data_config)
     cerebro = create_backtest_cerebro(
         venue_cls=venue_cls,
-        strategy_config=config.strategy_config,
+        strategy_config=strategy_config,
         broker_config=config.broker_config,
         data=feed,
         predict_num=pre_para.predict_num if pre_para is not None else None,
@@ -699,7 +739,7 @@ def main(logger: logging.Logger, config: RunnerConfig):
         strat,
         model_stats=model_stats,
         save_path=save_path,
-        strategy_config=config.strategy_config,
+        strategy_config=strategy_config,
         broker_config=config.broker_config,
         pre_para=pre_para,
         train_cfg=saved_train_config,
@@ -1354,12 +1394,7 @@ if __name__ == "__main__":
     pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
     exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'simulation'),pre_para.symbol, pre_para.interval)
     logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
-    strategy_config = BbmStrategyConfig(fixed_hold_bars =int(pre_para.predict_num), 
-                                        threshold_long =pre_para.vol_multiplier_long,
-                                        threshold_short =pre_para.vol_multiplier_short,
-                                        stop_loss_long= pre_para.vol_multiplier_long * pre_para.stop_multiplier_rate_long,
-                                        stop_loss_short= pre_para.vol_multiplier_short * pre_para.stop_multiplier_rate_short,
-                                          )
+    strategy_config = BbmStrategyConfig(fixed_hold_bars=int(pre_para.predict_num))
     # strategy_config = MlStrategyConfig(fixed_hold_bars =pre_para.predict_num )
     broker_config = BrokerConfig()
     runner_config = RunnerConfig(
@@ -1370,7 +1405,7 @@ if __name__ == "__main__":
         data_config=ModelDataConfig(
             prep_output_dir=common.DATA_OUT_DIR,
             train_output_dir=train_output_dir,
-            period="all", # forward long all
+            period="long", # forward long all
             device ='auto'
         ),
     )

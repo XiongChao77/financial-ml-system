@@ -414,6 +414,7 @@ def plot_equity_curves(
     price_file: str | None = None,
     normalize_equity: bool = False,
     equity_scale: str = "both",
+    label_by_index: bool = False,
     logger=None,
 ) -> str | None:
     """Plot one or more report equity curves over the underlying market price.
@@ -425,7 +426,8 @@ def plot_equity_curves(
     starting value of 1 with ``normalize_equity=True``. By default both the
     absolute equity (linear axis) and logarithmic equity are drawn with separate
     right-side axes. Pass ``equity_scale="linear"`` or ``"log"`` to draw only
-    one representation. The saved image path is returned.
+    one representation. ``label_by_index=True`` labels strategies as ``S0``,
+    ``S1``, etc. instead of using report hashes. The saved image path is returned.
     """
     import matplotlib.pyplot as plt
     import pandas as pd
@@ -535,7 +537,12 @@ def plot_equity_curves(
             )
         report_for_label = reports_by_period[0][1]
         params_hash = safe_get(report_for_label, ["params", "hash"])
-        label = str(params_hash) if params_hash else f"S{start_index + index}"
+        strategy_number = start_index + index
+        label = (
+            f"S{strategy_number}"
+            if label_by_index or not params_hash
+            else str(params_hash)
+        )
         equity_paths.append((label, full_path))
 
     if not equity_paths:
@@ -563,22 +570,25 @@ def plot_equity_curves(
     color_map = plt.get_cmap("tab10")
     for path_index, (label, full_path) in enumerate(equity_paths):
         values = full_path["continuous_equity"]
+        strategy_color = color_map(path_index % 10)
         if linear_equity_axis is not None:
             linear_equity_axis.plot(
                 full_path.index,
                 values,
-                color=color_map((path_index * 2) % 10),
+                color=strategy_color,
                 linewidth=1.5,
                 alpha=0.8,
+                linestyle="-",
                 label=f"{label} Absolute",
             )
         if log_equity_axis is not None:
             log_equity_axis.plot(
                 full_path.index,
                 values.where(values > 0),
-                color=color_map((path_index * 2 + 1) % 10),
+                color=strategy_color,
                 linewidth=1.5,
                 alpha=0.8,
+                linestyle="--",
                 label=f"{label} Log",
             )
 
