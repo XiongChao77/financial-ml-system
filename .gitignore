@@ -28,3 +28,16 @@ tests/*
 
 # Local experiment sweeps. Keep the tracked example as the default fallback.
 /experiment/task_constructors.py
+
+# Report explorer service regression coverage.
+!tests/
+!tests/test_report_service.py
+!tests/test_frontend_report_store.py
+!tests/test_detail_report_api.py
+
+# Backtests is an application module, not a test directory.
+!UI/backend/modules/backtests/
+!UI/backend/modules/backtests/**
+!UI/quant-ui/src/modules/backtests/
+!UI/quant-ui/src/modules/backtests/**
+*__pycache__*

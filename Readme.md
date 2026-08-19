@@ -32,12 +32,15 @@ cd data_process
 python download_binance_history.py #data format example: data_process/data_format_example.csv
 python preparation.py   #data process and labeling
 ```
-**Label Visualization (Optional)**
-An optional web-based tool for inspecting generated labels together with market price, thresholds, and other labeling details, making it easier to validate and debug the labeling process.
-Make sure `CONF_DF = 'to_csv'` in `data_process/common.py`.
+**Strategy Center**
+
+The unified UI provides Labels, Backtests, and Experiments in one application.
+Labels reads the current preparation output and can generate a new dataset from
+an editable `BaseDefine` configuration.
+
 ```bash
-cd data_process/label_viewer
-npm install
+uvicorn UI.backend.main:app --host 0.0.0.0 --port 8000
+cd UI/quant-ui
 npm run dev
 ```
 <p align="left">
@@ -304,7 +307,6 @@ It is not financial advice, investment advice, or a recommendation to trade. Qua
 ## License
 
 No open-source license is currently specified. Unless a license is added, all rights are reserved by the author.
-
 
 
 
