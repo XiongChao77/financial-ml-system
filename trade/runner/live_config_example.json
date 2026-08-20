@@ -1,0 +1,39 @@
+{
+  "_comment": "Each key is a deployment id. The nested hash selects report params.hash. Paths are relative to this file.",
+  "mt5-live-1": {
+    "enable": true,
+    "hash": "mt5-report-hash",
+    "report": "../../quant_output/experiment/reports.jsonl",
+    "model_path": "../../quant_output/experiment/valid_train_out/mt5-report-hash",
+    "device": "cpu",
+    "venue": "MT5",
+    "MT5": {
+      "path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
+      "login": "100000001",
+      "password": "replace-with-local-password",
+      "server": "Broker-Server"
+    }
+  },
+  "bybit-live-1": {
+    "enable": true,
+    "hash": "bybit-report-hash",
+    "report": "../../quant_output/experiment/reports.jsonl",
+    "model_path": "../../quant_output/experiment/valid_train_out/bybit-report-hash",
+    "device": "cpu",
+    "venue": "Bybit",
+    "Bybit": {
+      "key_path": "../exchange/bybit/account/keys/main"
+    }
+  },
+  "binance-live-1": {
+    "enable": false,
+    "hash": "binance-report-hash",
+    "report": "../../quant_output/experiment/reports.jsonl",
+    "model_path": "../../quant_output/experiment/valid_train_out/binance-report-hash",
+    "device": "cpu",
+    "venue": "Binance",
+    "Binance": {
+      "key_path": "../exchange/binance/account/keys/main"
+    }
+  }
+}
