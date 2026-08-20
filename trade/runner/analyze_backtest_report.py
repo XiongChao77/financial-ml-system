@@ -441,7 +441,7 @@ def plot_equity_curves(
     if not results:
         return None
 
-    period_order = ("long", "short", "forward")
+    period_order = ("long", "short", "forward", "all")
 
     def period_reports(result: dict):
         if not isinstance(result, dict):
@@ -712,16 +712,17 @@ def daily_equity_context(report: dict, target_date: str | None) -> dict:
             "end_equity": None,
             "equity_change": None,
             "equity_change_pct": None,
-            "intraday_drawdown_pct": None,
+            "daily_drawdown_pct": None,
         }
 
     row = rows[index]
     start_equity = to_float(row.get("start_equity"), None)
     minimum_equity = to_float(row.get("minimum_equity"), None)
     end_equity = to_float(row.get("end_equity"), None)
-    intraday_drawdown_pct = to_float(
-        row.get("intraday_drawdown_pct"),
-        0.0,
+    daily_drawdown_pct = (
+        minimum_equity / start_equity - 1.0
+        if start_equity and minimum_equity is not None
+        else 0.0
     )
     equity_change = (
         end_equity - start_equity
@@ -740,7 +741,7 @@ def daily_equity_context(report: dict, target_date: str | None) -> dict:
         "end_equity": end_equity,
         "equity_change": equity_change,
         "equity_change_pct": equity_change_pct,
-        "intraday_drawdown_pct": intraday_drawdown_pct,
+        "daily_drawdown_pct": daily_drawdown_pct,
     }
 
 
@@ -749,17 +750,31 @@ def worst_daily_loss(report: dict) -> dict:
     if not rows:
         return {
             "date": safe_get(report, ["drawdown", "max_daily_date"]),
-            "intraday_drawdown_pct": safe_get(
+            "daily_drawdown_pct": safe_get(
                 report,
                 ["drawdown", "max_daily_dd"],
                 0.0,
             ),
             "end_equity": None,
         }
-    return min(
+    worst = dict(min(
         rows,
-        key=lambda item: to_float(item.get("intraday_drawdown_pct"), 0.0),
+        key=lambda item: (
+            to_float(item.get("minimum_equity"), 0.0)
+            / to_float(item.get("start_equity"), 1.0)
+            - 1.0
+            if to_float(item.get("start_equity"), 0.0) > 0
+            else 0.0
+        ),
+    ))
+    start_equity = to_float(worst.get("start_equity"), 0.0)
+    minimum_equity = to_float(worst.get("minimum_equity"), start_equity)
+    worst["daily_drawdown_pct"] = (
+        minimum_equity / start_equity - 1.0
+        if start_equity > 0
+        else 0.0
     )
+    return worst
 
 
 def trade_logs(report: dict) -> list[dict]:
@@ -871,7 +886,12 @@ def short_trade_line(trade: dict) -> str:
 
 
 def analyze_record(record: dict, top_n: int = 10, focus_date: str | None = None) -> dict:
-    report = dict(record["report"])
+    period = next(
+        period
+        for period in ("all", "long", "forward")
+        if isinstance(record.get(period), dict)
+    )
+    report = dict(record[period])
     additional = record["additional"]
     report["trade_logs"] = additional.get("trade_logs") or report.get("trade_logs") or []
     worst_day = worst_daily_loss(report)
@@ -903,7 +923,7 @@ def print_analysis(
     emit(
         "Worst daily loss: "
         f"date={worst.get('date')} "
-        f"dd={fmt_pct(worst.get('intraday_drawdown_pct'))} "
+        f"dd={fmt_pct(worst.get('daily_drawdown_pct'))} "
         f"equity={worst.get('end_equity')}"
     )
     emit(f"Focus date: {item['focus_date']}")

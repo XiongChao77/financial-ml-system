@@ -3,12 +3,27 @@ import backtrader as bt
 import math
 
 
+def daily_drawdown_pct(item) -> float:
+    """Calculate intraday drawdown from persisted daily account facts."""
+    start_equity = float(item.get("start_equity", 0.0))
+    minimum_equity = float(item.get("minimum_equity", start_equity))
+    if start_equity <= 0:
+        return 0.0
+    return minimum_equity / start_equity - 1.0
+
+
 def _count_daily_drawdown_breaches(daily_stats, threshold: float) -> int:
     """Count days whose drawdown magnitude is strictly greater than threshold."""
     return sum(
         1
         for item in daily_stats
-        if item["intraday_drawdown_pct"] < -threshold
+        if daily_drawdown_pct(item) < -threshold
+        and not math.isclose(
+            daily_drawdown_pct(item),
+            -threshold,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
     )
 
 class CusAnalyzer(bt.Analyzer):
@@ -143,19 +158,11 @@ class CusAnalyzer(bt.Analyzer):
         if date_obj is None:
             return
 
-        if self._day_start_equity > 0:
-            intraday_drawdown_pct = (
-                self._day_min_equity - self._day_start_equity
-            ) / self._day_start_equity
-        else:
-            intraday_drawdown_pct = 0.0
-
         self._daily_stats.append({
             "date": str(date_obj),
             "start_equity": self._day_start_equity,
             "minimum_equity": self._day_min_equity,
             "end_equity": self._day_end_equity,
-            "intraday_drawdown_pct": intraday_drawdown_pct,
         })
 
     def _finalize_drawdown(self):
@@ -169,14 +176,14 @@ class CusAnalyzer(bt.Analyzer):
 
         worst_day = min(
             self._daily_stats,
-            key=lambda x: x["intraday_drawdown_pct"],
+            key=daily_drawdown_pct,
         )
         violation_count_3 = _count_daily_drawdown_breaches(self._daily_stats, 0.03)
         violation_count_4 = _count_daily_drawdown_breaches(self._daily_stats, 0.04)
         violation_count_5 = _count_daily_drawdown_breaches(self._daily_stats, 0.05)
 
         return {
-            'max_daily_dd': worst_day['intraday_drawdown_pct'],
+            'max_daily_dd': daily_drawdown_pct(worst_day),
             'max_daily_dd_date': worst_day['date'],
             'daily_dd_violation_days': violation_count_4,
             'daily_dd_max_violation_days': violation_count_5,
