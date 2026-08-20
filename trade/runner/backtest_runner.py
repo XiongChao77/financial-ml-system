@@ -248,6 +248,8 @@ def atr_ref_bars_for_strategy(strategy_config, default: int = 14) -> int:
     value = getattr(strategy_config, "atr_ref_bars", None)
     if value is None:
         value = getattr(strategy_config, "fixed_hold_bars", default)
+    if value is None:
+        value = default
     return max(1, int(value))
 
 
@@ -769,6 +771,8 @@ def main(logger: logging.Logger, config: RunnerConfig):
     candles.rename(columns={"open_time_date_utc": "time"}, inplace=True)
     candles["time"] = candles["time"].apply(lambda dt: int(dt.timestamp()))
     report_additional, report = statistics
+    report_period = getattr(config.data_config, "period", "all")
+    statistics = (report_additional, {report_period: report})
     # report_analysis = analyze_backtest_report(
     #     report,
     #     report_additional,
@@ -1185,7 +1189,7 @@ def generate_backtest_report(
         losses_values = []
         for item in daily_account:
             if isinstance(item, dict):
-                val = item.get("intraday_drawdown_pct", 0)
+                val = cus_analyzer.daily_drawdown_pct(item)
             else:
                 val = item
             if val < 0:
@@ -1394,9 +1398,10 @@ def generate_backtest_report(
     logger.info("-" * 80)
 
     if save_path:
+        period = getattr(data_config, "period", "all")
         with open(save_path, "w", encoding="utf-8") as f:
             json.dump(
-                {"report": report, "additional": report_additional},
+                {period: report, "additional": report_additional},
                 f,
                 ensure_ascii=False,
                 separators=(",", ":"),

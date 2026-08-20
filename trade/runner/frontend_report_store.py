@@ -36,6 +36,17 @@ def validate_frontend_report(payload: Any) -> None:
         raise ValueError(
             "The frontend report must contain [additional, report] statistics"
         )
+    reports = statistics[1]
+    if not isinstance(reports, Mapping):
+        raise ValueError("The frontend report must contain a period report object")
+    period_keys = {"long", "forward", "all"}.intersection(reports)
+    if len(period_keys) != 1:
+        raise ValueError(
+            "The frontend report must contain exactly one period report"
+        )
+    period = next(iter(period_keys))
+    if not isinstance(reports[period], Mapping):
+        raise ValueError("The period report must be a JSON object")
 
 
 def write_latest_backtest_report(
