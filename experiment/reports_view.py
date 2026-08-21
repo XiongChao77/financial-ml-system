@@ -1,5 +1,5 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
-import os, sys, time, json, math
+import os, sys, time, json, math, shutil
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -17,6 +17,7 @@ output_dir = os.path.join(common.PERSISTENCE_DIR,'batch_experiments',"selected_c
 os.makedirs(output_dir, exist_ok=True)
 TOP_K = 50
 SKIP_PERCENT = 0  # Percentage of front part to skip; 0 means no skip, select from the very beginning
+EQUITY_SCALE = "log"  # Supported values: "linear", "log", or "both".
 
 def analyze_forward_long_correlation(selected):
     """
@@ -293,18 +294,59 @@ def save_raw_reports(selected_rows, exp_dir ='' ,output_filename="reports_raw.js
                 raw_data = row.get("raw")
                 if raw_data:
                     f.write(json.dumps(raw_data, ensure_ascii=False) + "\n")
+                    source_details = report_details_path(raw_data, row["path"])
+                    target_details = report_details_path(raw_data, out_path)
+                    if os.path.abspath(source_details) != os.path.abspath(target_details):
+                        os.makedirs(os.path.dirname(target_details), exist_ok=True)
+                        shutil.copy2(source_details, target_details)
         
         print(f"✅ Raw data saved successfully!")
     except Exception as e:
         print(f"❌ Failed to save: {str(e)}")
 
 
+def report_details_path(report, report_path):
+    identity = report["params"]["identity"]
+    return os.path.join(
+        os.path.dirname(report_path),
+        identity["prep_hash"],
+        identity["train_hash"],
+        identity["sim_hash"],
+        "report_details.json",
+    )
+
+
+def load_report_details(report, report_path):
+    path = report_details_path(report, report_path)
+    with open(path, "r", encoding="utf-8") as source:
+        return json.load(source)
+
+
+def period_report(report, period, report_details=None):
+    materialized = {
+        "params": report["params"],
+        **report["results"][period],
+    }
+    if report_details is not None:
+        materialized.update(report_details["results"][period])
+    return materialized
+
+
+def attach_report_details(row):
+    detailed = dict(row)
+    details = load_report_details(row["raw"], row["path"])
+    detailed["long"] = period_report(row["raw"], "long", details)
+    detailed["forward"] = period_report(row["raw"], "forward", details)
+    detailed["report_details"] = details
+    return detailed
+
+
 def extract_row(report, src_path):
     """
     Extract key fields from a single report.
     """
-    long = report.get("long", report)
-    forward = report.get("forward", report)
+    long = period_report(report, "long")
+    forward = period_report(report, "forward")
     perf = forward.get("performance", {})
     params = forward.get("params", {})
     common = params.get("common", {})
@@ -336,7 +378,7 @@ def basic_filter(all_results):
     forward_results, _ = filter_by_criteria(
         all_results,
         period='forward',
-        cagr=0,
+        cagr=0.3, daily_freq = 0.25
     )
     print(
         f"After 0-screening forward: {len(forward_results)}, "
@@ -393,36 +435,50 @@ def _short_model_type(model_type):
     return _MODEL_TYPE_SHORT_NAMES.get(model_type, model_type[:8])
 
 
-def show_performance(all_results,output_dir, batch_size=5):
+def show_performance(
+    all_results,
+    output_dir,
+    batch_size=5,
+    equity_scale=EQUITY_SCALE,
+):
     print("-"*20 + 'Key strategy indicators' +"-"*20)
     header = (
         f"{'Num':>3} {'Hash':<12} {'Model':<8} {'Ver':>3} "
-        f"{'CAGR':>7} {'Sharpe':>7} {'Calmar':>7} {'MaxDD':>7} "
+        f"{'L_CAGR':>7} {'F_CAGR':>7} {'Sharpe':>7} {'Calmar':>7} {'MaxDD':>7} "
         f"{'Freq':>6} {'Win':>6} {'RCMed':>7} {'RCPos':>6} {'DDDays':>7}"
     )
     print(header)
     print("-" * len(header))
 
     for i, r in enumerate(all_results):
-        g = lambda k: common.recursive_get(r['long'], k)
+        long_metric = lambda key: common.recursive_get(r["long"], key)
+        forward_metric = lambda key: common.recursive_get(r["forward"], key)
         model_cfg = (
             r.get("long", {})
             .get("params", {})
             .get("train", {})
             .get("model_cfg", {})
         )
-        model_type = model_cfg.get("model_type", g("model_type"))
-        model_version = model_cfg.get("model_version", g("model_version"))
+        model_type = model_cfg.get("model_type", long_metric("model_type"))
+        model_version = model_cfg.get("model_version", long_metric("model_version"))
         print(
-            f"{i:>3} {str(g('hash')):<12} "
+            f"{i:>3} {str(long_metric('hash')):<12} "
             f"{_short_model_type(model_type):<8} {str(model_version):>3} "
-            f"{g('cagr'):7.2f} {g('sharpe'):7.2f} {g('calmar'):7.2f} "
-            f"{g('max_dd_pct'):7.2f} {g('daily_freq'):6.2f} "
-            f"{g('win_rate'):6.2f} {g('rc_median'):7.2f} "
-            f"{g('rc_pos_ratio'):6.2f} {g('max_hwm_duration_days'):7.2f}"
+            f"{long_metric('cagr'):7.2f} {forward_metric('cagr'):7.2f} "
+            f"{long_metric('sharpe'):7.2f} {long_metric('calmar'):7.2f} "
+            f"{long_metric('max_dd_pct'):7.2f} {long_metric('daily_freq'):6.2f} "
+            f"{long_metric('win_rate'):6.2f} {long_metric('rc_median'):7.2f} "
+            f"{long_metric('rc_pos_ratio'):6.2f} "
+            f"{long_metric('max_hwm_duration_days'):7.2f}"
         )
-    compute_correlation(all_results,output_dir)
-    plot_in_batches(all_results,output_dir,batch_size)
+    detailed_results = [attach_report_details(row) for row in all_results]
+    compute_correlation(detailed_results,output_dir)
+    plot_in_batches(
+        detailed_results,
+        output_dir,
+        batch_size,
+        equity_scale=equity_scale,
+    )
 
 def sort_by_correlation_diversity(all_results):
     """
@@ -460,7 +516,12 @@ def sort_by_correlation_diversity(all_results):
     return sorted_results
 
 def build_return_series(report):
-    daily = report["long"].get("daily_account", [])
+    daily = (
+        report["long"]
+        .get("raw_analyzer", {})
+        .get("customize", {})
+        .get("daily_account", [])
+    )
 
     df = pd.DataFrame(daily)
     df['date'] = pd.to_datetime(df['date'])
@@ -537,28 +598,42 @@ def compute_correlation(all_results, output_dir):
 
     print(f"📊 Dynamic-size correlation heatmap saved (Size: {fig_width:.1f}x{fig_height:.1f} in): {save_path}")
 
-def plot_in_batches(all_results, output_dir, batch_size=5):
+def plot_in_batches(
+    all_results,
+    output_dir,
+    batch_size=5,
+    equity_scale=EQUITY_SCALE,
+):
     total = len(all_results)
     
     sns.set_theme(style="white")
     for i in range(0, total, batch_size):
         batch = all_results[i:i + batch_size]
+        plot_payloads = [
+            {
+                "report": row["raw"],
+                "report_details": row["report_details"],
+            }
+            for row in batch
+        ]
         filename = f"batch_{i//batch_size + 1}.png"
         # ✨ Pass current loop index i as the starting number
         plot_equity_curves(
-            batch,
+            plot_payloads,
             output_dir,
             filename,
             start_index=i,
             label_by_index=True,
+            equity_scale=equity_scale,
         )
 
 def main():
     exp_dir1 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','13_31_24')
     exp_dir2 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','14_16_19')
-    exp_dir_list = [exp_dir2]
+    exp_dir3 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','22_55_08')
+    exp_dir_list = [exp_dir3]
     filter_report = None
-    # filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
+    filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
     rows = []
     records = []
@@ -577,38 +652,44 @@ def main():
     print(f"Total reports loaded: {len(rows)}")
     uin_records = merge_selected(rows)
     print(f"Total uint reports: {len(uin_records)}")
-    # if not filter_report:
-    #     analyze_holdbar(uin_records,target_key="seq_len", period ='forward',metric_key="daily_freq")
-    #     uin_records = basic_filter(uin_records)
-    #     analyze_holdbar(uin_records,target_key="seq_len", period ='long',metric_key="cagr")
-    #     plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
-    #     plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
-    #     plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
-    #     save_raw_reports(uin_records,output_dir, "filtered_raw_reports.jsonl")
-    #     exit()
+    if not filter_report:
+        # analyze_holdbar(uin_records,target_key="seq_len", period ='forward',metric_key="daily_freq")
+        uin_records = basic_filter(uin_records)
+        # analyze_holdbar(uin_records,target_key="seq_len", period ='long',metric_key="cagr")
+        # plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
+        # plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
+        # plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
+        save_raw_reports(uin_records,output_dir, "filtered_raw_reports.jsonl")
+        exit()
+    # uin_records,_ = filter_by_criteria(uin_records, period ='long', cagr=0)
+    # uin_records,_ = filter_by_criteria(uin_records, period ='forward', cagr=0)
     analyze_holdbar(uin_records,target_key="stride",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="fixed_hold_bars",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="seq_len",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="vol_ewma_span", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="predict_num", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="min_expected_move_pct", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='long',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="stop_multiplier_rate_long", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="model_type", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="model_version", period ='long',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="max_daily_loss_pct", period ='long',metric_key="cagr")
-    print("*************************************")
+    print("*********************************************************************************************")
     analyze_holdbar(uin_records,target_key="stride",period ='forward', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="fixed_hold_bars",period ='forward', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="seq_len",period ='forward', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="vol_ewma_span", period ='forward',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="predict_num", period ='forward',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="min_expected_move_pct", period ='forward',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="vol_multiplier_long", period ='forward',metric_key="cagr")
+    analyze_holdbar(uin_records,target_key="stop_multiplier_rate_long", period ='forward',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="model_type", period ='forward',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="model_version", period ='forward',metric_key="cagr")
     analyze_holdbar(uin_records,target_key="max_daily_loss_pct", period ='forward',metric_key="cagr")
     # analyze_model_performance_correlation(uin_records)
     # analyze_model_metrics_by_decile(uin_records)
     # exit()
-    sorted_selected1 = sorted(uin_records, key=itemgetter("l_cagr"), reverse=True)
+    sorted_selected1 = sorted(uin_records, key=itemgetter("f_cagr"), reverse=True)
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_sharpe",save_path=os.path.join(output_dir,f"l_sharpe_heatmap_combined.png"))
     # plot_heatmap(sorted_selected1,var1_key='predict_num',var2_key='predict_num',metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
@@ -634,9 +715,9 @@ def main():
             # show_performance(refined_data, output_dir, 3)
             l_results = l_results + refined_data
         l_results = merge_selected(l_results)
-        l_results = sorted(l_results, key=itemgetter("l_cagr"), reverse=True)
         l_results,unselected = filter_by_criteria(l_results, period ='long', cagr=0.3,calmar = 0.5,sharpe = 0.5,rc_pos_ratio = 0.5,daily_freq = 0.1)
-        l_results,unselected = filter_by_criteria(l_results, period ='forward', cagr=0)
+        l_results,unselected = filter_by_criteria(l_results, period ='forward', cagr=0.3)
+        l_results,unselected = filter_by_criteria(l_results, period ='forward', daily_freq=0.25)
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.8)
         # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.6)
     if symbol == 'DOGEUSDT' and interval=='30m':
@@ -655,7 +736,7 @@ def main():
     #     key=lambda r: common.recursive_get(r.get('long', {}), 'rc_pos_ratio') or 0, 
     #     reverse=True
     # )
-    l_results = l_results#[:2]
+    l_results = l_results[:20]
     selected = l_results
     filter_hash_doge_15 = ['1df68cde','2c833b42','4e6d96d6','b4643441','b1d3aa34','358126fe','404b9edc','8918c3a8','652c9e37','d5eb8b05','6810b357','ef82f618','4e1bcd26','d81ee9ea','1351d037','d40a5588'
                            ,'f1fa2ba1','978a1afb','1870ccac','5290ee6d','d1062846','6d2b9fc9','c6943cca','b7a08817','2babf5c5','f7c92570','044c22f4','e7653d4c','9cc7065e',

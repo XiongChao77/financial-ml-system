@@ -16,6 +16,9 @@ import pyarrow as pa
 from experiment.report_service import (
     ReportRecord,
     json_safe_value,
+    load_report_details,
+    materialize_period_report,
+    report_details_path,
     resolve_under_root,
     validate_period,
 )
@@ -64,14 +67,29 @@ def _load_period_backtest(
 ) -> dict[str, Any]:
     period_report = _period_report(record, period)
     artifacts = resolve_experiment_artifacts(record, period, period_report)
-    report = json_safe_value(deepcopy(dict(period_report)))
-    additional: dict[str, Any] = {}
-    candles = _load_candles(artifacts.prepared_data, report)
-
     root = experiment_service.get_reports_root()
+    details = load_report_details(record, root)
+    materialized = materialize_period_report(record.raw, period, details)
+    candles = _load_candles(artifacts.prepared_data, materialized)
+    report = {
+        "params": json_safe_value(deepcopy(record.raw["params"])),
+        "results": {
+            period: json_safe_value(
+                deepcopy(record.raw["results"][period])
+            ),
+        },
+    }
+    report_details = {
+        "results": {
+            period: json_safe_value(
+                deepcopy(details["results"][period])
+            ),
+        },
+    }
     report_file = resolve_under_root(root, record.source)
+    details_file = report_details_path(record, root)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": {
             "kind": "experiment",
             "dataset_id": dataset_id,
@@ -79,10 +97,12 @@ def _load_period_backtest(
             "strategy_number": record.strategy_number,
             "period": period,
             "report_file": str(report_file.relative_to(root)),
+            "report_details_file": str(details_file.relative_to(root)),
             "data_file": str(artifacts.prepared_data.relative_to(root)),
         },
         "candles": candles,
-        "statistics": [additional, report],
+        "report": report,
+        "report_details": report_details,
     }
 
 
@@ -93,12 +113,34 @@ def _load_complete_experiment_backtest(
     record = experiment_service.registry.record(dataset_id, record_id)
     long_payload = _load_period_backtest(dataset_id, record_id, record, "long")
     forward_payload = _load_period_backtest(dataset_id, record_id, record, "forward")
-    long_additional, long_report = long_payload["statistics"]
-    forward_additional, forward_report = forward_payload["statistics"]
-    additional = _combine_additional(long_additional, forward_additional)
-    report = _combine_reports(long_report, forward_report)
+    long_report = materialize_period_report(
+        long_payload["report"],
+        "long",
+        long_payload["report_details"],
+    )
+    forward_report = materialize_period_report(
+        forward_payload["report"],
+        "forward",
+        forward_payload["report_details"],
+    )
+    combined = _combine_reports(long_report, forward_report)
+    params = combined.pop("params")
+    daily_account = (
+        combined.get("raw_analyzer", {})
+        .get("customize", {})
+        .get("daily_account", [])
+    )
+    for detail_key in ("raw_analyzer", "strategy_detail", "trade_logs"):
+        combined.pop(detail_key, None)
+    long_details = long_payload["report_details"]["results"]["long"]
+    forward_details = forward_payload["report_details"]["results"]["forward"]
+    combined_details = _combine_additional(long_details, forward_details)
+    combined_details.setdefault("raw_analyzer", {}).setdefault(
+        "customize",
+        {},
+    )["daily_account"] = daily_account
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": {
             "kind": "experiment",
             "dataset_id": dataset_id,
@@ -118,7 +160,13 @@ def _load_complete_experiment_backtest(
             long_payload["candles"],
             forward_payload["candles"],
         ),
-        "statistics": [additional, report],
+        "report": {
+            "params": params,
+            "results": {"all": combined},
+        },
+        "report_details": {
+            "results": {"all": combined_details},
+        },
     }
 
 
@@ -190,7 +238,6 @@ def _combine_reports(
 
     daily_account = _combine_daily_account(long_report, forward_report)
 
-    combined.setdefault("params", {}).setdefault("data", {})["period"] = "all"
     combined.setdefault("time", {})["start"] = long_report.get("time", {}).get("start")
     combined["time"]["end"] = forward_report.get("time", {}).get("end")
     regions = {}
@@ -205,7 +252,10 @@ def _combine_reports(
     if forward_time.get("end") is not None:
         ood_region["end"] = forward_time["end"]
     combined["time"]["regions"] = regions
-    combined["daily_account"] = daily_account
+    combined.setdefault("raw_analyzer", {}).setdefault(
+        "customize",
+        {},
+    )["daily_account"] = daily_account
     combined.setdefault("performance", {}).update(
         {
             "start_value": start_value,
@@ -248,7 +298,7 @@ def _combine_reports(
             ),
         }
     )
-    combined["ftmo_challenge"] = simulate_ftmo_challenges(combined)
+    combined["ftmo_challenge"] = simulate_ftmo_challenges(combined, "all")
     return combined
 
 
@@ -260,7 +310,11 @@ def _combine_daily_account(
     combined = []
     current_equity = None
     for report in reports:
-        rows = report.get("daily_account")
+        rows = (
+            report.get("raw_analyzer", {})
+            .get("customize", {})
+            .get("daily_account")
+        )
         if not isinstance(rows, list) or not rows:
             continue
         start_value = report.get("performance", {}).get("start_value")
@@ -354,10 +408,7 @@ def resolve_experiment_artifacts(
 
 
 def _period_report(record: ReportRecord, period: str) -> Mapping[str, Any]:
-    report = record.raw.get(period)
-    if not isinstance(report, Mapping):
-        raise ValueError(f"The selected record has no {period!r} report")
-    return report
+    return materialize_period_report(record.raw, period)
 
 
 def _artifact_component(value: Any, field_name: str) -> str:

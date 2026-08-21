@@ -264,7 +264,7 @@ class BbmSignalStrategy(StrategyBase):
         self.execute_action(action)
         return action
 
-    def report(self) -> dict:
+    def report(self) -> tuple[dict, dict]:
         return {
             "meltdown_days": self.meltdown_days,
             "unexplained_meltdown": self.unexplained_meltdown,
@@ -274,7 +274,7 @@ class BbmSignalStrategy(StrategyBase):
             "skipped_missing_threshold": self.skipped_missing_threshold,
             "skipped_small_threshold": self.skipped_small_threshold,
             "skipped_size": self.skipped_size,
-        }
+        }, {}
 
 
 def valid_pct(value) -> bool:

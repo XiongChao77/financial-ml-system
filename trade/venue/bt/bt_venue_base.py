@@ -227,46 +227,15 @@ class BtVenue(VenueBase,bt.Strategy):
                 metrics[f'label_{side}_count'] = total
         return metrics
 
-    def strategy_metrics(self) -> dict:
-        """
-        Merge [generic venue metrics] + [strategy specific statistics] into {'summary':..., 'detail':...}.
-
-        summary holds scalars only, so it can go straight into the report and into jsonl;
-        detail holds list/dict records (e.g. the martingale death log) and goes to report_additional.
-        A strategy only has to implement report() in its own class, nothing above changes.
-        """
+    def strategy_metrics(self) -> tuple[dict, dict]:
+        """Merge venue metrics with the strategy's explicit report tuple."""
         summary = self.executor_metrics()
-        detail = {}
+        details = {}
 
-        strategy = getattr(self, 'strategy', None)
-        payload = {}
-        if strategy is not None and hasattr(strategy, 'report'):
-            try:
-                payload = strategy.report() or {}
-            except Exception as e:   # a statistics failure must not affect the backtest result
-                self.logger.warning(f"⚠️ strategy.report() failed; skipping strategy metrics: {e}")
-                payload = {}
-
-        strategy_summary, strategy_detail = self._split_metrics(payload)
+        strategy_summary, strategy_details = self.strategy.report()
         summary.update(strategy_summary)
-        detail.update(strategy_detail)
-        return {'summary': summary, 'detail': detail}
-
-    @staticmethod
-    def _split_metrics(payload: dict):
-        """Split by "scalar vs detail" automatically; a strategy may also return summary/detail explicitly"""
-        if 'summary' in payload or 'detail' in payload:
-            return dict(payload.get('summary') or {}), dict(payload.get('detail') or {})
-
-        summary, detail = {}, {}
-        for k, v in payload.items():
-            if isinstance(v, np.generic):
-                v = v.item()
-            if v is None or isinstance(v, (int, float, str, bool)):
-                summary[k] = v
-            else:
-                detail[k] = v
-        return summary, detail
+        details.update(strategy_details)
+        return summary, details
 
     def print_label_audit_report(self):
         """Label alignment audit summary"""

@@ -575,7 +575,7 @@ class RestartableMartingaleStrategy(StrategyBase):
             self.logger.info(f"[EXIT REASONS] {reasons}")
         self.logger.info("=" * 60 + "\n")
 
-    def report(self) -> dict:
+    def report(self) -> tuple[dict, dict]:
         """Structured statistics for the layer above (backtest report / frontend)"""
         losses = [d.loss for d in self.deaths]
         swept = [d.swept for d in self.deaths]
@@ -610,4 +610,4 @@ class RestartableMartingaleStrategy(StrategyBase):
                 }
                 for d in self.deaths
             ],
-        }
+        }, {}

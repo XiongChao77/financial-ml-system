@@ -179,7 +179,7 @@ def load_done_set(reports_path: str) -> set[str]:
                 d = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            h = ((((d or {}).get("forward") or {}).get("params") or {}).get("hash"))
+            h = (((d or {}).get("params") or {}).get("hash"))
             if isinstance(h, str) and h:
                 done.add(h)
     return done
@@ -492,17 +492,18 @@ def _precompute_backtest_predictions(
     from trade.runner import backtest_runner
 
     for period in ("long", "forward"):
+        data_config = backtest_runner.ModelDataConfig(
+            atr_ref_bars=1,
+            prep_output_dir=prep_output_dir,
+            train_output_dir=train_output_dir,
+            device=device,
+            use_prediction_cache=True,
+        )
         cache_path = backtest_runner.precompute_prediction_cache(
             logger,
-            backtest_runner.ModelDataConfig(
-                atr_ref_bars=1,
-                prep_output_dir=prep_output_dir,
-                train_output_dir=train_output_dir,
-                period=period,
-                device=device,
-                use_prediction_cache=True,
-            ),
+            data_config,
             train_cfg,
+            period,
             inference_batch_size=INFERENCE_BATCH_SIZE,
         )
         logger.info("Precomputed %s prediction cache: %s", period, cache_path)
@@ -638,7 +639,6 @@ def _worker_sim(
                     f"calculated={identity.as_dict()}"
                 )
             report_stat = None
-            report = {'long': {}, 'forward': {}, 'pass': False, **(extra_report_fields or {})}
             def run_period(period):
                 runner_config = backtest_runner.RunnerConfig(
                     strategy_config=strategy_config,
@@ -655,24 +655,42 @@ def _worker_sim(
                         train_output_dir=train_output_dir,
                         device="cpu",
                         use_prediction_cache=True,
-                        period=period,
                     ),
                     experiment_context=experiment_context,
-                    persist_full_report=False,
                 )
-                return backtest_runner.main(logger, runner_config)["statistics"][1]
+                return backtest_runner.main(logger, runner_config, period)
 
-            report['long'] = run_period('long')
-            report['forward'] = run_period('forward')
+            period_results = {}
+            period_details = {}
+            shared_params = None
             for period in ("long", "forward"):
-                report_identity = report[period]["params"].get("identity")
+                period_output = run_period(period)
+                period_report = period_output["report"]
+                period_detail = period_output["report_details"]
+                params = period_report["params"]
+                report_identity = params.get("identity")
                 if report_identity != identity.as_dict():
                     raise ValueError(
                         f"{period} report identity mismatch: report={report_identity}, "
                         f"task={identity.as_dict()}"
                     )
-            _assert_period_parameters_match(report["long"], report["forward"])
-            report['pass'] = report['long']["performance"]["cagr"] > 0
+                if shared_params is None:
+                    shared_params = params
+                elif params != shared_params:
+                    raise ValueError("Long and forward report parameters differ")
+                period_results[period] = period_report["results"][period]
+                period_details[period] = period_detail["results"][period]
+
+            report = {
+                **(extra_report_fields or {}),
+                "params": shared_params,
+                "results": period_results,
+            }
+            _write_report_details(
+                reports_path,
+                identity,
+                {"results": period_details},
+            )
             report_stat = report
         except Exception:
             logger.exception(f"Sim failed: {pre_h}/{tr_h}/{sim_h}")
@@ -692,33 +710,34 @@ def _worker_sim(
         result_queue.put(("sim_done", pre_h, tr_h, sim_h, elapsed, report_stat, reports_path, train_output_dir))
 
 
-def _assert_period_parameters_match(
-    long_report: Dict[str, Any],
-    forward_report: Dict[str, Any],
-) -> None:
-    """Require complete period reports to differ only by data.period."""
-
-    normalized = []
-    for expected_period, report in (
-        ("long", long_report),
-        ("forward", forward_report),
-    ):
-        params = report.get("params")
-        if not isinstance(params, dict):
-            raise ValueError(f"{expected_period} report has no params object")
-        params = copy.deepcopy(params)
-        data = params.get("data")
-        if not isinstance(data, dict) or data.get("period") != expected_period:
-            raise ValueError(
-                f"{expected_period} report has invalid params.data.period"
+def _write_report_details(
+    output_path: str,
+    identity: TaskIdentity,
+    report_details: Dict[str, Any],
+) -> str:
+    detail_output_path = os.path.join(
+        os.path.dirname(output_path),
+        identity.prep_hash,
+        identity.train_hash,
+        identity.sim_hash,
+        "report_details.json",
+    )
+    os.makedirs(os.path.dirname(detail_output_path), exist_ok=True)
+    temporary_path = f"{detail_output_path}.{os.getpid()}.tmp"
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as output:
+            json.dump(
+                report_details,
+                output,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
             )
-        data.pop("period")
-        normalized.append(params)
-
-    if normalized[0] != normalized[1]:
-        raise ValueError(
-            "Long and forward report parameters differ outside params.data.period"
-        )
+        os.replace(temporary_path, detail_output_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    return detail_output_path
 
 
 # -----------------------------------------------------------------------------
@@ -757,7 +776,7 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
         if report_stat is not None:
             common.append_jsonl(rp, report_stat)
             if valid == True:
-                strategy_hash = report_stat['forward']['params']['hash']
+                strategy_hash = report_stat["params"]["hash"]
                 target_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', strategy_hash)
                 _hardlink_tree(train_dir, target_dir)
                 logger.info(f"🚀 Hardlinked artifacts: {tr_h} -> {strategy_hash} {target_dir}")
@@ -820,7 +839,7 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
             logger.error(f"❌ Failed to load {path}: {e}")
             return data_map
         for record in records:
-            h = record["forward"].get("params", {}).get("hash")
+            h = record.get("params", {}).get("hash")
             data_map[h] = record
         return data_map
 
@@ -850,8 +869,8 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
 
         # Iterate over three periods
         for p in periods:
-            old_p = old_record.get(p)
-            new_p = new_record.get(p)
+            old_p = (old_record.get("results") or {}).get(p)
+            new_p = (new_record.get("results") or {}).get(p)
 
             # Case A: both reports contain this period
             if old_p and new_p:
@@ -883,7 +902,7 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
                 comparison_entry["verify_all_passed"] = False
 
         # Keep params in results for easier inspection
-        comparison_entry["params"] = old_record.get("forward", {}).get("params") or old_record.get("long", {}).get("params")
+        comparison_entry["params"] = old_record.get("params")
         compare_results.append(comparison_entry)
 
     # --- 4. Save and summarize ---
@@ -1045,12 +1064,12 @@ def train_and_cross_test(
                             train_output_dir=train_save_dir,
                             device="cpu",
                             use_prediction_cache=True,
-                            period="long",
                         )
                         backtest_runner.precompute_prediction_cache(
                             logger,
                             data_config,
                             train_cfg,
+                            "long",
                             inference_batch_size=INFERENCE_BATCH_SIZE,
                         )
                         runner_config = backtest_runner.RunnerConfig(
@@ -1064,11 +1083,14 @@ def train_and_cross_test(
                             ),
                             data_config=data_config,
                             experiment_context=experiment_context,
-                            persist_full_report=False,
                         )
-                        result = backtest_runner.main(logger, runner_config)["statistics"][1]
-                        results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
-                        results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result['performance']['cagr']
+                        report = backtest_runner.main(
+                            logger,
+                            runner_config,
+                            "long",
+                        )["report"]
+                        results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = report
+                        results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = report["results"]["long"]['performance']['cagr']
                     else:
                         for interval in ["15m","30m","1h"]:
                             t_pre_para = common.BaseDefine(**pre_params)
@@ -1084,12 +1106,12 @@ def train_and_cross_test(
                                 train_output_dir=train_save_dir,
                                 device="cpu",
                                 use_prediction_cache=True,
-                                period="long",
                             )
                             backtest_runner.precompute_prediction_cache(
                                 logger,
                                 data_config,
                                 train_cfg,
+                                "long",
                                 inference_batch_size=INFERENCE_BATCH_SIZE,
                             )
                             runner_config = backtest_runner.RunnerConfig(
@@ -1103,11 +1125,14 @@ def train_and_cross_test(
                                 ),
                                 data_config=data_config,
                                 experiment_context=experiment_context,
-                                persist_full_report=False,
                             )
-                            result = backtest_runner.main(logger, runner_config)["statistics"][1]
-                            results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result
-                            results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = result['performance']['cagr']
+                            report = backtest_runner.main(
+                                logger,
+                                runner_config,
+                                "long",
+                            )["report"]
+                            results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = report
+                            results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = report["results"]["long"]['performance']['cagr']
     output_path = os.path.join(output_dir, "cross_test_reports.jsonl")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -1349,18 +1374,17 @@ def main():
         begin_time = time.time()
         results = []
         for r in records:
-            report = {'long': {}, 'forward': {}}
-            params = r["forward"] if "forward" in r else r
+            params = r["params"]
             strategy_config = backtest_runner.strategy_config_from_dict(
-                params["params"]["strategy"],
+                params["strategy"],
             )
             broker_config = backtest_runner.BrokerConfig(
-                **params["params"]["broker"],
+                **params["broker"],
             )
-            pre_para =common.BaseDefine(**params["params"]["common"])
-            train_cfg = _config_from_dict_train(params["params"]["train"])
+            pre_para =common.BaseDefine(**params["common"])
+            train_cfg = _config_from_dict_train(params["train"])
             load_prep_output_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "load_configs",'prep',f'{pre_para.symbol}_{pre_para.interval}')
-            strategy_hash = params["params"]['hash']
+            strategy_hash = params['hash']
             #prepare train output for market
             train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', strategy_hash)
             if not os.path.exists(train_save_dir):
@@ -1368,25 +1392,23 @@ def main():
                     f"Training artifact not found for {strategy_hash}: {train_save_dir}"
                 )
             preparation.main(logger, para=pre_para,prep_output_dir = load_prep_output_dir)
-            cached_data_configs = {}
+            data_config = backtest_runner.ModelDataConfig(
+                atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
+                    strategy_config
+                ),
+                prep_output_dir=load_prep_output_dir,
+                train_output_dir=train_save_dir,
+                device="cpu",
+                use_prediction_cache=True,
+            )
             for period in ("long", "forward"):
-                data_config = backtest_runner.ModelDataConfig(
-                    atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
-                        strategy_config
-                    ),
-                    prep_output_dir=load_prep_output_dir,
-                    train_output_dir=train_save_dir,
-                    device="cpu",
-                    use_prediction_cache=True,
-                    period=period,
-                )
                 backtest_runner.precompute_prediction_cache(
                     logger,
                     data_config,
                     train_cfg,
+                    period,
                     inference_batch_size=INFERENCE_BATCH_SIZE,
                 )
-                cached_data_configs[period] = data_config
             last_cagr = 0
             for risk_per_trade_pct in [0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
                 result = {}
@@ -1403,11 +1425,11 @@ def main():
                             str(risk_per_trade_pct),
                             period,
                         ),
-                        data_config=cached_data_configs[period],
+                        data_config=data_config,
                         experiment_context=experiment_context,
-                        persist_full_report=False,
                     )
-                    return backtest_runner.main(logger, runner_config)["statistics"][1]
+                    output = backtest_runner.main(logger, runner_config, period)
+                    return output["report"]["results"][period]
 
                 long_result = run_selected_period('long')
                 forward_result = run_selected_period('forward')

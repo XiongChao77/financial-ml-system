@@ -44,17 +44,12 @@ class ModelDataConfig:
     atr_ref_bars: int = 80
     prep_output_dir: str = common.DATA_OUT_DIR
     train_output_dir: str = common.TRAIN_OUT_DIR
-    period: str = "long"  # long | forward | all
     device: str = "auto"  # 'auto'/'cuda'/'cpu'
     use_prediction_cache: bool = False
 
     def __post_init__(self):
         if self.atr_ref_bars <= 0:
             raise ValueError("atr_ref_bars must be a positive integer")
-        if self.period not in {"long", "forward", "all"}:
-            raise ValueError(
-                "period must be one of: 'long', 'forward', 'all'"
-            )
 
 @dataclass(kw_only=True)
 class CsvDataConfig(common.MarketDataSourceConfig):
@@ -84,9 +79,3 @@ class RunnerConfig:
     experiment_context: ExperimentContext
     broker_config: BrokerConfig = field(default_factory=BrokerConfig)
     engine_config: BacktestEngineConfig = field(default_factory=BacktestEngineConfig)
-    # Batch workers leave this disabled so concurrent runs never overwrite the
-    # user-facing single-strategy report.
-    publish_frontend_report: bool = False
-    # Standalone runs keep a self-contained detail artifact. Batch experiments
-    # use reports.jsonl as their canonical output and disable this duplicate.
-    persist_full_report: bool = True

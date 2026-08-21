@@ -517,7 +517,7 @@ class ClassicMartingaleStrategy(StrategyBase):
             )
         return intent
 
-    def report(self) -> dict:
+    def report(self) -> tuple[dict, dict]:
         total_trades = len(self.trade_records)
         profitable_trades = sum(
             trade["net_pnl"] > 0.0 for trade in self.trade_records
@@ -558,10 +558,10 @@ class ClassicMartingaleStrategy(StrategyBase):
             "marked_equity": self.marked_equity,
             "exit_counts": dict(self.exit_counts),
         }
-        return {
-            "summary": summary,
-            "detail": {
+        summary.update(
+            {
                 "layer_stats": self._layer_statistics(),
                 "trades": list(self.trade_records),
-            },
-        }
+            }
+        )
+        return summary, {}

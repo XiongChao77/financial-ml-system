@@ -30,7 +30,7 @@ tests/*
 /experiment/task_constructors.py
 PropTrading
 live_config.json
-
+account*
 # Report explorer service regression coverage.
 !tests/
 !tests/test_report_service.py

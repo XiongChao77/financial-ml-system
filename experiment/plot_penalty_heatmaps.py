@@ -56,12 +56,12 @@ def load_and_process(path: Path, period: str = 'forward') -> pd.DataFrame:
         print(f"\n--- Debug: {period.upper()} Period Parsing ---")
         print(f"Raw Columns Found: {df_raw.columns.tolist()}")
 
-        if period not in df_raw.columns:
-            print(f"❌ Error: Period '{period}' not in JSON columns!")
+        if "params" not in df_raw.columns or "results" not in df_raw.columns:
+            print("❌ Error: Canonical params/results columns are missing!")
             return pd.DataFrame()
 
         # 3. Debug: sample first row structure
-        sample_row = df_raw[period].iloc[0]
+        sample_row = df_raw["results"].iloc[0].get(period)
         if isinstance(sample_row, dict):
             print(f"Sample keys in '{period}': {list(sample_row.keys())}")
         else:
@@ -69,7 +69,12 @@ def load_and_process(path: Path, period: str = 'forward') -> pd.DataFrame:
 
         def extract_data(row):
             try:
-                p = row[period]
+                period_result = row["results"].get(period)
+                p = (
+                    {"params": row["params"], **period_result}
+                    if isinstance(period_result, dict)
+                    else None
+                )
                 if p is None: return None
                 
                 res = {
