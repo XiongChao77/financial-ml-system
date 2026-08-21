@@ -15,8 +15,13 @@ from analyse import volatility_prediction_heatmap
 
 def _time_range(df: pd.DataFrame) -> dict:
     if df.empty:
-        raise ValueError("Prepared dataset split is empty")
-    times = pd.to_datetime(df["open_time_date_utc"], utc=True)
+        raise ValueError("Dataset is empty")
+    if "open_time_date_utc" in df.columns:
+        times = pd.to_datetime(df["open_time_date_utc"], utc=True)
+    elif "open_time_ms_utc" in df.columns:
+        times = pd.to_datetime(df["open_time_ms_utc"], unit="ms", utc=True)
+    else:
+        raise ValueError("Dataset has no supported open-time column")
     return {
         "start": times.min().isoformat(),
         "end": times.max().isoformat(),
@@ -24,7 +29,7 @@ def _time_range(df: pd.DataFrame) -> dict:
     }
 
 
-def _dataset_descriptor(df: pd.DataFrame, path: str) -> dict:
+def _source_descriptor(df: pd.DataFrame, path: str) -> dict:
     return {
         "filename": os.path.basename(path),
         "size_bytes": os.path.getsize(path),
@@ -35,16 +40,12 @@ def _dataset_descriptor(df: pd.DataFrame, path: str) -> dict:
 def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,feature_conf_list=[],para = common.BaseDefine(), prep_output_dir =common.DATA_OUT_DIR ):
     file = common.market_data_path(para)
     logger.info(f"using file :{file}")
-    source_descriptor = {
-        "filename": os.path.basename(file),
-        "size_bytes": os.path.getsize(file),
-        "sha256": common.sha256_file(file),
-    }
     # 1. Convert interval string to milliseconds
     interval_ms = common.get_interval_ms(para.interval)
     
     # 2. Persist metadata for labeling and downstream model usage
     df = pd.read_csv(file)
+    source_descriptor = _source_descriptor(df, file)
     if para.market_category == 'Cryptocurrency':
         common.validate_kline_source(
             df,
@@ -100,8 +101,6 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
     os.makedirs(out_dir, exist_ok=True)
     common.save_train_df_to_dir(train_df, out_dir)
     common.save_test_df_to_dir(test_df, out_dir)
-    train_path = common.get_train_data_path_in_dir(out_dir)
-    test_path = common.get_test_data_path_in_dir(out_dir)
     meta_path = common.get_data_config_path_in_dir(out_dir)
     para_dict = asdict(para)
     safe_para = common.json_safe(para_dict)
@@ -109,7 +108,7 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
         json.dump(safe_para, f, indent=4, ensure_ascii=False)
 
     manifest_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": source_descriptor,
         "configuration_hash": param_hash(safe_para),
         "features": {
@@ -127,10 +126,6 @@ def main(logger:logging.Logger, feature_group_list = common.FEATURE_GROUP_LIST,f
         },
         "time": _time_range(df),
         "split_time": pd.Timestamp(split_ts).isoformat(),
-        "datasets": {
-            "train": _dataset_descriptor(train_df, train_path),
-            "forward": _dataset_descriptor(test_df, test_path),
-        },
     }
     manifest = {
         **manifest_payload,

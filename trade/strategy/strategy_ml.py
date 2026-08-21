@@ -274,11 +274,8 @@ class MlSignalStrategy(StrategyBase):
                     f"[Streak] n={len(s)} min={np.min(s)} avg={np.mean(s):.1f} med={np.median(s):.1f} p95={np.percentile(s,95):.1f} max={np.max(s)}"
                 )
 
-    def report(self) -> dict:
-        """
-        MlSignalStrategy specific statistics (holding time distribution / signal streaks / intraday breaker).
-        The scalar part goes into report["strategy"], the list details into report_additional.
-        """
+    def report(self) -> tuple[dict, dict]:
+        """Return ML strategy statistics."""
         metrics = {
             'meltdown_days': self.meltdown_days,
             'fixed_hold_bars': self.config.fixed_hold_bars,
@@ -293,7 +290,7 @@ class MlSignalStrategy(StrategyBase):
                 'hold_max_bars': int(d.max()),
                 'hold_p95_bars': float(np.percentile(d, 95)),
                 'hold_renewal_rate': float((d > self.config.fixed_hold_bars).mean()),
-                'hold_durations': self.all_durations,          # detail
+                'hold_durations': self.all_durations,
             })
         if self.all_signal_streaks:
             s = np.array(self.all_signal_streaks)
@@ -303,9 +300,9 @@ class MlSignalStrategy(StrategyBase):
                 'streak_med': float(np.median(s)),
                 'streak_p95': float(np.percentile(s, 95)),
                 'streak_max': int(s.max()),
-                'signal_streaks': self.all_signal_streaks,     # detail
+                'signal_streaks': self.all_signal_streaks,
             })
-        return metrics
+        return metrics, {}
 
     def log_histogram(self, data):
         """Print a simple console histogram to inspect the distribution"""

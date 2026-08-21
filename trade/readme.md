@@ -56,10 +56,11 @@ Parameters are split by the layer that owns their meaning:
 
 - `trade.strategy.*StrategyConfig`: decision parameters only, such as holding bars, signal thresholds, risk budget and grid rules.
 - `trade.runner.config.BrokerConfig`: initial equity, commission and leverage.
-- `ModelDataConfig` / `CsvDataConfig`: model artifact paths, period selection, symbol, interval and date range.
+- `ModelDataConfig` / `CsvDataConfig`: model artifact paths, symbol, interval and date range.
 - `BacktestEngineConfig`: Backtrader execution switches.
 
-`RunnerConfig` is the single input to `backtest_runner.main(logger, config)`. Its fields are
+`RunnerConfig` and an explicit period are the inputs to
+`backtest_runner.main(logger, config, period)`. Its configuration fields are
 grouped by owner: `strategy_config`, `broker_config`, `data_config`, `engine_config` and
 `report_config`. The concrete data config type selects the pipeline: `ModelDataConfig` loads
 prepared data, model artifacts and predictions internally; `CsvDataConfig` loads raw market

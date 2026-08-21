@@ -197,15 +197,15 @@ class MasterController:
                 raise FileNotFoundError(f"Model output path not found: {train_out_path}")
             record = None
             for r in records:
-                if strategy_hash == r['short']['params']['hash']:
+                if strategy_hash == r["params"]["hash"]:
                     record = r
                     break
             if record == None:
                 raise RuntimeError(f"{strategy_hash} not found in {records_file}")
-            params =record["short"]
-            pre_para= common.BaseDefine(**params["params"]["common"])
-            train_para = TrainConfig(**params["params"]["train"])
-            raw_strategy = params["params"]["strategy"]
+            params = record["params"]
+            pre_para= common.BaseDefine(**params["common"])
+            train_para = TrainConfig(**params["train"])
+            raw_strategy = params["strategy"]
             st_para = MlStrategyConfig(**{
                 key: value for key, value in raw_strategy.items()
                 if key in MlStrategyConfig.__dataclass_fields__

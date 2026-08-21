@@ -74,7 +74,7 @@ class ReportRecord:
     def values(self, period: str) -> dict[str, Any]:
         validate_period(period)
         if period not in self._flat_cache:
-            period_report = self.raw.get(period, self.raw)
+            period_report = materialize_period_report(self.raw, period)
             flattened = flatten_mapping(period_report)
             flattened["_meta.record_id"] = self.record_id
             flattened["_meta.source"] = self.source
@@ -167,8 +167,7 @@ def load_report_dataset(
                     malformed_lines += 1
                     continue
 
-                anchor = raw.get("long") or raw.get("forward") or raw
-                params = anchor.get("params", {}) if isinstance(anchor, dict) else {}
+                params = raw.get("params", {})
                 task_hash = str(params.get("hash") or "")
                 git_commit = str(params.get("git_commit") or "")
                 identity = (task_hash, git_commit)
@@ -195,6 +194,62 @@ def load_report_dataset(
         malformed_lines=malformed_lines,
         duplicate_records=duplicate_records,
     )
+
+
+def materialize_period_report(
+    report: Mapping[str, Any],
+    period: str,
+    report_details: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Combine shared parameters, one period result, and optional details."""
+    validate_period(period)
+    params = report.get("params")
+    results = report.get("results")
+    if not isinstance(params, Mapping):
+        raise ValueError("Report has no params object")
+    if not isinstance(results, Mapping) or not isinstance(results.get(period), Mapping):
+        raise ValueError(f"Report has no {period!r} result")
+
+    materialized = {"params": dict(params), **dict(results[period])}
+    if report_details is not None:
+        detail_results = report_details.get("results")
+        if not isinstance(detail_results, Mapping):
+            raise ValueError("report_details has no results object")
+        period_details = detail_results.get(period)
+        if not isinstance(period_details, Mapping):
+            raise ValueError(f"report_details has no {period!r} result")
+        materialized.update(dict(period_details))
+    return materialized
+
+
+def report_details_path(record: ReportRecord, reports_root: str | Path) -> Path:
+    """Resolve the per-task detail artifact associated with a summary record."""
+    root = Path(reports_root).expanduser().resolve()
+    report_file = resolve_under_root(root, record.source)
+    params = record.raw.get("params")
+    identity = params.get("identity") if isinstance(params, Mapping) else None
+    if not isinstance(identity, Mapping):
+        raise ValueError("Report params has no identity object")
+
+    components = []
+    for key in ("prep_hash", "train_hash", "sim_hash"):
+        value = str(identity.get(key) or "")
+        if not value or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in value):
+            raise ValueError(f"Invalid report identity component: {key}")
+        components.append(value)
+    return report_file.parent.joinpath(*components, "report_details.json")
+
+
+def load_report_details(
+    record: ReportRecord,
+    reports_root: str | Path,
+) -> dict[str, Any]:
+    path = report_details_path(record, reports_root)
+    with path.open("r", encoding="utf-8") as source:
+        payload = json.load(source)
+    if not isinstance(payload, dict):
+        raise ValueError(f"report_details must contain an object: {path}")
+    return payload
 
 
 def flatten_mapping(value: Any, prefix: str = "") -> dict[str, Any]:
@@ -394,6 +449,8 @@ def equity_series(
     records: Sequence[ReportRecord],
     record_ids: Sequence[str],
     period: str,
+    *,
+    reports_root: str | Path,
 ) -> list[dict[str, Any]]:
     validate_period(period)
     requested = set(record_ids)
@@ -403,8 +460,12 @@ def equity_series(
     for record in records:
         if record.record_id not in requested:
             continue
-        period_report = record.raw.get(period, record.raw)
-        daily = _get_nested(period_report, "daily_account")
+        details = load_report_details(record, reports_root)
+        period_report = materialize_period_report(record.raw, period, details)
+        daily = _get_nested(
+            period_report,
+            "raw_analyzer.customize.daily_account",
+        )
         points = []
         if isinstance(daily, list):
             for item in daily:

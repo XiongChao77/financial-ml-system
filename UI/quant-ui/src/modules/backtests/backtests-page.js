@@ -141,7 +141,6 @@ export async function mountBacktestsPage(container, context) {
             </div>
           </div>
           <div class="button-row">
-            ${experimentSource ? '<button data-action="latest" class="secondary-button" type="button">Open latest report</button>' : ""}
             <button data-action="performance" class="secondary-button" type="button" disabled>Performance</button>
             <button data-action="prediction" class="secondary-button" type="button" disabled>Model Prediction</button>
             ${returnTo === "experiments"
@@ -216,13 +215,14 @@ export async function mountBacktestsPage(container, context) {
 
   function renderPayload(payload) {
     const normalized = normalizeBacktestPayload(payload);
-    const [additional, report] = normalized.statistics;
+    const report = normalized.periodReport;
+    const reportDetails = normalized.periodDetails;
     rawCandles = normalized.candles;
-    rawTrades = additional?.trade_logs || [];
-    rawEquity = report?.daily_account || [];
+    rawTrades = reportDetails?.trade_logs || [];
+    rawEquity = getByPath(report, "raw_analyzer.customize.daily_account", []);
     reportData = report || {};
     renderSummary(query('[data-role="summary"]'), report);
-    renderDetails(query('[data-role="details"]'), report, additional);
+    renderDetails(query('[data-role="details"]'), report, reportDetails);
 
     const source = normalized.source || {};
     const sourceLabel = experimentSource
@@ -329,7 +329,6 @@ export async function mountBacktestsPage(container, context) {
 
   reloadButton?.addEventListener("click", load, { signal: abortController.signal });
   query('[data-action="close"]')?.addEventListener("click", () => context.navigate("experiments"), { signal: abortController.signal });
-  query('[data-action="latest"]')?.addEventListener("click", () => context.navigate("backtests"), { signal: abortController.signal });
   performanceButton.addEventListener("click", () => showView("performance"), { signal: abortController.signal });
   predictionButton.addEventListener("click", () => showView("prediction"), { signal: abortController.signal });
   container.querySelectorAll('[data-action="back"]').forEach((button) => {
@@ -357,17 +356,26 @@ export async function mountBacktestsPage(container, context) {
 
 function normalizeBacktestPayload(payload) {
   const body = payload?.payload || payload || {};
-  let statistics = body.statistics;
-  if (!Array.isArray(statistics)) {
-    statistics = [body.additional || {}, body.report || {}];
-  }
-  if (statistics.length !== 2) statistics = [{}, {}];
+  const reportEnvelope = body.report || {};
+  const detailEnvelope = body.report_details || {};
+  const results = reportEnvelope.results || {};
+  const detailResults = detailEnvelope.results || {};
+  const period = body.source?.period
+    || ["all", "long", "forward"].find((name) => results[name]);
+  const periodResult = period ? results[period] || {} : {};
+  const periodDetails = period ? detailResults[period] || {} : {};
+  const report = {
+    params: reportEnvelope.params || {},
+    ...periodResult,
+    ...periodDetails,
+  };
   return {
     ...body,
     candles: Array.isArray(body.candles) ? body.candles : [],
-    statistics,
+    periodReport: report,
+    periodDetails,
     source: body.source || {
-      hash: getByPath(statistics[1], "params.hash"),
+      hash: getByPath(reportEnvelope, "params.hash"),
     },
   };
 }
@@ -379,11 +387,11 @@ function renderSummary(container, report) {
   }).join("");
 }
 
-function renderDetails(container, report, additional) {
+function renderDetails(container, report, reportDetails) {
   const standardGroups = DETAIL_GROUPS.map((group) => {
     const cards = group.fields.map((field) => {
       const value = typeof field.value === "function"
-        ? field.value(report, additional)
+        ? field.value(report, reportDetails)
         : getByPath(report, field.path);
       if (value === null || value === undefined) return "";
       const tone = typeof field.tone === "function" ? field.tone(value) : field.tone;
@@ -470,7 +478,7 @@ function metricCard(label, value, tone = "", wide = false) {
 }
 
 function topDailyLosses(report) {
-  const rows = getByPath(report, "daily_account", []);
+  const rows = getByPath(report, "raw_analyzer.customize.daily_account", []);
   if (!Array.isArray(rows)) return null;
   const losses = rows.map((item) => Number(item?.intraday_drawdown_pct))
     .filter((value) => Number.isFinite(value) && value < 0)
@@ -479,13 +487,13 @@ function topDailyLosses(report) {
   return losses.length ? losses : null;
 }
 
-function minimumEquityDistance(report, additional) {
+function minimumEquityDistance(report, reportDetails) {
   const rawStartValue = getByPath(report, "performance.start_value");
-  const rawMinimumEquity = getByPath(additional, "raw_analyzer.customize.global_min_equity");
+  const rawMinimumEquity = getByPath(reportDetails, "raw_analyzer.customize.global_min_equity");
   const startValue = rawStartValue === null ? NaN : Number(rawStartValue);
   let minimumEquity = rawMinimumEquity === null ? NaN : Number(rawMinimumEquity);
   if (!Number.isFinite(minimumEquity)) {
-    const rows = getByPath(report, "daily_account", []);
+    const rows = getByPath(report, "raw_analyzer.customize.daily_account", []);
     const equities = Array.isArray(rows)
       ? rows.map((item) => Number(item?.minimum_equity)).filter(Number.isFinite)
       : [];
@@ -496,8 +504,8 @@ function minimumEquityDistance(report, additional) {
     : null;
 }
 
-function maximumLossStatus(report, additional) {
-  const distance = minimumEquityDistance(report, additional);
+function maximumLossStatus(report, reportDetails) {
+  const distance = minimumEquityDistance(report, reportDetails);
   return distance === null ? null : distance < -0.10 ? "Breached" : "Within limit";
 }
 

@@ -79,8 +79,3 @@ class MartingaleBtVenue(BtVenue):
         state = self.observe(layers=self.strategy.cycle_layers)
         self.dir = state.position.dir
         self.strategy.process(state)
-
-    def stop(self):
-        self.martingale_report = self.strategy.report()
-        # Strategy settlement + input F1 / label alignment / margin usage / start-end equity are all printed by BtVenue
-        super().stop()

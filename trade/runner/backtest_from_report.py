@@ -69,22 +69,15 @@ def load_jsonl_record(path: str, record_index: int) -> dict[str, Any]:
 
 
 def select_period_report(record: dict[str, Any], period: str) -> dict[str, Any]:
-    """Accept both selected-config wrappers and standalone backtest reports."""
+    """Materialize one period from a canonical summary report."""
     if period not in {"short", "forward", "long", "all"}:
         raise ValueError(f"Unsupported PERIOD: {period!r}")
 
-    # An existing selected-config record normally only contains long/forward.
-    # Either one carries the same model/data parameters needed to rerun "all".
     source_period = "long" if period == "all" else period
-    period_report = record.get(source_period)
-    if isinstance(period_report, dict) and isinstance(period_report.get("params"), dict):
-        return period_report
-    if isinstance(record.get("params"), dict):
-        return record
-
-    raise KeyError(
-        f"The selected record contains neither {source_period!r}.params nor top-level params"
-    )
+    params = _required_dict(record, "params")
+    results = _required_dict(record, "results")
+    period_result = _required_dict(results, source_period)
+    return {"params": params, **period_result}
 
 
 def _required_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -97,7 +90,6 @@ def _required_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
 def build_runner_config(
     period_report: dict[str, Any],
     *,
-    period: str,
     save_dir: str,
 ) -> tuple[backtest_runner.RunnerConfig, common.BaseDefine, Any, str | None]:
     """Restore backtest_runner configuration objects from a report snapshot."""
@@ -129,7 +121,6 @@ def build_runner_config(
         ),
         prep_output_dir=str(prep_output_dir),
         train_output_dir=str(train_output_dir),
-        period=period,
         device=str(data_params.get("device", "cpu")),
     )
     runner_config = backtest_runner.RunnerConfig(
@@ -296,7 +287,6 @@ def main() -> None:
     )
     runner_config, market_config, train_config, params_hash = build_runner_config(
         period_report,
-        period=PERIOD,
         save_dir=output_dir,
     )
 
@@ -307,11 +297,11 @@ def main() -> None:
     logger.info("Prep output: %s", runner_config.data_config.prep_output_dir)
     logger.info("Train output: %s", runner_config.data_config.train_output_dir)
     ensure_backtest_artifacts(runner_config, market_config, train_config, logger)
-    result = backtest_runner.main(logger, runner_config)
+    result = backtest_runner.main(logger, runner_config, PERIOD)
     reports_path = os.path.join(output_dir, "reports.jsonl")
-    common.append_jsonl(reports_path, result["statistics"][1])
+    common.append_jsonl(reports_path, result["report"])
     plot_equity_curves(
-        result["statistics"][1],
+        result,
         output_dir,
         file_name=f"equity_{PERIOD}.png",
         logger=logger,

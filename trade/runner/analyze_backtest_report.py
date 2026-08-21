@@ -38,7 +38,11 @@ def date_from_order(order: dict) -> str | None:
 
 
 def daily_account_rows(report: dict) -> list[dict]:
-    rows = report.get("daily_account") or []
+    rows = safe_get(
+        report,
+        ["raw_analyzer", "customize", "daily_account"],
+        [],
+    ) or []
     return rows if isinstance(rows, list) else []
 
 
@@ -213,6 +217,7 @@ def _simulate_ftmo_equity_segment(
 
 def simulate_ftmo_challenges(
     report: dict,
+    period: str,
     *,
     profit_target_pct: float = 0.10,
     loss_limit_pct: float = 0.10,
@@ -235,7 +240,9 @@ def simulate_ftmo_challenges(
         raise ValueError("loss_limit_pct must be between 0 and 1")
 
     equity_frame = _daily_equity_frame(report)
-    period = str(safe_get(report, ["params", "data", "period"], "backtest")).lower()
+    period = str(period).lower()
+    if period not in {"long", "forward", "all"}:
+        raise ValueError("period must be one of: 'long', 'forward', 'all'")
     segments = {}
     split_at = None
 
@@ -419,8 +426,8 @@ def plot_equity_curves(
 ) -> str | None:
     """Plot one or more report equity curves over the underlying market price.
 
-    ``all_results`` accepts either one report returned by ``backtest_runner`` or
-    selected-config records containing ``long``/``short``/``forward`` reports.
+    ``all_results`` accepts either one payload returned by ``backtest_runner`` or
+    canonical reports containing shared ``params`` and period-keyed ``results``.
     Batch records are chained in chronological period order. By default the
     curve starts at the report's absolute initial equity; callers may request a
     starting value of 1 with ``normalize_equity=True``. By default both the
@@ -446,13 +453,31 @@ def plot_equity_curves(
     def period_reports(result: dict):
         if not isinstance(result, dict):
             return []
-        if isinstance(result.get("params"), dict):
-            period = safe_get(result, ["params", "data", "period"], "backtest")
-            return [(str(period), result)]
+        details = {}
+        if isinstance(result.get("report"), dict):
+            details = result.get("report_details") or {}
+            result = result["report"]
+        params = result.get("params")
+        period_results = result.get("results")
+        if not isinstance(params, dict) or not isinstance(period_results, dict):
+            return []
+        detail_results = details.get("results", {}) if isinstance(details, dict) else {}
         return [
-            (period, result.get(period))
+            (
+                period,
+                {
+                    "params": params,
+                    **period_results[period],
+                    **(
+                        detail_results.get(period, {})
+                        if isinstance(detail_results.get(period), dict)
+                        else {}
+                    ),
+                },
+            )
             for period in period_order
-            if isinstance(result.get(period), dict) and result.get(period)
+            if isinstance(period_results.get(period), dict)
+            and period_results.get(period)
         ]
 
     first_report = next(
@@ -885,20 +910,27 @@ def short_trade_line(trade: dict) -> str:
     )
 
 
-def analyze_record(record: dict, top_n: int = 10, focus_date: str | None = None) -> dict:
-    period = next(
-        period
-        for period in ("all", "long", "forward")
-        if isinstance(record.get(period), dict)
-    )
-    report = dict(record[period])
-    additional = record["additional"]
-    report["trade_logs"] = additional.get("trade_logs") or report.get("trade_logs") or []
+def analyze_record(
+    report: dict,
+    report_details: dict,
+    period: str,
+    top_n: int = 10,
+    focus_date: str | None = None,
+) -> dict:
+    period_result = report["results"][period]
+    period_details = report_details["results"][period]
+    materialized = {
+        "params": report["params"],
+        **period_result,
+        **period_details,
+    }
+    materialized["trade_logs"] = period_details.get("trade_logs") or []
+    report = materialized
     worst_day = worst_daily_loss(report)
     target_date = focus_date or worst_day.get("date")
     ftmo_challenge = report.get("ftmo_challenge")
     if not isinstance(ftmo_challenge, dict):
-        ftmo_challenge = simulate_ftmo_challenges(report)
+        ftmo_challenge = simulate_ftmo_challenges(report, period)
 
     return {
         "params_hash": safe_get(report, ["params", "hash"]),
@@ -960,7 +992,8 @@ def print_analysis(
 
 def analyze_backtest_report(
     report: dict,
-    additional: dict | None = None,
+    report_details: dict,
+    period: str,
     *,
     top_n: int = 10,
     focus_date: str | None = None,
@@ -968,18 +1001,23 @@ def analyze_backtest_report(
 ) -> dict:
     """Analyze one completed in-memory report and emit a readable diagnostic block.
 
-    ``report`` and ``additional`` are the two dictionaries returned by
+    ``report`` and ``report_details`` are the two dictionaries returned by
     ``backtest_runner.generate_backtest_report``. No command-line arguments or
     report files are involved. The returned dictionary is suitable for callers
     that need to consume the diagnostics programmatically.
     """
     if not isinstance(report, dict):
         raise TypeError(f"report must be a dict, got {type(report).__name__}")
-    if additional is not None and not isinstance(additional, dict):
-        raise TypeError(f"additional must be a dict or None, got {type(additional).__name__}")
+    if not isinstance(report_details, dict):
+        raise TypeError(
+            "report_details must be a dict, got "
+            f"{type(report_details).__name__}"
+        )
 
     analysis = analyze_record(
-        {"report": report, "additional": additional or {}},
+        report,
+        report_details,
+        period,
         top_n=max(int(top_n), 0),
         focus_date=focus_date,
     )
