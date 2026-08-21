@@ -185,19 +185,18 @@ def _iter_report_records(path: str) -> Iterable[dict[str, Any]]:
 
 
 def _period_reports(record: Mapping[str, Any]) -> Iterable[tuple[str, dict[str, Any]]]:
-    if isinstance(record.get("params"), Mapping):
-        yield "top", dict(record)
-    for period in ("forward", "long", "short"):
-        report = record.get(period)
-        if isinstance(report, Mapping) and isinstance(report.get("params"), Mapping):
-            yield period, dict(report)
+    params = record.get("params")
+    results = record.get("results")
+    if not isinstance(params, Mapping) or not isinstance(results, Mapping):
+        return
+    for period in ("forward", "long", "short", "all"):
+        period_result = results.get(period)
+        if isinstance(period_result, Mapping):
+            yield period, {"params": dict(params), **dict(period_result)}
 
 
 def _parameter_signature(report: Mapping[str, Any]) -> str:
     params = json.loads(json.dumps(report["params"], default=str))
-    data_params = params.get("data")
-    if isinstance(data_params, dict):
-        data_params.pop("period", None)
     return json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
 
 
@@ -491,12 +490,10 @@ class LiveRunner:
         model_factory: Optional[Callable[[LiveStrategySpec], Any]] = None,
         venue_factory: Optional[Callable[[LiveStrategySpec, logging.Logger], Any]] = None,
         strategy_factory: Optional[Callable[[LiveStrategySpec, Any], Any]] = None,
-        process_latest_on_start: bool = False,
     ):
         if not specs:
             raise ValueError("LiveRunner requires at least one strategy")
         self.logger = logger or logging.getLogger("trade.live")
-        self.process_latest_on_start = bool(process_latest_on_start)
         self._feed_factory = feed_factory or self._default_feed_factory
         self._feature_factory = feature_factory or self._default_feature_factory
         self._model_factory = model_factory or self._default_model_factory
@@ -742,12 +739,8 @@ class LiveRunner:
             if initial is None or initial.empty:
                 raise RuntimeError(f"Failed to warm live feed: {group.key}")
             latest_candle_id = int(initial.iloc[-1]["open_time_ms_utc"])
-            if self.process_latest_on_start:
-                group.last_candle_id = None
-                group.next_poll_time_ms = 0
-            else:
-                group.last_candle_id = latest_candle_id
-                group.next_poll_time_ms = latest_candle_id + interval_ms * 2 + 500
+            group.last_candle_id = latest_candle_id
+            group.next_poll_time_ms = latest_candle_id + interval_ms * 2 + 500
             self.logger.info(
                 "Live feed ready | source=%s symbol=%s interval=%s bars=%d",
                 group.key.data_source,
@@ -925,11 +918,6 @@ def main() -> None:
         default=5.0,
         help="Seconds between shared-feed polls",
     )
-    parser.add_argument(
-        "--process-latest-on-start",
-        action="store_true",
-        help="Process the latest closed candle immediately instead of waiting for a new one",
-    )
     args = parser.parse_args()
 
     logger, _ = common.setup_session_logger(
@@ -939,7 +927,6 @@ def main() -> None:
     runner = LiveRunner.from_config(
         args.config,
         logger=logger,
-        process_latest_on_start=args.process_latest_on_start,
     )
     runner.run_forever(args.poll_seconds)
 

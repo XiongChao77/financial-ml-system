@@ -31,22 +31,31 @@ def validate_frontend_report(payload: Any) -> None:
         raise ValueError("The frontend report must be a JSON object")
     if not isinstance(payload.get("candles"), list):
         raise ValueError("The frontend report must contain a candles list")
-    statistics = payload.get("statistics")
-    if not isinstance(statistics, (list, tuple)) or len(statistics) != 2:
-        raise ValueError(
-            "The frontend report must contain [additional, report] statistics"
-        )
-    reports = statistics[1]
-    if not isinstance(reports, Mapping):
-        raise ValueError("The frontend report must contain a period report object")
-    period_keys = {"long", "forward", "all"}.intersection(reports)
+    report = payload.get("report")
+    if not isinstance(report, Mapping):
+        raise ValueError("The frontend payload must contain a report object")
+    if not isinstance(report.get("params"), Mapping):
+        raise ValueError("The report must contain a params object")
+    results = report.get("results")
+    if not isinstance(results, Mapping):
+        raise ValueError("The report must contain a results object")
+    period_keys = {"long", "forward", "all"}.intersection(results)
     if len(period_keys) != 1:
         raise ValueError(
-            "The frontend report must contain exactly one period report"
+            "The frontend report must contain exactly one period result"
         )
     period = next(iter(period_keys))
-    if not isinstance(reports[period], Mapping):
-        raise ValueError("The period report must be a JSON object")
+    if not isinstance(results[period], Mapping):
+        raise ValueError("The period result must be a JSON object")
+
+    report_details = payload.get("report_details")
+    if not isinstance(report_details, Mapping):
+        raise ValueError("The frontend payload must contain report_details")
+    detail_results = report_details.get("results")
+    if not isinstance(detail_results, Mapping):
+        raise ValueError("report_details must contain a results object")
+    if not isinstance(detail_results.get(period), Mapping):
+        raise ValueError("report_details must contain the matching period")
 
 
 def write_latest_backtest_report(

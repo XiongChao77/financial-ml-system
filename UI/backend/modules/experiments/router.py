@@ -158,8 +158,9 @@ def equity(payload: EquityInput) -> dict[str, Any]:
             entry.dataset.records,
             payload.record_ids,
             payload.period,
+            reports_root=service.get_reports_root(),
         )
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, FileNotFoundError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"period": payload.period, "series": series}
 

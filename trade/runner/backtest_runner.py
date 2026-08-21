@@ -303,7 +303,18 @@ def _prediction_artifact_files(train_output_dir: str) -> list[str]:
     return sorted(files)
 
 
-def _prediction_cache_path(data_config: ModelDataConfig, train_output_dir: str) -> str:
+def _validate_period(period: str) -> str:
+    if period not in {"long", "forward", "all"}:
+        raise ValueError("period must be one of: 'long', 'forward', 'all'")
+    return period
+
+
+def _prediction_cache_path(
+    data_config: ModelDataConfig,
+    train_output_dir: str,
+    period: str,
+) -> str:
+    period = _validate_period(period)
     data_filenames = {
         "long": ["train_data.csv" if common.CONF_DF == "to_csv" else "train_data.feather"],
         "forward": ["test_data.csv" if common.CONF_DF == "to_csv" else "test_data.feather"],
@@ -311,7 +322,7 @@ def _prediction_cache_path(data_config: ModelDataConfig, train_output_dir: str) 
             "train_data.csv" if common.CONF_DF == "to_csv" else "train_data.feather",
             "test_data.csv" if common.CONF_DF == "to_csv" else "test_data.feather",
         ],
-    }[data_config.period]
+    }[period]
     source_files = _prediction_artifact_files(train_output_dir)
     source_files.extend(
         os.path.join(data_config.prep_output_dir, filename)
@@ -323,7 +334,7 @@ def _prediction_cache_path(data_config: ModelDataConfig, train_output_dir: str) 
         signatures.append((path, stat.st_size, stat.st_mtime_ns))
     identity = {
         "schema": _PREDICTION_CACHE_SCHEMA,
-        "period": data_config.period,
+        "period": period,
         "prep_output_dir": os.path.abspath(data_config.prep_output_dir),
         "train_output_dir": os.path.abspath(train_output_dir),
         "sources": signatures,
@@ -331,7 +342,7 @@ def _prediction_cache_path(data_config: ModelDataConfig, train_output_dir: str) 
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]
-    return os.path.join(train_output_dir, "prediction_cache", f"{data_config.period}_{digest}.pkl")
+    return os.path.join(train_output_dir, "prediction_cache", f"{period}_{digest}.pkl")
 
 
 @contextlib.contextmanager
@@ -407,17 +418,21 @@ def combine_model_period_frames(
     return pd.concat([long_part, forward_part], ignore_index=True)
 
 
-def _load_model_period_frame(data_config: ModelDataConfig) -> pd.DataFrame:
-    if data_config.period == "long":
+def _load_model_period_frame(
+    data_config: ModelDataConfig,
+    period: str,
+) -> pd.DataFrame:
+    period = _validate_period(period)
+    if period == "long":
         return common.load_train_df_from_dir(data_config.prep_output_dir)
-    if data_config.period == "forward":
+    if period == "forward":
         return common.load_test_df_from_dir(data_config.prep_output_dir)
-    if data_config.period == "all":
+    if period == "all":
         return combine_model_period_frames(
             common.load_train_df_from_dir(data_config.prep_output_dir),
             common.load_test_df_from_dir(data_config.prep_output_dir),
         )
-    raise ValueError(f"Unsupported model data period: {data_config.period}")
+    raise AssertionError("validated period was not handled")
 
 
 def _model_time_regions(
@@ -425,6 +440,7 @@ def _model_time_regions(
     train_cfg: train_config.TrainConfig,
     handler: model_loader.ModelHandler,
     current_frame: pd.DataFrame,
+    period: str,
 ) -> dict[str, dict[str, Any]]:
     """Calculate the exact train/valid/test/OOD timestamp regions."""
     data_cfg = train_cfg.data_cfg
@@ -444,12 +460,12 @@ def _model_time_regions(
 
     train_frame = (
         current_frame
-        if data_config.period == "long"
+        if period == "long"
         else common.load_train_df_from_dir(data_config.prep_output_dir)
     )
     ood_frame = (
         current_frame
-        if data_config.period == "forward"
+        if period == "forward"
         else common.load_test_df_from_dir(data_config.prep_output_dir)
     )
     valid_indices = data_loader.valid_window_end_indices(
@@ -501,13 +517,20 @@ def _infer_prediction_payload(
     frame: pd.DataFrame,
     train_output_dir: str,
     interval_ms: int,
+    period: str,
     inference_batch_size: int = 512,
 ) -> dict:
     handler = model_loader.ModelHandler(
         tarin_out_path=train_output_dir,
         device=_resolve_device(data_config.device),
     )
-    time_regions = _model_time_regions(data_config, train_cfg, handler, frame)
+    time_regions = _model_time_regions(
+        data_config,
+        train_cfg,
+        handler,
+        frame,
+        period,
+    )
     dataset = data_loader.TimeSeriesWindowDataset(
         df=frame,
         kline_interval_ms=interval_ms,
@@ -541,9 +564,9 @@ def _infer_prediction_payload(
     }
 
 
-def _prediction_inputs(data_config: ModelDataConfig):
+def _prediction_inputs(data_config: ModelDataConfig, period: str):
     pre_para: BaseDefine = common.load_pre_params_from_dir(data_config.train_output_dir)
-    frame = _load_model_period_frame(data_config).copy()
+    frame = _load_model_period_frame(data_config, period).copy()
     frame["open_time_date_utc"] = pd.to_datetime(frame["open_time_date_utc"], utc=True)
     train_output_dir = data_config.train_output_dir
     if not os.path.isabs(train_output_dir):
@@ -555,13 +578,18 @@ def precompute_prediction_cache(
     logger,
     data_config: ModelDataConfig,
     train_cfg: train_config.TrainConfig,
+    period: str,
     *,
     inference_batch_size: int,
 ) -> str:
     """Generate one prediction cache before CPU backtest workers are started."""
-    pre_para, frame, train_output_dir, interval_ms = _prediction_inputs(data_config)
+    period = _validate_period(period)
+    pre_para, frame, train_output_dir, interval_ms = _prediction_inputs(
+        data_config,
+        period,
+    )
     del pre_para
-    cache_path = _prediction_cache_path(data_config, train_output_dir)
+    cache_path = _prediction_cache_path(data_config, train_output_dir, period)
     with _exclusive_file_lock(cache_path + ".lock"):
         payload = _read_prediction_cache(cache_path)
         if payload is None:
@@ -573,6 +601,7 @@ def precompute_prediction_cache(
                 frame,
                 train_output_dir,
                 interval_ms,
+                period,
                 inference_batch_size,
             )
             _write_prediction_cache(cache_path, payload)
@@ -586,16 +615,20 @@ def _load_model_data(
     logger,
     data_config: ModelDataConfig,
     train_cfg: train_config.TrainConfig,
+    period: str,
 ):
-    pre_para, frame, train_output_dir, interval_ms = _prediction_inputs(data_config)
+    pre_para, frame, train_output_dir, interval_ms = _prediction_inputs(
+        data_config,
+        period,
+    )
     logger.info(
         f"prep_output_dir:{data_config.prep_output_dir}, "
         f"train_output_dir:{data_config.train_output_dir}"
     )
-    logger.info("Loaded model data | period=%s | bars=%d", data_config.period, len(frame))
+    logger.info("Loaded model data | period=%s | bars=%d", period, len(frame))
 
     if data_config.use_prediction_cache:
-        cache_path = _prediction_cache_path(data_config, train_output_dir)
+        cache_path = _prediction_cache_path(data_config, train_output_dir, period)
         with _exclusive_file_lock(cache_path + ".lock"):
             try:
                 payload = _read_prediction_cache(cache_path)
@@ -615,6 +648,7 @@ def _load_model_data(
             frame,
             train_output_dir,
             interval_ms,
+            period,
         )
 
     predictions = payload["predictions"]
@@ -688,24 +722,31 @@ def _build_feed(frame: pd.DataFrame, data_config):
     return PredictionFeed(**feed_params)
 
 
-def main(logger: logging.Logger, config: RunnerConfig):
-    """Standalone runner: load data/model, execute the strategy and build the report."""
-    if isinstance(config.data_config, ModelDataConfig):
-        training_data_manifest = common.load_data_manifest_from_dir(
-            config.data_config.train_output_dir,
+def _write_json_file(path: str, payload: dict) -> None:
+    with open(path, "w", encoding="utf-8") as output:
+        json.dump(
+            payload,
+            output,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
         )
-        backtest_data_manifest = common.load_data_manifest_from_dir(
+
+
+def main(logger: logging.Logger, config: RunnerConfig, period: str):
+    """Standalone runner: load data/model, execute the strategy and build the report."""
+    period = _validate_period(period)
+    if isinstance(config.data_config, ModelDataConfig):
+        preparation_manifest = common.load_data_manifest_from_dir(
             config.data_config.prep_output_dir,
         )
-        data_manifest = {
-            "training": training_data_manifest,
-            "backtest": backtest_data_manifest,
-        }
+        data_manifest = preparation_manifest["source"]
         saved_train_config = _load_train_config(config.data_config.train_output_dir)
         frame, model_stats, sub_model_stats, pre_para, time_regions = _load_model_data(
             logger,
             config.data_config,
             saved_train_config,
+            period,
         )
     elif isinstance(config.data_config, CsvDataConfig):
         data_manifest = None
@@ -741,15 +782,11 @@ def main(logger: logging.Logger, config: RunnerConfig):
         f"| venue={venue_cls.__name__}"
     )
     strat = cerebro.run()[0]
-    save_path = None
-    if config.persist_full_report:
-        os.makedirs(config.save_dir, exist_ok=True)
-        save_path = os.path.join(config.save_dir, "full_backtest_report.json")
-    statistics = generate_backtest_report(
+    report, report_details = generate_backtest_report(
         logger,
         strat,
+        period=period,
         model_stats=model_stats,
-        save_path=save_path,
         strategy_config=strategy_config,
         broker_config=config.broker_config,
         pre_para=pre_para,
@@ -770,25 +807,16 @@ def main(logger: logging.Logger, config: RunnerConfig):
         candles["label"] = candles["label"].fillna(-1).astype(int)
     candles.rename(columns={"open_time_date_utc": "time"}, inplace=True)
     candles["time"] = candles["time"].apply(lambda dt: int(dt.timestamp()))
-    report_additional, report = statistics
-    report_period = getattr(config.data_config, "period", "all")
-    statistics = (report_additional, {report_period: report})
-    # report_analysis = analyze_backtest_report(
-    #     report,
-    #     report_additional,
-    #     logger=logger,
-    # )
+
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime_module.datetime.now(
             datetime_module.timezone.utc
         ).isoformat(),
         "candles": candles.to_dict(orient="records"),
-        "statistics": statistics,
+        "report": report,
+        "report_details": report_details,
     }
-    if config.publish_frontend_report:
-        frontend_report_path = write_latest_backtest_report(result)
-        logger.info("Frontend report published to %s", frontend_report_path)
     return result
 
 
@@ -1037,8 +1065,8 @@ def generate_backtest_report(
     strat,
     strategy_config: Any,
     broker_config: BrokerConfig,
+    period: str,
     model_stats=None,
-    save_path=None,
     pre_para: Optional[BaseDefine] = None,
     train_cfg=None,
     sub_model_stats=None,
@@ -1057,6 +1085,7 @@ def generate_backtest_report(
     """
     model_stats = model_stats or {}
     sub_model_stats = sub_model_stats or {}
+    period = _validate_period(period)
     if experiment_context is None:
         raise ValueError("experiment_context is required for reproducible reports")
 
@@ -1206,11 +1235,12 @@ def generate_backtest_report(
         else:
             robust_max_loss = sorted_losses[0] if sorted_losses else 0.0
 
-    # ---- strategy specific statistics: content differs per strategy (ML holding times / martingale deaths and restarts...), the channel does not ----
-    # The venue already split strategy.report() into summary(scalars, jsonl-able) + detail(list/dict records)
-    strategy_stats = strat.strategy_metrics() if hasattr(strat, "strategy_metrics") else {}
-    strategy_summary = strategy_stats.get("summary", {})
-    strategy_detail = strategy_stats.get("detail", {})
+    # ---- strategy specific statistics ----
+    strategy_summary, strategy_details = (
+        strat.strategy_metrics()
+        if hasattr(strat, "strategy_metrics")
+        else ({}, {})
+    )
 
     params_snapshot = {
         "strategy": strategy_config_to_dict(strategy_config),
@@ -1247,9 +1277,7 @@ def generate_backtest_report(
         "risk_per_trade_pct",
         getattr(strategy_config, "base_order_pct", None),
     )
-    report = {
-        f"params": params_snapshot,
-        f"daily_account": daily_account,
+    period_report = {
         f"time": {
             f"start": bt.num2date(strat.datas[0].datetime.array[0]),
             f"end": bt.num2date(strat.datas[0].datetime.array[-1]),
@@ -1305,15 +1333,21 @@ def generate_backtest_report(
         f"model_metrics": model_stats,
         f"sub_model_metrics": sub_model_stats,
     }
-    report["ftmo_challenge"] = simulate_ftmo_challenges(report)
+    ftmo_input = dict(period_report)
+    ftmo_input["raw_analyzer"] = {
+        "customize": {"daily_account": daily_account},
+    }
+    period_report["ftmo_challenge"] = simulate_ftmo_challenges(
+        ftmo_input,
+        period,
+    )
 
     persisted_perf = dict(perf)
-    persisted_perf.pop("daily_account", None)
-    report_additional = {
+    period_details = {
         f"raw_analyzer":{
             f"customize": persisted_perf,
         },
-        f"strategy_detail": strategy_detail,
+        f"strategy_detail": strategy_details,
         f"trade_logs": list(getattr(strat, "trade_logs", [])),
     }
 
@@ -1332,43 +1366,43 @@ def generate_backtest_report(
         )
     logger.info(
         f"RISK(Daily)| Worst Day: "
-        f"{report['drawdown']['max_daily_dd']*100:.2f}% "
-        f"({report['drawdown']['max_daily_date']}) | "
-        f">3% Days: {report['drawdown']['dd_3_pct_days']} | "
-        f">4% Days: {report['drawdown']['dd_4_pct_days']} | "
-        f">5% Days: {report['drawdown']['dd_5_pct_days']}"
+        f"{period_report['drawdown']['max_daily_dd']*100:.2f}% "
+        f"({period_report['drawdown']['max_daily_date']}) | "
+        f">3% Days: {period_report['drawdown']['dd_3_pct_days']} | "
+        f">4% Days: {period_report['drawdown']['dd_4_pct_days']} | "
+        f">5% Days: {period_report['drawdown']['dd_5_pct_days']}"
     )
 
     logger.info(
-        f"Time    | {report['time']['start']} --> {report['time']['end']} "
-        f"| CAGR: {report['performance']['cagr']*100:.2f}% "
-        f"| Calmar: {report['performance']['calmar']:.2f}"
+        f"Time    | {period_report['time']['start']} --> {period_report['time']['end']} "
+        f"| CAGR: {period_report['performance']['cagr']*100:.2f}% "
+        f"| Calmar: {period_report['performance']['calmar']:.2f}"
     )
 
     logger.info(
-        f"SUMMARY | GrossRet: {report['performance']['gross_return']*100:.2f}% "
-        f"| Sharpe: {report['performance']['sharpe']:.3f} "
-        f"| MaxDD: {report['drawdown']['max_dd_pct']:.2f}% "
-        f"({report['drawdown']['max_dd_amt']:.0f}) "
-        f"| end value {report['performance']['end_value']}"
+        f"SUMMARY | GrossRet: {period_report['performance']['gross_return']*100:.2f}% "
+        f"| Sharpe: {period_report['performance']['sharpe']:.3f} "
+        f"| MaxDD: {period_report['drawdown']['max_dd_pct']:.2f}% "
+        f"({period_report['drawdown']['max_dd_amt']:.0f}) "
+        f"| end value {period_report['performance']['end_value']}"
     )
 
     logger.info(
-        f"EXPOSURE| Avg Pos: {report['exposure']['avg_pos']*100:.2f}% "
-        f"| Max Pos: {report['exposure']['max_pos']*100:.2f}% "
-        f"| P95 Pos: {report['exposure']['p95_pos']*100:.2f}% "
-        f"| risk_per_trade_pct: {report['exposure']['risk_per_trade_pct']}"
+        f"EXPOSURE| Avg Pos: {period_report['exposure']['avg_pos']*100:.2f}% "
+        f"| Max Pos: {period_report['exposure']['max_pos']*100:.2f}% "
+        f"| P95 Pos: {period_report['exposure']['p95_pos']*100:.2f}% "
+        f"| risk_per_trade_pct: {period_report['exposure']['risk_per_trade_pct']}"
     )
 
     logger.info(
-        f"TRADES  | Total: {report['trades']['total']} "
-        f"| Freq: {report['trades']['daily_freq']:.2f} trades/day "
-        f"| WinRate: {report['trades']['win_rate']*100:.2f}% "
-        f"| lost_longest: {report['trades']['lost_longest']} "
-        f"| won_longest: {report['trades']['won_longest']}"
+        f"TRADES  | Total: {period_report['trades']['total']} "
+        f"| Freq: {period_report['trades']['daily_freq']:.2f} trades/day "
+        f"| WinRate: {period_report['trades']['win_rate']*100:.2f}% "
+        f"| lost_longest: {period_report['trades']['lost_longest']} "
+        f"| won_longest: {period_report['trades']['won_longest']}"
     )
 
-    hold = report["trades"]["holding_period_bars"]
+    hold = period_report["trades"]["holding_period_bars"]
     logger.info(
         f"HOLD PCT| P10: {hold['p10']:.2f} | P25: {hold['p25']:.2f} "
         f"| P50: {hold['p50']:.2f} "
@@ -1376,39 +1410,35 @@ def generate_backtest_report(
         f"| P95: {hold['p95']:.2f} | P99: {hold['p99']:.2f} bars"
     )
 
-    log_ftmo_challenge_summary(report["ftmo_challenge"], logger=logger)
+    log_ftmo_challenge_summary(period_report["ftmo_challenge"], logger=logger)
 
     logger.info(
-        f"PNL($)  | Avg Gross: {report['trades']['avg_pnl_gross']:.2f}"
-        f"({report['trades']['avg_pct_gross']:.3f}%) "
-        f"| Avg Net: {report['trades']['avg_pnl_net']:.2f}"
-        f"({report['trades']['avg_pct_net']:.3f}%) "
-        f"(Cost: {report['trades']['avg_cost']:.2f}/trade)"
+        f"PNL($)  | Avg Gross: {period_report['trades']['avg_pnl_gross']:.2f}"
+        f"({period_report['trades']['avg_pct_gross']:.3f}%) "
+        f"| Avg Net: {period_report['trades']['avg_pnl_net']:.2f}"
+        f"({period_report['trades']['avg_pct_net']:.3f}%) "
+        f"(Cost: {period_report['trades']['avg_cost']:.2f}/trade)"
     )
 
-    log_metrics_block(logger, "STRATEGY", report['strategy'])
+    log_metrics_block(logger, "STRATEGY", period_report['strategy'])
 
     logger.info(
-        f"DETAILS | Long: {report['trades']['long_pnl']} "
-        f"Winrate: {report['trades']['long_win_rate']:.1f}% | "
-        f"Short: {report['trades']['short_pnl']} "
-        f"Winrate: {report['trades']['short_win_rate']:.1f}%"
+        f"DETAILS | Long: {period_report['trades']['long_pnl']} "
+        f"Winrate: {period_report['trades']['long_win_rate']:.1f}% | "
+        f"Short: {period_report['trades']['short_pnl']} "
+        f"Winrate: {period_report['trades']['short_win_rate']:.1f}%"
     )
 
     logger.info("-" * 80)
 
-    if save_path:
-        period = getattr(data_config, "period", "all")
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {period: report, "additional": report_additional},
-                f,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                default=str,
-            )
-
-    return (report_additional,report)
+    report = {
+        "params": params_snapshot,
+        "results": {period: period_report},
+    }
+    report_details = {
+        "results": {period: period_details},
+    }
+    return report, report_details
 
 if __name__ == "__main__":
     train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.SingleModelConfig.train_task)
@@ -1424,24 +1454,36 @@ if __name__ == "__main__":
         broker_config=broker_config,
         save_dir=exp_dir,
         experiment_context=ExperimentContext(git_commit=common.git_revision()),
-        publish_frontend_report=True,
         data_config=ModelDataConfig(
             prep_output_dir=common.DATA_OUT_DIR,
             train_output_dir=train_output_dir,
-            period="all", # forward long all
             device ='auto'
         ),
     )
-    report = main(logger, runner_config)
-    output_path = os.path.join(exp_dir, "reports.jsonl")
-    append_jsonl(output_path, report["statistics"][1])
+    result = main(logger, runner_config, "all")
+    output_path = os.path.join(exp_dir, "report.jsonl")
+    append_jsonl(output_path, result["report"])
+
+    identity = TaskIdentity(**result["report"]["params"]["identity"])
+    detail_output_path = os.path.join(
+        os.path.dirname(output_path),
+        identity.prep_hash,
+        identity.train_hash,
+        identity.sim_hash,
+        "report_details.json",
+    )
+    os.makedirs(os.path.dirname(detail_output_path), exist_ok=True)
+    _write_json_file(detail_output_path, result["report_details"])
+
     plot_equity_curves(
-        report["statistics"][1],
+        result,
         exp_dir,
         file_name="equity_curve.png",
         normalize_equity=False,
         logger=logger,
     )
+    frontend_report_path = write_latest_backtest_report(result)
+    logger.info("Frontend report published to %s", frontend_report_path)
     end_time = time.time()
     run_time = end_time - start_time
     logger.info(f": run_time: {run_time:.4f} s, report saved to {output_path}")

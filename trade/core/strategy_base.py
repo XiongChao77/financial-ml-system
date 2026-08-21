@@ -123,17 +123,9 @@ class StrategyBase(ABC):
         """
         pass
 
-    def report(self) -> dict:
-        """
-        Single exit for strategy specific statistics (content differs per strategy, channel does not).
-
-        Returns a dict that the venue automatically splits in two for the layer above:
-          - scalars (int/float/str/bool/None) -> report["strategy"], directly jsonl-able
-          - everything else (list/dict details) -> report_additional["strategy_detail"]
-        You may also return {"summary": {...}, "detail": {...}} to split it explicitly.
-        Defaults to an empty dict, i.e. no strategy specific statistics.
-        """
-        return {}
+    def report(self) -> tuple[dict, dict]:
+        """Return ``(report_summary, report_details)`` for this strategy."""
+        return {}, {}
 
     def execute_action(self, action: TradeIntent):
         """Reworked to use the submit_order interface and pass the stop loss parameters"""
