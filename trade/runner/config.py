@@ -25,7 +25,7 @@ class ExperimentContext:
 class BrokerConfig:
     initial_equity: float = 10_000.0
     commission_pct: float = 0.05
-    leverage: float = 10.0
+    leverage: float = 20.0
     margin_warn_pct: float = 0.95
 
 
@@ -41,25 +41,15 @@ class BacktestEngineConfig:
 
 @dataclass(frozen=True)
 class ModelDataConfig:
-    atr_ref_bars: int = 80
     prep_output_dir: str = common.DATA_OUT_DIR
     train_output_dir: str = common.TRAIN_OUT_DIR
     device: str = "auto"  # 'auto'/'cuda'/'cpu'
     use_prediction_cache: bool = False
 
-    def __post_init__(self):
-        if self.atr_ref_bars <= 0:
-            raise ValueError("atr_ref_bars must be a positive integer")
-
 @dataclass(kw_only=True)
 class CsvDataConfig(common.MarketDataSourceConfig):
-    atr_ref_bars: int
     from_date: Optional[str] = None
     to_date: Optional[str] = None
-
-    def __post_init__(self):
-        if self.atr_ref_bars <= 0:
-            raise ValueError("atr_ref_bars must be a positive integer")
 
 
 RunnerDataConfig = Union[ModelDataConfig, CsvDataConfig]

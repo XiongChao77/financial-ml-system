@@ -7,31 +7,153 @@ from trade.core.protocol import PositionDir
 MT5_SYMBOL_FTMO_MAP = {"DOGEUSDT": "DOGEUSD", "ETHUSDT": "ETHUSD", "BTCUSDT": "BTCUSD"}
 
 class MT5Venue(VenueBase):
-    def __init__(self, path, symbol, magic, logger):
+    def __init__(
+        self,
+        path,
+        symbol,
+        magic,
+        logger,
+        login=None,
+        password=None,
+        server=None,
+    ):
         self.symbol = MT5_SYMBOL_FTMO_MAP[symbol]
         self.magic = magic
         self.logger = logger
         self.path = path
-        
-        if not mt5.initialize(path=path):
-            self.logger.error(f"❌ Initialization failed | Error code: {mt5.last_error()}")
-            raise RuntimeError("MT5 initialization failed")
-        else:
-            self.logger.info(f"init success | {self.magic}")
+        self.login = int(login) if login not in (None, "") else None
+        self.password = password
+        self.server = server
+
+        self._connect_and_login()
         
         # make sure the symbol exist
         if not mt5.symbol_select(self.symbol, True):
+            mt5.shutdown()
             raise RuntimeError(f"{symbol} not support | {self.magic}")
+
+    def _connect_and_login(self):
+        mt5.shutdown()
+        initialize_args = {
+            "path": self.path,
+            "timeout": 60_000,
+        }
+        if self.login is not None:
+            initialize_args["login"] = self.login
+            if self.password is not None:
+                initialize_args["password"] = self.password
+            if self.server is not None:
+                initialize_args["server"] = self.server
+
+        initialized = mt5.initialize(**initialize_args)
+        if initialized and self._is_target_account(mt5.account_info()):
+            self.logger.info(
+                "MT5 connection ready | login=%s magic=%s",
+                self.login,
+                self.magic,
+            )
+            return
+
+        first_error = mt5.last_error()
+        if self.login is None:
+            self.logger.error(
+                "MT5 initialization or account check failed | error=%s",
+                first_error,
+            )
+            mt5.shutdown()
+            raise RuntimeError("MT5 initialization failed")
+
+        if not initialized:
+            self.logger.warning(
+                "MT5 credential initialization failed | error=%s; retrying login",
+                first_error,
+            )
+            mt5.shutdown()
+            if not mt5.initialize(path=self.path, timeout=60_000):
+                error = mt5.last_error()
+                self.logger.error("MT5 initialization retry failed | error=%s", error)
+                mt5.shutdown()
+                raise RuntimeError("MT5 initialization failed")
+        else:
+            account = mt5.account_info()
+            self.logger.warning(
+                "MT5 initialized with unexpected account | current=%s target=%s; "
+                "retrying login",
+                getattr(account, "login", None),
+                self.login,
+            )
+
+        login_args = {"login": self.login}
+        if self.password is not None:
+            login_args["password"] = self.password
+        if self.server is not None:
+            login_args["server"] = self.server
+        if not mt5.login(**login_args):
+            error = mt5.last_error()
+            self.logger.error(
+                "MT5 login failed | login=%s server=%s error=%s",
+                self.login,
+                self.server,
+                error,
+            )
+            mt5.shutdown()
+            raise RuntimeError("MT5 login failed")
+
+        account = mt5.account_info()
+        if not self._is_target_account(account):
+            self.logger.error(
+                "MT5 account verification failed | current=%s target=%s",
+                getattr(account, "login", None),
+                self.login,
+            )
+            mt5.shutdown()
+            raise RuntimeError("MT5 account verification failed")
+
+        self.logger.info(
+            "MT5 login succeeded | login=%s server=%s magic=%s",
+            self.login,
+            self.server,
+            self.magic,
+        )
+
+    def _is_target_account(self, account):
+        if account is None:
+            return False
+        if self.login is None:
+            return True
+        return int(account.login) == self.login
+
+    def _ensure_target_account(self):
+        account = mt5.account_info()
+        if self._is_target_account(account):
+            return account
+
+        self.logger.warning(
+            "MT5 account changed or disconnected | current=%s target=%s; reconnecting",
+            getattr(account, "login", None),
+            self.login,
+        )
+        self._connect_and_login()
+        account = mt5.account_info()
+        if not self._is_target_account(account):
+            raise RuntimeError("MT5 target account is not active")
+        if not mt5.symbol_select(self.symbol, True):
+            raise RuntimeError(f"MT5 symbol is unavailable after login: {self.symbol}")
+        return account
+
+    def shutdown(self):
+        mt5.shutdown()
 
     def get_account_equity(self):
         """Used by the daily risk audit"""
-        return mt5.account_info().equity
+        return self._ensure_target_account().equity
 
     def get_current_state(self):
         """
         Current position state (direction, layers, average entry price)
         Note: price_open must be returned for TurtleStrategy's pyramiding check
         """
+        self._ensure_target_account()
         positions = mt5.positions_get(symbol=self.symbol, magic=self.magic)
         if not positions:
             return PositionDir.FLAT, 0, 0.0
@@ -44,6 +166,7 @@ class MT5Venue(VenueBase):
         return direction, 1, pos.price_open
 
     def get_server_time(self):
+        self._ensure_target_account()
         tick = mt5.symbol_info_tick(self.symbol)
         server_time = datetime.fromtimestamp(tick.time)
         return server_time
@@ -56,6 +179,7 @@ class MT5Venue(VenueBase):
         take_profit: Percentage value, e.g. 0.04 for 4%
         interval_ms: Delay between split orders in milliseconds
         """
+        self._ensure_target_account()
         symbol_info = mt5.symbol_info(self.symbol)
         if symbol_info is None:
             self.logger.error(f"Symbol not found: {self.symbol}")
@@ -140,6 +264,7 @@ class MT5Venue(VenueBase):
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
 
+            self._ensure_target_account()
             res = mt5.order_send(request)
 
             if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
@@ -195,8 +320,10 @@ class MT5Venue(VenueBase):
         
     def close_position(self, **kwargs):
         """Close every position of the current magic number"""
+        self._ensure_target_account()
         positions = mt5.positions_get(symbol=self.symbol, magic=self.magic)
         for pos in positions:
+            self._ensure_target_account()
             tick = mt5.symbol_info_tick(self.symbol)
             mt5.order_send({
                 "action": mt5.TRADE_ACTION_DEAL,
@@ -212,6 +339,7 @@ class MT5Venue(VenueBase):
 
     def get_last_position_open_time(self):
         try:
+            self._ensure_target_account()
             positions = mt5.positions_get(symbol=self.symbol, magic=self.magic)
             
             # No position

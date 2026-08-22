@@ -68,8 +68,8 @@ data internally. Callers never load a DataFrame or model and pass it into the ru
 
 `MarketDataSourceConfig` is the common raw-data locator shared by `BaseDefine` and
 `CsvDataConfig`: `market_category / data_source / trading_type / symbol_interval.csv`.
-`atr_ref_bars` is required in both data configs. `bars_to_close` is an optional feed column;
-when it is absent, the observation uses infinity to represent a continuous market with no close.
+`bars_to_close` is an optional feed column; when it is absent, the observation uses infinity
+to represent a continuous market with no close.
 
 `create_backtest_cerebro()` is the common execution skeleton. It installs the same broker,
 Sharpe/Returns/DrawDown/TradeAnalyzer/CusAnalyzer set for ML and non-ML runs, and passes

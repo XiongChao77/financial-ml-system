@@ -239,20 +239,6 @@ def strategy_config_for_preparation(strategy_config, pre_para: Optional[BaseDefi
     )
 
 
-def atr_ref_bars_for_strategy(strategy_config, default: int = 14) -> int:
-    """
-    ModelDataConfig still needs atr_ref_bars to build the shared dataframe.
-    BBM does not use ATR or fixed_hold_bars, so callers should use this adapter
-    instead of reading strategy_config.fixed_hold_bars directly.
-    """
-    value = getattr(strategy_config, "atr_ref_bars", None)
-    if value is None:
-        value = getattr(strategy_config, "fixed_hold_bars", default)
-    if value is None:
-        value = default
-    return max(1, int(value))
-
-
 def _resolve_device(device_name):
     if device_name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -663,10 +649,6 @@ def _load_model_data(
     model_stats = payload["model_stats"]
     sub_model_stats = payload["sub_model_stats"]
     time_regions = payload["time_regions"]
-    frame["stop_loss_atr_pct"] = common.stop_loss_atr_pct(
-        frame,
-        data_config.atr_ref_bars,
-    )
     logger.info(
         "Model time regions | train=%s | valid=%s | test=%s | OOD=%s",
         time_regions["train"]["start"],
@@ -689,10 +671,6 @@ def _load_csv_data(logger, data_config: CsvDataConfig):
     if "open_time_date_utc" not in frame.columns:
         raise ValueError("'open_time_date_utc' column missing from market data")
     frame["open_time_date_utc"] = pd.to_datetime(frame["open_time_date_utc"], utc=True)
-    frame["stop_loss_atr_pct"] = common.stop_loss_atr_pct(
-        frame,
-        data_config.atr_ref_bars,
-    )
     logger.info(f"Loaded {len(frame)} bars from {data_path}")
     return frame, {}, {}, None, None
 
@@ -764,6 +742,12 @@ def main(logger: logging.Logger, config: RunnerConfig, period: str):
         config.strategy_config,
         pre_para,
     )
+    fixed_hold_bars = getattr(strategy_config, "fixed_hold_bars", None)
+    if fixed_hold_bars is not None and int(fixed_hold_bars) > 0:
+        frame["stop_loss_atr_pct"] = common.stop_loss_atr_pct(
+            frame,
+            int(fixed_hold_bars),
+        )
     venue_cls = _venue_for_strategy(strategy_config)
     feed = _build_feed(frame, config.data_config)
     cerebro = create_backtest_cerebro(

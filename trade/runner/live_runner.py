@@ -6,8 +6,8 @@ Pipeline:
     shared data feed -> feature generation -> model inference -> MarketView
     -> strategy intent -> configured live venue
 
-Each strategy is restored from a canonical backtest report selected by the
-top-level live-config hash.  Live-only settings choose the model artifact,
+Each strategy is restored from a shared canonical JSONL backtest report and
+selected by its live-config hash.  Live-only settings choose the model artifact,
 inference device, and execution venue; strategy and market parameters remain
 owned by the report.
 """
@@ -21,15 +21,16 @@ import logging
 import math
 import ntpath
 import os
+import queue
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 import pandas as pd
 
 from data_process import common
-from data_process.utils import config_from_dict_train, json_safe
+from data_process.utils import config_from_dict_train
 from trade.core.protocol import (
     AccountView,
     MarketView,
@@ -40,7 +41,7 @@ from trade.core.protocol import (
     TradeIntent,
 )
 from trade.runner.config import BrokerConfig
-
+from trade.venue.live.binance_data_feed import BinanceDataFeed
 
 SUPPORTED_VENUES = {"mt5": "MT5", "bybit": "Bybit", "binance": "Binance"}
 SUPPORTED_BINANCE_DATA_SOURCES = {
@@ -49,58 +50,39 @@ SUPPORTED_BINANCE_DATA_SOURCES = {
     "binance_public_data",
 }
 
-
-@dataclass(frozen=True)
-class FeedKey:
-    """Identity of one independently requested live market-data stream."""
-
-    market_category: str
-    data_source: str
-    trading_type: str
-    symbol: str
-    interval: str
-
-    @classmethod
-    def from_market_config(cls, config: common.BaseDefine) -> "FeedKey":
-        data_source = str(config.data_source).casefold()
-        if data_source in SUPPORTED_BINANCE_DATA_SOURCES:
-            data_source = "binance_public_data"
-        return cls(
-            market_category=str(config.market_category).casefold(),
-            data_source=data_source,
-            trading_type=str(config.trading_type).casefold(),
-            symbol=str(config.symbol).upper(),
-            interval=str(config.interval).casefold(),
-        )
-
-
 @dataclass(frozen=True)
 class LiveVenueConfig:
     """Live-only connection data. Secrets are deliberately omitted from repr."""
 
-    kind: str
+    venue: str
     path: str
+    firm: Optional[str] = None
     login: Optional[str] = None
     password: Optional[str] = field(default=None, repr=False)
     server: Optional[str] = None
+    challenge_type: Optional[str] = None
+    stage: Optional[str] = None
+    compound: Optional[str] = None
+    profit_target: Optional[float] = None
+    max_loss: Optional[float] = None
+    cost: Optional[float] = None
+    hedge: Optional[str] = None
+    hedge_venue: Optional[str] = None
+    hedge_key_path: Optional[str] = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class LiveStrategySpec:
-    id: str
+    strategy_id: str
     hash_id: str
-    report_path: str
+    enable: str
     model_path: str
-    device: str
-    market_config: common.BaseDefine
-    train_config: Any
-    strategy_config: Any
-    broker_config: BrokerConfig
-    venue_config: LiveVenueConfig
-
-    @property
-    def feed_key(self) -> FeedKey:
-        return FeedKey.from_market_config(self.market_config)
+    device: str = 'auto'
+    market_config: common.MarketDataSourceConfig = None
+    train_config: Any  = None
+    strategy_config: Any  = None
+    broker_config: BrokerConfig  = None
+    venue_config: LiveVenueConfig  = None
 
 
 @dataclass
@@ -111,30 +93,33 @@ class StrategyPipeline:
     strategy: Any
     feature_factory: Any
     interval_ms: int
-    atr_ref_bars: int
+    enable: str
 
     @property
     def required_bars(self) -> int:
         feature_history = int(self.feature_factory.get_global_min_history())
         model_history = max(1, int(self.model.seq_len)) * 2
-        atr_history = max(1, int(self.atr_ref_bars)) * 2
-        return feature_history + max(model_history, atr_history)
-
-
-@dataclass
-class FeatureGroup:
-    factory: Any
-    pipelines: list[StrategyPipeline] = field(default_factory=list)
+        fixed_hold_bars = getattr(self.spec.strategy_config, "fixed_hold_bars", None)
+        hold_history = max(1, int(fixed_hold_bars or 1)) * 2
+        return feature_history + max(model_history, hold_history)
 
 
 @dataclass
 class FeedGroup:
-    key: FeedKey
-    feed: Any
+    market_config: common.MarketDataSourceConfig
+    feed: BinanceDataFeed
     required_bars: int
-    feature_groups: list[FeatureGroup]
+    pipelines: list[StrategyPipeline]
     last_candle_id: Optional[int] = None
-    next_poll_time_ms: int = 0
+
+
+WATCHDOG_DELAY_MS = 500
+
+
+def _latest_expected_candle_id(boundary_ms: int, interval_ms: int) -> int:
+    """Return the open time of the latest candle closed by a time boundary."""
+
+    return boundary_ms // interval_ms * interval_ms - interval_ms
 
 
 def _resolve_path(config_path: str, value: Any) -> str:
@@ -157,69 +142,65 @@ def _iter_report_records(path: str) -> Iterable[dict[str, Any]]:
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Report file not found: {path}")
 
-    if path.lower().endswith(".jsonl"):
-        with open(path, "r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"Invalid JSON at {path}:{line_number}: {exc}") from exc
-                if not isinstance(record, dict):
-                    raise TypeError(f"Expected a JSON object at {path}:{line_number}")
-                yield record
-        return
-
     with open(path, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if isinstance(payload, dict):
-        yield payload
-    elif isinstance(payload, list):
-        for index, record in enumerate(payload):
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON at {path}:{line_number}: {exc}") from exc
             if not isinstance(record, dict):
-                raise TypeError(f"Expected a JSON object at {path}[{index}]")
+                raise TypeError(f"Expected a JSON object at {path}:{line_number}")
             yield record
-    else:
-        raise TypeError(f"Expected a JSON object or array in {path}")
 
 
-def _period_reports(record: Mapping[str, Any]) -> Iterable[tuple[str, dict[str, Any]]]:
-    params = record.get("params")
-    results = record.get("results")
-    if not isinstance(params, Mapping) or not isinstance(results, Mapping):
-        return
-    for period in ("forward", "long", "short", "all"):
-        period_result = results.get(period)
-        if isinstance(period_result, Mapping):
-            yield period, {"params": dict(params), **dict(period_result)}
+def load_params_from_report(
+    strategy_entries: list[LiveStrategySpec],
+    report_path: str,
+) -> None:
+    """Find matching JSONL records and fill strategy parameter configs."""
 
+    from trade.runner.backtest_runner import strategy_config_from_dict
 
-def _parameter_signature(report: Mapping[str, Any]) -> str:
-    params = json.loads(json.dumps(report["params"], default=str))
-    return json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
+    specs_by_hash: dict[str, list[LiveStrategySpec]] = {}
+    for spec in strategy_entries:
+        specs_by_hash.setdefault(spec.hash_id, []).append(spec)
+    params_by_hash: dict[str, dict[str, Any] | None] = dict.fromkeys(specs_by_hash)
 
+    for record in _iter_report_records(report_path):
+        params = record.get("params")
+        if not isinstance(params, Mapping):
+            continue
+        hash_id = params.get("hash")
+        if hash_id in params_by_hash and params_by_hash[hash_id] is None:
+            loaded_params = dict(params)
+            market_params = loaded_params["common"]
+            train_params = loaded_params["train"]
+            strategy_params = loaded_params["strategy"]
+            for spec in specs_by_hash[hash_id]:
+                spec.market_config = common.MarketDataSourceConfig(
+                    **{
+                        field.name: market_params[field.name]
+                        for field in fields(common.MarketDataSourceConfig)
+                    }
+                )
+                spec.train_config = config_from_dict_train(train_params)
+                spec.strategy_config = strategy_config_from_dict(strategy_params)
+            params_by_hash[hash_id] = loaded_params
+            if all(params is not None for params in params_by_hash.values()):
+                break
 
-def load_report_by_hash(path: str, hash_id: str) -> dict[str, Any]:
-    """Find one report by params.hash, accepting standalone and period wrappers."""
-
-    matches: list[tuple[str, dict[str, Any]]] = []
-    for record in _iter_report_records(path):
-        for period, report in _period_reports(record):
-            if str(report["params"].get("hash", "")) == str(hash_id):
-                matches.append((period, report))
-
-    if not matches:
-        raise KeyError(f"Hash {hash_id!r} was not found in report file {path}")
-
-    signatures = {_parameter_signature(report) for _, report in matches}
-    if len(signatures) != 1:
-        raise ValueError(
-            f"Hash {hash_id!r} resolves to conflicting parameter snapshots in {path}"
+    missing = sorted(
+        hash_id
+        for hash_id, params in params_by_hash.items()
+        if params is None
+    )
+    if missing:
+        missing_text = ", ".join(repr(hash_id) for hash_id in missing)
+        raise KeyError(
+            f"Hashes {missing_text} were not found in report file {report_path}"
         )
-
-    priority = {"forward": 0, "long": 1, "short": 2, "top": 3}
-    return min(matches, key=lambda item: priority[item[0]])[1]
 
 
 def _venue_section(entry: Mapping[str, Any], venue_kind: str) -> dict[str, Any]:
@@ -244,60 +225,29 @@ def _parse_venue_config(
         choices = ", ".join(SUPPORTED_VENUES.values())
         raise ValueError(f"venue must be one of {choices}; got {raw_kind!r}")
 
-    kind = SUPPORTED_VENUES[normalized]
-    section = _venue_section(entry, kind)
-    if kind == "MT5":
-        required = ("path", "login", "password", "server")
-        missing = [key for key in required if section.get(key) in (None, "")]
-        if missing:
-            raise ValueError(f"MT5 configuration is missing: {', '.join(missing)}")
-        return LiveVenueConfig(
-            kind=kind,
-            path=_resolve_path(config_path, section["path"]),
-            login=str(section["login"]),
-            password=str(section["password"]),
-            server=str(section["server"]),
-        )
-
-    key_path = section.get("key_path", section.get("path"))
-    if not key_path:
-        raise ValueError(f"{kind} configuration requires key_path or path")
-    resolved_key_path = os.path.realpath(_resolve_path(config_path, key_path))
-    if not os.path.isdir(resolved_key_path):
-        raise FileNotFoundError(f"{kind} key directory not found: {resolved_key_path}")
+    venue = SUPPORTED_VENUES[normalized]
+    section = _venue_section(entry, venue)
+    path = section.get("path")
+    if venue != "MT5":
+        path = os.path.realpath(_resolve_path(config_path, path))
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f"{venue} key directory not found: {path}")
     return LiveVenueConfig(
-        kind=kind,
-        path=resolved_key_path,
+        venue=venue,
+        path=path,
+        **{
+            field.name: section.get(field.name)
+            for field in fields(LiveVenueConfig)
+            if field.name not in {"venue", "path"}
+        },
     )
 
 
 def _strategy_entries(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    strategies = payload.get("strategies")
-    if strategies is not None:
-        if not isinstance(strategies, Mapping):
-            raise TypeError("live config strategies must be an object")
-        return strategies
-    return {
-        key: value
-        for key, value in payload.items()
-        if not str(key).startswith("_")
-    }
-
-
-def _parse_enable(value: Any, strategy_id: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in {0, 1}:
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().casefold()
-        if normalized in {"true", "1", "yes", "on"}:
-            return True
-        if normalized in {"false", "0", "no", "off"}:
-            return False
-    raise ValueError(
-        f"Live strategy {strategy_id!r} enable must be a boolean or boolean string"
-    )
+    strategies = payload.get("strategy")
+    if not isinstance(strategies, Mapping):
+        raise TypeError("Live configuration strategy must be an object")
+    return strategies
 
 
 def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
@@ -309,79 +259,42 @@ def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
     if not isinstance(payload, Mapping):
         raise TypeError("Live configuration root must be an object")
 
-    from trade.runner.backtest_runner import (
-        strategy_config_for_preparation,
-        strategy_config_from_dict,
-    )
+    report_path = _resolve_path(config_path, payload.get("report"))
+    if not report_path.lower().endswith(".jsonl"):
+        raise ValueError(f"Live configuration report must be a JSONL file: {report_path}")
 
-    specs = []
-    for raw_id, raw_entry in _strategy_entries(payload).items():
+    raw_strategy_entries = _strategy_entries(payload)
+    strategy_entries: list[LiveStrategySpec] = []
+    for raw_id, raw_entry in raw_strategy_entries.items():
         strategy_id = str(raw_id).strip()
-        if not strategy_id:
-            raise ValueError("Live strategy id must not be empty")
-        if not isinstance(raw_entry, Mapping):
-            raise TypeError(f"Live strategy {strategy_id!r} must be an object")
         entry = dict(raw_entry)
-        if "enable" not in entry:
-            raise KeyError(f"Live strategy {strategy_id!r} is missing enable")
-        if not _parse_enable(entry["enable"], strategy_id):
-            continue
-
-        hash_id = str(entry.get("hash", "")).strip()
-        if not hash_id:
-            raise ValueError(f"Enabled live strategy {strategy_id!r} has no hash")
-        report_path = _resolve_path(config_path, entry.get("report"))
-        report = load_report_by_hash(report_path, hash_id)
-        params = _required_mapping(report, "params", "report")
-
-        market_params = _required_mapping(params, "common", "report.params")
-        train_params = _required_mapping(params, "train", "report.params")
-        strategy_params = _required_mapping(params, "strategy", "report.params")
-        report_broker_params = _required_mapping(params, "broker", "report.params")
-
-        market_config = common.BaseDefine(**market_params)
-        train_config = config_from_dict_train(train_params)
-        strategy_config = strategy_config_for_preparation(
-            strategy_config_from_dict(strategy_params),
-            market_config,
-        )
-        broker_params = {
-            **report_broker_params,
-            **dict(entry.get("broker_config") or {}),
-        }
-
-        model_path = _resolve_path(config_path, entry.get("model_path"))
+        enable = entry["enable"].lower()
+        if enable not in ['false', 'true']:
+            raise ValueError(f"Live strategy {strategy_id!r} enable must be a boolean or boolean string")
+        hash_id = entry["hash"]
+        model_path = _resolve_path(config_path, entry['model_path'])
         if not os.path.isdir(model_path):
-            raise FileNotFoundError(f"Model artifact directory not found: {model_path}")
-
-        specs.append(
+            raise FileNotFoundError(
+                f"Model artifact directory not found: {model_path}"
+            )
+        strategy_entries.append(
             LiveStrategySpec(
-                id=strategy_id,
+                strategy_id=strategy_id,
                 hash_id=hash_id,
-                report_path=report_path,
+                enable=enable,
                 model_path=model_path,
-                device=str(entry.get("device", "cpu")),
-                market_config=market_config,
-                train_config=train_config,
-                strategy_config=strategy_config,
-                broker_config=BrokerConfig(**broker_params),
+                device=str(entry.get("device", "auto")),
+                broker_config=BrokerConfig(**entry["broker_config"]),
                 venue_config=_parse_venue_config(config_path, entry),
             )
         )
 
-    if not specs:
-        raise ValueError("Live configuration contains no enabled strategies")
-    return specs
+    if not strategy_entries:
+        raise ValueError("Live configuration contains no strategies")
 
+    load_params_from_report(strategy_entries, report_path)
 
-def _feature_signature(spec: LiveStrategySpec) -> str:
-    payload = json.dumps(
-        json_safe(spec.train_config.feature_conf_list),
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return strategy_entries
 
 
 def _magic_number(hash_id: str) -> int:
@@ -452,8 +365,12 @@ def _market_view(
     row = predicted_frame.iloc[-1]
     raw_signal = _optional_float(row.get("pred"))
     signal = Signal.INVALID if raw_signal is None else Signal(int(raw_signal))
-    atr_series = common.stop_loss_atr_pct(feature_frame, pipeline.atr_ref_bars)
-    atr_pct = _optional_float(atr_series.iloc[-1], 0.0) or 0.0
+    fixed_hold_bars = getattr(pipeline.spec.strategy_config, "fixed_hold_bars", None)
+    if fixed_hold_bars is None or int(fixed_hold_bars) <= 0:
+        atr_pct = 0.0
+    else:
+        atr_series = common.stop_loss_atr_pct(feature_frame, int(fixed_hold_bars))
+        atr_pct = _optional_float(atr_series.iloc[-1], 0.0) or 0.0
     current_time = _bar_time(row)
     close = _optional_float(row.get("close"))
     if close is None or close <= 0:
@@ -485,24 +402,17 @@ class LiveRunner:
         specs: list[LiveStrategySpec],
         *,
         logger: Optional[logging.Logger] = None,
-        feed_factory: Optional[Callable[[FeedKey, int], Any]] = None,
-        feature_factory: Optional[Callable[[LiveStrategySpec], Any]] = None,
-        model_factory: Optional[Callable[[LiveStrategySpec], Any]] = None,
-        venue_factory: Optional[Callable[[LiveStrategySpec, logging.Logger], Any]] = None,
-        strategy_factory: Optional[Callable[[LiveStrategySpec, Any], Any]] = None,
     ):
         if not specs:
             raise ValueError("LiveRunner requires at least one strategy")
         self.logger = logger or logging.getLogger("trade.live")
-        self._feed_factory = feed_factory or self._default_feed_factory
-        self._feature_factory = feature_factory or self._default_feature_factory
-        self._model_factory = model_factory or self._default_model_factory
-        self._venue_factory = venue_factory or self._default_venue_factory
-        self._strategy_factory = strategy_factory or self._default_strategy_factory
         self._initialized = False
         self._closed = False
-        self.pipelines: list[StrategyPipeline] = []
-        self.feed_groups: dict[FeedKey, FeedGroup] = {}
+        self.strategy_pipelines: list[StrategyPipeline] = []
+        self.feed_groups: list[FeedGroup] = []
+        self._candle_events: queue.Queue[tuple[FeedGroup, int]] = queue.Queue()
+        self._watchdog_interval_ms = 0
+        self._next_watchdog_time_ms = 0
         try:
             self._build(specs)
         except Exception:
@@ -510,86 +420,95 @@ class LiveRunner:
             raise
 
     @classmethod
-    def from_config(cls, path: str, **kwargs) -> "LiveRunner":
-        return cls(load_live_strategy_specs(path), **kwargs)
+    def from_config(
+        cls,
+        path: str,
+        logger: Optional[logging.Logger] = None,
+    ) -> "LiveRunner":
+        live_config = load_live_strategy_specs(path)
+        return cls(live_config, logger=logger)
 
     @staticmethod
-    def _default_feed_factory(key: FeedKey, max_len: int):
-        if key.data_source.casefold() not in SUPPORTED_BINANCE_DATA_SOURCES:
+    def _create_feed(
+        market_config: common.MarketDataSourceConfig,
+        max_len: int,
+    ):
+        if market_config.data_source.casefold() not in SUPPORTED_BINANCE_DATA_SOURCES:
             raise ValueError(
-                f"Unsupported live data source {key.data_source!r}; "
+                f"Unsupported live data source {market_config.data_source!r}; "
                 "only Binance public kline feeds are currently implemented"
             )
-        from trade.venue.live.binance_data_feed import BinanceDataFeed
 
         return BinanceDataFeed(
-            key.symbol,
-            key.interval,
-            key.trading_type,
+            market_config.symbol,
+            market_config.interval,
+            market_config.trading_type,
             max_len=max_len,
         )
 
     @staticmethod
-    def _default_feature_factory(spec: LiveStrategySpec):
+    def _create_feature_generator(spec: LiveStrategySpec):
         return common.FeatureFactory(
             common.get_interval_ms(spec.market_config.interval),
             feature_conf_list=spec.train_config.feature_conf_list,
         )
 
     @staticmethod
-    def _default_model_factory(spec: LiveStrategySpec):
+    def _load_model(spec: LiveStrategySpec):
         from model.model_loader import ModelHandler
 
         return ModelHandler(tarin_out_path=spec.model_path, device=spec.device)
 
     @staticmethod
-    def _default_venue_factory(spec: LiveStrategySpec, logger: logging.Logger):
+    def _create_venue(spec: LiveStrategySpec, logger: logging.Logger):
         config = spec.venue_config
-        if config.kind == "MT5":
+        if config.venue == "MT5":
             from trade.venue.live.ftmo.mt5_venue import MT5Venue
 
             return MT5Venue(
                 config.path,
                 spec.market_config.symbol,
-                _magic_number(f"{spec.id}:{spec.hash_id}"),
+                _magic_number(f"{spec.strategy_id}:{spec.hash_id}"),
                 logger=logger,
                 login=config.login,
                 password=config.password,
                 server=config.server,
             )
-        if config.kind == "Bybit":
+        if config.venue == "Bybit":
             from trade.venue.live.bybit.bybit_venue import BybitVenue
 
             return BybitVenue(config.path, spec.market_config.symbol, logger=logger)
-        if config.kind == "Binance":
+        if config.venue == "Binance":
             from trade.venue.live.binance.binance_venue import BinanceVenue
 
             return BinanceVenue(config.path, spec.market_config.symbol, logger=logger)
-        raise ValueError(f"Unsupported venue: {config.kind}")
+        raise ValueError(f"Unsupported venue: {config.venue}")
 
     @staticmethod
-    def _default_strategy_factory(spec: LiveStrategySpec, venue: Any):
+    def _create_strategy(spec: LiveStrategySpec, venue: Any):
         from trade.strategy.strategy_bbm import BbmSignalStrategy, BbmStrategyConfig
         from trade.strategy.strategy_ml import MlSignalStrategy, MlStrategyConfig
 
         equity = float(venue.get_account_equity())
         if equity <= 0:
             raise RuntimeError(
-                f"Venue returned invalid account equity for {spec.id} ({spec.hash_id})"
+                "Venue returned invalid account equity for "
+                f"{spec.strategy_id} ({spec.hash_id})"
             )
         leverage = float(spec.broker_config.leverage)
 
+        open_time = venue.get_last_position_open_time()
+        held_bars = 0
+        if open_time is not None:
+            now = venue.get_server_time()
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            if open_time.tzinfo is None:
+                open_time = open_time.replace(tzinfo=timezone.utc)
+            elapsed_ms = max(0, int((now - open_time).total_seconds() * 1000))
+            held_bars = elapsed_ms // common.get_interval_ms(spec.market_config.interval)
+
         if isinstance(spec.strategy_config, MlStrategyConfig):
-            open_time = venue.get_last_position_open_time()
-            held_bars = 0
-            if open_time is not None:
-                now = venue.get_server_time()
-                if now.tzinfo is None:
-                    now = now.replace(tzinfo=timezone.utc)
-                if open_time.tzinfo is None:
-                    open_time = open_time.replace(tzinfo=timezone.utc)
-                elapsed_ms = max(0, int((now - open_time).total_seconds() * 1000))
-                held_bars = elapsed_ms // common.get_interval_ms(spec.market_config.interval)
             return MlSignalStrategy(
                 venue,
                 config=spec.strategy_config,
@@ -602,6 +521,7 @@ class LiveRunner:
                 venue,
                 config=spec.strategy_config,
                 init_equity=equity,
+                exist_hold_bars=int(held_bars),
                 leverage=leverage,
             )
         raise TypeError(
@@ -609,72 +529,29 @@ class LiveRunner:
             f"BbmStrategyConfig, got {type(spec.strategy_config).__name__}"
         )
 
-    def _validate_execution_targets(self, specs: list[LiveStrategySpec]) -> None:
-        strategy_ids = [spec.id for spec in specs]
-        if len(set(strategy_ids)) != len(strategy_ids):
-            raise ValueError("Live strategy IDs must be unique")
-
-        mt5_magics = [
-            _magic_number(f"{spec.id}:{spec.hash_id}")
-            for spec in specs
-            if spec.venue_config.kind == "MT5"
-        ]
-        if len(set(mt5_magics)) != len(mt5_magics):
-            raise ValueError("MT5 strategy IDs produced duplicate magic numbers")
-
-        mt5_connections = {
-            (
-                spec.venue_config.path,
-                spec.venue_config.login,
-                spec.venue_config.password,
-                spec.venue_config.server,
-            )
-            for spec in specs
-            if spec.venue_config.kind == "MT5"
-        }
-        if len(mt5_connections) > 1:
-            raise ValueError(
-                "One LiveRunner process cannot safely switch between multiple MT5 "
-                "terminal/account connections"
-            )
-
-        exchange_targets = set()
-        for spec in specs:
-            if spec.venue_config.kind not in {"Bybit", "Binance"}:
-                continue
-            target = (
-                spec.venue_config.kind,
-                spec.venue_config.path,
-                spec.market_config.symbol,
-            )
-            if target in exchange_targets:
-                raise ValueError(
-                    "Multiple strategies cannot safely share one exchange account and "
-                    f"symbol without isolated positions: {target[0]} {target[2]}"
-                )
-            exchange_targets.add(target)
-
     def _build(self, specs: list[LiveStrategySpec]) -> None:
-        self._validate_execution_targets(specs)
-        model_cache: dict[tuple[str, str], Any] = {}
-        feature_cache: dict[tuple[FeedKey, str], Any] = {}
-        grouped_pipelines: dict[FeedKey, dict[str, FeatureGroup]] = {}
+        grouped_pipelines: list[
+            tuple[common.MarketDataSourceConfig, list[StrategyPipeline]]
+        ] = []
 
         for spec in specs:
-            model_key = (spec.model_path, spec.device)
-            model = model_cache.get(model_key)
-            if model is None:
-                model = self._model_factory(spec)
-                model_cache[model_key] = model
-            signature = _feature_signature(spec)
-            feature_key = (spec.feed_key, signature)
-            feature_generator = feature_cache.get(feature_key)
-            if feature_generator is None:
-                feature_generator = self._feature_factory(spec)
-                feature_cache[feature_key] = feature_generator
-            venue = self._venue_factory(spec, self.logger)
+            model = self._load_model(spec)
+            feature_generator = self._create_feature_generator(spec)
+            feed_entry = next(
+                filter(
+                    lambda item: item[0] == spec.market_config,
+                    grouped_pipelines,
+                ),
+                None,
+            )
+            if feed_entry is None:
+                feed_pipelines: list[StrategyPipeline] = []
+                grouped_pipelines.append((spec.market_config, feed_pipelines))
+            else:
+                feed_pipelines = feed_entry[1]
+            venue = self._create_venue(spec, self.logger)
             try:
-                strategy = self._strategy_factory(spec, venue)
+                strategy = self._create_strategy(spec, venue)
             except Exception:
                 shutdown = getattr(venue, "shutdown", None)
                 if callable(shutdown):
@@ -683,11 +560,9 @@ class LiveRunner:
                     except Exception:
                         self.logger.exception(
                             "Venue cleanup failed during construction: %s",
-                            spec.id,
+                            spec.strategy_id,
                         )
                 raise
-
-            from trade.runner.backtest_runner import atr_ref_bars_for_strategy
 
             pipeline = StrategyPipeline(
                 spec=spec,
@@ -696,59 +571,93 @@ class LiveRunner:
                 strategy=strategy,
                 feature_factory=feature_generator,
                 interval_ms=common.get_interval_ms(spec.market_config.interval),
-                atr_ref_bars=atr_ref_bars_for_strategy(spec.strategy_config),
+                enable=spec.enable,
             )
-            self.pipelines.append(pipeline)
-            feature_groups = grouped_pipelines.setdefault(spec.feed_key, {})
-            feature_groups.setdefault(
-                signature,
-                FeatureGroup(factory=feature_generator),
-            ).pipelines.append(pipeline)
+            self.strategy_pipelines.append(pipeline)
+            feed_pipelines.append(pipeline)
 
-        for feed_key, feature_groups in grouped_pipelines.items():
-            groups = list(feature_groups.values())
-            required_bars = max(
-                pipeline.required_bars
-                for group in groups
-                for pipeline in group.pipelines
-            )
-            feed = self._feed_factory(feed_key, required_bars + 500)
-            self.feed_groups[feed_key] = FeedGroup(
-                key=feed_key,
-                feed=feed,
-                required_bars=required_bars,
-                feature_groups=groups,
+        for market_config, pipelines in grouped_pipelines:
+            required_bars = max(pipeline.required_bars for pipeline in pipelines)
+            feed = self._create_feed(market_config, required_bars + 500)
+            self.feed_groups.append(
+                FeedGroup(
+                    market_config=market_config,
+                    feed=feed,
+                    required_bars=required_bars,
+                    pipelines=pipelines,
+                )
             )
 
         self.logger.info(
-            "Live runner built | strategies=%d shared_feeds=%d models=%d",
-            len(self.pipelines),
+            "Live runner built | strategies=%d enable=%d shared_feeds=%d",
+            len(self.strategy_pipelines),
+            sum(pipeline.enable == "true" for pipeline in self.strategy_pipelines),
             len(self.feed_groups),
-            len(model_cache),
         )
+
+    def set_strategy_enabled(self, strategy_id: str, enable: str) -> None:
+        """Enable or disable one strategy without rebuilding its pipeline."""
+
+        enable = enable.lower()
+        if enable not in ["false", "true"]:
+            raise ValueError("enable must be a boolean string")
+        for pipeline in self.strategy_pipelines:
+            if pipeline.spec.strategy_id == strategy_id:
+                pipeline.enable = enable
+                self.logger.info(
+                    "Strategy runtime state changed | id=%s enable=%s",
+                    strategy_id,
+                    enable,
+                )
+                return
+        raise KeyError(f"Unknown live strategy id: {strategy_id!r}")
 
     def initialize(self) -> None:
         if self._closed:
             raise RuntimeError("LiveRunner is already closed")
         if self._initialized:
             return
-        for group in self.feed_groups.values():
-            interval_ms = common.get_interval_ms(group.key.interval)
+
+        for group in self.feed_groups:
+            interval_ms = common.get_interval_ms(group.market_config.interval)
             group.feed.initialize_cache(group.required_bars, interval_ms)
             initial = group.feed.get_latest_data()
             if initial is None or initial.empty:
-                raise RuntimeError(f"Failed to warm live feed: {group.key}")
+                raise RuntimeError(
+                    f"Failed to warm live feed: {group.market_config}"
+                )
             latest_candle_id = int(initial.iloc[-1]["open_time_ms_utc"])
             group.last_candle_id = latest_candle_id
-            group.next_poll_time_ms = latest_candle_id + interval_ms * 2 + 500
             self.logger.info(
                 "Live feed ready | source=%s symbol=%s interval=%s bars=%d",
-                group.key.data_source,
-                group.key.symbol,
-                group.key.interval,
+                group.market_config.data_source,
+                group.market_config.symbol,
+                group.market_config.interval,
                 len(initial),
             )
+
+        self._watchdog_interval_ms = min(
+            common.get_interval_ms(group.market_config.interval)
+            for group in self.feed_groups
+        )
+        now_ms = int(time.time() * 1000)
+        next_boundary_ms = (
+            now_ms // self._watchdog_interval_ms + 1
+        ) * self._watchdog_interval_ms
+        self._next_watchdog_time_ms = next_boundary_ms + WATCHDOG_DELAY_MS
+
+        for group in self.feed_groups:
+            group.feed.start(
+                lambda candle_id, target=group: self._candle_events.put(
+                    (target, candle_id)
+                )
+            )
         self._initialized = True
+        self.logger.info(
+            "WebSocket feeds started | watchdog_interval_ms=%d delay_ms=%d",
+            self._watchdog_interval_ms,
+            WATCHDOG_DELAY_MS,
+        )
 
     def _predict(self, pipeline: StrategyPipeline, features: pd.DataFrame) -> pd.DataFrame:
         sequence_length = int(pipeline.model.seq_len)
@@ -783,7 +692,7 @@ class LiveRunner:
         intent = pipeline.strategy.process(observation)
         self.logger.info(
             "Strategy processed | id=%s hash=%s symbol=%s signal=%s action=%s",
-            pipeline.spec.id,
+            pipeline.spec.strategy_id,
             pipeline.spec.hash_id,
             pipeline.spec.market_config.symbol,
             market.signal.name,
@@ -791,81 +700,260 @@ class LiveRunner:
         )
         return intent
 
-    def run_step(self) -> dict[str, TradeIntent]:
+    def _dispatch_invalid(
+        self,
+        pipeline: StrategyPipeline,
+        candle_id: int,
+        frame: Optional[pd.DataFrame],
+    ) -> TradeIntent:
+        row: Mapping[str, Any] = {}
+        if frame is not None and not frame.empty:
+            row = frame.iloc[-1]
+        last_close = _optional_float(row.get("close"), 0.0) or 0.0
+        market = MarketView(
+            price=last_close,
+            open=_optional_float(row.get("open")),
+            high=_optional_float(row.get("high")),
+            low=_optional_float(row.get("low")),
+            close=_optional_float(row.get("close")),
+            signal=Signal.INVALID,
+            pred_prob=1.0,
+            atr_pct=0.0,
+            bar_interval_ms=pipeline.interval_ms,
+            bars_to_close=math.inf,
+        )
+        observation = Observation(
+            market=market,
+            position=_position_view(pipeline.venue.get_current_state()),
+            account=AccountView(equity=float(pipeline.venue.get_account_equity())),
+            current_time=pd.Timestamp(candle_id, unit="ms", tz="UTC").to_pydatetime(),
+        )
+        intent = pipeline.strategy.process(observation)
+        self.logger.warning(
+            "Invalid candle signal processed | id=%s hash=%s symbol=%s interval=%s "
+            "candle_id=%d action=%s",
+            pipeline.spec.strategy_id,
+            pipeline.spec.hash_id,
+            pipeline.spec.market_config.symbol,
+            pipeline.spec.market_config.interval,
+            candle_id,
+            intent.action.value,
+        )
+        return intent
+
+    def _emit_invalid_for_group(
+        self,
+        group: FeedGroup,
+        candle_id: int,
+        intents: dict[str, TradeIntent],
+    ) -> None:
+        frame = group.feed.get_latest_data()
+        if frame is not None and not frame.empty:
+            candle_ids = pd.to_numeric(
+                frame["open_time_ms_utc"],
+                errors="coerce",
+            )
+            frame = frame.loc[candle_ids < candle_id].copy()
+        for pipeline in group.pipelines:
+            if pipeline.enable != "true":
+                continue
+            try:
+                intents[pipeline.spec.strategy_id] = self._dispatch_invalid(
+                    pipeline,
+                    candle_id,
+                    frame,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Invalid signal dispatch failed | id=%s hash=%s symbol=%s",
+                    pipeline.spec.strategy_id,
+                    pipeline.spec.hash_id,
+                    pipeline.spec.market_config.symbol,
+                )
+
+    def _process_closed_candle(
+        self,
+        group: FeedGroup,
+        candle_id: int,
+        intents: dict[str, TradeIntent],
+    ) -> None:
+        if group.last_candle_id is None:
+            group.last_candle_id = candle_id
+            return
+        if candle_id <= group.last_candle_id:
+            return
+
+        interval_ms = common.get_interval_ms(group.market_config.interval)
+        missing_candle_id = group.last_candle_id + interval_ms
+        while missing_candle_id < candle_id:
+            cached = group.feed.get_latest_data()
+            received_ids = set()
+            if cached is not None and not cached.empty:
+                received_ids = set(
+                    pd.to_numeric(
+                        cached["open_time_ms_utc"],
+                        errors="coerce",
+                    ).dropna().astype("int64")
+                )
+            if missing_candle_id in received_ids:
+                self._process_closed_candle(group, missing_candle_id, intents)
+                missing_candle_id = group.last_candle_id + interval_ms
+                continue
+            self.logger.error(
+                "Closed kline was missed before a later WebSocket event | "
+                "symbol=%s interval=%s candle_id=%d",
+                group.market_config.symbol,
+                group.market_config.interval,
+                missing_candle_id,
+            )
+            self._emit_invalid_for_group(group, missing_candle_id, intents)
+            group.last_candle_id = missing_candle_id
+            missing_candle_id += interval_ms
+
+        frame = group.feed.get_latest_data()
+        if frame is None or frame.empty:
+            self.logger.error(
+                "Closed-kline event has no cached data | symbol=%s interval=%s "
+                "candle_id=%d",
+                group.market_config.symbol,
+                group.market_config.interval,
+                candle_id,
+            )
+            self._emit_invalid_for_group(group, candle_id, intents)
+            group.last_candle_id = candle_id
+            return
+
+        candle_ids = pd.to_numeric(frame["open_time_ms_utc"], errors="coerce")
+        frame = frame.loc[candle_ids <= candle_id].copy()
+        if frame.empty or int(frame.iloc[-1]["open_time_ms_utc"]) != candle_id:
+            self.logger.error(
+                "Closed-kline event is absent from cache | symbol=%s interval=%s "
+                "candle_id=%d",
+                group.market_config.symbol,
+                group.market_config.interval,
+                candle_id,
+            )
+            self._emit_invalid_for_group(group, candle_id, intents)
+            group.last_candle_id = candle_id
+            return
+
+        for pipeline in group.pipelines:
+            if pipeline.enable != "true":
+                continue
+            try:
+                prepared = _prepare_market_frame(frame, pipeline.spec)
+                features = pipeline.feature_factory.generate(prepared)
+                predicted = self._predict(pipeline, features)
+                intents[pipeline.spec.strategy_id] = self._dispatch(
+                    pipeline,
+                    predicted,
+                    features,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Strategy cycle failed; dispatching INVALID | "
+                    "id=%s hash=%s symbol=%s",
+                    pipeline.spec.strategy_id,
+                    pipeline.spec.hash_id,
+                    pipeline.spec.market_config.symbol,
+                )
+                try:
+                    intents[pipeline.spec.strategy_id] = self._dispatch_invalid(
+                        pipeline,
+                        candle_id,
+                        frame,
+                    )
+                except Exception:
+                    self.logger.exception(
+                        "Fallback INVALID dispatch failed | id=%s hash=%s symbol=%s",
+                        pipeline.spec.strategy_id,
+                        pipeline.spec.hash_id,
+                        pipeline.spec.market_config.symbol,
+                    )
+        group.last_candle_id = candle_id
+
+    def _run_watchdog(
+        self,
+        now_ms: int,
+        intents: dict[str, TradeIntent],
+    ) -> None:
+        while now_ms >= self._next_watchdog_time_ms:
+            boundary_ms = self._next_watchdog_time_ms - WATCHDOG_DELAY_MS
+            for group in self.feed_groups:
+                interval_ms = common.get_interval_ms(group.market_config.interval)
+                expected_candle_id = _latest_expected_candle_id(
+                    boundary_ms,
+                    interval_ms,
+                )
+                while (
+                    group.last_candle_id is not None
+                    and group.last_candle_id < expected_candle_id
+                ):
+                    next_candle_id = group.last_candle_id + interval_ms
+                    frame = group.feed.get_latest_data()
+                    received_ids = set()
+                    if frame is not None and not frame.empty:
+                        received_ids = set(
+                            pd.to_numeric(
+                                frame["open_time_ms_utc"],
+                                errors="coerce",
+                            ).dropna().astype("int64")
+                        )
+                    if next_candle_id in received_ids:
+                        self._process_closed_candle(group, next_candle_id, intents)
+                        continue
+                    self.logger.error(
+                        "Expected WebSocket kline was not received; dispatching INVALID | "
+                        "symbol=%s interval=%s candle_id=%d",
+                        group.market_config.symbol,
+                        group.market_config.interval,
+                        next_candle_id,
+                    )
+                    self._emit_invalid_for_group(group, next_candle_id, intents)
+                    group.last_candle_id = next_candle_id
+            self._next_watchdog_time_ms += self._watchdog_interval_ms
+
+    def run_step(
+        self,
+        wait_timeout_seconds: float = 0.0,
+    ) -> dict[str, TradeIntent]:
         if self._closed:
             raise RuntimeError("LiveRunner is already closed")
+        if wait_timeout_seconds < 0:
+            raise ValueError("wait_timeout_seconds must not be negative")
         if not self._initialized:
             self.initialize()
         intents: dict[str, TradeIntent] = {}
 
-        for feed_group in self.feed_groups.values():
-            now_ms = int(time.time() * 1000)
-            if now_ms < feed_group.next_poll_time_ms:
-                continue
-            try:
-                frame = feed_group.feed.get_latest_data()
-            except Exception:
-                self.logger.exception("Live feed update failed: %s", feed_group.key)
-                feed_group.next_poll_time_ms = now_ms + 5_000
-                continue
-            if frame is None or frame.empty:
-                self.logger.error("Live feed returned no data: %s", feed_group.key)
-                feed_group.next_poll_time_ms = now_ms + 5_000
-                continue
-            candle_id = int(frame.iloc[-1]["open_time_ms_utc"])
-            if candle_id == feed_group.last_candle_id:
-                feed_group.next_poll_time_ms = now_ms + 5_000
-                continue
-            feed_group.last_candle_id = candle_id
-            interval_ms = common.get_interval_ms(feed_group.key.interval)
-            feed_group.next_poll_time_ms = max(
-                now_ms + 1_000,
-                candle_id + interval_ms * 2 + 500,
+        try:
+            group, candle_id = self._candle_events.get(
+                timeout=wait_timeout_seconds,
             )
+            self._process_closed_candle(group, candle_id, intents)
+        except queue.Empty:
+            pass
 
-            for feature_group in feed_group.feature_groups:
-                representative = feature_group.pipelines[0].spec
-                try:
-                    prepared = _prepare_market_frame(frame, representative)
-                    features = feature_group.factory.generate(prepared)
-                except Exception:
-                    self.logger.exception(
-                        "Feature generation failed | source=%s symbol=%s interval=%s",
-                        feed_group.key.data_source,
-                        feed_group.key.symbol,
-                        feed_group.key.interval,
-                    )
-                    continue
+        while True:
+            try:
+                group, candle_id = self._candle_events.get_nowait()
+            except queue.Empty:
+                break
+            self._process_closed_candle(group, candle_id, intents)
 
-                prediction_cache: dict[int, pd.DataFrame] = {}
-                for pipeline in feature_group.pipelines:
-                    try:
-                        model_key = id(pipeline.model)
-                        if model_key not in prediction_cache:
-                            prediction_cache[model_key] = self._predict(pipeline, features)
-                        intents[pipeline.spec.id] = self._dispatch(
-                            pipeline,
-                            prediction_cache[model_key],
-                            features,
-                        )
-                    except Exception:
-                        self.logger.exception(
-                            "Strategy cycle failed safely | id=%s hash=%s symbol=%s",
-                            pipeline.spec.id,
-                            pipeline.spec.hash_id,
-                            pipeline.spec.market_config.symbol,
-                        )
+        self._run_watchdog(int(time.time() * 1000), intents)
         return intents
 
-    def run_forever(self, poll_interval_seconds: float = 5.0) -> None:
-        if poll_interval_seconds <= 0:
-            raise ValueError("poll_interval_seconds must be positive")
+    def run_forever(self) -> None:
         try:
             self.initialize()
             self.logger.info("Live runner started")
             while True:
-                self.run_step()
-                time.sleep(poll_interval_seconds)
+                now_ms = int(time.time() * 1000)
+                wait_seconds = max(
+                    0.0,
+                    (self._next_watchdog_time_ms - now_ms) / 1000.0,
+                )
+                self.run_step(wait_seconds)
         except KeyboardInterrupt:
             self.logger.info("Live runner stopped by user")
         finally:
@@ -875,14 +963,17 @@ class LiveRunner:
         if self._closed:
             return
         self._closed = True
-        for pipeline in self.pipelines:
+        for pipeline in self.strategy_pipelines:
             try:
                 pipeline.strategy.finalize()
             except Exception:
-                self.logger.exception("Strategy finalization failed: %s", pipeline.spec.id)
+                self.logger.exception(
+                    "Strategy finalization failed: %s",
+                    pipeline.spec.strategy_id,
+                )
 
         closed = set()
-        for pipeline in self.pipelines:
+        for pipeline in self.strategy_pipelines:
             venue = pipeline.venue
             if id(venue) in closed:
                 continue
@@ -892,9 +983,12 @@ class LiveRunner:
                 try:
                     shutdown()
                 except Exception:
-                    self.logger.exception("Venue shutdown failed: %s", pipeline.spec.id)
+                    self.logger.exception(
+                        "Venue shutdown failed: %s",
+                        pipeline.spec.strategy_id,
+                    )
 
-        for feed_group in self.feed_groups.values():
+        for feed_group in self.feed_groups:
             shutdown = getattr(feed_group.feed, "shutdown", None)
             if not callable(shutdown):
                 shutdown = getattr(feed_group.feed, "close", None)
@@ -902,7 +996,10 @@ class LiveRunner:
                 try:
                     shutdown()
                 except Exception:
-                    self.logger.exception("Live feed shutdown failed: %s", feed_group.key)
+                    self.logger.exception(
+                        "Live feed shutdown failed: %s",
+                        feed_group.market_config,
+                    )
 
 
 def main() -> None:
@@ -911,12 +1008,6 @@ def main() -> None:
         "--config",
         default=os.path.join(os.path.dirname(__file__), "live_config.json"),
         help="Path to the live strategy JSON configuration",
-    )
-    parser.add_argument(
-        "--poll-seconds",
-        type=float,
-        default=5.0,
-        help="Seconds between shared-feed polls",
     )
     args = parser.parse_args()
 
@@ -928,7 +1019,7 @@ def main() -> None:
         args.config,
         logger=logger,
     )
-    runner.run_forever(args.poll_seconds)
+    runner.run_forever()
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ class BbmStrategyConfig:
     """Strategy parameters for the Binary Barrier Model label backtest."""
 
     compound: bool = True
-    risk_per_trade_pct: float = 0.02
+    risk_per_trade_pct: float = 0.015
     fixed_hold_bars: Optional[int] = None
     # Multipliers of MarketView.expected_vol, not absolute percentages.
     threshold_long: float = 1.7
@@ -25,7 +25,7 @@ class BbmStrategyConfig:
     allow_short: bool = True
     prob_thresh: Optional[float] = None
     min_expected_move_pct: float = 0.01
-    max_daily_loss_pct: float = 0.025
+    max_daily_loss_pct: float = 0.99
 
 
 class BbmSignalStrategy(StrategyBase):
@@ -50,6 +50,7 @@ class BbmSignalStrategy(StrategyBase):
         venue: VenueBase,
         config: BbmStrategyConfig,
         init_equity: float,
+        exist_hold_bars: int = 0,
         leverage: float = 1.0,
     ):
         super().__init__(venue)
@@ -66,13 +67,18 @@ class BbmSignalStrategy(StrategyBase):
         self.skipped_missing_threshold = 0
         self.skipped_small_threshold = 0
         self.skipped_size = 0
-        self.position_hold_bars = 0
+        self.position_hold_bars = max(0, int(exist_hold_bars))
         self.previous_position_dir = PositionDir.FLAT
 
     def _update_position_hold_bars(self, position_dir: PositionDir):
         """Count from the observed entry without refreshing on later signals."""
         if position_dir == PositionDir.FLAT:
             self.position_hold_bars = 0
+        elif (
+            self.previous_position_dir == PositionDir.FLAT
+            and self.position_hold_bars > 0
+        ):
+            self.position_hold_bars += 1
         elif position_dir != self.previous_position_dir:
             self.position_hold_bars = 1
         else:

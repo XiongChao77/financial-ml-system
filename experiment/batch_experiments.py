@@ -493,7 +493,6 @@ def _precompute_backtest_predictions(
 
     for period in ("long", "forward"):
         data_config = backtest_runner.ModelDataConfig(
-            atr_ref_bars=1,
             prep_output_dir=prep_output_dir,
             train_output_dir=train_output_dir,
             device=device,
@@ -648,9 +647,6 @@ def _worker_sim(
                         period,
                     ),
                     data_config=backtest_runner.ModelDataConfig(
-                        atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
-                            strategy_config
-                        ),
                         prep_output_dir=prep_dir,
                         train_output_dir=train_output_dir,
                         device="cpu",
@@ -1057,9 +1053,6 @@ def train_and_cross_test(
                         sim_prep_output_dir = os.path.join(output_dir,'prep',f'{t_pre_para.symbol}_{t_pre_para.interval}')
                         ensure_prepared(t_pre_para, sim_prep_output_dir)
                         data_config = backtest_runner.ModelDataConfig(
-                            atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
-                                strategy_config
-                            ),
                             prep_output_dir=sim_prep_output_dir,
                             train_output_dir=train_save_dir,
                             device="cpu",
@@ -1099,9 +1092,6 @@ def train_and_cross_test(
                             sim_prep_output_dir = os.path.join(output_dir,'prep',f'{t_pre_para.symbol}_{t_pre_para.interval}')
                             ensure_prepared(t_pre_para, sim_prep_output_dir)
                             data_config = backtest_runner.ModelDataConfig(
-                                atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
-                                    strategy_config
-                                ),
                                 prep_output_dir=sim_prep_output_dir,
                                 train_output_dir=train_save_dir,
                                 device="cpu",
@@ -1393,9 +1383,6 @@ def main():
                 )
             preparation.main(logger, para=pre_para,prep_output_dir = load_prep_output_dir)
             data_config = backtest_runner.ModelDataConfig(
-                atr_ref_bars=backtest_runner.atr_ref_bars_for_strategy(
-                    strategy_config
-                ),
                 prep_output_dir=load_prep_output_dir,
                 train_output_dir=train_save_dir,
                 device="cpu",

@@ -113,12 +113,6 @@ def build_runner_config(
         raise ValueError("Missing params.data.train_output_dir")
 
     data_config = backtest_runner.ModelDataConfig(
-        atr_ref_bars=int(
-            data_params.get(
-                "atr_ref_bars",
-                backtest_runner.atr_ref_bars_for_strategy(strategy_config),
-            )
-        ),
         prep_output_dir=str(prep_output_dir),
         train_output_dir=str(train_output_dir),
         device=str(data_params.get("device", "cpu")),
