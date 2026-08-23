@@ -43,7 +43,12 @@ from trade.core.protocol import (
 from trade.runner.config import BrokerConfig
 from trade.venue.live.binance_data_feed import BinanceDataFeed
 
-SUPPORTED_VENUES = {"mt5": "MT5", "bybit": "Bybit", "binance": "Binance"}
+SUPPORTED_VENUES = {
+    "mt5": "MT5",
+    "ctrader": "cTrader",
+    "bybit": "Bybit",
+    "binance": "Binance",
+}
 SUPPORTED_BINANCE_DATA_SOURCES = {
     "binance",
     "binance_api",
@@ -60,6 +65,9 @@ class LiveVenueConfig:
     login: Optional[str] = None
     password: Optional[str] = field(default=None, repr=False)
     server: Optional[str] = None
+    account_id: Optional[str] = None
+    environment: Optional[str] = None
+    broker_symbol: Optional[str] = None
     challenge_type: Optional[str] = None
     stage: Optional[str] = None
     compound: Optional[str] = None
@@ -227,7 +235,7 @@ def _parse_venue_config(
 
     venue = SUPPORTED_VENUES[normalized]
     section = _venue_section(entry, venue)
-    path = section.get("path")
+    path = section.get("path") or section.get("key_path")
     if venue != "MT5":
         path = os.path.realpath(_resolve_path(config_path, path))
     if not os.path.isdir(path):
@@ -463,7 +471,7 @@ class LiveRunner:
     def _create_venue(spec: LiveStrategySpec, logger: logging.Logger):
         config = spec.venue_config
         if config.venue == "MT5":
-            from trade.venue.live.ftmo.mt5_venue import MT5Venue
+            from trade.venue.live.mt5.mt5_venue import MT5Venue
 
             return MT5Venue(
                 config.path,
@@ -478,6 +486,18 @@ class LiveRunner:
             from trade.venue.live.bybit.bybit_venue import BybitVenue
 
             return BybitVenue(config.path, spec.market_config.symbol, logger=logger)
+        if config.venue == "cTrader":
+            from trade.venue.live.ctrader.ctrader_venue import CTraderVenue
+
+            return CTraderVenue(
+                config.path,
+                spec.market_config.symbol,
+                _magic_number(f"{spec.strategy_id}:{spec.hash_id}"),
+                logger=logger,
+                account_id=config.account_id,
+                environment=config.environment or "demo",
+                broker_symbol=config.broker_symbol,
+            )
         if config.venue == "Binance":
             from trade.venue.live.binance.binance_venue import BinanceVenue
 

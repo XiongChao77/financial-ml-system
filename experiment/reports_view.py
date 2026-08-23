@@ -1,4 +1,7 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
+import argparse
+import operator
+import re
 import os, sys, time, json, math, shutil
 import pandas as pd
 import seaborn as sns
@@ -18,6 +21,257 @@ os.makedirs(output_dir, exist_ok=True)
 TOP_K = 50
 SKIP_PERCENT = 0  # Percentage of front part to skip; 0 means no skip, select from the very beginning
 EQUITY_SCALE = "log"  # Supported values: "linear", "log", or "both".
+RISK_COMPARISON_KEYS = ("risk_per_trade_pct", "max_daily_loss_pct")
+
+COMPARISON_OPERATORS = {
+    ">=": operator.ge,
+    "<=": operator.le,
+    ">": operator.gt,
+    "<": operator.lt,
+    "==": operator.eq,
+    "!=": operator.ne,
+}
+
+CRITERION_PATTERN = re.compile(
+    r"^(?P<period>[A-Za-z_][A-Za-z0-9_]*)\."
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)"
+    r"\s*(?P<operator>>=|<=|==|!=|>|<)\s*"
+    r"(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)$"
+)
+
+
+def parse_comparison_criterion(expression):
+    """Parse a filter expression such as 'forward.cagr>=0.3'."""
+    match = CRITERION_PATTERN.fullmatch(expression.strip())
+    if match is None:
+        raise ValueError(
+            f"Invalid criterion '{expression}'. "
+            "Expected format such as 'forward.cagr>=0.3'."
+        )
+
+    return (
+        match.group("period"),
+        match.group("key"),
+        match.group("operator"),
+        float(match.group("value")),
+    )
+
+
+def _risk_comparison_key(report):
+    """Return parameters that must match in a risk-only comparison group."""
+    params = copy.deepcopy(report["params"])
+    strategy = params.get("strategy", {})
+    for key in RISK_COMPARISON_KEYS:
+        strategy.pop(key, None)
+
+    # These identifiers are derived from simulation parameters, so they change
+    # when either risk parameter changes even though no additional input does.
+    params.pop("hash", None)
+    identity = params.get("identity", {})
+    identity.pop("sim_hash", None)
+    identity.pop("full_hash", None)
+    return json.dumps(params, sort_keys=True, separators=(",", ":"))
+
+
+def _risk_parameter_values(report):
+    strategy = report.get("params", {}).get("strategy", {})
+    return tuple(strategy.get(key) for key in RISK_COMPARISON_KEYS)
+
+
+def find_risk_only_comparison_groups(rows):
+    """Group reports whose inputs differ only in the two risk parameters."""
+    grouped = {}
+    for row in rows:
+        report = row["raw"]
+        if any(
+            key not in report.get("params", {}).get("strategy", {})
+            for key in RISK_COMPARISON_KEYS
+        ):
+            continue
+        group = grouped.setdefault(_risk_comparison_key(report), {})
+        risk_values = _risk_parameter_values(report)
+        group.setdefault(risk_values, row)
+
+    comparisons = [
+        [variants[risk_values] for risk_values in sorted(variants)]
+        for variants in grouped.values()
+        if len(variants) > 1
+    ]
+    comparisons.sort(
+        key=lambda group: str(group[0]["raw"].get("params", {}).get("hash", ""))
+    )
+    return comparisons
+
+
+def filter_comparison_groups(groups, criteria=None):
+    """Keep groups containing one strategy variant that satisfies all criteria."""
+    candidates = [(group, list(group)) for group in groups]
+
+    for expression in criteria or []:
+        period, key, operator_text, threshold = parse_comparison_criterion(expression)
+        compare = COMPARISON_OPERATORS[operator_text]
+
+        if not candidates:
+            print(
+                f"After screening comparison groups by "
+                f"{period}.{key} {operator_text} {threshold}: 0, 0.00%"
+            )
+            continue
+
+        sample_period_data = candidates[0][1][0].get(period, {})
+        key_path = find_key_path(sample_period_data, key)
+        if key_path is None:
+            print(
+                f"Warning: key '{key}' not found in {period} reports; "
+                "skipping this filter."
+            )
+            continue
+
+        previous_count = len(candidates)
+        filtered_candidates = []
+
+        for group, matching_rows in candidates:
+            matching_rows = [
+                row
+                for row in matching_rows
+                if (
+                    (value := get_value_by_path(row.get(period, {}), key_path))
+                    is not None
+                    and compare(value, threshold)
+                )
+            ]
+            if matching_rows:
+                filtered_candidates.append((group, matching_rows))
+
+        candidates = filtered_candidates
+        current_count = len(candidates)
+        ratio = current_count / previous_count * 100 if previous_count else 0
+        print(
+            f"After screening comparison groups by "
+            f"{period}.{key} {operator_text} {threshold}: "
+            f"{current_count}, {ratio:.2f}%"
+        )
+
+    return [group for group, _ in candidates]
+
+
+def print_comparison_group_metrics(groups):
+    """Print long and forward metrics for every strategy about to be plotted."""
+    columns = (
+        ("Hash", "hash", 12),
+        ("per_risk", "risk_per_trade_pct", 12),
+        ("MaxDayLoss", "max_daily_loss_pct", 10),
+        ("L_CAGR", "l_cagr", 9),
+        ("L_Calmar", "l_calmar", 9),
+        ("L_Sharpe", "l_sharpe", 9),
+        ("L_Freq", "l_daily_freq", 9),
+        ("F_CAGR", "f_cagr", 9),
+        ("F_Calmar", "f_calmar", 9),
+        ("F_Sharpe", "f_sharpe", 9),
+        ("F_Freq", "f_daily_freq", 9),
+    )
+    header = " ".join(f"{label:>{width}}" for label, _, width in columns)
+
+    def format_value(value, width):
+        if value is None:
+            return f"{'-':>{width}}"
+        try:
+            return f"{float(value):>{width}.4f}"
+        except (TypeError, ValueError):
+            return f"{str(value):>{width}}"
+
+    for group_index, group in enumerate(groups, start=1):
+        print(f"\nComparison group {group_index}/{len(groups)}")
+        print(header)
+        print("-" * len(header))
+        for row in group:
+            values = []
+            for _, key, width in columns:
+                value = row.get(key)
+                if key == "hash":
+                    values.append(f"{str(value):>{width}}")
+                else:
+                    values.append(format_value(value, width))
+            print(" ".join(values))
+
+
+def _risk_curve_payload(row):
+    """Build a plot payload whose legend names the compared risk settings."""
+    detailed = attach_report_details(row)
+    report = copy.deepcopy(detailed["raw"])
+    risk_per_trade_pct, max_daily_loss_pct = _risk_parameter_values(report)
+    report["params"]["hash"] = (
+        f"risk_per_trade_pct={risk_per_trade_pct:g}, "
+        f"max_daily_loss_pct={max_daily_loss_pct:g}"
+    )
+    return {
+        "report": report,
+        "report_details": detailed["report_details"],
+    }
+
+
+def plot_risk_only_comparisons(
+    rows,
+    comparison_output_dir,
+    *,
+    equity_scale=EQUITY_SCALE,
+    max_groups=None,
+    criteria=None,
+):
+    """Plot risk variants when one strategy passes all configured criteria."""
+    all_groups = find_risk_only_comparison_groups(rows)
+    groups = filter_comparison_groups(all_groups, criteria=criteria)
+    if criteria:
+        print(
+            f"Comparison group filters: {criteria}; "
+            f"before={len(all_groups)}, after={len(groups)}, "
+            f"removed={len(all_groups) - len(groups)}"
+        )
+    else:
+        print(f"Comparison groups before filtering: {len(all_groups)} (no filter)")
+
+    selected_groups = groups if max_groups is None else groups[:max_groups]
+    print_comparison_group_metrics(selected_groups)
+    os.makedirs(comparison_output_dir, exist_ok=True)
+    manifest_path = os.path.join(comparison_output_dir, "comparison_groups.jsonl")
+
+    with open(manifest_path, "w", encoding="utf-8") as manifest:
+        for index, group in enumerate(selected_groups, start=1):
+            base_hash = str(group[0]["raw"]["params"].get("hash", "unknown"))[:8]
+            filename = f"risk_comparison_{index:04d}_{base_hash}.png"
+            plot_equity_curves(
+                [_risk_curve_payload(row) for row in group],
+                comparison_output_dir,
+                filename,
+                equity_scale=equity_scale,
+            )
+            manifest.write(
+                json.dumps(
+                    {
+                        "file": filename,
+                        "strategies": [
+                            {
+                                "hash": row["raw"]["params"].get("hash"),
+                                **dict(
+                                    zip(
+                                        RISK_COMPARISON_KEYS,
+                                        _risk_parameter_values(row["raw"]),
+                                    )
+                                ),
+                            }
+                            for row in group
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    print(
+        f"Risk-only comparison plots saved: {len(selected_groups)}; "
+        f"output: {comparison_output_dir}"
+    )
+    return selected_groups
 
 def analyze_forward_long_correlation(selected):
     """
@@ -48,11 +302,11 @@ def analyze_forward_long_correlation(selected):
             l_calmar.append(l_cal)
 
     if len(forward_cagr) < 5:
-        print("❌ Sample size too small to compute correlation")
+        print("Sample size too small to compute correlation")
         return
 
     print("\n" + "="*100)
-    print("📈 Forward vs Long correlation analysis")
+    print("Forward vs Long correlation analysis")
     print("="*100)
 
     # CAGR
@@ -73,7 +327,7 @@ def analyze_forward_long_correlation(selected):
     print("="*100)
 
     # Quantile monotonicity test
-    print("\n🔎 Quantile monotonicity check (bucketed by forward CAGR)")
+    print("\nQuantile monotonicity check (bucketed by forward CAGR)")
 
     pairs = list(zip(forward_cagr, l_cagr))
     pairs.sort(key=lambda x: x[0])
@@ -120,13 +374,13 @@ def analyze_model_performance_correlation(all_results):
             data_list.append(row)
 
     if len(data_list) < 10:
-        print(f"⚠️ Sample size too small ({len(data_list)}) for meaningful correlation analysis")
+        print(f"Warning: Sample size too small ({len(data_list)}) for meaningful correlation analysis")
         return
 
     df = pd.DataFrame(data_list)
     
     print("\n" + "="*80)
-    print(f"📊 Model evaluation metrics vs long CAGR correlation (N={len(df)})")
+    print(f"Model evaluation metrics vs long CAGR correlation (N={len(df)})")
     print("-" * 80)
     print(f"{'Metric Name':<20} | {'Pearson r':>10} | {'p-value':>12} | {'Spearman r':>10}")
     print("-" * 80)
@@ -149,7 +403,7 @@ def analyze_model_performance_correlation(all_results):
         print(f"{m:<20} | {p_r:10.4f}{sig} | {p_val:12.2e} | {s_r:10.4f}")
 
     print("="*80)
-    print("💡 Note: Pearson r close to 1 implies strong positive linear correlation; p-value < 0.05 (*) is statistically significant.")
+    print("Note: Pearson r close to 1 implies strong positive linear correlation; p-value < 0.05 (*) is statistically significant.")
 
 def analyze_model_metrics_by_decile(all_results):
     """
@@ -182,7 +436,7 @@ def analyze_model_metrics_by_decile(all_results):
             data_list.append(row)
 
     if len(data_list) < 20:
-        print("⚠️ Not enough data for decile analysis")
+        print("Warning: Not enough data for decile analysis")
         return
 
     df = pd.DataFrame(data_list)
@@ -193,7 +447,7 @@ def analyze_model_metrics_by_decile(all_results):
             continue
 
         print("\n" + "="*100)
-        print(f"📈 Bucket analysis: model metrics ranked by {t_metric.upper()} (10% quantile buckets)")
+        print(f"Bucket analysis: model metrics ranked by {t_metric.upper()} (10% quantile buckets)")
         print("="*100)
 
         # Use qcut to divide trading metric into 10 equal-sized buckets (deciles).
@@ -228,8 +482,8 @@ def analyze_model_metrics_by_decile(all_results):
         # Simple monotonicity hint
         first_val = bucket_stats[model_keys[0]].iloc[0]
         last_val = bucket_stats[model_keys[0]].iloc[-1]
-        trend = "✅ positively monotonic" if last_val > first_val else "❌ non-monotonic or reversed"
-        print(f"\n💡 Trend check ({model_keys[0]}): from lowest to highest bucket -> {trend}")
+        trend = "positively monotonic" if last_val > first_val else "non-monotonic or reversed"
+        print(f"\nNote: Trend check ({model_keys[0]}): from lowest to highest bucket -> {trend}")
         print("-" * 100)
 
 def merge_selected(records):
@@ -280,12 +534,12 @@ def save_raw_reports(selected_rows, exp_dir ='' ,output_filename="reports_raw.js
     Extract 'raw' report field from rows and save to a jsonl file next to exp_dir.
     """
     if not selected_rows:
-        print("⚠️ No data to save")
+        print("Warning: No data to save")
         return
 
     out_path = os.path.join(exp_dir, output_filename)
 
-    print(f"📦 Extracting and saving {len(selected_rows)} raw reports to: {out_path}")
+    print(f"Extracting and saving {len(selected_rows)} raw reports to: {out_path}")
 
     try:
         with open(out_path, "w", encoding="utf-8") as f:
@@ -300,9 +554,9 @@ def save_raw_reports(selected_rows, exp_dir ='' ,output_filename="reports_raw.js
                         os.makedirs(os.path.dirname(target_details), exist_ok=True)
                         shutil.copy2(source_details, target_details)
         
-        print(f"✅ Raw data saved successfully!")
+        print(f"Raw data saved successfully!")
     except Exception as e:
-        print(f"❌ Failed to save: {str(e)}")
+        print(f"Failed to save: {str(e)}")
 
 
 def report_details_path(report, report_path):
@@ -366,7 +620,10 @@ def extract_row(report, src_path):
         "l_sharpe" : long_perf.get("sharpe"),
         "f_cagr": forward_perf.get("cagr"),
         "f_calmar": forward_perf.get("calmar"),
+        "f_sharpe": forward_perf.get("sharpe"),
         "f_daily_freq" : forward.get("trades", {}).get("daily_freq"),
+        "max_daily_loss_pct": (report.get("params", {}).get("strategy", {}).get("max_daily_loss_pct")),
+        "risk_per_trade_pct":(report.get("params", {}).get("strategy", {}).get("risk_per_trade_pct")),
         "hash": params.get('hash',0),
         "path": src_path,
         "long": long,
@@ -549,7 +806,7 @@ def compute_correlation(all_results, output_dir):
     
     df = pd.DataFrame(returns_dict).dropna()
     if df.empty:
-        print("⚠️ Data is empty, skip heatmap generation")
+        print("Warning: Data is empty, skip heatmap generation")
         return
 
     corr_matrix = df.corr()
@@ -596,7 +853,7 @@ def compute_correlation(all_results, output_dir):
     plt.savefig(save_path, dpi=150)  # 150 DPI is enough because the figure is already large
     plt.close()
 
-    print(f"📊 Dynamic-size correlation heatmap saved (Size: {fig_width:.1f}x{fig_height:.1f} in): {save_path}")
+    print(f"Dynamic-size correlation heatmap saved (Size: {fig_width:.1f}x{fig_height:.1f} in): {save_path}")
 
 def plot_in_batches(
     all_results,
@@ -617,7 +874,7 @@ def plot_in_batches(
             for row in batch
         ]
         filename = f"batch_{i//batch_size + 1}.png"
-        # ✨ Pass current loop index i as the starting number
+        # Pass current loop index i as the starting number
         plot_equity_curves(
             plot_payloads,
             output_dir,
@@ -631,9 +888,10 @@ def main():
     exp_dir1 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','13_31_24')
     exp_dir2 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','14_16_19')
     exp_dir3 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','22_55_08')
-    exp_dir_list = [exp_dir3]
+    exp_dir4 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-22','20_33_44')
+    exp_dir_list = [exp_dir4]
     filter_report = None
-    filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
+    # filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
     rows = []
     records = []
@@ -651,9 +909,18 @@ def main():
     interval = rows[0]['forward']['params']['common']['interval']
     print(f"Total reports loaded: {len(rows)}")
     uin_records = merge_selected(rows)
+    uin_records = sorted(uin_records, key=itemgetter("f_cagr"), reverse=True)
     print(f"Total uint reports: {len(uin_records)}")
     if not filter_report:
         # analyze_holdbar(uin_records,target_key="seq_len", period ='forward',metric_key="daily_freq")
+        plot_risk_only_comparisons(
+            uin_records,
+            comparison_output_dir=output_dir,
+            equity_scale='linear',
+            max_groups=30,
+            criteria=["forward.cagr>=0.3","long.cagr>0.5","long.rc_pos_ratio>0.5","long.max_hwm_duration_days<120"],
+        )
+        exit()
         uin_records = basic_filter(uin_records)
         # analyze_holdbar(uin_records,target_key="seq_len", period ='long',metric_key="cagr")
         # plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
@@ -756,7 +1023,7 @@ def main():
         if (h := str(common.recursive_get(r.get('long', {}), 'hash'))[:8]) not in filter_set 
         # and h in keep_set
     ]
-    print(f"🎯 hash fitler, {len(l_results)} -> {len(selected)}")
+    print(f"hash fitler, {len(l_results)} -> {len(selected)}")
     stats, f_map, groups = analyze_holdbar(selected,target_key="feature_conf_list",period ='long', metric_key="cagr")
     show_performance(l_results,output_dir,3)
     # exit()
@@ -795,10 +1062,10 @@ def filter_stable(selected):
     return results
 
 def filter_aggressive(selected):
-    # 1️⃣ Forward must be very strong (capture current regime)
+    # 1. Forward must be very strong (capture current regime)
     results, _ = filter_by_criteria( selected, period='forward', cagr=1, calmar=0)
     print(f"After forward performance filter: {len(results)} reports")
-    # 2️⃣ Long only needs to be acceptable, not extremely stable
+    # 2. Long only needs to be acceptable, not extremely stable
     results, _ = filter_by_performance( results, period='long', min_cagr=0.6, min_calmar=0.3 )
     print(f"After long performance filter: {len(results)} reports")
     results,long_unresults = filter_by_performance(results, period ='long', min_rc_cagr_median = 0)
@@ -912,7 +1179,7 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         df_final = pd.DataFrame(summary_rows).set_index("Group")
     
         print("\n" + "="*120)  # Slightly longer separator line
-        print(f"📊 Parameter group comparison (Group 1: {label1} | Group 2: {label2})")
+        print(f"Parameter group comparison (Group 1: {label1} | Group 2: {label2})")
         print("="*120)
         
         # Force single-line printing
@@ -923,9 +1190,9 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         cagr1 = np.mean(g1_metrics['cagr'])
         cagr2 = np.mean(g2_metrics['cagr'])
         winner = "Group 1" if cagr1 > cagr2 else "Group 2"
-        print(f"💡 Preview conclusion: {winner} has better expected return ({max(cagr1, cagr2):.2%})")
+        print(f"Note: Preview conclusion: {winner} has better expected return ({max(cagr1, cagr2):.2%})")
     else:
-        print("❌ Error: failed to classify valid data; please check parameters in rows input.")
+        print("Error: failed to classify valid data; please check parameters in rows input.")
     exit()
 
 def filter_by_criteria(reports, period='forward', **criteria):
@@ -955,7 +1222,7 @@ def filter_by_criteria(reports, period='forward', **criteria):
         # Note: path is found based on the first sample in the current surviving pool
         key_path = find_key_path(passed[0].get(period, {}), key)
         if key_path is None:
-            print(f"⚠️ Warning: key '{key}' not found in {period} reports, skipping this filter.")
+            print(f"Warning: key '{key}' not found in {period} reports, skipping this filter.")
             continue
 
         # 2. Apply this single filtering step
@@ -1014,19 +1281,19 @@ def filter_by_performance(reports, period= 'forward', min_cagr=None, min_calmar=
 def filter_by_rc_summary(
     reports,
     period= 'forward',
-    # —— Survival / tail risk ——
+    # -- Survival / tail risk --
     min_rc_es_05= None,          # e.g. > -0.8
     min_rc_q05= None,            # e.g. > -0.5
 
-    # —— Holdability / continuity ——
+    # -- Holdability / continuity --
     max_rc_longest_neg_run=None,  # e.g. < 300 (days/windows)
     max_rc_neg_ratio= None,       # e.g. < 0.5
 
-    # —— Typical return level ——
+    # -- Typical return level --
     min_rc_median=None,          # e.g. > 0
     min_rc_q25=None,             # e.g. > 0
 
-    # —— Stability / dispersion ——
+    # -- Stability / dispersion --
     max_rc_cv=None,              # e.g. < 3
     max_rc_mad=None,             # optional
 ):
@@ -1159,16 +1426,16 @@ def analyze_holdbar(records, target_key="fixed_hold_bars", period='forward', met
     import numpy as np
 
     if not records:
-        print("❌ Report list is empty")
+        print("Report list is empty")
         return [], {}, {}
 
     # 1. Locate path for target_key
     key_path = find_key_path(records[0][period], target_key)
     if key_path is None:
-        print(f"❌ Could not find any {target_key}")
+        print(f"Could not find any {target_key}")
         return [], {}, {}
 
-    print(f"✓ Located path for {target_key}: {' -> '.join(map(str, key_path))}")
+    print(f"Located path for {target_key}: {' -> '.join(map(str, key_path))}")
 
     # 2. Group records according to key
     grouped_records = defaultdict(list)  # Store original record groups
@@ -1191,7 +1458,7 @@ def analyze_holdbar(records, target_key="fixed_hold_bars", period='forward', met
         grouped_records[current_key].append(report)
 
     if not grouped_records:
-        print(f"❌ No valid {target_key} found")
+        print(f"No valid {target_key} found")
         return [], {}, {}
 
     # 3. Compute performance statistics per group
@@ -1238,7 +1505,7 @@ def analyze_holdbar(records, target_key="fixed_hold_bars", period='forward', met
 
     # 4. Print table
     print("\n" + "="*110)
-    print(f"📊 {target_key} {period} analysis (total {total_count} reports)")
+    print(f"{target_key} {period} analysis (total {total_count} reports)")
     print("="*110)
     header = f"{'Value/Hash':<15} {'Count':<8} {'%':<6} {f'{metric_key.upper()}':<12} {'':<2}{'AVG':<6}{'Max':<6}{'Std':<6}{'Med':<6} {'Calmar:':<8}{'AVG':<6}{'MAX':<6}{'Med':<6}"
     print(header)
@@ -1262,7 +1529,7 @@ def analyze_feature_regimes(records, target_key="predict_num", period='forward',
     # 1. Locate path
     key_path = find_key_path(records[0], target_key)
     if key_path is None:
-        print(f"❌ Key not found: {target_key}")
+        print(f"Key not found: {target_key}")
         return
 
     # 2. Group by feature combinations
@@ -1270,7 +1537,7 @@ def analyze_feature_regimes(records, target_key="predict_num", period='forward',
     for report in records:
         value = get_value_by_path(report, key_path)
         if value is not None:
-            # ✨ Core fix: convert list to string so it can be used as a dict key
+            # Core fix: convert list to string so it can be used as a dict key
             # For example, ['open', 'high'] becomes "open, high"
             key_repr = ", ".join(sorted(value)) if isinstance(value, list) else str(value)
             groups[key_repr].append(report)
@@ -1289,7 +1556,7 @@ def analyze_feature_regimes(records, target_key="predict_num", period='forward',
         })
 
     # 4. Sort and print
-    print(f"\n📊 Feature configuration set ({target_key}) impact analysis - Period: {period}")
+    print(f"\nFeature configuration set ({target_key}) impact analysis - Period: {period}")
     print("-" * 100)
     for res in sorted(analysis_results, key=lambda x: x['avg_metric'], reverse=True):
         print(f"Count: {res['count']:<4} | Avg {metric_key.upper()}: {res['avg_metric']:.2%} | Calmar: {res['avg_calmar']:.2f} | Features: {res['feature_set']}")
@@ -1356,7 +1623,7 @@ def plot_heatmap(selected, var1_key, var2_key, metric_key="l_cagr", save_path="h
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Leave space for overall title
     
     plt.savefig(save_path, dpi=200)
-    print(f"✅ Four-in-one heatmap saved to: {save_path}")
+    print(f"Four-in-one heatmap saved to: {save_path}")
     plt.close()  # Release memory promptly
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ The stable relationship is:
 order conversion, fills, precision, and error handling. Strategy code remains independent
 of whether its venue is a backtest engine or a live broker.
 
-Current migration status: `venue/live/ftmo/market_ml.py` is the reference live path and
+Current migration status: `venue/live/mt5/market_ml.py` is the reference live path and
 constructs the full `Observation`. `venue/live/bybit/bybit_turtle.py` still calls the old
 `strategy.process(df=...)` signature, so the Bybit turtle path is not yet fully on the shared
 protocol.

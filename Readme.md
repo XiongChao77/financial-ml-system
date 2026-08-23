@@ -71,8 +71,8 @@ Configure credentials, symbol mapping, leverage, and risk limits before starting
 entry point. Use a demo or paper-trading account before committing capital.
 
 ```bash
-# MT5 / FTMO
-python -m trade.venue.live.ftmo.market_ml
+# MT5
+python -m trade.venue.live.mt5.market_ml
 
 # Bybit
 python -m trade.venue.live.bybit.bybit_turtle
