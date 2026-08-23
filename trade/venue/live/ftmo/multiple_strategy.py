@@ -24,7 +24,7 @@ from trade.strategy.strategy_ml import MlSignalStrategy
 from trade.core.protocol import (
     Observation, MarketView, PositionView, AccountView, Signal, PositionDir,
 )
-from trade.venue.live.ftmo import mt5_venue
+from trade.venue.live.mt5 import mt5_venue
 from trade.venue.live.bybit.bybit_venue import BybitVenue 
 from trade.venue.live.binance_data_feed import BinanceDataFeed
 

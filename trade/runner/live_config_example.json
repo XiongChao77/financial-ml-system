@@ -25,6 +25,19 @@
         "key_path": "../exchange/bybit/account/keys/main"
       }
     },
+    "ctrader-live-1": {
+      "enable": false,
+      "hash": "ctrader-report-hash",
+      "model_path": "../../quant_output/experiment/valid_train_out/ctrader-report-hash",
+      "device": "cpu",
+      "venue": "cTrader",
+      "cTrader": {
+        "key_path": "../exchange/ctrader/account/keys/main",
+        "account_id": "12345678",
+        "environment": "demo",
+        "broker_symbol": "DOGE/USD"
+      }
+    },
     "binance-live-1": {
       "enable": false,
       "hash": "binance-report-hash",

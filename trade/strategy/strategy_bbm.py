@@ -14,7 +14,7 @@ class BbmStrategyConfig:
     """Strategy parameters for the Binary Barrier Model label backtest."""
 
     compound: bool = True
-    risk_per_trade_pct: float = 0.015
+    risk_per_trade_pct: float = 0.05
     fixed_hold_bars: Optional[int] = None
     # Multipliers of MarketView.expected_vol, not absolute percentages.
     threshold_long: float = 1.7
@@ -25,7 +25,7 @@ class BbmStrategyConfig:
     allow_short: bool = True
     prob_thresh: Optional[float] = None
     min_expected_move_pct: float = 0.01
-    max_daily_loss_pct: float = 0.99
+    max_daily_loss_pct: float = 0.08
 
 
 class BbmSignalStrategy(StrategyBase):

@@ -21,7 +21,7 @@ from trade.strategy.strategy_ml import MlSignalStrategy, MlStrategyConfig
 from trade.core.protocol import (
     Observation, MarketView, PositionView, AccountView, PositionDir, ActionType, Signal,
 )
-from trade.venue.live.ftmo import mt5_venue
+from trade.venue.live.mt5 import mt5_venue
 from trade.venue.live.binance_data_feed import  BinanceDataFeed
 pd.set_option("display.max_columns", None)   # no column limit
 pd.set_option("display.width", None)         # automatic width (no forced wrapping)
