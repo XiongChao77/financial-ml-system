@@ -39,6 +39,13 @@ class ActionType(Enum):
     PYRAMID = "pyramid"   # add to the position
 
 
+class OrderType(str, Enum):
+    """Supported entry order execution types."""
+
+    MARKET = "market"
+    LIMIT = "limit"
+
+
 @dataclass
 class TradeIntent:
     """

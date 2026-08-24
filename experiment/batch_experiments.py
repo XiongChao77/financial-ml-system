@@ -12,19 +12,195 @@ Key design goals
 
 from __future__ import annotations
 
-import argparse,shutil
+import argparse
 import copy
+import fcntl
+import importlib
 import json
 import logging
 import multiprocessing as mp
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from queue import Empty
 from typing import Any, Dict, Iterable, List, Optional, Tuple,Set
 from collections import defaultdict
+
+
+SNAPSHOT_PATH_ENV = "FINANCIAL_ML_SNAPSHOT_PATH"
+ORIGINAL_PROJECT_DIR_ENV = "FINANCIAL_ML_ORIGINAL_PROJECT_DIR"
+SOURCE_REVISION_ENV = "FINANCIAL_ML_SOURCE_REVISION"
+
+# Repository-relative files required at runtime but intentionally not tracked.
+# Keep this list small and explicit so ignored data, artifacts, and environments
+# are never copied accidentally.
+essential_files_list = [
+    "data_process/config.py",
+    "data_process/analyse/volatility_prediction_heatmap.py",
+    "experiment/task_constructors.py",
+]
+
+
+def _run_git(repo_root: str, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", repo_root, *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return completed.stdout.decode("utf-8", errors="surrogateescape")
+
+
+def _require_clean_worktree(repo_root: str) -> None:
+    status = _run_git(repo_root, "status", "--short", "--untracked-files=all")
+    if status:
+        raise RuntimeError(
+            "Git working tree is not clean; commit or remove all staged, unstaged, "
+            f"and untracked changes before starting an experiment:\n{status}"
+        )
+
+
+def _safe_repository_path(repo_root: str, relative_path: str) -> tuple[str, str]:
+    normalized = os.path.normpath(relative_path)
+    if (
+        not relative_path
+        or os.path.isabs(relative_path)
+        or normalized == os.pardir
+        or normalized.startswith(os.pardir + os.sep)
+    ):
+        raise ValueError(f"Snapshot path must stay inside the repository: {relative_path!r}")
+
+    root = os.path.realpath(repo_root)
+    source = os.path.realpath(os.path.join(root, normalized))
+    if os.path.commonpath([root, source]) != root:
+        raise ValueError(f"Snapshot path resolves outside the repository: {relative_path!r}")
+    return normalized, source
+
+
+def _copy_snapshot_file(
+    repo_root: str,
+    snapshot_root: str,
+    relative_path: str,
+    *,
+    required: bool,
+) -> None:
+    normalized, source = _safe_repository_path(repo_root, relative_path)
+    if not os.path.lexists(source):
+        if required:
+            raise FileNotFoundError(f"Essential snapshot file does not exist: {normalized}")
+        return
+    if os.path.isdir(source) and not os.path.islink(source):
+        raise ValueError(f"Snapshot entries must be files, not directories: {normalized}")
+
+    destination = os.path.join(snapshot_root, normalized)
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    shutil.copy2(source, destination, follow_symlinks=False)
+
+
+def _create_source_snapshot(repo_root: str, snapshot_root: str) -> None:
+    tracked_output = subprocess.run(
+        ["git", "-C", repo_root, "ls-files", "-z", "--cached"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+    tracked_files = {
+        os.fsdecode(raw_path)
+        for raw_path in tracked_output.split(b"\0")
+        if raw_path
+    }
+    for relative_path in sorted(tracked_files):
+        _copy_snapshot_file(
+            repo_root,
+            snapshot_root,
+            relative_path,
+            required=False,
+        )
+    for relative_path in essential_files_list:
+        _copy_snapshot_file(
+            repo_root,
+            snapshot_root,
+            relative_path,
+            required=True,
+        )
+
+
+def _replace_snapshot_directory(staging_dir: str, snapshot_dir: str) -> None:
+    if os.path.islink(snapshot_dir) or os.path.isfile(snapshot_dir):
+        os.unlink(snapshot_dir)
+    elif os.path.isdir(snapshot_dir):
+        shutil.rmtree(snapshot_dir)
+    os.replace(staging_dir, snapshot_dir)
+
+
+def _clean_check_requested(argv: List[str]) -> bool:
+    require_clean = True
+    for argument in argv:
+        if argument == "--check-git-clean":
+            require_clean = True
+        elif argument == "--no-check-git-clean":
+            require_clean = False
+    return require_clean
+
+
+def _restart_from_source_snapshot() -> None:
+    if os.environ.get(SNAPSHOT_PATH_ENV) or any(
+        argument in {"-h", "--help"} for argument in sys.argv[1:]
+    ):
+        return
+
+    script_path = os.path.realpath(__file__)
+    repo_root = _run_git(os.path.dirname(script_path), "rev-parse", "--show-toplevel").strip()
+    revision = _run_git(repo_root, "rev-parse", "HEAD").strip()
+    require_clean = _clean_check_requested(sys.argv[1:])
+    if require_clean:
+        _require_clean_worktree(repo_root)
+
+    repo_name = os.path.basename(os.path.normpath(repo_root))
+    snapshot_dir = os.path.join("/dev/shm", repo_name)
+    lock_path = os.path.join("/dev/shm", f".{repo_name}.batch-experiments.lock")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(lock_fd)
+        raise RuntimeError(
+            f"Another batch experiment is already using snapshot {snapshot_dir}"
+        ) from exc
+    os.set_inheritable(lock_fd, True)
+
+    staging_dir = tempfile.mkdtemp(prefix=f".{repo_name}.snapshot-", dir="/dev/shm")
+    try:
+        _create_source_snapshot(repo_root, staging_dir)
+        if require_clean:
+            _require_clean_worktree(repo_root)
+            current_revision = _run_git(repo_root, "rev-parse", "HEAD").strip()
+            if current_revision != revision:
+                raise RuntimeError("Git HEAD changed while creating the source snapshot")
+        _replace_snapshot_directory(staging_dir, snapshot_dir)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    relative_script = os.path.relpath(script_path, repo_root)
+    snapshot_script = os.path.join(snapshot_dir, relative_script)
+    os.environ[SNAPSHOT_PATH_ENV] = snapshot_dir
+    os.environ[ORIGINAL_PROJECT_DIR_ENV] = repo_root
+    os.environ[SOURCE_REVISION_ENV] = revision
+    os.chdir(snapshot_dir)
+    print(f"Executing experiment from source snapshot: {snapshot_dir}", flush=True)
+    os.execv(sys.executable, [sys.executable, snapshot_script, *sys.argv[1:]])
+
+
+# Create the snapshot before importing project modules. Spawned multiprocessing
+# children execute this file as ``__mp_main__`` and skip this branch.
+if __name__ == "__main__":
+    _restart_from_source_snapshot()
 
 # -----------------------------------------------------------------------------
 # Project imports
@@ -35,11 +211,11 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 from model import train_config
 from data_process import common, preparation
 try:
-    from experiment import task_constructors as experiment_tasks
+    experiment_tasks = importlib.import_module("experiment.task_constructors")
 except ModuleNotFoundError as exc:
     if exc.name != "experiment.task_constructors":
         raise
-    from experiment import task_constructors_example as experiment_tasks
+    experiment_tasks = importlib.import_module("experiment.task_constructors_example")
 from data_process.utils import (
     TaskIdentity,
     config_from_dict_train,
@@ -1312,7 +1488,10 @@ def main():
     parser.add_argument("-c", "--cross_test", action="store_true", default=False, help="crosss test")
     parser.add_argument("-l", "--load", action="store_true", default=False, help="load condidate configs for verification,befor applying to market")
     parser.add_argument("--check-git-clean", action=argparse.BooleanOptionalAction, default=True,
-        help=( "Require a clean Git working tree throughout the experiment " "(disable with --no-check-git-clean)"),
+        help=(
+            "Require a clean Git working tree when creating the source snapshot "
+            "(disable with --no-check-git-clean)"
+        ),
     )
 
     args = parser.parse_args()
@@ -1359,8 +1538,9 @@ def main():
         os.makedirs(exp_dir, exist_ok=True)
         logger = _setup_root_logger(exp_dir)
         logger.info("Experiment Git commit: %s", experiment_context.git_commit)
+        logger.info("Experiment source snapshot: %s", os.environ.get(SNAPSHOT_PATH_ENV))
         if not args.check_git_clean:
-            logger.warning("Git clean-worktree checks are disabled for this experiment")
+            logger.warning("The startup Git clean-worktree check is disabled")
         begin_time = time.time()
         results = []
         for r in records:
@@ -1448,8 +1628,9 @@ def main():
 
     logger = _setup_root_logger(exp_dir)
     logger.info("Experiment Git commit: %s", experiment_context.git_commit)
+    logger.info("Experiment source snapshot: %s", os.environ.get(SNAPSHOT_PATH_ENV))
     if not args.check_git_clean:
-        logger.warning("Git clean-worktree checks are disabled for this experiment")
+        logger.warning("The startup Git clean-worktree check is disabled")
 
     begin_time = time.time()
     reports_path = os.path.join(exp_dir, REPORTS_FILE)

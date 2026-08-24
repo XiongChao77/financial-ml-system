@@ -106,8 +106,9 @@ def find_risk_only_comparison_groups(rows):
 def filter_comparison_groups(groups, criteria=None):
     """Keep groups containing one strategy variant that satisfies all criteria."""
     candidates = [(group, list(group)) for group in groups]
+    expressions = [criteria] if isinstance(criteria, str) else list(criteria or [])
 
-    for expression in criteria or []:
+    for expression in expressions:
         period, key, operator_text, threshold = parse_comparison_criterion(expression)
         compare = COMPARISON_OPERATORS[operator_text]
 
@@ -118,8 +119,12 @@ def filter_comparison_groups(groups, criteria=None):
             )
             continue
 
-        sample_period_data = candidates[0][1][0].get(period, {})
-        key_path = find_key_path(sample_period_data, key)
+        candidate_rows = [
+            row
+            for _, matching_rows in candidates
+            for row in matching_rows
+        ]
+        key_path = _criterion_key_path(candidate_rows, period, key)
         if key_path is None:
             print(
                 f"Warning: key '{key}' not found in {period} reports; "
@@ -134,10 +139,12 @@ def filter_comparison_groups(groups, criteria=None):
             matching_rows = [
                 row
                 for row in matching_rows
-                if (
-                    (value := get_value_by_path(row.get(period, {}), key_path))
-                    is not None
-                    and compare(value, threshold)
+                if _matches_criterion(
+                    row,
+                    period,
+                    key_path,
+                    compare,
+                    threshold,
                 )
             ]
             if matching_rows:
@@ -244,11 +251,13 @@ def plot_risk_only_comparisons(
                 comparison_output_dir,
                 filename,
                 equity_scale=equity_scale,
+                align_curve_maxima=True,
             )
             manifest.write(
                 json.dumps(
                     {
                         "file": filename,
+                        "curve_alignment": "peak",
                         "strategies": [
                             {
                                 "hash": row["raw"]["params"].get("hash"),
@@ -632,16 +641,21 @@ def extract_row(report, src_path):
     }
 
 def basic_filter(all_results):
-    forward_results, _ = filter_by_criteria(
+    basic_filter_results, _ = filter_by_criteria(
         all_results,
-        period='forward',
-        cagr=0.3, daily_freq = 0.25
+        criteria=[
+            "forward.cagr>=0.2",
+            "forward.daily_freq>=0.25",
+            "long.cagr>=0.5",
+            "long.cagr<=10",
+            "long.daily_freq>=0.25",
+        ],
     )
     print(
-        f"After 0-screening forward: {len(forward_results)}, "
-        f"{len(forward_results) / len(all_results) * 100:.2f}%"
+        f"After basic_filter: {len(basic_filter_results)}, "
+        f"{len(basic_filter_results) / len(all_results) * 100:.2f}%"
     )
-    return forward_results
+    return basic_filter_results
 
 def filter_and_rank_strategies(data, metric, k=30, final_sort_key="l_cagr"):
     """
@@ -882,6 +896,7 @@ def plot_in_batches(
             start_index=i,
             label_by_index=True,
             equity_scale=equity_scale,
+            align_curve_extrema=len(plot_payloads) > 1,
         )
 
 def main():
@@ -889,7 +904,11 @@ def main():
     exp_dir2 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','14_16_19')
     exp_dir3 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-19','22_55_08')
     exp_dir4 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'DOGEUSDT_15m','2026-08-22','20_33_44')
-    exp_dir_list = [exp_dir4]
+    exp_dir5 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'AAVEUSDT_15m','2026-08-23','12_12_48')
+    exp_dir6 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'ETHUSDT_15m','2026-08-24','22_54_38')
+    exp_dir7 = os.path.join(common.PERSISTENCE_DIR,'batch_experiments', 'XLMUSDT_15m','2026-08-24','13_07_55')
+
+    exp_dir_list = [exp_dir6]
     filter_report = None
     # filter_report =  os.path.join(output_dir,'filtered_raw_reports.jsonl')
     report_files = []
@@ -913,14 +932,14 @@ def main():
     print(f"Total uint reports: {len(uin_records)}")
     if not filter_report:
         # analyze_holdbar(uin_records,target_key="seq_len", period ='forward',metric_key="daily_freq")
-        plot_risk_only_comparisons(
-            uin_records,
-            comparison_output_dir=output_dir,
-            equity_scale='linear',
-            max_groups=30,
-            criteria=["forward.cagr>=0.3","long.cagr>0.5","long.rc_pos_ratio>0.5","long.max_hwm_duration_days<120"],
-        )
-        exit()
+        # plot_risk_only_comparisons(
+        #     uin_records,
+        #     comparison_output_dir=output_dir,
+        #     equity_scale='linear',
+        #     max_groups=30,
+        #     criteria=["forward.cagr>=0.3","long.cagr>0.5","long.rc_pos_ratio>0.5","long.max_hwm_duration_days<180"],
+        # )
+        # exit()
         uin_records = basic_filter(uin_records)
         # analyze_holdbar(uin_records,target_key="seq_len", period ='long',metric_key="cagr")
         # plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_cagr",save_path=os.path.join(output_dir,f"l_cagr_heatmap_combined.png"))
@@ -928,8 +947,8 @@ def main():
         # plot_heatmap(uin_records,var1_key='flip_penalty',var2_key='miss_penalty', metric_key="l_calmar",save_path=os.path.join(output_dir,f"l_calmar_heatmap_combined.png"))
         save_raw_reports(uin_records,output_dir, "filtered_raw_reports.jsonl")
         exit()
-    # uin_records,_ = filter_by_criteria(uin_records, period ='long', cagr=0)
-    # uin_records,_ = filter_by_criteria(uin_records, period ='forward', cagr=0)
+    # uin_records, _ = filter_by_criteria(uin_records, criteria=["long.cagr>=0"])
+    # uin_records, _ = filter_by_criteria(uin_records, criteria=["forward.cagr>=0"])
     analyze_holdbar(uin_records,target_key="stride",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="fixed_hold_bars",period ='long', metric_key="cagr")
     analyze_holdbar(uin_records,target_key="seq_len",period ='long', metric_key="cagr")
@@ -964,7 +983,17 @@ def main():
     # stats, f_map, groups = analyze_holdbar(sorted_selected1,target_key="feature_conf_list",period ='long', metric_key="cagr")
 
     if symbol == 'DOGEUSDT' and interval=='15m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.3,rc_median = 0,rc_pos_ratio = 0.8,calmar = 1.3 ,daily_freq = 0.1,sharpe = 0.6)
+        l_results, unselected = filter_by_criteria(
+            sorted_selected1,
+            criteria=[
+                "long.cagr>=0.3",
+                "long.rc_median>=0",
+                "long.rc_pos_ratio>=0.8",
+                "long.calmar>=1.3",
+                "long.daily_freq>=0.1",
+                "long.sharpe>=0.6",
+            ],
+        )
         # Define all metrics of interest
         metrics_to_test = [
             ("Calmar", "l_calmar"),
@@ -982,17 +1011,52 @@ def main():
             # show_performance(refined_data, output_dir, 3)
             l_results = l_results + refined_data
         l_results = merge_selected(l_results)
-        l_results,unselected = filter_by_criteria(l_results, period ='long', cagr=0.3,calmar = 0.5,sharpe = 0.5,rc_pos_ratio = 0.5,daily_freq = 0.1)
-        l_results,unselected = filter_by_criteria(l_results, period ='forward', cagr=0.3)
-        l_results,unselected = filter_by_criteria(l_results, period ='forward', daily_freq=0.25)
-        # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.8)
-        # l_results,unselected = filter_by_criteria(unselected, period ='long', rc_pos_ratio = 0.6)
+        l_results, unselected = filter_by_criteria(
+            l_results,
+            criteria=[
+                "long.cagr>=0.3",
+                "long.calmar>=0.5",
+                "long.sharpe>=0.5",
+                "long.rc_pos_ratio>=0.5",
+                "long.daily_freq>=0.1",
+                "forward.cagr>=0.3",
+                "forward.daily_freq>=0.25",
+            ],
+        )
+        # l_results, unselected = filter_by_criteria(
+        #     unselected, criteria=["long.rc_pos_ratio>=0.8"]
+        # )
+        # l_results, unselected = filter_by_criteria(
+        #     unselected, criteria=["long.rc_pos_ratio>=0.6"]
+        # )
     if symbol == 'DOGEUSDT' and interval=='30m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0)
+        l_results, unselected = filter_by_criteria(
+            sorted_selected1, criteria=["long.cagr>=0"]
+        )
     if symbol == 'ETHUSDT' and interval=='15m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.8,calmar = 1.2,daily_freq = 0.1,sharpe = 0.5)
+        l_results, unselected = filter_by_criteria(
+            sorted_selected1,
+            criteria=[
+                "long.cagr>=0.2",
+                "long.rc_median>=0",
+                "long.rc_pos_ratio>=0.8",
+                "long.calmar>=1.2",
+                "long.daily_freq>=0.1",
+                "long.sharpe>=0.5",
+            ],
+        )
     if symbol == 'ETHUSDT' and interval=='30m':
-        l_results,unselected = filter_by_criteria(sorted_selected1, period ='long', cagr=0.2,rc_median = 0,rc_pos_ratio = 0.6,calmar = 0.9,daily_freq = 0.15,sharpe = 0.5)
+        l_results, unselected = filter_by_criteria(
+            sorted_selected1,
+            criteria=[
+                "long.cagr>=0.2",
+                "long.rc_median>=0",
+                "long.rc_pos_ratio>=0.6",
+                "long.calmar>=0.9",
+                "long.daily_freq>=0.15",
+                "long.sharpe>=0.5",
+            ],
+        )
     # sort_by_correlation_result = sort_by_correlation_diversity(l_results)
     # for h,r in groups.items():
     #     h_output_dir = os.path.join(output_dir, str(h))
@@ -1034,7 +1098,9 @@ def main():
     # # merged_selected = merge_selected_sort(sorted_selected1[:5],selected2[:5],period ='long', sort_key='cagr')
     # # print(f"-------------After all filter: {len(merged_selected)} reports")
     
-    # rc_pos_ratio_results,unselected = filter_by_criteria(stable_selected1, period ='long', rc_pos_ratio = 0.7)
+    # rc_pos_ratio_results, unselected = filter_by_criteria(
+    #     stable_selected1, criteria=["long.rc_pos_ratio>=0.7"]
+    # )
     # print(f"-------------After rc_pos_ratio: {len(rc_pos_ratio_results)} reports")
 
     # sorted_l_sharpe = sorted(rc_pos_ratio_results, key=itemgetter("l_sharpe"), reverse=True)
@@ -1051,7 +1117,14 @@ def main():
     print(f"[SAVE] {out_path} | total={len(selected)}")
 
 def filter_stable(selected):
-    results,unselected = filter_by_criteria(selected, period ='forward', cagr=0.7, calmar=0, win_rate = 30  )
+    results, unselected = filter_by_criteria(
+        selected,
+        criteria=[
+            "forward.cagr>=0.7",
+            "forward.calmar>=0",
+            "forward.win_rate>=30",
+        ],
+    )
     print(f"After forward performance filter: {len(results)} reports")
     results,long_unresults = filter_by_performance(results, period ='long', min_cagr=0.7, min_calmar=0.5)#,min_rc_cagr_median = -0.2)#,min_rc_cagr_q25 = -0.2)
     print(f"After long cagr filter: {len(results)} reports")
@@ -1063,7 +1136,10 @@ def filter_stable(selected):
 
 def filter_aggressive(selected):
     # 1. Forward must be very strong (capture current regime)
-    results, _ = filter_by_criteria( selected, period='forward', cagr=1, calmar=0)
+    results, _ = filter_by_criteria(
+        selected,
+        criteria=["forward.cagr>=1", "forward.calmar>=0"],
+    )
     print(f"After forward performance filter: {len(results)} reports")
     # 2. Long only needs to be acceptable, not extremely stable
     results, _ = filter_by_performance( results, period='long', min_cagr=0.6, min_calmar=0.3 )
@@ -1072,7 +1148,10 @@ def filter_aggressive(selected):
     print(f"After long rc_cagr_median filter: {len(results)} reports")
     results, _ = filter_by_performance( results, period='forward', min_cagr=1, min_calmar=0.4)
     print(f"After forward performance filter: {len(results)} reports")
-    results, _ = filter_by_criteria( results, period='forward', daily_freq = 0.7)
+    results, _ = filter_by_criteria(
+        results,
+        criteria=["forward.daily_freq>=0.7"],
+    )
     print(f"After long daily_freq filter: {len(results)} reports")
 
     return results
@@ -1195,58 +1274,88 @@ def para_evaluation(rows, label1="Vol 1.9", label2="Vol 1.7"):
         print("Error: failed to classify valid data; please check parameters in rows input.")
     exit()
 
-def filter_by_criteria(reports, period='forward', **criteria):
-    """
-    Step-wise filtering function:
-    - Apply each filter condition in sequence
-    - Print surviving count and retention ratio after each step
+def _criterion_key_path(reports, period, key):
+    """Find a metric path from the first report containing the requested key."""
+    for report in reports:
+        key_path = find_key_path(report.get(period, {}), key)
+        if key_path is not None:
+            return key_path
+    return None
+
+
+def _matches_criterion(report, period, key_path, compare, threshold):
+    """Return whether one report satisfies a parsed comparison criterion."""
+    value = get_value_by_path(report.get(period, {}), key_path)
+    if value is None:
+        return False
+    try:
+        return compare(value, threshold)
+    except TypeError:
+        try:
+            return compare(float(value), threshold)
+        except (TypeError, ValueError):
+            return False
+
+
+def filter_by_criteria(reports, criteria=None):
+    """Filter reports sequentially using period-aware comparison expressions.
+
+    Criteria use the same format as ``plot_risk_only_comparisons``, for example
+    ``forward.cagr>=0.3`` or ``long.max_hwm_duration_days<180``. Supported
+    operators are ``>=``, ``<=``, ``>``, ``<``, ``==``, and ``!=``.
     """
     if not reports:
         return [], []
+    expressions = [criteria] if isinstance(criteria, str) else list(criteria or [])
     initial_len = len(reports)
-    passed = reports
-    
-    for key, min_value in criteria.items():
-        # Skip empty criteria
-        if min_value is None:
-            continue
-            
-        # If pool is already empty, record 0 for subsequent steps
+    passed = list(reports)
+
+    for expression in expressions:
+        period, key, operator_text, threshold = parse_comparison_criterion(expression)
+        compare = COMPARISON_OPERATORS[operator_text]
+
         if not passed:
-            print(f"After screening {period} {key:<12} >= {min_value:>3}: 0, 0.00%")
+            print(
+                f"After screening reports by "
+                f"{period}.{key} {operator_text} {threshold}: 0, 0.00%"
+            )
             continue
 
         prev_len = len(passed)
-        
-        # 1. Locate the path of this metric in the dict (reuse find_key_path)
-        # Note: path is found based on the first sample in the current surviving pool
-        key_path = find_key_path(passed[0].get(period, {}), key)
+        key_path = _criterion_key_path(passed, period, key)
         if key_path is None:
-            print(f"Warning: key '{key}' not found in {period} reports, skipping this filter.")
+            print(
+                f"Warning: key '{key}' not found in {period} reports; "
+                "skipping this filter."
+            )
             continue
 
-        # 2. Apply this single filtering step
-        step_passed = []
-        for r in passed:
-            period_data = r.get(period, {})
-            # Reuse existing get_value_by_path
-            current_value = get_value_by_path(period_data, key_path)
-            
-            # Comparison logic
-            if current_value is not None and current_value >= min_value:
-                step_passed.append(r)
-        
-        # 3. Update pool and print result
-        passed = step_passed
+        passed = [
+            report
+            for report in passed
+            if _matches_criterion(
+                report,
+                period,
+                key_path,
+                compare,
+                threshold,
+            )
+        ]
         curr_len = len(passed)
         ratio = (curr_len / prev_len * 100) if prev_len > 0 else 0
-        
-        # Print in the requested format
-        print(f"After screening {period} {key:<12} >= {min_value:>3}: {curr_len}, {ratio:.2f}%")
+
+        print(
+            f"After screening reports by "
+            f"{period}.{key} {operator_text} {threshold}: "
+            f"{curr_len}, {ratio:.2f}%"
+        )
+
     final_len = len(passed)
     filtered_count = initial_len - final_len
-    summary_desc = f"TOTAL SUMMARY ({period.upper()})"
-    print(f"{summary_desc:<25}: {final_len:>6} remaining, {filtered_count:>6} filtered out, {final_len/initial_len*100:.2f}%")
+    print(
+        f"TOTAL SUMMARY: {final_len} remaining, {filtered_count} filtered out, "
+        f"{final_len / initial_len * 100:.2f}%"
+    )
     passed_ids = {id(r) for r in passed}
     failed = [r for r in reports if id(r) not in passed_ids]
     return passed, failed

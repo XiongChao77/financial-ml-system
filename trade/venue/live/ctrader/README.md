@@ -22,3 +22,9 @@ symbol, for example `DOGE/USD` versus `DOGEUSDT`.
 
 The venue uses the strategy magic number as the cTrader position label. Position
 queries and close requests only affect positions with that exact label and symbol.
+
+`CTRADER_SYMBOL_MAP` contains the 32 cryptocurrency CFDs in the current FTMO
+offering, mapped from Binance USDT market-data symbols to FTMO's cTrader USD
+symbols. cTrader symbol availability is broker- and account-specific, so venue
+initialization still verifies the mapped symbol against `ProtoOASymbolsListRes`.
+Use `broker_symbol` to override the mapping for another broker.

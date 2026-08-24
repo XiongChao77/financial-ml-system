@@ -148,7 +148,11 @@ class RulesStrategy(StrategyBase):
                 self.last_order_price, self.curr_layers = current_price, 1
                 direction = 'long' if  is_long else 'short'
                 self.logger.debug(f"🐢 [ENTRY] SL_Pct: {final_sl_pct:.2%} | {direction} | Shares: {final_unit_shares:.4f}")
-                self.venue.submit_order(final_unit_shares, is_buy=is_long, stop_loss=final_sl_pct)
+                self.venue.submit_order(
+                    final_unit_shares,
+                    is_buy=is_long,
+                    stop_loss_pct=final_sl_pct,
+                )
                 return TradeIntent(ActionType.OPEN)
 
         elif self.curr_layers < self.config.max_layers:
@@ -160,7 +164,11 @@ class RulesStrategy(StrategyBase):
                 self.last_order_price, self.curr_layers = current_price, len(self.layer_sizes)
                 direction = 'long' if  curr_dir == PositionDir.POSITIVE  else 'short'
                 self.logger.info(f"➕ [PYRAMID] Layer: {self.curr_layers} | SL_Pct: {final_sl_pct:.2%} | {direction} ")
-                self.venue.submit_order(final_unit_shares, is_buy=(curr_dir == PositionDir.POSITIVE ), stop_loss=final_sl_pct)
+                self.venue.submit_order(
+                    final_unit_shares,
+                    is_buy=(curr_dir == PositionDir.POSITIVE),
+                    stop_loss_pct=final_sl_pct,
+                )
                 return TradeIntent(ActionType.PYRAMID)
 
         return TradeIntent(ActionType.NOOP)

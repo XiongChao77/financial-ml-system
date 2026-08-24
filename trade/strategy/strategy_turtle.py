@@ -184,7 +184,11 @@ class TurtleStrategy(StrategyBase):
                 is_buy = action.target_dir == PositionDir.POSITIVE 
                 self.logger.info(f"🐢 Order: {action.action} | is_buy: {is_buy} | Layer: {self.curr_layers} | Size_Pct: {unit_pct:.2%} | SL: {final_sl_ratio:.2%}")
                 # change: use submit_order instead of target_percent
-                self.venue.submit_order(unit_size, is_buy, stop_loss=final_sl_ratio)
+                self.venue.submit_order(
+                    unit_size,
+                    is_buy,
+                    stop_loss_pct=final_sl_ratio,
+                )
         
         return action
     

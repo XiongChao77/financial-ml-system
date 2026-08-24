@@ -1,5 +1,9 @@
 import logging
 import sys,os
+import itertools
+import math
+import re
+import time
 from datetime import datetime, timezone
 
 # Path setup
@@ -7,14 +11,23 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", "..", "..", ".."))
 
 from trade.venue.live.bybit.bybit_engine import BybitEngine
-from trade.core.protocol import PositionDir, ActionType
+from trade.core.protocol import ActionType, OrderType, PositionDir
 from trade.core.venue_base import VenueBase
 
 class BybitVenue(VenueBase):
-    def __init__(self, key_path, symbol: str):
+    def __init__(
+        self,
+        key_path,
+        symbol: str,
+        magic: str | None = None,
+        *,
+        logger: logging.Logger | None = None,
+    ):
         self.engine = BybitEngine(key_path)
         self.symbol = symbol
-        self.logger = logging.getLogger("BybitVenue")
+        self.magic = str(magic or "financial-ml-system")
+        self._order_id_sequence = itertools.count()
+        self.logger = logger or logging.getLogger("BybitVenue")
         self.logger.info(f"BybitVenue key_path:{key_path} symbol {symbol}")
         
         # Initialize precision info
@@ -22,6 +35,12 @@ class BybitVenue(VenueBase):
         self.tick_size = 0.0
         self.min_qty = 0.0
         self._init_symbol_info()
+
+    def _new_order_link_id(self, action: str) -> str:
+        safe_magic = re.sub(r"[^A-Za-z0-9_-]", "_", self.magic)
+        nonce = f"{time.time_ns():x}{next(self._order_id_sequence):x}"[-14:]
+        suffix = f"_{action}_{nonce}"
+        return f"{safe_magic[:36 - len(suffix)]}{suffix}"
 
     def _init_symbol_info(self):
         """Sync exchange precision settings to prevent Invalid Volume errors."""
@@ -77,54 +96,70 @@ class BybitVenue(VenueBase):
     def get_server_time(self):
         return datetime.now(timezone.utc)
     
-    def submit_order(self, size, is_buy, stop_loss=None, take_profit=None):
+    def _latest_price(self) -> float:
+        response = self.engine.http.get_tickers(
+            category="linear",
+            symbol=self.symbol,
+        )
+        price = float(response["result"]["list"][0]["lastPrice"])
+        if not math.isfinite(price) or price <= 0:
+            raise RuntimeError("Bybit returned an invalid ticker price")
+        return price
+
+    def submit_order(
+        self,
+        size,
+        is_buy,
+        stop_loss_pct=None,
+        take_profit_pct=None,
+        *,
+        order_type=OrderType.MARKET,
+        price=None,
+    ):
         """
         Place an order.
 
         size: base coin quantity
         is_buy: True = Buy/Long, False = Sell/Short
-        stop_loss: stop-loss ratio, e.g. 0.05 means 5%
-        take_profit: take-profit ratio, e.g. 0.10 means 10%
+        stop_loss_pct: stop-loss ratio, e.g. 0.05 means 5%
+        take_profit_pct: take-profit ratio, e.g. 0.10 means 10%
         """
+        order_type, price = self.normalize_order_request(order_type, price)
 
         # 1. Align quantity to exchange precision
         qty = round(float(size) / self.qty_step) * self.qty_step
         qty = max(self.min_qty, qty)
         qty_str = str(qty)
 
-        # 2. Get current price for computing SL/TP price.
-        # Note: this uses a market order, so entry_price ~= current ticker price.
-        tickers = self.engine.http.get_tickers(
-            category="linear",
-            symbol=self.symbol
-        )
-        curr_price = float(tickers["result"]["list"][0]["lastPrice"])
+        reference_price = self._latest_price() if price is None else price
+        if order_type == OrderType.LIMIT:
+            reference_price = round(reference_price / self.tick_size) * self.tick_size
 
         # 3. Compute stop-loss / take-profit concrete prices.
         # Bybit expects concrete price, while the strategy layer provides ratios.
         sl_price = 0.0
         tp_price = 0.0
 
-        if stop_loss:
+        if stop_loss_pct:
             if is_buy:
-                raw_sl = curr_price * (1 - stop_loss)
+                raw_sl = reference_price * (1 - stop_loss_pct)
             else:
-                raw_sl = curr_price * (1 + stop_loss)
+                raw_sl = reference_price * (1 + stop_loss_pct)
 
             sl_price = round(raw_sl / self.tick_size) * self.tick_size
 
-        if take_profit:
+        if take_profit_pct:
             if is_buy:
-                raw_tp = curr_price * (1 + take_profit)
+                raw_tp = reference_price * (1 + take_profit_pct)
             else:
-                raw_tp = curr_price * (1 - take_profit)
+                raw_tp = reference_price * (1 - take_profit_pct)
 
             tp_price = round(raw_tp / self.tick_size) * self.tick_size
 
         side = "Buy" if is_buy else "Sell"
 
         self.logger.info(
-            f"🐢 Placing order: {side} {qty_str} @ market | "
+            f"🐢 Placing {order_type.value} order: {side} {qty_str} | "
             f"SL: {sl_price} | TP: {tp_price}"
         )
 
@@ -135,11 +170,15 @@ class BybitVenue(VenueBase):
                 "category": "linear",
                 "symbol": self.symbol,
                 "side": side,
-                "orderType": "Market",
+                "orderType": "Market" if order_type == OrderType.MARKET else "Limit",
                 "qty": qty_str,
                 "positionIdx": 0,  # one-way position mode
                 "reduceOnly": False,
+                "orderLinkId": self._new_order_link_id("open"),
             }
+            if order_type == OrderType.LIMIT:
+                order_params["price"] = str(reference_price)
+                order_params["timeInForce"] = "GTC"
 
             if sl_price > 0:
                 order_params["stopLoss"] = str(sl_price)
@@ -186,7 +225,8 @@ class BybitVenue(VenueBase):
                         orderType="Market",
                         qty=str(size),
                         positionIdx=0,
-                        reduceOnly=True
+                        reduceOnly=True,
+                        orderLinkId=self._new_order_link_id("close"),
                     )
         except Exception as e:
             self.logger.error(f"Close position exception: {e}")

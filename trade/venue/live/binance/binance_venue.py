@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import itertools
 import logging
 import math
 import os
+import re
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
@@ -15,7 +17,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from trade.core.protocol import PositionDir
+from trade.core.protocol import OrderType, PositionDir
 from trade.core.venue_base import VenueBase
 
 
@@ -30,12 +32,15 @@ class BinanceVenue(VenueBase):
         self,
         key_path: str,
         symbol: str,
+        magic: str | None = None,
         *,
         logger: logging.Logger | None = None,
         session: requests.Session | None = None,
         timeout: float = 10.0,
     ):
         self.symbol = str(symbol).upper()
+        self.magic = str(magic or "financial-ml-system")
+        self._order_id_sequence = itertools.count()
         self.logger = logger or logging.getLogger("trade.binance")
         self.timeout = float(timeout)
         self.session = session or requests.Session()
@@ -137,6 +142,12 @@ class BinanceVenue(VenueBase):
     def _decimal_string(value: Decimal) -> str:
         return format(value.normalize(), "f")
 
+    def _new_client_order_id(self, action: str) -> str:
+        safe_magic = re.sub(r"[^.A-Za-z0-9_:/-]", "_", self.magic)
+        nonce = f"{time.time_ns():x}{next(self._order_id_sequence):x}"[-14:]
+        suffix = f":{action}:{nonce}"
+        return f"{safe_magic[:36 - len(suffix)]}{suffix}"
+
     def _position(self) -> dict[str, Any] | None:
         positions = self._request(
             "GET",
@@ -202,6 +213,7 @@ class BinanceVenue(VenueBase):
         return self._decimal_string(price)
 
     def _place_protective_order(self, side: str, order_type: str, trigger_price: str):
+        action = "sl" if order_type == "STOP_MARKET" else "tp"
         return self._request(
             "POST",
             "/fapi/v1/algoOrder",
@@ -213,6 +225,7 @@ class BinanceVenue(VenueBase):
                 "triggerPrice": trigger_price,
                 "closePosition": "true",
                 "workingType": "MARK_PRICE",
+                "clientAlgoId": self._new_client_order_id(action),
             },
             signed=True,
         )
@@ -249,14 +262,16 @@ class BinanceVenue(VenueBase):
         is_buy,
         stop_loss_pct=None,
         take_profit_pct=None,
-        **legacy,
+        *,
+        order_type=OrderType.MARKET,
+        price=None,
     ):
-        if stop_loss_pct is None:
-            stop_loss_pct = legacy.pop("stop_loss", None)
-        if take_profit_pct is None:
-            take_profit_pct = legacy.pop("take_profit", None)
-        if legacy:
-            raise TypeError(f"Unsupported Binance order arguments: {sorted(legacy)}")
+        order_type, price = self.normalize_order_request(order_type, price)
+        if order_type == OrderType.LIMIT and (stop_loss_pct or take_profit_pct):
+            raise ValueError(
+                "Binance resting limit entries with protective orders require "
+                "fill monitoring, which is not supported"
+            )
         if self._position() is not None:
             raise RuntimeError(f"Refusing to open over an existing Binance position: {self.symbol}")
         self._assert_no_open_orders()
@@ -268,22 +283,33 @@ class BinanceVenue(VenueBase):
             )
         side = "BUY" if is_buy else "SELL"
         exit_side = "SELL" if is_buy else "BUY"
-        price = self._latest_price()
+        order_params = {
+            "symbol": self.symbol,
+            "side": side,
+            "type": "MARKET" if order_type == OrderType.MARKET else "LIMIT",
+            "quantity": self._decimal_string(quantity),
+            "newOrderRespType": "RESULT",
+            "newClientOrderId": self._new_client_order_id("open"),
+        }
+        if order_type == OrderType.LIMIT:
+            limit_price = self._floor_to_step(price, self.price_tick)
+            if limit_price <= 0:
+                raise ValueError("Binance limit price rounded to zero")
+            order_params.update(
+                price=self._decimal_string(limit_price),
+                timeInForce="GTC",
+            )
         order = self._request(
             "POST",
             "/fapi/v1/order",
-            {
-                "symbol": self.symbol,
-                "side": side,
-                "type": "MARKET",
-                "quantity": self._decimal_string(quantity),
-                "newOrderRespType": "RESULT",
-            },
+            order_params,
             signed=True,
         )
-        executed_price = float(order.get("avgPrice", 0.0) or 0.0)
-        if not math.isfinite(executed_price) or executed_price <= 0:
-            executed_price = price
+        executed_price = None
+        if stop_loss_pct or take_profit_pct:
+            executed_price = float(order.get("avgPrice", 0.0) or 0.0)
+            if not math.isfinite(executed_price) or executed_price <= 0:
+                executed_price = self._latest_price()
 
         try:
             if stop_loss_pct:
@@ -336,6 +362,7 @@ class BinanceVenue(VenueBase):
                 "quantity": self._decimal_string(quantity),
                 "reduceOnly": "true",
                 "newOrderRespType": "RESULT",
+                "newClientOrderId": self._new_client_order_id("close"),
             },
             signed=True,
         )

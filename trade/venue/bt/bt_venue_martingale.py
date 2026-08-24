@@ -9,8 +9,10 @@ Account model: the broker holds a single pool of cash; the reserve account is a 
 Position sizing may only use the trade account equity, so the reserve can never be eaten by a blow-up.
 """
 
+import backtrader as bt
+
 from trade.venue.bt.bt_venue_base import BtVenue, TradeRole
-from trade.core.protocol import PositionDir
+from trade.core.protocol import OrderType, PositionDir
 from trade.strategy.strategy_martingale import RestartableMartingaleStrategy, AccountPhase
 
 
@@ -32,11 +34,24 @@ class MartingaleBtVenue(BtVenue):
     # ------------------------------------------------------------------
     # Executor interface (overrides BtVenue's bracket version, the martingale only uses market orders)
     # ------------------------------------------------------------------
-    def submit_order(self, size, is_buy, stop_loss_pct=None, take_profit_pct=None):
+    def submit_order(
+        self,
+        size,
+        is_buy,
+        stop_loss_pct=None,
+        take_profit_pct=None,
+        *,
+        order_type=OrderType.MARKET,
+        price=None,
+    ):
+        order_type, price = self.normalize_order_request(order_type, price)
         size = abs(size)
         if size <= 0:
             return
-        order = self.buy(size=size) if is_buy else self.sell(size=size)
+        order_args = {"size": size}
+        if order_type == OrderType.LIMIT:
+            order_args.update(price=price, exectype=bt.Order.Limit)
+        order = self.buy(**order_args) if is_buy else self.sell(**order_args)
         if order is not None:
             order.addinfo(role=TradeRole.OPEN, is_entry=True, is_long=is_buy)
 
