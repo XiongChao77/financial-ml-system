@@ -11,14 +11,45 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Iterable
 
-from trade.core.protocol import PositionDir
+from trade.core.protocol import OrderType, PositionDir
 from trade.core.venue_base import VenueBase
+from ctrader_open_api import Client, EndPoints, Protobuf, TcpProtocol
+from ctrader_open_api.messages import OpenApiMessages_pb2
 
-
+# Binance USDT market-data symbols to FTMO's current cTrader crypto CFD symbols.
 CTRADER_SYMBOL_MAP = {
+    "AAVEUSDT": "AAVUSD",
+    "ADAUSDT": "ADAUSD",
+    "ALGOUSDT": "ALGUSD",
+    "AVAXUSDT": "AVAUSD",
+    "BCHUSDT": "BCHUSD",
+    "BNBUSDT": "BNBUSD",
     "BTCUSDT": "BTCUSD",
+    "DASHUSDT": "DASHUSD",
     "DOGEUSDT": "DOGEUSD",
+    "DOTUSDT": "DOTUSD",
+    "ETCUSDT": "ETCUSD",
     "ETHUSDT": "ETHUSD",
+    "FETUSDT": "FETUSD",
+    "GALAUSDT": "GALUSD",
+    "GRTUSDT": "GRTUSD",
+    "HBARUSDT": "BARUSD",
+    "ICPUSDT": "ICPUSD",
+    "IMXUSDT": "IMXUSD",
+    "LINKUSDT": "LNKUSD",
+    "LTCUSDT": "LTCUSD",
+    "MANAUSDT": "MANUSD",
+    "MKRUSDT": "MKRUSD",
+    "NEARUSDT": "NERUSD",
+    "NEOUSDT": "NEOUSD",
+    "SANDUSDT": "SANUSD",
+    "SOLUSDT": "SOLUSD",
+    "UNIUSDT": "UNIUSD",
+    "VETUSDT": "VECUSD",
+    "XLMUSDT": "XLMUSD",
+    "XMRUSDT": "XMRUSD",
+    "XRPUSDT": "XRPUSD",
+    "XTZUSDT": "XTZUSD",
 }
 
 
@@ -49,14 +80,6 @@ class CTraderOpenApiConnection:
         timeout: float = 10.0,
         logger: logging.Logger | None = None,
     ):
-        try:
-            from ctrader_open_api import Client, EndPoints, Protobuf, TcpProtocol
-            from ctrader_open_api.messages import OpenApiMessages_pb2
-        except ImportError as exc:
-            raise RuntimeError(
-                "cTrader support requires the ctrader-open-api package"
-            ) from exc
-
         self._protobuf = Protobuf
         self._messages = OpenApiMessages_pb2
         self._timeout = float(timeout)
@@ -336,6 +359,7 @@ class CTraderVenue(VenueBase):
     """cTrader venue scoped to one account, symbol, and strategy label."""
 
     MARKET_ORDER = 1
+    LIMIT_ORDER = 2
     BUY = 1
     SELL = 2
 
@@ -343,21 +367,17 @@ class CTraderVenue(VenueBase):
         self,
         key_path: str,
         symbol: str,
-        magic: int | str | None = None,
+        magic: str | None = None,
         *,
         logger: logging.Logger | None = None,
         account_id: int | str | None = None,
-        environment: str = "demo",
-        broker_symbol: str | None = None,
+        environment: str = "live",
         timeout: float = 10.0,
         api: Any = None,
     ):
-        self.logger = logger or logging.getLogger("trade.ctrader")
-        self.label = str(magic if magic is not None else "financial-ml-system")[:100]
-        self.symbol = str(
-            broker_symbol
-            or CTRADER_SYMBOL_MAP.get(str(symbol).upper(), str(symbol))
-        )
+        self.logger = logger
+        self.label = str(magic)[:100]
+        self.symbol = CTRADER_SYMBOL_MAP.get(str(symbol).upper(), str(symbol))
         self.api = api or CTraderOpenApiConnection(
             key_path,
             account_id=account_id,
@@ -556,14 +576,11 @@ class CTraderVenue(VenueBase):
         stop_loss_pct=None,
         take_profit_pct=None,
         interval_ms=500,
-        **legacy,
+        *,
+        order_type=OrderType.MARKET,
+        price=None,
     ):
-        if stop_loss_pct is None:
-            stop_loss_pct = legacy.pop("stop_loss", None)
-        if take_profit_pct is None:
-            take_profit_pct = legacy.pop("take_profit", None)
-        if legacy:
-            raise TypeError(f"Unsupported cTrader order arguments: {sorted(legacy)}")
+        order_type, price = self.normalize_order_request(order_type, price)
         stop_loss_pct = self._order_percentage(stop_loss_pct, "stop_loss_pct")
         take_profit_pct = self._order_percentage(
             take_profit_pct,
@@ -574,14 +591,18 @@ class CTraderVenue(VenueBase):
 
         total_volume = self._normalize_volume(float(size))
         batches = self._volume_batches(total_volume)
-        price = self.api.latest_price(self.symbol_id, is_buy=bool(is_buy))
+        reference_price = (
+            self.api.latest_price(self.symbol_id, is_buy=bool(is_buy))
+            if price is None
+            else round(price, self.digits)
+        )
         relative_stop = (
-            max(1, int(round(price * stop_loss_pct * 100_000)))
+            max(1, int(round(reference_price * stop_loss_pct * 100_000)))
             if stop_loss_pct is not None
             else None
         )
         relative_take_profit = (
-            max(1, int(round(price * take_profit_pct * 100_000)))
+            max(1, int(round(reference_price * take_profit_pct * 100_000)))
             if take_profit_pct is not None
             else None
         )
@@ -590,12 +611,18 @@ class CTraderVenue(VenueBase):
             fields = {
                 "ctidTraderAccountId": self.account_id,
                 "symbolId": self.symbol_id,
-                "orderType": self.MARKET_ORDER,
+                "orderType": (
+                    self.MARKET_ORDER
+                    if order_type == OrderType.MARKET
+                    else self.LIMIT_ORDER
+                ),
                 "tradeSide": self.BUY if is_buy else self.SELL,
                 "volume": volume,
                 "label": self.label,
                 "comment": f"financial-ml-system batch {index + 1}/{len(batches)}",
             }
+            if order_type == OrderType.LIMIT:
+                fields["limitPrice"] = reference_price
             if relative_stop is not None:
                 fields["relativeStopLoss"] = relative_stop
             if relative_take_profit is not None:

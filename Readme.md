@@ -276,8 +276,8 @@ Signals can also be tested across different K-line periods to check whether they
 ## Environment
 ```bash
 Python >= 3.10
-pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4 pytorch-ignite  colorlog backtrader pyarrow numba GitPython ignite
-pip install MetaTrader5 pybit    # for live trading
+pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib requests beautifulsoup4 pytorch-ignite  colorlog backtrader pyarrow numba GitPython ignite service-identity
+pip install pybit ctrader-open-api   # for live trading
 ```
 > Some entry points may change as the system evolves.
 

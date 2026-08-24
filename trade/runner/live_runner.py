@@ -15,7 +15,6 @@ owned by the report.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import math
@@ -43,12 +42,6 @@ from trade.core.protocol import (
 from trade.runner.config import BrokerConfig
 from trade.venue.live.binance_data_feed import BinanceDataFeed
 
-SUPPORTED_VENUES = {
-    "mt5": "MT5",
-    "ctrader": "cTrader",
-    "bybit": "Bybit",
-    "binance": "Binance",
-}
 SUPPORTED_BINANCE_DATA_SOURCES = {
     "binance",
     "binance_api",
@@ -56,28 +49,45 @@ SUPPORTED_BINANCE_DATA_SOURCES = {
 }
 
 @dataclass(frozen=True)
-class LiveVenueConfig:
+class LiveVenueConfigBase:
     """Live-only connection data. Secrets are deliberately omitted from repr."""
-
-    venue: str
+    venue :str
     path: str
+
+class LiveVenueConfigHedge:
+    hedge: str = False
+    # the rest only required when hedge is true
     firm: Optional[str] = None
-    login: Optional[str] = None
-    password: Optional[str] = field(default=None, repr=False)
-    server: Optional[str] = None
-    account_id: Optional[str] = None
-    environment: Optional[str] = None
-    broker_symbol: Optional[str] = None
+    cost: Optional[float] = None
     challenge_type: Optional[str] = None
     stage: Optional[str] = None
-    compound: Optional[str] = None
-    profit_target: Optional[float] = None
-    max_loss: Optional[float] = None
-    cost: Optional[float] = None
-    hedge: Optional[str] = None
     hedge_venue: Optional[str] = None
     hedge_key_path: Optional[str] = None
 
+@dataclass(frozen=True)
+class LiveVenueConfigMt5(LiveVenueConfigBase,LiveVenueConfigHedge):
+    """Live-only connection data. Secrets are deliberately omitted from repr."""
+    login: str
+    password: str
+    server: str
+
+    profit_target: float
+    max_loss: float
+
+@dataclass(frozen=True)
+class LiveVenueConfigCtrader(LiveVenueConfigBase,LiveVenueConfigHedge):
+    """Live-only connection data. Secrets are deliberately omitted from repr."""
+    account_id: str
+
+    profit_target: float
+    max_loss: float
+
+SUPPORTED_VENUES = {
+    "mt5": LiveVenueConfigMt5,
+    "ctrader": LiveVenueConfigCtrader,
+    "bybit": LiveVenueConfigBase,
+    "binance": LiveVenueConfigBase,
+}
 
 @dataclass
 class LiveStrategySpec:
@@ -86,11 +96,12 @@ class LiveStrategySpec:
     enable: str
     model_path: str
     device: str = 'auto'
+    compound:str = True
     market_config: common.MarketDataSourceConfig = None
     train_config: Any  = None
     strategy_config: Any  = None
     broker_config: BrokerConfig  = None
-    venue_config: LiveVenueConfig  = None
+    venue_config: LiveVenueConfigBase  = None
 
 
 @dataclass
@@ -177,10 +188,8 @@ def load_params_from_report(
     params_by_hash: dict[str, dict[str, Any] | None] = dict.fromkeys(specs_by_hash)
 
     for record in _iter_report_records(report_path):
-        params = record.get("params")
-        if not isinstance(params, Mapping):
-            continue
-        hash_id = params.get("hash")
+        params = record["params"]
+        hash_id = params["hash"]
         if hash_id in params_by_hash and params_by_hash[hash_id] is None:
             loaded_params = dict(params)
             market_params = loaded_params["common"]
@@ -226,26 +235,25 @@ def _venue_section(entry: Mapping[str, Any], venue_kind: str) -> dict[str, Any]:
 def _parse_venue_config(
     config_path: str,
     entry: Mapping[str, Any],
-) -> LiveVenueConfig:
-    raw_kind = str(entry.get("venue", "")).strip()
-    normalized = raw_kind.casefold()
-    if normalized not in SUPPORTED_VENUES:
+) -> LiveVenueConfigBase:
+    venue_name = str(entry.get("venue", "")).strip().casefold()
+    if venue_name not in SUPPORTED_VENUES:
         choices = ", ".join(SUPPORTED_VENUES.values())
-        raise ValueError(f"venue must be one of {choices}; got {raw_kind!r}")
+        raise ValueError(f"venue must be one of {choices}; got {venue_name!r}")
+    venue_class = SUPPORTED_VENUES[venue_name]
 
-    venue = SUPPORTED_VENUES[normalized]
-    section = _venue_section(entry, venue)
-    path = section.get("path") or section.get("key_path")
-    if venue != "MT5":
+    section = _venue_section(entry, venue_name)
+    path = section.get("path")
+    if venue_name != "mt5":
         path = os.path.realpath(_resolve_path(config_path, path))
     if not os.path.isdir(path):
-        raise FileNotFoundError(f"{venue} key directory not found: {path}")
-    return LiveVenueConfig(
-        venue=venue,
+        raise FileNotFoundError(f"{venue_name} key directory not found: {path}")
+    return venue_class(
+        venue=venue_name,
         path=path,
         **{
             field.name: section.get(field.name)
-            for field in fields(LiveVenueConfig)
+            for field in fields(venue_class)
             if field.name not in {"venue", "path"}
         },
     )
@@ -276,9 +284,7 @@ def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
     for raw_id, raw_entry in raw_strategy_entries.items():
         strategy_id = str(raw_id).strip()
         entry = dict(raw_entry)
-        enable = entry["enable"].lower()
-        if enable not in ['false', 'true']:
-            raise ValueError(f"Live strategy {strategy_id!r} enable must be a boolean or boolean string")
+        enable = entry["enable"]
         hash_id = entry["hash"]
         model_path = _resolve_path(config_path, entry['model_path'])
         if not os.path.isdir(model_path):
@@ -292,6 +298,7 @@ def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
                 enable=enable,
                 model_path=model_path,
                 device=str(entry.get("device", "auto")),
+                compound=str(entry["compound"]),
                 broker_config=BrokerConfig(**entry["broker_config"]),
                 venue_config=_parse_venue_config(config_path, entry),
             )
@@ -303,13 +310,6 @@ def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
     load_params_from_report(strategy_entries, report_path)
 
     return strategy_entries
-
-
-def _magic_number(hash_id: str) -> int:
-    candidate = hash_id.strip().lower()
-    if not candidate or any(char not in "0123456789abcdef" for char in candidate):
-        candidate = hashlib.sha256(hash_id.encode("utf-8")).hexdigest()
-    return int(candidate[:15], 16)
 
 
 def _optional_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -470,38 +470,52 @@ class LiveRunner:
     @staticmethod
     def _create_venue(spec: LiveStrategySpec, logger: logging.Logger):
         config = spec.venue_config
-        if config.venue == "MT5":
+        if config.venue == "mt5":
+            if not spec.strategy_id.isascii() or not spec.strategy_id.isdigit():
+                raise ValueError(
+                    "MT5 strategy_id must contain ASCII digits only; "
+                    f"got {spec.strategy_id!r}"
+                )
             from trade.venue.live.mt5.mt5_venue import MT5Venue
 
             return MT5Venue(
                 config.path,
                 spec.market_config.symbol,
-                _magic_number(f"{spec.strategy_id}:{spec.hash_id}"),
+                int(spec.strategy_id),
                 logger=logger,
                 login=config.login,
                 password=config.password,
                 server=config.server,
             )
-        if config.venue == "Bybit":
+        if config.venue == "bybit":
             from trade.venue.live.bybit.bybit_venue import BybitVenue
 
-            return BybitVenue(config.path, spec.market_config.symbol, logger=logger)
-        if config.venue == "cTrader":
+            return BybitVenue(
+                config.path,
+                spec.market_config.symbol,
+                f"{spec.strategy_id}:{spec.hash_id}",
+                logger=logger,
+            )
+        if config.venue == "ctrader":
             from trade.venue.live.ctrader.ctrader_venue import CTraderVenue
 
             return CTraderVenue(
                 config.path,
                 spec.market_config.symbol,
-                _magic_number(f"{spec.strategy_id}:{spec.hash_id}"),
+                f"{spec.strategy_id}:{spec.hash_id}",
                 logger=logger,
                 account_id=config.account_id,
-                environment=config.environment or "demo",
-                broker_symbol=config.broker_symbol,
+                environment='live',
             )
-        if config.venue == "Binance":
+        if config.venue == "binance":
             from trade.venue.live.binance.binance_venue import BinanceVenue
 
-            return BinanceVenue(config.path, spec.market_config.symbol, logger=logger)
+            return BinanceVenue(
+                config.path,
+                spec.market_config.symbol,
+                f"{spec.strategy_id}:{spec.hash_id}",
+                logger=logger,
+            )
         raise ValueError(f"Unsupported venue: {config.venue}")
 
     @staticmethod

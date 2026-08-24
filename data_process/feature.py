@@ -1966,20 +1966,20 @@ FEATURE_LIST_CRYPTOCURRENCY = [
     "low",
     "close",
     "volume",
-    # "number_of_trades",        # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
-    # "quote_asset_volume",      # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
-    # "taker_buy_base_volume",   # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
-    # "taker_buy_quote_volume",  # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "number_of_trades",        # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "quote_asset_volume",      # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "taker_buy_base_volume",   # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "taker_buy_quote_volume",  # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
     # =========================
     # 1) Trend / directional persistence: whether price has continuation
     # =========================
     "MA_WEEK_M_L",        # Long-term regime direction (core)
-    # "PVT",              # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "PVT",              # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
     "dist_to_high_100",   # Breakout-style trend structure
     "id_factor_100",
     "id_factor_20",
-    # "MFI_999",          # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
-    # "MFI_99",           # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "MFI_999",          # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "MFI_99",           # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
     # =========================
     # 2) Volatility regime: amplitude and risk environment
     # =========================
@@ -1987,7 +1987,7 @@ FEATURE_LIST_CRYPTOCURRENCY = [
     "vol_gk_14",           # Short-term volatility
     "skew_100",
     "kurt_100",            # Tail structure (extreme risk)
-    # "BOLL_BW_25",         # Decide after uplift testing
+    "BOLL_BW_25",         # Decide after uplift testing
     "RSI_14",              # Relative Strength Index (momentum/overheat; indirectly reflects volatility)
     # =========================
     # 3) Efficiency / market structure: trending vs ranging
@@ -1996,19 +1996,19 @@ FEATURE_LIST_CRYPTOCURRENCY = [
     # =========================
     # 4) Participation / liquidity: market activity
     # =========================
-    # "trade_density_14",  # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
-    # "vol_event_flag_500",  # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "trade_density_14",  # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "vol_event_flag_500",  # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
     # =========================
     # 5) Order flow / imbalance: buy-vs-sell dominance
     # =========================
-    # "vpin_49",           # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
-    # "vpin_14",           # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "vpin_49",           # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "vpin_14",           # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
     # =========================
     # 6) Spatial / price position: where price sits within ranges/cost
     # =========================
-    # "poc_bias_600",      # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
-    # "poc_bias_99",       # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
-    # "close_pos",         # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "poc_bias_600",      # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "poc_bias_99",       # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
+    "close_pos",         # CRYPTO_ONLY: not enabled in FEATURE_LIST_COMMODITY
     # =========================
     # 7) Candlestick / path microstructure
     # =========================

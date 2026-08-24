@@ -28,7 +28,10 @@ VOL_MULTIPLIER=1.5, 1.5σ, only ~13.4% of price moves exceed this threshold.
 VOL_MULTIPLIER=2.0, 2σ, only ~4.6% of price moves exceed this threshold.
 '''
 DATA_PROCESS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(DATA_PROCESS_DIR)
+PROJECT_DIR = os.environ.get(
+    "FINANCIAL_ML_ORIGINAL_PROJECT_DIR",
+    os.path.dirname(DATA_PROCESS_DIR),
+)
 TEMPORARY_DIR = os.path.join(PROJECT_DIR, 'output')
 if platform.system().lower() != 'windows':
     os.makedirs('/dev/shm/quant', exist_ok=True)
@@ -1710,6 +1713,9 @@ def validate_kline_source(
 
 def git_revision(*, require_clean: bool = False) -> str:
     """Return the repository revision, optionally requiring an entirely clean tree."""
+    snapshot_revision = os.environ.get("FINANCIAL_ML_SOURCE_REVISION")
+    if snapshot_revision:
+        return snapshot_revision
     repo = git.Repo(PROJECT_DIR)
     if require_clean and repo.is_dirty(untracked_files=True):
         status = repo.git.status("--short")

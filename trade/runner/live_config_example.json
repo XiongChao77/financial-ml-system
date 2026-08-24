@@ -1,52 +1,57 @@
 {
-  "_comment": "Each strategy hash selects params.hash from the shared JSONL report. Paths are relative to this file.",
-  "report": "../../quant_output/experiment/reports.jsonl",
-  "strategy": {
-    "mt5-live-1": {
-      "enable": true,
-      "hash": "mt5-report-hash",
-      "model_path": "../../quant_output/experiment/valid_train_out/mt5-report-hash",
-      "device": "cpu",
-      "venue": "MT5",
-      "MT5": {
-        "path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
-        "login": "100000001",
-        "password": "replace-with-local-password",
-        "server": "Broker-Server"
-      }
-    },
-    "bybit-live-1": {
-      "enable": true,
-      "hash": "bybit-report-hash",
-      "model_path": "../../quant_output/experiment/valid_train_out/bybit-report-hash",
-      "device": "cpu",
-      "venue": "Bybit",
-      "Bybit": {
-        "key_path": "../exchange/bybit/account/keys/main"
-      }
-    },
-    "ctrader-live-1": {
-      "enable": false,
-      "hash": "ctrader-report-hash",
-      "model_path": "../../quant_output/experiment/valid_train_out/ctrader-report-hash",
-      "device": "cpu",
-      "venue": "cTrader",
-      "cTrader": {
-        "key_path": "../exchange/ctrader/account/keys/main",
-        "account_id": "12345678",
-        "environment": "demo",
-        "broker_symbol": "DOGE/USD"
-      }
-    },
-    "binance-live-1": {
-      "enable": false,
-      "hash": "binance-report-hash",
-      "model_path": "../../quant_output/experiment/valid_train_out/binance-report-hash",
-      "device": "cpu",
-      "venue": "Binance",
-      "Binance": {
-        "key_path": "../exchange/binance/account/keys/main"
-      }
+    "report":"../../output/reports.jsonl",
+    "strategy":{
+        "ctrader-live-the5ers-1": {
+            "enable": false,
+            "hash": "ctrader-report-hash",
+            "model_path": "../../quant_output/experiment/valid_train_out/ctrader-report-hash",
+            "device": "cpu",
+            "broker_config":{
+                "initial_equity": 200000,
+                "commission_pct": 0.05,
+                "leverage":  10.0,
+                "margin_warn_pct":  0.95
+            },
+            "venue": "cTrader",
+            "cTrader": {
+                "path": "../exchange/ctrader/account/keys/main",
+                "account_id": "12345678",
+                "login":"531400400",
+                "password":"B8?@h4rW7x",
+                "profit_target": 0.1,
+                "max_loss": 0.1
+            }
+        },
+        "id2":
+        {
+            "hash":"6b41d3de9072",
+            "enable":"true",
+            "model_path":"./model",
+            "broker_config":{
+                "initial_equity": 200000,
+                "commission_pct": 0.05,
+                "leverage":  10.0,
+                "margin_warn_pct":  0.95
+            },
+            "venue": "MT5/Bybit/Binance",
+            "MT5":{
+                "path":"C:\\Program Files\\FTMO Global Markets MT5 Terminal\\terminal64.exe",
+                "cost":1200,
+                "firm":"FTMO/the5ers",
+                "challenge_type":"1step",
+                "stage":"verification",
+                "login":"531400400",
+                "password":"xxxxxx",
+                "server":"FTMO-Server3",
+                "profit_target": 0.1,
+                "max_loss": 0.1,
+                "hedge": "true",
+                "hedge_venue":"Bybit/binance",
+                "hedge_key_path":"../exchange/binance/account_k/keys/main"
+            },
+            "Bybit/binance":{
+                "path":"C:\\Program Files\\FTMO Global Markets MT5 Terminal\\terminal64.exe"
+            }
+        }
     }
-  }
 }

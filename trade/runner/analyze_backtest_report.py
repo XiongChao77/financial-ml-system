@@ -412,6 +412,43 @@ def time_region_boundaries(time_regions: dict) -> list[tuple[str, object]]:
     return boundaries
 
 
+def align_equity_path_to_peak(equity_path):
+    """Return a copy of an equity path scaled so its finite maximum is 1."""
+    import numpy as np
+
+    aligned = equity_path.copy()
+    values = aligned["continuous_equity"]
+    finite_values = values[np.isfinite(values)]
+    if finite_values.empty:
+        raise ValueError("Cannot peak-align an equity curve without finite values")
+    peak = float(finite_values.max())
+    if peak <= 0:
+        raise ValueError("Cannot peak-align an equity curve with a non-positive maximum")
+    aligned["continuous_equity"] = values / peak
+    return aligned
+
+
+def align_equity_path_extrema(equity_path):
+    """Min-max normalize an equity path so its finite range is from 0 to 1."""
+    import numpy as np
+
+    aligned = equity_path.copy()
+    values = aligned["continuous_equity"]
+    finite_values = values[np.isfinite(values)]
+    if finite_values.empty:
+        raise ValueError("Cannot range-align an equity curve without finite values")
+    minimum = float(finite_values.min())
+    maximum = float(finite_values.max())
+    value_range = maximum - minimum
+    if value_range == 0:
+        aligned_values = values.copy()
+        aligned_values[np.isfinite(values)] = 0.5
+        aligned["continuous_equity"] = aligned_values
+    else:
+        aligned["continuous_equity"] = (values - minimum) / value_range
+    return aligned
+
+
 def plot_equity_curves(
     all_results,
     output_dir: str,
@@ -420,6 +457,8 @@ def plot_equity_curves(
     *,
     price_file: str | None = None,
     normalize_equity: bool = False,
+    align_curve_maxima: bool = False,
+    align_curve_extrema: bool = False,
     equity_scale: str = "both",
     label_by_index: bool = False,
     logger=None,
@@ -430,11 +469,15 @@ def plot_equity_curves(
     canonical reports containing shared ``params`` and period-keyed ``results``.
     Batch records are chained in chronological period order. By default the
     curve starts at the report's absolute initial equity; callers may request a
-    starting value of 1 with ``normalize_equity=True``. By default both the
-    absolute equity (linear axis) and logarithmic equity are drawn with separate
-    right-side axes. Pass ``equity_scale="linear"`` or ``"log"`` to draw only
-    one representation. ``label_by_index=True`` labels strategies as ``S0``,
-    ``S1``, etc. instead of using report hashes. The saved image path is returned.
+    starting value of 1 with ``normalize_equity=True``. Set
+    ``align_curve_maxima=True`` to divide every curve by its own maximum when
+    multiple curves are present. Set ``align_curve_extrema=True`` to min-max
+    normalize every curve so their minima equal 0 and maxima equal 1. By default
+    both the absolute equity (linear axis) and logarithmic equity are drawn with
+    separate right-side axes. Pass ``equity_scale="linear"`` or ``"log"`` to
+    draw only one representation. ``label_by_index=True`` labels strategies as
+    ``S0``, ``S1``, etc. instead of using report hashes. The saved image path is
+    returned.
     """
     import matplotlib.pyplot as plt
     import pandas as pd
@@ -443,6 +486,10 @@ def plot_equity_curves(
 
     if equity_scale not in {"both", "log", "linear"}:
         raise ValueError("equity_scale must be one of: 'both', 'log', 'linear'")
+    if align_curve_maxima and align_curve_extrema:
+        raise ValueError(
+            "align_curve_maxima and align_curve_extrema cannot both be enabled"
+        )
 
     results = [all_results] if isinstance(all_results, dict) else list(all_results)
     if not results:
@@ -541,7 +588,6 @@ def plot_equity_curves(
     split_dates = {}
     equity_paths = []
     has_multi_period_record = False
-    minimum_equity = None
     for index, result in enumerate(results):
         reports_by_period = period_reports(result)
         has_multi_period_record |= len(reports_by_period) > 1
@@ -553,13 +599,6 @@ def plot_equity_curves(
             split_dates.setdefault(period, split_date)
         if full_path.empty:
             continue
-        path_minimum = full_path["continuous_equity"].dropna().min()
-        if pd.notna(path_minimum):
-            minimum_equity = (
-                float(path_minimum)
-                if minimum_equity is None
-                else min(minimum_equity, float(path_minimum))
-            )
         report_for_label = reports_by_period[0][1]
         params_hash = safe_get(report_for_label, ["params", "hash"])
         strategy_number = start_index + index
@@ -574,8 +613,31 @@ def plot_equity_curves(
         plt.close(fig)
         return None
 
-    show_linear = equity_scale in {"both", "linear"}
-    show_log = equity_scale in {"both", "log"}
+    align_curve_maxima = align_curve_maxima and len(equity_paths) > 1
+    align_curve_extrema = align_curve_extrema and len(equity_paths) > 1
+    if align_curve_maxima:
+        equity_paths = [
+            (label, align_equity_path_to_peak(full_path))
+            for label, full_path in equity_paths
+        ]
+    elif align_curve_extrema:
+        equity_paths = [
+            (label, align_equity_path_extrema(full_path))
+            for label, full_path in equity_paths
+        ]
+
+    minimum_equity = None
+    for _, full_path in equity_paths:
+        path_minimum = full_path["continuous_equity"].dropna().min()
+        if pd.notna(path_minimum):
+            minimum_equity = (
+                float(path_minimum)
+                if minimum_equity is None
+                else min(minimum_equity, float(path_minimum))
+            )
+
+    show_linear = align_curve_extrema or equity_scale in {"both", "linear"}
+    show_log = not align_curve_extrema and equity_scale in {"both", "log"}
     if equity_scale == "log" and (minimum_equity is None or minimum_equity <= 0):
         show_log = False
         show_linear = True
@@ -604,7 +666,13 @@ def plot_equity_curves(
                 linewidth=1.5,
                 alpha=0.8,
                 linestyle="-",
-                label=f"{label} Absolute",
+                label=(
+                    f"{label} Peak-Aligned"
+                    if align_curve_maxima
+                    else f"{label} Range-Normalized"
+                    if align_curve_extrema
+                    else f"{label} Absolute"
+                ),
             )
         if log_equity_axis is not None:
             log_equity_axis.plot(
@@ -614,21 +682,35 @@ def plot_equity_curves(
                 linewidth=1.5,
                 alpha=0.8,
                 linestyle="--",
-                label=f"{label} Log",
+                label=(
+                    f"{label} Peak-Aligned Log"
+                    if align_curve_maxima
+                    else f"{label} Range-Normalized Log"
+                    if align_curve_extrema
+                    else f"{label} Log"
+                ),
             )
 
     normalized_suffix = " (Normalized)" if normalize_equity else ""
     if linear_equity_axis is not None:
-        linear_equity_axis.set_ylabel(
-            f"Absolute Strategy Equity{normalized_suffix}",
-            color=color_map(0),
+        linear_label = (
+            "Peak-Aligned Strategy Equity (Peak = 1)"
+            if align_curve_maxima
+            else "Range-Normalized Strategy Equity (Min = 0, Max = 1)"
+            if align_curve_extrema
+            else f"Absolute Strategy Equity{normalized_suffix}"
         )
+        linear_equity_axis.set_ylabel(linear_label, color=color_map(0))
         linear_equity_axis.tick_params(axis="y", labelcolor=color_map(0))
     if log_equity_axis is not None:
-        log_equity_axis.set_ylabel(
-            f"Strategy Equity{normalized_suffix} (Log Scale)",
-            color=color_map(1),
+        log_label = (
+            "Peak-Aligned Strategy Equity (Peak = 1, Log Scale)"
+            if align_curve_maxima
+            else "Range-Normalized Strategy Equity (Log Scale)"
+            if align_curve_extrema
+            else f"Strategy Equity{normalized_suffix} (Log Scale)"
         )
+        log_equity_axis.set_ylabel(log_label, color=color_map(1))
         log_equity_axis.tick_params(axis="y", labelcolor=color_map(1))
 
     region_starts = time_region_boundaries(time_regions)
@@ -708,6 +790,10 @@ def plot_equity_curves(
         title = "Strategy Performance: Long -> Short -> Forward"
     else:
         title = "Strategy Equity Curve"
+    if align_curve_maxima:
+        title = f"{title} (Peak-Aligned)"
+    elif align_curve_extrema:
+        title = f"{title} (Range-Normalized)"
     plt.title(title)
     if linear_equity_axis is not None and log_equity_axis is not None:
         fig.subplots_adjust(right=0.82)

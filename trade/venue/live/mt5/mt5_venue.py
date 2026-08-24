@@ -2,7 +2,7 @@ import MetaTrader5 as mt5
 import logging,time
 from datetime import datetime, timezone
 from trade.core.venue_base import VenueBase
-from trade.core.protocol import PositionDir
+from trade.core.protocol import OrderType, PositionDir
 
 MT5_SYMBOL_FTMO_MAP = {"DOGEUSDT": "DOGEUSD", "ETHUSDT": "ETHUSD", "BTCUSDT": "BTCUSD"}
 
@@ -171,28 +171,30 @@ class MT5Venue(VenueBase):
         server_time = datetime.fromtimestamp(tick.time)
         return server_time
 
-    def submit_order(self, size, is_buy, stop_loss=None, take_profit=None, interval_ms=500):
+    def submit_order(
+        self,
+        size,
+        is_buy,
+        stop_loss_pct=None,
+        take_profit_pct=None,
+        interval_ms=500,
+        *,
+        order_type=OrderType.MARKET,
+        price=None,
+    ):
         """
         size: Notional value in currency units
         is_buy: Boolean, True for BUY, False for SELL
-        stop_loss: Percentage value, e.g. 0.02 for 2%
-        take_profit: Percentage value, e.g. 0.04 for 4%
+        stop_loss_pct: Percentage value, e.g. 0.02 for 2%
+        take_profit_pct: Percentage value, e.g. 0.04 for 4%
         interval_ms: Delay between split orders in milliseconds
         """
+        order_type, price = self.normalize_order_request(order_type, price)
         self._ensure_target_account()
         symbol_info = mt5.symbol_info(self.symbol)
         if symbol_info is None:
             self.logger.error(f"Symbol not found: {self.symbol}")
             return
-
-        # 1. Get benchmark price
-        tick = mt5.symbol_info_tick(self.symbol)
-        if tick is None:
-            self.logger.error("Failed to get initial tick")
-            return
-
-        benchmark_price = tick.ask if is_buy else tick.bid
-        benchmark_price = round(benchmark_price, symbol_info.digits)
 
         # 2. Calculate total lots
         total_raw_lots = float(size / symbol_info.trade_contract_size)
@@ -209,6 +211,8 @@ class MT5Venue(VenueBase):
 
         remaining_lots = total_lots
         order_count = 0
+        benchmark_price = None
+        responses = []
 
         # 3. Execute split orders
         while remaining_lots > 0:
@@ -222,59 +226,84 @@ class MT5Venue(VenueBase):
             if current_batch_lots < symbol_info.volume_min:
                 break
 
-            tick = mt5.symbol_info_tick(self.symbol)
-            if tick is None:
-                self.logger.error("Tick fetch failed, aborting")
-                break
-
-            price = tick.ask if is_buy else tick.bid
-            price = round(price, symbol_info.digits)
+            if order_type == OrderType.MARKET:
+                tick = mt5.symbol_info_tick(self.symbol)
+                if tick is None:
+                    self.logger.error("Tick fetch failed, aborting")
+                    break
+                order_price = tick.ask if is_buy else tick.bid
+            else:
+                order_price = price
+            order_price = round(order_price, symbol_info.digits)
+            if benchmark_price is None:
+                benchmark_price = order_price
 
             # Stop Loss
-            if stop_loss is not None:
+            if stop_loss_pct is not None:
                 sl_price = (
-                    price * (1.0 - stop_loss)
-                    if is_buy else price * (1.0 + stop_loss)
+                    order_price * (1.0 - stop_loss_pct)
+                    if is_buy else order_price * (1.0 + stop_loss_pct)
                 )
                 sl_price = round(sl_price, symbol_info.digits)
             else:
                 sl_price = 0.0
 
             # Take Profit
-            if take_profit is not None:
+            if take_profit_pct is not None:
                 tp_price = (
-                    price * (1.0 + take_profit)
-                    if is_buy else price * (1.0 - take_profit)
+                    order_price * (1.0 + take_profit_pct)
+                    if is_buy else order_price * (1.0 - take_profit_pct)
                 )
                 tp_price = round(tp_price, symbol_info.digits)
             else:
                 tp_price = 0.0
 
             request = {
-                "action": mt5.TRADE_ACTION_DEAL,
+                "action": (
+                    mt5.TRADE_ACTION_DEAL
+                    if order_type == OrderType.MARKET
+                    else mt5.TRADE_ACTION_PENDING
+                ),
                 "symbol": self.symbol,
                 "volume": current_batch_lots,
-                "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
-                "price": price,
+                "type": (
+                    mt5.ORDER_TYPE_BUY
+                    if order_type == OrderType.MARKET and is_buy
+                    else mt5.ORDER_TYPE_SELL
+                    if order_type == OrderType.MARKET
+                    else mt5.ORDER_TYPE_BUY_LIMIT
+                    if is_buy
+                    else mt5.ORDER_TYPE_SELL_LIMIT
+                ),
+                "price": order_price,
                 "sl": sl_price,
                 "tp": tp_price,
                 "magic": self.magic,
                 "comment": f"Split_Order_{order_count}",
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
+                "type_filling": (
+                    mt5.ORDER_FILLING_IOC
+                    if order_type == OrderType.MARKET
+                    else mt5.ORDER_FILLING_RETURN
+                ),
             }
 
             self._ensure_target_account()
             res = mt5.order_send(request)
+            responses.append(res)
 
-            if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+            success_codes = {
+                mt5.TRADE_RETCODE_DONE,
+                getattr(mt5, "TRADE_RETCODE_PLACED", mt5.TRADE_RETCODE_DONE),
+            }
+            if res is None or res.retcode not in success_codes:
                 err_msg = res.comment if res else "Order failed"
                 self.logger.error(f"Batch {order_count} failed: {err_msg}")
                 break
 
             self.logger.info(
                 f"Batch {order_count} executed | "
-                f"lots={current_batch_lots} | req_price={price} | "
+                f"lots={current_batch_lots} | req_price={order_price} | "
                 f"SL={sl_price} | TP={tp_price}"
             )
 
@@ -284,6 +313,9 @@ class MT5Venue(VenueBase):
 
             if remaining_lots > 0:
                 time.sleep(interval_ms / 1000.0)
+
+        if order_type == OrderType.LIMIT:
+            return responses
 
         # 4. Wait briefly to ensure position is updated
         time.sleep(0.2)
@@ -317,6 +349,7 @@ class MT5Venue(VenueBase):
             f"benchmark_price={benchmark_price} | avg_price={avg_price:.6f} | "
             f"slippage={slippage_pct * 100:.4f}%"
         )
+        return responses
         
     def close_position(self, **kwargs):
         """Close every position of the current magic number"""
