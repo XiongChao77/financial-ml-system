@@ -9,6 +9,7 @@ class BbmBtVenue(BtVenue):
             self,
             config=self.p.strategy_config,
             init_equity=self.p.initial_equity,
+            bar_interval_ms=self.p.bar_interval_ms,
             leverage=self.leverage,
         )
 

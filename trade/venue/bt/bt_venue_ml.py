@@ -10,6 +10,7 @@ class MlBtVenue(BtVenue):
             self,
             config=strategy_config,
             init_equity=self.p.initial_equity,
+            bar_interval_ms=self.p.bar_interval_ms,
             exist_hold_bars=0,
             leverage=self.leverage,
         )

@@ -12,7 +12,10 @@ class MaBtVenue(BtVenue):
         self.fast_ma = bt.ind.SMA(period=strategy_config.fast_period)
         self.slow_ma = bt.ind.SMA(period=strategy_config.slow_period)
         
-        self.strategy = MaCrossoverStrategy(config=strategy_config)
+        self.strategy = MaCrossoverStrategy(
+            config=strategy_config,
+            bar_interval_ms=self.p.bar_interval_ms,
+        )
 
     def next(self):
         self.collect_bar_metrics()

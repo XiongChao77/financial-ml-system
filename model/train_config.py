@@ -244,7 +244,7 @@ COMBO_SUB_TASKS = {
 seq_len = 96
 SingleModelConfig = TrainConfig(
     model_cfg=TransformerConfig(model_version=2, seq_len=seq_len),
-    feature_conf_list=feature.FEATURE_LIST_CRYPTOCURRENCY,
+    feature_conf_list=feature.FEATURE_LIST_COMMODITY,
     train_task=TrainTask.DIRECT_3CLASS,
     stride =4,
 )

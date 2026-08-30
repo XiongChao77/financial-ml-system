@@ -36,10 +36,11 @@ class MlSignalStrategy(StrategyBase):
         venue: VenueBase,
         config: MlStrategyConfig,
         init_equity: float,
+        bar_interval_ms: int,
         exist_hold_bars: int = 0,
         leverage: float = 1.0,
     ):
-        super().__init__(venue)
+        super().__init__(venue, bar_interval_ms)
         self.logger = logging.getLogger("trade")
         self.config = config
         self.init_equity = float(init_equity)

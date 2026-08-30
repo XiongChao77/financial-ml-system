@@ -117,10 +117,11 @@ class RestartableMartingaleStrategy(StrategyBase):
         venue: VenueBase,
         init_equity: float,
         config: MartingaleStrategyConfig,
+        bar_interval_ms: int,
         leverage: float = 1.0,
     ):
         self.logger = logging.getLogger("trade")
-        super().__init__(venue)
+        super().__init__(venue, bar_interval_ms)
         self.config = config
         self.init_equity = init_equity
         self.min_restart_capital = init_equity * config.min_restart_capital_pct

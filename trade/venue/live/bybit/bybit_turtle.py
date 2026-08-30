@@ -111,8 +111,8 @@ class BybitTurtleBot:
                 upper_limit=TurtleConfig.UPPER_LIMIT,
                 unit_pct_scale=TurtleConfig.UNIT_PCT_SCALE,
             ),
+            bar_interval_ms=TurtleConfig.TIMEFRAME * 60 * 1000,
         )
-        self.strategy.bar_interval_ms = TurtleConfig.TIMEFRAME * 60 * 1000
         
         self.last_candle_time = None
         self.stop_signal = False

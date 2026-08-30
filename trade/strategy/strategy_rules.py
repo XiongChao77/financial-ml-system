@@ -21,8 +21,13 @@ class RulesStrategyConfig:
 
 
 class RulesStrategy(StrategyBase):
-    def __init__(self, venue: VenueBase, config: RulesStrategyConfig):
-        super().__init__(venue)
+    def __init__(
+        self,
+        venue: VenueBase,
+        config: RulesStrategyConfig,
+        bar_interval_ms: int,
+    ):
+        super().__init__(venue, bar_interval_ms)
         self.config = config
 
         # --- state ---

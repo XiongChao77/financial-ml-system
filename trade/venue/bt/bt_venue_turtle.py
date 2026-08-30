@@ -14,6 +14,7 @@ class TurtleBtVenue(BtVenue):
         self.strategy = TurtleStrategy(
             venue=self,
             config=strategy_config,
+            bar_interval_ms=self.p.bar_interval_ms,
         )
         
         # Audit-only variables

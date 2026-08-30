@@ -28,6 +28,7 @@ class MartingaleBtVenue(BtVenue):
             self,
             init_equity=self.p.initial_equity,
             config=strategy_config,
+            bar_interval_ms=self.p.bar_interval_ms,
             leverage=self.leverage,
         )
 

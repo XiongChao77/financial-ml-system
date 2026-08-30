@@ -100,6 +100,7 @@ class LiveBot:
                 max_daily_loss_pct=LiveConfig.max_daily_loss_pct,
             ),
             init_equity=self.venue.get_account_equity(),
+            bar_interval_ms=self.interval_ms,
         )
 
         # 4. Warm up the data -> fill the memory cache
@@ -196,7 +197,6 @@ class LiveBot:
                 signal=current_signal,
                 pred_prob=float(current_prob),
                 atr_pct=last_row["atr_14"],
-                bar_interval_ms=self.interval_ms,
             ),
             position=PositionView(dir=curr_dir, layers=curr_layers),
             account=AccountView(equity=self.venue.get_account_equity()),

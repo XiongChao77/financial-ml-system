@@ -42,11 +42,7 @@ class VenueBase:
     def normalize_order_request(order_type=OrderType.MARKET, price=None):
         """Validate an entry order type and its optional limit price."""
         try:
-            normalized_type = (
-                order_type
-                if isinstance(order_type, OrderType)
-                else OrderType(str(order_type).strip().casefold())
-            )
+            normalized_type = order_type if isinstance(order_type, OrderType) else OrderType(str(order_type).strip().casefold())
         except ValueError as exc:
             raise ValueError("order_type must be 'market' or 'limit'") from exc
 

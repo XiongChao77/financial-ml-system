@@ -22,7 +22,7 @@ from trade.core.venue_base import VenueBase
 
 
 class BinanceVenue(VenueBase):
-    """One-way Binance USD-M futures venue with fail-closed bracket creation."""
+    """Binance USD-M futures venue with fail-closed bracket creation."""
 
     BASE_URL = "https://fapi.binance.com"
     API_KEY_FILES = ("hmac_api_key", "binance_api_key")
@@ -49,7 +49,7 @@ class BinanceVenue(VenueBase):
             self.api_secret = self._load_first(key_path, self.API_SECRET_FILES)
             self.session.headers.update({"X-MBX-APIKEY": self.api_key})
             self.quantity_step, self.minimum_quantity, self.price_tick = self._load_filters()
-            self._require_one_way_mode()
+            self.hedge_mode = self._load_hedge_mode()
         except Exception:
             self.session.close()
             raise
@@ -124,14 +124,18 @@ class BinanceVenue(VenueBase):
             Decimal(str(price["tickSize"])),
         )
 
-    def _require_one_way_mode(self) -> None:
+    def _load_hedge_mode(self) -> bool:
+        """Return whether the account uses Hedge Mode."""
         mode = self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
         dual_side = mode.get("dualSidePosition")
-        if dual_side is True or str(dual_side).casefold() == "true":
-            raise RuntimeError(
-                "Binance hedge mode is not supported by this live runner; "
-                "switch the account to one-way mode before starting"
-            )
+        if isinstance(dual_side, bool):
+            return dual_side
+        normalized = str(dual_side).casefold()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+        raise RuntimeError("Binance returned an invalid position mode response")
 
     @staticmethod
     def _floor_to_step(value: float, step: Decimal) -> Decimal:
@@ -157,15 +161,31 @@ class BinanceVenue(VenueBase):
         )
         if not isinstance(positions, list):
             raise RuntimeError("Binance returned an invalid position response")
-        return next(
-            (
-                position
-                for position in positions
-                if position.get("symbol") == self.symbol
-                and float(position.get("positionAmt", 0.0)) != 0.0
-            ),
-            None,
-        )
+        active_positions = [
+            position
+            for position in positions
+            if position.get("symbol") == self.symbol
+            and float(position.get("positionAmt", 0.0)) != 0.0
+        ]
+        if len(active_positions) > 1:
+            raise RuntimeError(
+                "Binance account has simultaneous LONG and SHORT positions for "
+                f"{self.symbol}; this strategy supports one active position"
+            )
+        if not active_positions:
+            return None
+
+        position = active_positions[0]
+        if self.hedge_mode:
+            position_side = position.get("positionSide")
+            quantity = float(position.get("positionAmt", 0.0))
+            if position_side not in {"LONG", "SHORT"}:
+                raise RuntimeError("Binance Hedge Mode position has no valid positionSide")
+            if (position_side == "LONG" and quantity <= 0) or (
+                position_side == "SHORT" and quantity >= 0
+            ):
+                raise RuntimeError("Binance Hedge Mode position direction is inconsistent")
+        return position
 
     def get_account_equity(self) -> float:
         account = self._request("GET", "/fapi/v3/account", signed=True)
@@ -178,8 +198,15 @@ class BinanceVenue(VenueBase):
         position = self._position()
         if position is None:
             return PositionDir.FLAT, 0, 0.0
-        quantity = float(position["positionAmt"])
-        direction = PositionDir.POSITIVE if quantity > 0 else PositionDir.NEGATIVE
+        if self.hedge_mode:
+            direction = (
+                PositionDir.POSITIVE
+                if position["positionSide"] == "LONG"
+                else PositionDir.NEGATIVE
+            )
+        else:
+            quantity = float(position["positionAmt"])
+            direction = PositionDir.POSITIVE if quantity > 0 else PositionDir.NEGATIVE
         return direction, 1, float(position.get("entryPrice", 0.0))
 
     def get_server_time(self):
@@ -212,21 +239,59 @@ class BinanceVenue(VenueBase):
             raise ValueError("Protective trigger price rounded to zero")
         return self._decimal_string(price)
 
-    def _place_protective_order(self, side: str, order_type: str, trigger_price: str):
-        action = "sl" if order_type == "STOP_MARKET" else "tp"
+    def _place_stop_market_order(
+        self,
+        side: str,
+        trigger_price: str,
+        position_side: str | None = None,
+    ):
+        params = {
+            "algoType": "CONDITIONAL",
+            "symbol": self.symbol,
+            "side": side,
+            "type": "STOP_MARKET",
+            "triggerPrice": trigger_price,
+            "closePosition": "true",
+            "workingType": "MARK_PRICE",
+            "clientAlgoId": self._new_client_order_id("sl"),
+        }
+        if position_side is not None:
+            params["positionSide"] = position_side
         return self._request(
             "POST",
             "/fapi/v1/algoOrder",
-            {
-                "algoType": "CONDITIONAL",
-                "symbol": self.symbol,
-                "side": side,
-                "type": order_type,
-                "triggerPrice": trigger_price,
-                "closePosition": "true",
-                "workingType": "MARK_PRICE",
-                "clientAlgoId": self._new_client_order_id(action),
-            },
+            params,
+            signed=True,
+        )
+
+    def _place_take_profit_limit_order(
+        self,
+        side: str,
+        trigger_price: str,
+        quantity: Decimal,
+        position_side: str | None = None,
+    ):
+        quantity_string = self._decimal_string(quantity)
+        params = {
+            "algoType": "CONDITIONAL",
+            "symbol": self.symbol,
+            "side": side,
+            "type": "TAKE_PROFIT",
+            "timeInForce": "GTC",
+            "quantity": quantity_string,
+            "price": trigger_price,
+            "triggerPrice": trigger_price,
+            "workingType": "MARK_PRICE",
+            "clientAlgoId": self._new_client_order_id("tp"),
+        }
+        if position_side is not None:
+            params["positionSide"] = position_side
+        else:
+            params["reduceOnly"] = "true"
+        return self._request(
+            "POST",
+            "/fapi/v1/algoOrder",
+            params,
             signed=True,
         )
 
@@ -283,6 +348,9 @@ class BinanceVenue(VenueBase):
             )
         side = "BUY" if is_buy else "SELL"
         exit_side = "SELL" if is_buy else "BUY"
+        position_side = (
+            "LONG" if is_buy else "SHORT"
+        ) if self.hedge_mode else None
         order_params = {
             "symbol": self.symbol,
             "side": side,
@@ -291,6 +359,8 @@ class BinanceVenue(VenueBase):
             "newOrderRespType": "RESULT",
             "newClientOrderId": self._new_client_order_id("open"),
         }
+        if position_side is not None:
+            order_params["positionSide"] = position_side
         if order_type == OrderType.LIMIT:
             limit_price = self._floor_to_step(price, self.price_tick)
             if limit_price <= 0:
@@ -316,19 +386,20 @@ class BinanceVenue(VenueBase):
                 stop_price = executed_price * (
                     1.0 - stop_loss_pct if is_buy else 1.0 + stop_loss_pct
                 )
-                self._place_protective_order(
+                self._place_stop_market_order(
                     exit_side,
-                    "STOP_MARKET",
                     self._trigger_price(stop_price),
+                    position_side,
                 )
             if take_profit_pct:
                 take_profit_price = executed_price * (
                     1.0 + take_profit_pct if is_buy else 1.0 - take_profit_pct
                 )
-                self._place_protective_order(
+                self._place_take_profit_limit_order(
                     exit_side,
-                    "TAKE_PROFIT_MARKET",
                     self._trigger_price(take_profit_price),
+                    quantity,
+                    position_side,
                 )
         except Exception:
             self.logger.exception(
@@ -352,18 +423,22 @@ class BinanceVenue(VenueBase):
         quantity = self._floor_to_step(close_quantity, self.quantity_step)
         if quantity < self.minimum_quantity:
             raise ValueError("Binance close quantity is below the symbol minimum")
+        order_params = {
+            "symbol": self.symbol,
+            "side": "SELL" if position_quantity > 0 else "BUY",
+            "type": "MARKET",
+            "quantity": self._decimal_string(quantity),
+            "newOrderRespType": "RESULT",
+            "newClientOrderId": self._new_client_order_id("close"),
+        }
+        if self.hedge_mode:
+            order_params["positionSide"] = position["positionSide"]
+        else:
+            order_params["reduceOnly"] = "true"
         result = self._request(
             "POST",
             "/fapi/v1/order",
-            {
-                "symbol": self.symbol,
-                "side": "SELL" if position_quantity > 0 else "BUY",
-                "type": "MARKET",
-                "quantity": self._decimal_string(quantity),
-                "reduceOnly": "true",
-                "newOrderRespType": "RESULT",
-                "newClientOrderId": self._new_client_order_id("close"),
-            },
+            order_params,
             signed=True,
         )
         self._cancel_protective_orders()

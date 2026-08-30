@@ -9,18 +9,21 @@ from abc import ABC, abstractmethod
 import logging
 from typing import Optional
 
-from trade.core.protocol import TradeIntent,ActionType,PositionDir,Observation
+from trade.core.protocol import TradeIntent, ActionType, PositionDir, Observation
 from trade.core.venue_base import VenueBase
+
 
 class StrategyBase(ABC):
 
-    def __init__(self, venue: Optional[VenueBase]):
+    def __init__(self, venue: Optional[VenueBase], bar_interval_ms: int):
         super().__init__()
+        if bar_interval_ms is None or bar_interval_ms <= 0:
+            raise ValueError("bar_interval_ms must be positive")
         self.venue = venue
-        self.last_action:TradeIntent = None
-        self.last_state:Observation = None
+        self.last_action: TradeIntent = None
+        self.last_state: Observation = None
         self._last_bar_time = None
-        self.bar_interval_ms = None
+        self.bar_interval_ms = int(bar_interval_ms)
 
     def process(self, *args, **kwargs) -> TradeIntent:
         """Validate the incoming bar, then dispatch to the strategy decision logic.
@@ -30,18 +33,9 @@ class StrategyBase(ABC):
         forms here gives every strategy the same continuity check and warning
         hook.
         """
-        state = (
-            args[0]
-            if args and isinstance(args[0], Observation)
-            else kwargs.get("state")
-        )
-        current_time = (
-            state.current_time
-            if isinstance(state, Observation)
-            else kwargs.get("current_time")
-        )
-        expected_interval_ms = self._expected_bar_interval_ms(state)
-        self._check_bar_continuity(current_time, expected_interval_ms)
+        state = args[0] if args and isinstance(args[0], Observation) else kwargs.get("state")
+        current_time = state.current_time if isinstance(state, Observation) else kwargs.get("current_time")
+        self._check_bar_continuity(current_time)
 
         action = self._process(*args, **kwargs)
         self._last_bar_time = current_time
@@ -60,36 +54,17 @@ class StrategyBase(ABC):
         logger = getattr(self, "logger", logging.getLogger("trade"))
         logger.error(message)
 
-    def _expected_bar_interval_ms(self, state) -> Optional[int]:
-        if isinstance(state, Observation):
-            interval_ms = getattr(state.market, "bar_interval_ms", None)
-            if interval_ms is not None:
-                return interval_ms
-
-        if self.bar_interval_ms is not None:
-            return self.bar_interval_ms
-
-        venue_params = getattr(getattr(self, "venue", None), "p", None)
-        return getattr(venue_params, "bar_interval_ms", None)
-
-    def _check_bar_continuity(self, current_time, expected_interval_ms) -> None:
+    def _check_bar_continuity(self, current_time) -> None:
         if current_time is None or self._last_bar_time is None:
-            return
-        if expected_interval_ms is None or expected_interval_ms <= 0:
             return
 
         try:
-            actual_interval_ms = int(
-                round((current_time - self._last_bar_time).total_seconds() * 1000)
-            )
+            actual_interval_ms = int(round((current_time - self._last_bar_time).total_seconds() * 1000))
         except (AttributeError, TypeError, ValueError) as exc:
-            self.strategy_warning(
-                "K-line continuity check failed: "
-                f"previous={self._last_bar_time!r}, current={current_time!r}, error={exc}"
-            )
+            self.strategy_warning("K-line continuity check failed: " f"previous={self._last_bar_time!r}, current={current_time!r}, error={exc}")
             return
 
-        expected_interval_ms = int(expected_interval_ms)
+        expected_interval_ms = self.bar_interval_ms
         if actual_interval_ms == expected_interval_ms:
             return
 
@@ -135,7 +110,7 @@ class StrategyBase(ABC):
         if action.action == ActionType.CLOSE:
             self.venue.close_position()
         elif action.action == ActionType.OPEN:
-            is_buy = (action.target_dir == PositionDir.POSITIVE )
+            is_buy = action.target_dir == PositionDir.POSITIVE
             self.venue.submit_order(
                 action.order_qty,
                 is_buy=is_buy,
