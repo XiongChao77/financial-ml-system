@@ -111,7 +111,7 @@ def create_backtest_cerebro(
     broker_config: BrokerConfig,
     data: bt.feed.DataBase,
     predict_num: Optional[int] = None,
-    bar_interval_ms: Optional[int] = None,
+    bar_interval_ms: int,
     engine_config: Optional[BacktestEngineConfig] = None,
 ) -> bt.Cerebro:
     """Create the shared Backtrader runtime and preserve the original analyzers."""
@@ -551,7 +551,7 @@ def _infer_prediction_payload(
 
 
 def _prediction_inputs(data_config: ModelDataConfig, period: str):
-    pre_para: BaseDefine = common.load_pre_params_from_dir(data_config.train_output_dir)
+    pre_para: BaseDefine = common.load_pre_params_from_dir(data_config.prep_output_dir)
     frame = _load_model_period_frame(data_config, period).copy()
     frame["open_time_date_utc"] = pd.to_datetime(frame["open_time_date_utc"], utc=True)
     train_output_dir = data_config.train_output_dir
@@ -661,6 +661,29 @@ def _load_model_data(
         f"to {frame['open_time_date_utc'].max()}"
     )
     return frame, model_stats, sub_model_stats, pre_para, time_regions
+
+
+def load_backtest_prediction_frame(
+    logger,
+    data_config: ModelDataConfig,
+    period: str,
+) -> pd.DataFrame:
+    """Return timestamped predictions produced by the backtest inference path."""
+
+    train_cfg = _load_train_config(data_config.train_output_dir)
+    frame, _, _, _, _ = _load_model_data(
+        logger,
+        data_config,
+        train_cfg,
+        period,
+    )
+    result = frame.loc[:, ["close_time_ms_utc", *_PREDICTION_COLUMNS]].copy()
+    result.insert(
+        1,
+        "close_time_date_utc",
+        pd.to_datetime(result["close_time_ms_utc"], unit="ms", utc=True),
+    )
+    return result.reset_index(drop=True)
 
 
 def _load_csv_data(logger, data_config: CsvDataConfig):

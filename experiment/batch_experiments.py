@@ -28,9 +28,8 @@ import time
 import traceback
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from queue import Empty
-from typing import Any, Dict, Iterable, List, Optional, Tuple,Set
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 from collections import defaultdict
-
 
 SNAPSHOT_PATH_ENV = "FINANCIAL_ML_SNAPSHOT_PATH"
 ORIGINAL_PROJECT_DIR_ENV = "FINANCIAL_ML_ORIGINAL_PROJECT_DIR"
@@ -60,19 +59,13 @@ def _require_clean_worktree(repo_root: str) -> None:
     status = _run_git(repo_root, "status", "--short", "--untracked-files=all")
     if status:
         raise RuntimeError(
-            "Git working tree is not clean; commit or remove all staged, unstaged, "
-            f"and untracked changes before starting an experiment:\n{status}"
+            "Git working tree is not clean; commit or remove all staged, unstaged, " f"and untracked changes before starting an experiment:\n{status}"
         )
 
 
 def _safe_repository_path(repo_root: str, relative_path: str) -> tuple[str, str]:
     normalized = os.path.normpath(relative_path)
-    if (
-        not relative_path
-        or os.path.isabs(relative_path)
-        or normalized == os.pardir
-        or normalized.startswith(os.pardir + os.sep)
-    ):
+    if not relative_path or os.path.isabs(relative_path) or normalized == os.pardir or normalized.startswith(os.pardir + os.sep):
         raise ValueError(f"Snapshot path must stay inside the repository: {relative_path!r}")
 
     root = os.path.realpath(repo_root)
@@ -109,11 +102,7 @@ def _create_source_snapshot(repo_root: str, snapshot_root: str) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ).stdout
-    tracked_files = {
-        os.fsdecode(raw_path)
-        for raw_path in tracked_output.split(b"\0")
-        if raw_path
-    }
+    tracked_files = {os.fsdecode(raw_path) for raw_path in tracked_output.split(b"\0") if raw_path}
     for relative_path in sorted(tracked_files):
         _copy_snapshot_file(
             repo_root,
@@ -149,9 +138,7 @@ def _clean_check_requested(argv: List[str]) -> bool:
 
 
 def _restart_from_source_snapshot() -> None:
-    if os.environ.get(SNAPSHOT_PATH_ENV) or any(
-        argument in {"-h", "--help"} for argument in sys.argv[1:]
-    ):
+    if os.environ.get(SNAPSHOT_PATH_ENV) or any(argument in {"-h", "--help"} for argument in sys.argv[1:]):
         return
 
     script_path = os.path.realpath(__file__)
@@ -169,9 +156,7 @@ def _restart_from_source_snapshot() -> None:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         os.close(lock_fd)
-        raise RuntimeError(
-            f"Another batch experiment is already using snapshot {snapshot_dir}"
-        ) from exc
+        raise RuntimeError(f"Another batch experiment is already using snapshot {snapshot_dir}") from exc
     os.set_inheritable(lock_fd, True)
 
     staging_dir = tempfile.mkdtemp(prefix=f".{repo_name}.snapshot-", dir="/dev/shm")
@@ -210,6 +195,7 @@ sys.path.append(os.path.join(current_work_dir, ".."))
 
 from model import train_config
 from data_process import common, preparation
+
 try:
     experiment_tasks = importlib.import_module("experiment.task_constructors")
 except ModuleNotFoundError as exc:
@@ -240,10 +226,13 @@ INFERENCE_BATCH_SIZE = experiment_tasks.INFERENCE_BATCH_SIZE
 SYMBOL = experiment_tasks.SYMBOL
 INTERVAL = experiment_tasks.INTERVAL
 TRAIN_MODE = experiment_tasks.TRAIN_MODE
+CROSS_TEST_SYMBOLS = ("DOGEUSDT", "ETHUSDT", "BTCUSDT")
+CROSS_TEST_INTERVALS = ("15m", "30m", "1h")
 
 
 class ExperimentTaskError(RuntimeError):
     """A child stage failed; the complete experiment must stop."""
+
 
 # -----------------------------------------------------------------------------
 # Path layout helpers
@@ -256,7 +245,8 @@ def _batch_train_dir(exp_dir: str) -> str:
         rel = os.path.relpath(exp_dir, common.PERSISTENCE_DIR)
         return os.path.join(common.PERSISTENCE_DIR, rel, "train")
     base = os.path.basename(exp_dir.rstrip(os.sep)) or "run"
-    return os.path.join(common.PERSISTENCE_DIR,"batch_temp", base, "train")
+    return os.path.join(common.PERSISTENCE_DIR, "batch_temp", base, "train")
+
 
 def _prep_output_dir(temp_dir: str, pre_h: str) -> str:
     return os.path.join(temp_dir, f"pre_{pre_h}")
@@ -293,10 +283,7 @@ def build_task_spec(
         _assert_hash_roundtrip("prep", pre_d, common.BaseDefine(**pre_d), pre_h)
 
         node_pre = spec.setdefault(pre_h, {"params": json_safe(pre_d), "train": {}})
-        pre_strategy_configs = [
-            backtest_runner.strategy_config_for_preparation(strategy_config, pre)
-            for strategy_config in simulation_task
-        ]
+        pre_strategy_configs = [backtest_runner.strategy_config_for_preparation(strategy_config, pre) for strategy_config in simulation_task]
 
         for tr in training_task:
             tr_d = asdict(tr)
@@ -355,7 +342,7 @@ def load_done_set(reports_path: str) -> set[str]:
                 d = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            h = (((d or {}).get("params") or {}).get("hash"))
+            h = ((d or {}).get("params") or {}).get("hash")
             if isinstance(h, str) and h:
                 done.add(h)
     return done
@@ -378,14 +365,9 @@ def _assert_hash_roundtrip(kind: str, original: Dict[str, Any], restored_obj: An
     actual_hash = hash_functions[kind](restored_d)
     if actual_hash != expected_hash:
         before = json_safe(original)
-        mismatched = {
-            k: (before.get(k), restored_d.get(k))
-            for k in set(before) | set(restored_d)
-            if before.get(k) != restored_d.get(k)
-        }
+        mismatched = {k: (before.get(k), restored_d.get(k)) for k in set(before) | set(restored_d) if before.get(k) != restored_d.get(k)}
         raise ValueError(
-            f"{kind} params failed hash round-trip: expected {expected_hash!r}, "
-            f"restored config hashes to {actual_hash!r}. Mismatched fields: {mismatched}"
+            f"{kind} params failed hash round-trip: expected {expected_hash!r}, " f"restored config hashes to {actual_hash!r}. Mismatched fields: {mismatched}"
         )
 
 
@@ -449,10 +431,7 @@ def filter_pending_from_spec(task_spec: Dict[str, Any], done_set: set[str]) -> D
                 )
                 saved_identity = sim.get("identity")
                 if saved_identity is not None and saved_identity != identity.as_dict():
-                    raise ValueError(
-                        f"Task identity mismatch for {pre_h}/{tr_h}/{sim['hash']}: "
-                        f"stored={saved_identity}, calculated={identity.as_dict()}"
-                    )
+                    raise ValueError(f"Task identity mismatch for {pre_h}/{tr_h}/{sim['hash']}: " f"stored={saved_identity}, calculated={identity.as_dict()}")
                 if identity.full_hash not in done_set:
                     sim_pending.append(sim)
 
@@ -501,6 +480,7 @@ def _worker_logger(log_file: str) -> logging.Logger:
     root.addHandler(fh)
     return root
 
+
 SWEEPABLE_TYPES = (int, float, str, bool, type(None))
 
 
@@ -526,6 +506,7 @@ def collect_from_any(
             collect_from_any(v, out, key)
         return
 
+
 def log_param_sweep(logger, sweep):
     logger.info("📌 Experiment parameter sweep:")
 
@@ -535,6 +516,7 @@ def log_param_sweep(logger, sweep):
         logger.info(f"  [{stage}]")
         for k, v in sweep[stage].items():
             logger.info(f"    {k}: {v}")
+
 
 def collect_param_sweep(task_spec):
     sweep = {
@@ -565,11 +547,7 @@ def collect_param_sweep(task_spec):
         return (4, f"{type(value).__name__}:{value!r}")
 
     def finalize(d):
-        return {
-            k: sorted(v, key=value_sort_key)
-            for k, v in d.items()
-            if len(v) > 1
-        }
+        return {k: sorted(v, key=value_sort_key) for k, v in d.items() if len(v) > 1}
 
     return {
         "pre": finalize(sweep["pre"]),
@@ -577,7 +555,8 @@ def collect_param_sweep(task_spec):
         "sim": finalize(sweep["sim"]),
     }
 
-def create_task_spec(logger, exp_dir,done_set: set[str]):
+
+def create_task_spec(logger, exp_dir, done_set: set[str]):
     is_combo = TRAIN_MODE in train_config.COMBO_SUB_TASKS
     preparation_task, training_task, simulation_task = construct_experiment_tasks(
         SYMBOL,
@@ -599,7 +578,7 @@ def create_task_spec(logger, exp_dir,done_set: set[str]):
         json.dump(task_spec, f, indent=2, ensure_ascii=False, default=str)
     logger.info(f"📄 Tasks spec saved: {tasks_spec_path}")
 
-    (n_prep_total, n_train_total, n_sim_total) = _count_spec_tasks(task_spec)
+    n_prep_total, n_train_total, n_sim_total = _count_spec_tasks(task_spec)
     total_all = n_prep_total + n_train_total + n_sim_total
     logger.info(f"📊 Total: {total_all} (prep={n_prep_total}, train={n_train_total}, sim={n_sim_total})")
     if done_set:
@@ -608,6 +587,7 @@ def create_task_spec(logger, exp_dir,done_set: set[str]):
         total_pending = n_prep + n_train + n_sim
         logger.info(f"📊 Pending: {total_pending} (prep={n_prep}, train={n_train}, sim={n_sim}), done: {total_all - total_pending}")
     return task_spec, (simulation_task if is_combo else None)
+
 
 # -----------------------------------------------------------------------------
 # Worker loops
@@ -623,7 +603,7 @@ def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Que
             break
 
         task_spec = msg
-        for pre_h,pre_task in task_spec.items():
+        for pre_h, pre_task in task_spec.items():
             para = common.BaseDefine(**pre_task["params"])
             t0 = time.time()
             try:
@@ -631,9 +611,7 @@ def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Que
                 preparation.main(logger, para=para, prep_output_dir=prep_dir)
             except Exception:
                 logger.exception(f"Prep failed: {pre_h}")
-                train_queue.put(
-                    ("prep_failed", pre_h, time.time() - t0, traceback.format_exc())
-                )
+                train_queue.put(("prep_failed", pre_h, time.time() - t0, traceback.format_exc()))
                 return
 
             elapsed = time.time() - t0
@@ -760,6 +738,7 @@ def _train_task(
             )
         )
 
+
 def _worker_sim(
     worker_log_file: str,
     task_queue: mp.Queue,
@@ -785,7 +764,7 @@ def _worker_sim(
         # -- so the same worker pool can run both the single model training output directory and the
         # combined model directory produced by the combo_model fuse; the backtest stage is identical for both.
         pre_h, pre_params, tr_h, train_params, sim, train_output_dir, extra_report_fields = msg
-        sim_h = sim['hash']
+        sim_h = sim["hash"]
         sim_params = sim["params"]
         strategy_config = backtest_runner.strategy_config_from_dict(
             sim_params["strategy_config"],
@@ -803,17 +782,12 @@ def _worker_sim(
                 sim=sim_params,
             )
             if identity.prep_hash != pre_h or identity.sim_hash != sim_h:
-                raise ValueError(
-                    f"Queued task identity mismatch: queued={pre_h}/{tr_h}/{sim_h}, "
-                    f"calculated={identity.as_dict()}"
-                )
+                raise ValueError(f"Queued task identity mismatch: queued={pre_h}/{tr_h}/{sim_h}, " f"calculated={identity.as_dict()}")
             stored_identity = sim.get("identity")
             if stored_identity is not None and stored_identity != identity.as_dict():
-                raise ValueError(
-                    f"Stored task identity mismatch: stored={stored_identity}, "
-                    f"calculated={identity.as_dict()}"
-                )
+                raise ValueError(f"Stored task identity mismatch: stored={stored_identity}, " f"calculated={identity.as_dict()}")
             report_stat = None
+
             def run_period(period):
                 runner_config = backtest_runner.RunnerConfig(
                     strategy_config=strategy_config,
@@ -842,10 +816,7 @@ def _worker_sim(
                 params = period_report["params"]
                 report_identity = params.get("identity")
                 if report_identity != identity.as_dict():
-                    raise ValueError(
-                        f"{period} report identity mismatch: report={report_identity}, "
-                        f"task={identity.as_dict()}"
-                    )
+                    raise ValueError(f"{period} report identity mismatch: report={report_identity}, " f"task={identity.as_dict()}")
                 if shared_params is None:
                     shared_params = params
                 elif params != shared_params:
@@ -922,7 +893,16 @@ def _hardlink_tree(source_dir: str, target_dir: str) -> None:
     shutil.copytree(source_dir, target_dir, copy_function=os.link)
 
 
-def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger: logging.Logger, eta_msg,pending_sim_hashes: Dict[Tuple[str, str], Set[str]],temp_dir: str, valid:bool,task_spec) -> None:
+def _drain_sim_results(
+    sim_result_queue: mp.Queue,
+    stats: Dict[str, Any],
+    logger: logging.Logger,
+    eta_msg,
+    pending_sim_hashes: Dict[Tuple[str, str], Set[str]],
+    temp_dir: str,
+    valid: bool,
+    task_spec,
+) -> None:
     while True:
         try:
             msg = sim_result_queue.get_nowait()
@@ -934,10 +914,7 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
         typ = msg[0]
         if typ == "sim_failed":
             _, pre_h, tr_h, sim_h, elapsed, error = msg
-            raise ExperimentTaskError(
-                f"Simulation failed after {elapsed:.2f}s for "
-                f"{pre_h}/{tr_h}/{sim_h}:\n{error}"
-            )
+            raise ExperimentTaskError(f"Simulation failed after {elapsed:.2f}s for " f"{pre_h}/{tr_h}/{sim_h}:\n{error}")
         if typ != "sim_done":
             raise ExperimentTaskError(f"Unexpected simulation result: {msg!r}")
 
@@ -949,7 +926,7 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
             common.append_jsonl(rp, report_stat)
             if valid == True:
                 strategy_hash = report_stat["params"]["hash"]
-                target_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', strategy_hash)
+                target_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "valid_train_out", strategy_hash)
                 _hardlink_tree(train_dir, target_dir)
                 logger.info(f"🚀 Hardlinked artifacts: {tr_h} -> {strategy_hash} {target_dir}")
         # 2. Hash-based cleanup and deletion logic
@@ -957,7 +934,7 @@ def _drain_sim_results(sim_result_queue: mp.Queue, stats: Dict[str, Any], logger
         if train_key in pending_sim_hashes:
             # Remove current finished sim_h from the pending set
             pending_sim_hashes[train_key].discard(sim_h)
-            
+
             # If all sim tasks for this train task have been removed
             # if not pending_sim_hashes[train_key]:
             #     if os.path.exists(train_dir):
@@ -998,12 +975,12 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
         data_map = {}
         if not os.path.exists(path):
             return data_map
-        
+
         # Support both selected_configs (list) and reports (jsonl)
         try:
             if is_selected_config:
                 # Assume load_selected_configs is the existing helper
-                records = load_selected_configs(path) 
+                records = load_selected_configs(path)
             else:
                 with open(path, "r", encoding="utf-8") as f:
                     records = [json.loads(line.strip()) for line in f if line.strip()]
@@ -1033,11 +1010,7 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
 
         new_record = new_data[h]
         # Initialize comparison entry
-        comparison_entry = {
-            "hash": h,
-            "verify_all_passed": True,
-            "period_details": {}
-        }
+        comparison_entry = {"hash": h, "verify_all_passed": True, "period_details": {}}
 
         # Iterate over three periods
         for p in periods:
@@ -1054,23 +1027,19 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
                     # Compare with one decimal place (e.g., 0.1556 represents 15.6%)
                     v1 = round(old_cagr, 1)
                     v2 = round(new_cagr, 1)
-                    is_match = (v1 == v2)
-                    
+                    is_match = v1 == v2
+
                     if not is_match:
                         comparison_entry["verify_all_passed"] = False
-                    
-                    comparison_entry["period_details"][p] = {
-                        "status": "match" if is_match else "mismatch",
-                        "old_cagr": v1,
-                        "new_cagr": v2
-                    }
+
+                    comparison_entry["period_details"][p] = {"status": "match" if is_match else "mismatch", "old_cagr": v1, "new_cagr": v2}
                 else:
                     comparison_entry["period_details"][p] = {"status": "missing_performance_data"}
-            
+
             # Case B: one side is missing this period
             elif old_p or new_p:
                 comparison_entry["period_details"][p] = {"status": "period_not_in_both"}
-            # If the period should exist in the strategy but is missing, mark as failed
+                # If the period should exist in the strategy but is missing, mark as failed
                 comparison_entry["verify_all_passed"] = False
 
         # Keep params in results for easier inspection
@@ -1094,6 +1063,7 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
     logger.info(f"ℹ️  Only in old: {len(hashes_only_in_old)} | Only in new: {len(hashes_only_in_new)}")
 
     return output_path, len(compare_results), len(hashes_only_in_old), len(hashes_only_in_new)
+
 
 # -----------------------------------------------------------------------------
 # ETA helper
@@ -1131,7 +1101,11 @@ def _make_eta_fn(n_prep: int, n_train: int, n_sim: int, stats: Dict[str, Any]):
             return ""
 
         total_eta = None
-        if (n_prep == 0 or stats["preparation"]["count"] > 0) and (n_train == 0 or stats["train"]["count"] > 0) and (n_sim == 0 or stats["simulation"]["count"] > 0):
+        if (
+            (n_prep == 0 or stats["preparation"]["count"] > 0)
+            and (n_train == 0 or stats["train"]["count"] > 0)
+            and (n_sim == 0 or stats["simulation"]["count"] > 0)
+        ):
             total_eta = (prep_eta or 0) + (train_eta or 0) + (sim_eta or 0)
 
         msg = "[ETA] " + ", ".join(parts)
@@ -1172,10 +1146,86 @@ def _assert_experiment_revision(
 ) -> None:
     current_commit = common.git_revision(require_clean=check_git_clean)
     if current_commit != context.git_commit:
+        raise RuntimeError("Git state changed while the experiment was running: " f"started={context.git_commit}, current={current_commit}")
+
+
+def _cross_test_targets(
+    original_symbol: str,
+    original_interval: str,
+) -> List[Tuple[str, str]]:
+    targets = [(symbol, original_interval) for symbol in CROSS_TEST_SYMBOLS if symbol != original_symbol]
+    targets.extend((original_symbol, interval) for interval in CROSS_TEST_INTERVALS if interval != original_interval)
+    return list(dict.fromkeys(targets))
+
+
+def _cross_test_prep_output_dir(output_dir: str, pre_para: common.BaseDefine) -> str:
+    prep_hash = TaskIdentity.prep_hash_for(asdict(pre_para))
+    return os.path.join(
+        output_dir,
+        "prep",
+        f"{pre_para.symbol}_{pre_para.interval}_{prep_hash}",
+    )
+
+
+def _validate_cross_test_preparation(
+    pre_para: common.BaseDefine,
+    prep_output_dir: str,
+) -> None:
+    expected_configuration_hash = TaskIdentity.prep_hash_for(asdict(pre_para))
+    manifest = common.load_data_manifest_from_dir(prep_output_dir)
+    actual_configuration_hash = manifest.get("configuration_hash")
+    if actual_configuration_hash != expected_configuration_hash:
         raise RuntimeError(
-            "Git state changed while the experiment was running: "
-            f"started={context.git_commit}, current={current_commit}"
+            "Cross-test preparation configuration mismatch: "
+            f"path={prep_output_dir}, expected={expected_configuration_hash}, "
+            f"actual={actual_configuration_hash}"
         )
+
+    stored_pre_para = common.load_pre_params_from_dir(prep_output_dir)
+    stored_configuration_hash = TaskIdentity.prep_hash_for(asdict(stored_pre_para))
+    if stored_configuration_hash != expected_configuration_hash:
+        raise RuntimeError(
+            "Cross-test preparation metadata mismatch: "
+            f"path={prep_output_dir}, expected={expected_configuration_hash}, "
+            f"actual={stored_configuration_hash}"
+        )
+
+    source_path = common.market_data_path(pre_para)
+    expected_source = {
+        "filename": os.path.basename(source_path),
+        "size_bytes": os.path.getsize(source_path),
+        "sha256": common.sha256_file(source_path),
+    }
+    actual_source = manifest.get("source") or {}
+    mismatched_source = {
+        key: (expected_value, actual_source.get(key)) for key, expected_value in expected_source.items() if actual_source.get(key) != expected_value
+    }
+    if mismatched_source:
+        raise RuntimeError("Cross-test preparation source mismatch: " f"path={prep_output_dir}, mismatches={mismatched_source}")
+
+    required_data_paths = (
+        common.get_train_data_path_in_dir(prep_output_dir),
+        common.get_test_data_path_in_dir(prep_output_dir),
+    )
+    missing_data_paths = [path for path in required_data_paths if not os.path.isfile(path)]
+    if missing_data_paths:
+        raise RuntimeError("Cross-test preparation is incomplete: " f"missing={missing_data_paths}")
+
+
+def _ensure_cross_test_prepared(
+    logger: logging.Logger,
+    pre_para: common.BaseDefine,
+    prep_output_dir: str,
+) -> None:
+    manifest_path = common.get_data_manifest_path_in_dir(prep_output_dir)
+    if not os.path.isfile(manifest_path):
+        preparation.main(
+            logger,
+            para=pre_para,
+            prep_output_dir=prep_output_dir,
+        )
+    _validate_cross_test_preparation(pre_para, prep_output_dir)
+
 
 def train_and_cross_test(
     logger: logging.Logger,
@@ -1186,127 +1236,94 @@ def train_and_cross_test(
     from trade.runner import backtest_runner
 
     task_spec = task_spec or {}
-    def ensure_prepared(pre_para, prep_output_dir):
-        manifest_path = common.get_data_manifest_path_in_dir(prep_output_dir)
-        if not os.path.isfile(manifest_path):
-            preparation.main(
-                logger,
-                para=pre_para,
-                prep_output_dir=prep_output_dir,
-            )
-
-    #data prepare
     results = {}
-    for pre_h, pre_node in task_spec.items():
+    for pre_node in task_spec.values():
         pre_params = pre_node["params"]
         pre_para = common.BaseDefine(**pre_params)
-        prep_output_dir = os.path.join(output_dir,'prep',f'{pre_para.symbol}_{pre_para.interval}')
-        ensure_prepared(pre_para, prep_output_dir)
         original_symbol = pre_para.symbol
         original_interval = pre_para.interval
         for tr_h, tr_node in pre_node["train"].items():
             train_params = tr_node["params"]
             train_cfg = _config_from_dict_train(train_params, expected_hash=tr_h)
-            for sim_task in tr_node['sim_tasks']:
-                hash_value =  sim_task['hash']
-                strategy_hash = sim_task['strategy_hash']
-                train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', strategy_hash)
-                if not os.path.exists(train_save_dir):
-                    raise RuntimeError(f" {train_save_dir} not exist,run valid first!")
-                sim_params = sim_task['params']
+            for sim_task in tr_node["sim_tasks"]:
+                strategy_hash = sim_task["strategy_hash"]
+                train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "valid_train_out", strategy_hash)
+                if not os.path.isdir(train_save_dir):
+                    raise FileNotFoundError("Cross-test training artifact is missing; run validation first: " f"{train_save_dir}")
+                sim_params = sim_task["params"]
                 strategy_config = backtest_runner.strategy_config_from_dict(
                     sim_params["strategy_config"],
                 )
                 broker_config = backtest_runner.BrokerConfig(
                     **sim_params["broker_config"],
                 )
-                results[strategy_hash] = {'orignal_symbol': f'{pre_para.symbol}_{pre_para.interval}','CAGR':{}}
-                for symbol in ["DOGEUSDT","ETHUSDT", "BTCUSDT"]:   #BTCUSDT ETHUSDT DOGEUSDT
-                    if symbol != original_symbol:
-                        t_pre_para = common.BaseDefine(**pre_params)
-                        t_pre_para.symbol = symbol
-                        t_pre_para.interval = original_interval
-                        sim_prep_output_dir = os.path.join(output_dir,'prep',f'{t_pre_para.symbol}_{t_pre_para.interval}')
-                        ensure_prepared(t_pre_para, sim_prep_output_dir)
-                        data_config = backtest_runner.ModelDataConfig(
-                            prep_output_dir=sim_prep_output_dir,
-                            train_output_dir=train_save_dir,
-                            device="cpu",
-                            use_prediction_cache=True,
-                        )
-                        backtest_runner.precompute_prediction_cache(
-                            logger,
-                            data_config,
-                            train_cfg,
-                            "long",
-                            inference_batch_size=INFERENCE_BATCH_SIZE,
-                        )
-                        runner_config = backtest_runner.RunnerConfig(
-                            strategy_config=strategy_config,
-                            broker_config=broker_config,
-                            save_dir=os.path.join(
-                                output_dir,
-                                "cross_test",
-                                strategy_hash,
-                                f"{t_pre_para.symbol}_{t_pre_para.interval}",
-                            ),
-                            data_config=data_config,
-                            experiment_context=experiment_context,
-                        )
-                        report = backtest_runner.main(
-                            logger,
-                            runner_config,
-                            "long",
-                        )["report"]
-                        results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = report
-                        results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = report["results"]["long"]['performance']['cagr']
-                    else:
-                        for interval in ["15m","30m","1h"]:
-                            t_pre_para = common.BaseDefine(**pre_params)
-                            t_pre_para.symbol = original_symbol
-                            t_pre_para.interval = interval
-                            sim_prep_output_dir = os.path.join(output_dir,'prep',f'{t_pre_para.symbol}_{t_pre_para.interval}')
-                            ensure_prepared(t_pre_para, sim_prep_output_dir)
-                            data_config = backtest_runner.ModelDataConfig(
-                                prep_output_dir=sim_prep_output_dir,
-                                train_output_dir=train_save_dir,
-                                device="cpu",
-                                use_prediction_cache=True,
-                            )
-                            backtest_runner.precompute_prediction_cache(
-                                logger,
-                                data_config,
-                                train_cfg,
-                                "long",
-                                inference_batch_size=INFERENCE_BATCH_SIZE,
-                            )
-                            runner_config = backtest_runner.RunnerConfig(
-                                strategy_config=strategy_config,
-                                broker_config=broker_config,
-                                save_dir=os.path.join(
-                                    output_dir,
-                                    "cross_test",
-                                    strategy_hash,
-                                    f"{t_pre_para.symbol}_{t_pre_para.interval}",
-                                ),
-                                data_config=data_config,
-                                experiment_context=experiment_context,
-                            )
-                            report = backtest_runner.main(
-                                logger,
-                                runner_config,
-                                "long",
-                            )["report"]
-                            results[strategy_hash][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = report
-                            results[strategy_hash]['CAGR'][f'{t_pre_para.symbol}_{t_pre_para.interval}'] = report["results"]["long"]['performance']['cagr']
+                strategy_result = {
+                    "original_symbol": original_symbol,
+                    "original_interval": original_interval,
+                    "CAGR": {},
+                }
+                for target_symbol, target_interval in _cross_test_targets(
+                    original_symbol,
+                    original_interval,
+                ):
+                    target_pre_para = common.BaseDefine(**pre_params)
+                    target_pre_para.symbol = target_symbol
+                    target_pre_para.interval = target_interval
+                    prep_output_dir = _cross_test_prep_output_dir(
+                        output_dir,
+                        target_pre_para,
+                    )
+                    _ensure_cross_test_prepared(
+                        logger,
+                        target_pre_para,
+                        prep_output_dir,
+                    )
+                    data_config = backtest_runner.ModelDataConfig(
+                        prep_output_dir=prep_output_dir,
+                        train_output_dir=train_save_dir,
+                        device="cpu",
+                        use_prediction_cache=True,
+                    )
+                    backtest_runner.precompute_prediction_cache(
+                        logger,
+                        data_config,
+                        train_cfg,
+                        "long",
+                        inference_batch_size=INFERENCE_BATCH_SIZE,
+                    )
+                    target_key = f"{target_symbol}_{target_interval}"
+                    runner_config = backtest_runner.RunnerConfig(
+                        strategy_config=strategy_config,
+                        broker_config=broker_config,
+                        save_dir=os.path.join(
+                            output_dir,
+                            "artifacts",
+                            strategy_hash,
+                            target_key,
+                        ),
+                        data_config=data_config,
+                        experiment_context=experiment_context,
+                    )
+                    report = backtest_runner.main(
+                        logger,
+                        runner_config,
+                        "long",
+                    )["report"]
+                    report_common = report["params"]["common"]
+                    if report_common.get("symbol") != target_symbol or report_common.get("interval") != target_interval:
+                        raise RuntimeError("Cross-test report market mismatch: " f"target={target_key}, report_common={report_common}")
+                    strategy_result[target_key] = report
+                    strategy_result["CAGR"][target_key] = report["results"]["long"]["performance"]["cagr"]
+                results[strategy_hash] = strategy_result
     output_path = os.path.join(output_dir, "cross_test_reports.jsonl")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         for s_hash, data in results.items():
             record = {"strategy_hash": s_hash}
-            record.update(data) 
+            record.update(data)
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     logger.info(f"Successfully saved {len(results)} cross test records to {output_path}")
+
 
 def run_combo_fusion_and_backtest(
     logger: logging.Logger,
@@ -1394,8 +1411,10 @@ def run_combo_fusion_and_backtest(
 
     for pre_h, compat, r1, r2 in fusion_pairs:
         payload = {
-            "pre_h": pre_h, "compat": compat,
-            f"{role_1}_tr_h": r1["tr_h"], f"{role_2}_tr_h": r2["tr_h"],
+            "pre_h": pre_h,
+            "compat": compat,
+            f"{role_1}_tr_h": r1["tr_h"],
+            f"{role_2}_tr_h": r2["tr_h"],
         }
         fusion_hash = TaskIdentity.train_hash_for({"fusion": payload})
 
@@ -1435,11 +1454,9 @@ def run_combo_fusion_and_backtest(
         }
         for strategy_config in simulation_task:
             pre_para = common.BaseDefine(**r1["pre_params"])
-            effective_strategy_config = (
-                backtest_runner.strategy_config_for_preparation(
-                    strategy_config,
-                    pre_para,
-                )
+            effective_strategy_config = backtest_runner.strategy_config_for_preparation(
+                strategy_config,
+                pre_para,
             )
             sim_d = json_safe(_simulation_params(effective_strategy_config))
             identity = TaskIdentity.from_params(
@@ -1449,12 +1466,17 @@ def run_combo_fusion_and_backtest(
             )
             sim_h = identity.sim_hash
             pending_sim_hashes.setdefault((pre_h, fusion_hash), set()).add(sim_h)
-            sim_task_queue.put((
-                pre_h, r1["pre_params"], fusion_hash, r1["train_params"],
-                {"hash": sim_h, "identity": identity.as_dict(), "params": sim_d},
-                fusion_dir,
-                extra_report_fields,
-            ))
+            sim_task_queue.put(
+                (
+                    pre_h,
+                    r1["pre_params"],
+                    fusion_hash,
+                    r1["train_params"],
+                    {"hash": sim_h, "identity": identity.as_dict(), "params": sim_d},
+                    fusion_dir,
+                    extra_report_fields,
+                )
+            )
             n_sim_total += 1
 
     logger.info(f"[combo fuse] enqueued {n_sim_total} backtest tasks across {len(fusion_pairs)} fusion pairs")
@@ -1466,19 +1488,19 @@ def run_combo_fusion_and_backtest(
     # fusion_dir once every sim finished (mirroring the cleanup of the single model training directories), except
     # that there is no prep/train stage to coordinate with here, so a simple polling loop is enough.
     stats = {"simulation": {"time": 0.0, "count": 0}}
+
     def _no_eta():
         return ""
+
     while stats["simulation"]["count"] < n_sim_total:
         for process in sim_workers:
             if process.exitcode not in (None, 0):
-                raise ExperimentTaskError(
-                    f"combo simulation process {process.name} exited "
-                    f"with code {process.exitcode}"
-                )
+                raise ExperimentTaskError(f"combo simulation process {process.name} exited " f"with code {process.exitcode}")
         _drain_sim_results(sim_result_queue, stats, logger, _no_eta, pending_sim_hashes, temp_dir, valid, {})
         if stats["simulation"]["count"] < n_sim_total:
             time.sleep(0.5)
     logger.info(f"[combo fuse] all {n_sim_total} backtest tasks done.")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Batch experiments: prep -> train -> sim (with resume)")
@@ -1487,11 +1509,11 @@ def main():
     parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
     parser.add_argument("-c", "--cross_test", action="store_true", default=False, help="crosss test")
     parser.add_argument("-l", "--load", action="store_true", default=False, help="load condidate configs for verification,befor applying to market")
-    parser.add_argument("--check-git-clean", action=argparse.BooleanOptionalAction, default=True,
-        help=(
-            "Require a clean Git working tree when creating the source snapshot "
-            "(disable with --no-check-git-clean)"
-        ),
+    parser.add_argument(
+        "--check-git-clean",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=("Require a clean Git working tree when creating the source snapshot " "(disable with --no-check-git-clean)"),
     )
 
     args = parser.parse_args()
@@ -1499,9 +1521,7 @@ def main():
         git_commit=common.git_revision(require_clean=args.check_git_clean),
     )
 
-    if TRAIN_MODE in train_config.COMBO_SUB_TASKS and (
-        args.resume or args.add or args.valid or args.cross_test or args.load
-    ):
+    if TRAIN_MODE in train_config.COMBO_SUB_TASKS and (args.resume or args.add or args.valid or args.cross_test or args.load):
         raise ValueError(
             "combo_model 模式 (TRAIN_MODE=TRIGGER_DIRECTION/LONG_SHORT_OVR) 暂不支持 "
             "--resume/--add/--valid/--cross_test/--load，这些流程假设的是单模型模式下 "
@@ -1518,22 +1538,44 @@ def main():
         if not os.path.exists(exp_dir):
             raise FileNotFoundError(f"Add directory not found: {exp_dir}")
     elif args.valid:
-        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
-        exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs")
+        selected_configs_source = os.path.join(
+            common.PERSISTENCE_DIR,
+            "batch_experiments",
+            "selected_configs",
+            SELECTED_FILE,
+        )
+        if not os.path.exists(selected_configs_source):
+            raise FileNotFoundError(
+                f"Valid config file not found: {selected_configs_source}"
+            )
+        exp_dir = os.path.join(
+            common.PERSISTENCE_DIR,
+            "batch_experiments",
+            "valid_train_out",
+        )
+        shutil.rmtree(exp_dir, ignore_errors=True)
         os.makedirs(exp_dir, exist_ok=True)
-        if not os.path.exists(selected_configs):
-            raise FileNotFoundError(f"Valid config file not found: {selected_configs}")
+        selected_configs = os.path.join(exp_dir, SELECTED_FILE)
+        shutil.copy2(selected_configs_source, selected_configs)
     elif args.cross_test:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
-        exp_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "selected_configs", "cross_test")
-        os.makedirs(exp_dir, exist_ok=True)
         if not os.path.exists(selected_configs):
             raise FileNotFoundError(f"Selected config file not found: {selected_configs}")
+        exp_dir = common.create_experiment_dir(
+            os.path.join(
+                common.PERSISTENCE_DIR,
+                "batch_experiments",
+                "cross_test",
+            ),
+            SYMBOL,
+            INTERVAL,
+        )
     elif args.load:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         records = common.load_selected_configs(selected_configs)  # just to validate file and format
         from trade.runner import backtest_runner
         import model.train as train
+
         exp_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "load_configs")
         os.makedirs(exp_dir, exist_ok=True)
         logger = _setup_root_logger(exp_dir)
@@ -1551,17 +1593,15 @@ def main():
             broker_config = backtest_runner.BrokerConfig(
                 **params["broker"],
             )
-            pre_para =common.BaseDefine(**params["common"])
+            pre_para = common.BaseDefine(**params["common"])
             train_cfg = _config_from_dict_train(params["train"])
-            load_prep_output_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "load_configs",'prep',f'{pre_para.symbol}_{pre_para.interval}')
-            strategy_hash = params['hash']
-            #prepare train output for market
-            train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out', strategy_hash)
+            load_prep_output_dir = os.path.join(common.TEMPORARY_DIR, "batch_experiments", "load_configs", "prep", f"{pre_para.symbol}_{pre_para.interval}")
+            strategy_hash = params["hash"]
+            # prepare train output for market
+            train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "valid_train_out", strategy_hash)
             if not os.path.exists(train_save_dir):
-                raise FileNotFoundError(
-                    f"Training artifact not found for {strategy_hash}: {train_save_dir}"
-                )
-            preparation.main(logger, para=pre_para,prep_output_dir = load_prep_output_dir)
+                raise FileNotFoundError(f"Training artifact not found for {strategy_hash}: {train_save_dir}")
+            preparation.main(logger, para=pre_para, prep_output_dir=load_prep_output_dir)
             data_config = backtest_runner.ModelDataConfig(
                 prep_output_dir=load_prep_output_dir,
                 train_output_dir=train_save_dir,
@@ -1577,10 +1617,11 @@ def main():
                     inference_batch_size=INFERENCE_BATCH_SIZE,
                 )
             last_cagr = 0
-            for risk_per_trade_pct in [0.3,0.4,0.5,0.6,0.7,0.8,0.9]:
+            for risk_per_trade_pct in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
                 result = {}
                 strategy_config.risk_per_trade_pct = risk_per_trade_pct
-                result[strategy_hash] = {risk_per_trade_pct:{'cagr':{}}}
+                result[strategy_hash] = {risk_per_trade_pct: {"cagr": {}}}
+
                 def run_selected_period(period):
                     runner_config = backtest_runner.RunnerConfig(
                         strategy_config=strategy_config,
@@ -1598,18 +1639,18 @@ def main():
                     output = backtest_runner.main(logger, runner_config, period)
                     return output["report"]["results"][period]
 
-                long_result = run_selected_period('long')
-                forward_result = run_selected_period('forward')
-                result[strategy_hash][risk_per_trade_pct]['cagr']['long'] = long_result['performance']['cagr']
-                result[strategy_hash][risk_per_trade_pct]['cagr']['forward'] = forward_result['performance']['cagr']
-                result[strategy_hash][risk_per_trade_pct]['long'] = long_result
-                result[strategy_hash][risk_per_trade_pct]['forward'] = forward_result
+                long_result = run_selected_period("long")
+                forward_result = run_selected_period("forward")
+                result[strategy_hash][risk_per_trade_pct]["cagr"]["long"] = long_result["performance"]["cagr"]
+                result[strategy_hash][risk_per_trade_pct]["cagr"]["forward"] = forward_result["performance"]["cagr"]
+                result[strategy_hash][risk_per_trade_pct]["long"] = long_result
+                result[strategy_hash][risk_per_trade_pct]["forward"] = forward_result
                 results.append(result)
-                if long_result['performance']['cagr'] < last_cagr:
+                if long_result["performance"]["cagr"] < last_cagr:
                     break
-                last_cagr = long_result['performance']['cagr']
-        output_path = os.path.join(exp_dir, 'trade_risk_test' , "loaded_reports.jsonl")
-        os.makedirs(os.path.dirname(output_path), exist_ok= True)
+                last_cagr = long_result["performance"]["cagr"]
+        output_path = os.path.join(exp_dir, "trade_risk_test", "loaded_reports.jsonl")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             for report in results:
                 f.write(json.dumps(report, ensure_ascii=False, default=str) + "\n")
@@ -1629,6 +1670,12 @@ def main():
     logger = _setup_root_logger(exp_dir)
     logger.info("Experiment Git commit: %s", experiment_context.git_commit)
     logger.info("Experiment source snapshot: %s", os.environ.get(SNAPSHOT_PATH_ENV))
+    if args.valid:
+        logger.info(
+            "Validation selected-config snapshot: %s | sha256=%s",
+            selected_configs,
+            common.sha256_file(selected_configs),
+        )
     if not args.check_git_clean:
         logger.warning("The startup Git clean-worktree check is disabled")
 
@@ -1655,9 +1702,6 @@ def main():
         done_set = load_done_set(reports_path)
         task_spec, combo_simulation_task = create_task_spec(logger, exp_dir, done_set)
     elif args.valid:
-        valid_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments",'valid_train_out')
-        shutil.rmtree(valid_save_dir,ignore_errors=True)
-        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         task_spec = _load_task_from_configs(selected_configs)
         n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
         logger.info(f"📥 Loaded from {selected_configs}")
@@ -1743,17 +1787,15 @@ def main():
         logger,
         prep_workers,
         sim_workers,
-        valid= args.valid,
+        valid=args.valid,
         train_reports_path=train_reports_path,
     )
-
 
     _send_none_to_workers(prep_task_queue, MAX_PREP)
     if not is_combo:
         _send_none_to_workers(sim_task_queue, MAX_SIM)
 
     if args.valid:
-        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         compare_old_new_reports(selected_configs, reports_path, exp_dir, logger)
 
     # combo_model mode: once every sub-model finished training, group by (pre_key, train_compatibility),
@@ -1818,6 +1860,7 @@ def main():
 
     logger.info("=" * 40)
 
+
 def run_task_spec(
     task_spec,
     temp_dir,
@@ -1830,8 +1873,8 @@ def run_task_spec(
     logger,
     prep_workers,
     sim_workers,
-    valid = False,
-    train_reports_path = None,
+    valid=False,
+    train_reports_path=None,
 ):
     stats = {"preparation": {"time": 0.0, "count": 0}, "train": {"time": 0.0, "count": 0}, "simulation": {"time": 0.0, "count": 0}}
     # key: (pre_h, tr_h), value: set of sim_h
@@ -1849,7 +1892,7 @@ def run_task_spec(
     eta_msg = _make_eta_fn(n_prep, n_train, n_sim, stats)
 
     # If no train stage exists, we should stop sim workers after we enqueue all sims.
-    sim_nones_sent = (n_train == 0)
+    sim_nones_sent = n_train == 0
 
     pending_train_items: List[Dict[str, Any]] = []
     train_procs: List[mp.Process] = []
@@ -1864,18 +1907,14 @@ def run_task_spec(
             else:
                 p.join(timeout=0)
                 if p.exitcode:
-                    raise ExperimentTaskError(
-                        f"Training process {p.name} exited with code {p.exitcode}"
-                    )
+                    raise ExperimentTaskError(f"Training process {p.name} exited with code {p.exitcode}")
         train_procs = alive
 
     def _check_worker_processes():
         for stage, processes in (("prep", prep_workers), ("simulation", sim_workers)):
             for process in processes:
                 if process.exitcode not in (None, 0):
-                    raise ExperimentTaskError(
-                        f"{stage} process {process.name} exited with code {process.exitcode}"
-                    )
+                    raise ExperimentTaskError(f"{stage} process {process.name} exited with code {process.exitcode}")
 
     def _drain_train_results():
         nonlocal sim_nones_sent
@@ -1889,9 +1928,7 @@ def run_task_spec(
             typ, pre_h, tr_h, elapsed, train_report, *details = msg
             if typ == "train_failed":
                 error = details[0] if details else "no traceback returned"
-                raise ExperimentTaskError(
-                    f"Training failed after {elapsed:.2f}s for {pre_h}/{tr_h}:\n{error}"
-                )
+                raise ExperimentTaskError(f"Training failed after {elapsed:.2f}s for {pre_h}/{tr_h}:\n{error}")
             if typ != "train_done":
                 raise ExperimentTaskError(f"Unexpected training result: {msg!r}")
 
@@ -1930,9 +1967,7 @@ def run_task_spec(
             if msg is not None:
                 typ, pre_h, elapsed, train_items = msg
                 if typ == "prep_failed":
-                    raise ExperimentTaskError(
-                        f"Preparation failed after {elapsed:.2f}s for {pre_h}:\n{train_items}"
-                    )
+                    raise ExperimentTaskError(f"Preparation failed after {elapsed:.2f}s for {pre_h}:\n{train_items}")
                 if typ != "prep_done":
                     raise ExperimentTaskError(f"Unexpected preparation result: {msg!r}")
 
@@ -1957,6 +1992,7 @@ def run_task_spec(
         for p in train_procs + prep_workers + sim_workers:
             p.join(timeout=5)
 
+
 def _load_task_from_configs(path: str) -> Dict[str, Any]:
     """
     Build a task spec tree from selected_configs.jsonl.
@@ -1967,9 +2003,9 @@ def _load_task_from_configs(path: str) -> Dict[str, Any]:
     for r in records:
         params = common.recursive_get(r, "params")
 
-        r_hash = params['hash']
-        pre_conf =  common.recursive_get(params, "common")
-        tr_conf  =   common.recursive_get(params, "train")
+        r_hash = params["hash"]
+        pre_conf = common.recursive_get(params, "common")
+        tr_conf = common.recursive_get(params, "train")
         strategy_conf = common.recursive_get(params, "strategy")
         broker_conf = common.recursive_get(params, "broker")
         if strategy_conf and "strategy_config" in strategy_conf:
@@ -2014,6 +2050,7 @@ def _load_task_from_configs(path: str) -> Dict[str, Any]:
             )
 
     return task_spec
+
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)

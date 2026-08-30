@@ -3,6 +3,7 @@
     "strategy":{
         "ctrader-live-the5ers-1": {
             "enable": false,
+            "compound": true,
             "hash": "ctrader-report-hash",
             "model_path": "../../quant_output/experiment/valid_train_out/ctrader-report-hash",
             "device": "cpu",
@@ -25,7 +26,8 @@
         "id2":
         {
             "hash":"6b41d3de9072",
-            "enable":"true",
+            "enable": true,
+            "compound": true,
             "model_path":"./model",
             "broker_config":{
                 "initial_equity": 200000,

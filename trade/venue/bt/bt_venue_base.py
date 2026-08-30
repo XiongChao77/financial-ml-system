@@ -111,7 +111,6 @@ class BtVenue(VenueBase,bt.Strategy):
             ),
             slow_atr=self.line_value("slow_atr"),
             vol_regime=self.line_value("vol_regime"),
-            bar_interval_ms=self.p.bar_interval_ms,
             bars_to_close=(
                 float("inf")
                 if bars_to_close is None or np.isnan(bars_to_close)

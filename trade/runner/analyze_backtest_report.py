@@ -347,7 +347,37 @@ def build_continuous_equity_path(
         frame = pd.DataFrame(daily)
         if "date" not in frame or "end_equity" not in frame:
             continue
-        frame["date"] = pd.to_datetime(frame["date"], utc=True).dt.tz_convert(None)
+        daily_dates = pd.to_datetime(frame["date"], utc=True).dt.tz_convert(None)
+        frame["date"] = (
+            daily_dates.dt.normalize()
+            + pd.Timedelta(days=1)
+            - pd.Timedelta(nanoseconds=1)
+        )
+
+        exact_period_ends = []
+        report_end = pd.to_datetime(
+            safe_get(report, ["time", "end"]),
+            utc=True,
+            errors="coerce",
+        )
+        if not pd.isna(report_end):
+            exact_period_ends.append(report_end.tz_convert(None))
+        regions = safe_get(report, ["time", "regions"], {})
+        if isinstance(regions, dict):
+            for region in regions.values():
+                region_end = pd.to_datetime(
+                    region.get("end") if isinstance(region, dict) else None,
+                    utc=True,
+                    errors="coerce",
+                )
+                if not pd.isna(region_end):
+                    exact_period_ends.append(region_end.tz_convert(None))
+        normalized_daily_dates = daily_dates.dt.normalize()
+        for exact_end in exact_period_ends:
+            frame.loc[
+                normalized_daily_dates == exact_end.normalize(),
+                "date",
+            ] = exact_end
         frame["end_equity"] = pd.to_numeric(frame["end_equity"], errors="coerce")
         frame = frame.dropna(subset=["date", "end_equity"]).sort_values("date")
         if frame.empty:
@@ -461,6 +491,7 @@ def plot_equity_curves(
     align_curve_extrema: bool = False,
     equity_scale: str = "both",
     label_by_index: bool = False,
+    include_ood: bool = True,
     logger=None,
 ) -> str | None:
     """Plot one or more report equity curves over the underlying market price.
@@ -476,8 +507,9 @@ def plot_equity_curves(
     both the absolute equity (linear axis) and logarithmic equity are drawn with
     separate right-side axes. Pass ``equity_scale="linear"`` or ``"log"`` to
     draw only one representation. ``label_by_index=True`` labels strategies as
-    ``S0``, ``S1``, etc. instead of using report hashes. The saved image path is
-    returned.
+    ``S0``, ``S1``, etc. instead of using report hashes. Set
+    ``include_ood=False`` to omit the forward/OOD equity segment and crop the
+    chart at the OOD boundary. The saved image path is returned.
     """
     import matplotlib.pyplot as plt
     import pandas as pd
@@ -497,7 +529,7 @@ def plot_equity_curves(
 
     period_order = ("long", "short", "forward", "all")
 
-    def period_reports(result: dict):
+    def period_reports(result: dict, *, include_forward=include_ood):
         if not isinstance(result, dict):
             return []
         details = {}
@@ -523,6 +555,7 @@ def plot_equity_curves(
                 },
             )
             for period in period_order
+            if include_forward or period != "forward"
             if isinstance(period_results.get(period), dict)
             and period_results.get(period)
         ]
@@ -542,7 +575,7 @@ def plot_equity_curves(
         (
             regions
             for result in results
-            for _, report in period_reports(result)
+            for _, report in period_reports(result, include_forward=True)
             if isinstance(
                 (regions := safe_get(report, ["time", "regions"])),
                 dict,
@@ -551,6 +584,15 @@ def plot_equity_curves(
         ),
         {},
     )
+    ood_start = None
+    if not include_ood:
+        parsed_ood_start = pd.to_datetime(
+            safe_get(time_regions, ["ood", "start"]),
+            utc=True,
+            errors="coerce",
+        )
+        if not pd.isna(parsed_ood_start):
+            ood_start = parsed_ood_start.tz_convert(None)
 
     if price_file is None:
         market_params = safe_get(first_report, ["params", "common"])
@@ -571,7 +613,6 @@ def plot_equity_curves(
     ).dt.tz_convert(None)
     price_df.set_index("open_time_date_utc", inplace=True)
     price_series = pd.to_numeric(price_df["close"], errors="coerce").sort_index()
-
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, file_name)
     fig, price_axis = plt.subplots(figsize=(16, 8))
@@ -595,6 +636,8 @@ def plot_equity_curves(
             reports_by_period,
             normalize_equity=normalize_equity,
         )
+        if ood_start is not None:
+            full_path = full_path[full_path.index < ood_start]
         for period, split_date in result_split_dates.items():
             split_dates.setdefault(period, split_date)
         if full_path.empty:
@@ -785,7 +828,11 @@ def plot_equity_curves(
         fontsize=8,
     )
     if region_starts:
-        title = "Strategy Equity Curve: Train -> Valid -> Test -> OOD"
+        region_names = " -> ".join(
+            "OOD" if name == "ood" else name.title()
+            for name, _ in region_starts
+        )
+        title = f"Strategy Equity Curve: {region_names}"
     elif has_multi_period_record:
         title = "Strategy Performance: Long -> Short -> Forward"
     else:

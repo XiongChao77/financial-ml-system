@@ -29,6 +29,7 @@ tests/*
 # Local experiment sweeps. Keep the tracked example as the default fallback.
 /experiment/task_constructors.py
 PropTrading
+LiveTrading
 live_config.json
 account*
 # Report explorer service regression coverage.

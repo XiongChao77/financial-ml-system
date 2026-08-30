@@ -20,8 +20,13 @@ class TurtleStrategyConfig:
 
 
 class TurtleStrategy(StrategyBase):
-    def __init__(self, venue: VenueBase, config: TurtleStrategyConfig):
-        super().__init__(venue)
+    def __init__(
+        self,
+        venue: VenueBase,
+        config: TurtleStrategyConfig,
+        bar_interval_ms: int,
+    ):
+        super().__init__(venue, bar_interval_ms)
         self.config = config
 
         self.curr_layers = 0

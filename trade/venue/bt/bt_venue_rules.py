@@ -12,6 +12,7 @@ class RulesBtVenue(BtVenue):
         self.strategy = RulesStrategy(
             venue=self,
             config=self.p.strategy_config,
+            bar_interval_ms=self.p.bar_interval_ms,
         )
         # 2. Pre-create the backtrader indicators in init (computed vectorized)
         # Note: the (-1) offset emulates shift(1) and prevents look-ahead bias

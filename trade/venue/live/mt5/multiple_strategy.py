@@ -121,6 +121,7 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
         venue,
         config=st_para,
         init_equity=venue.get_account_equity(),
+        bar_interval_ms=common.get_interval_ms(pre_para.interval),
         exist_hold_bars= get_bars_since_open(venue,pre_para),
     )
 
@@ -141,11 +142,6 @@ def strategy_worker(strategy_hash, strategy_type, path, pre_para:common.BaseDefi
                     atr_pct=msg["atr_pct"],
                     slow_atr=msg["slow_atr"],
                     vol_regime=msg["vol_regime"],
-                    bar_interval_ms=(
-                        common.get_interval_ms(pre_para.interval)
-                        if bar_time is not None
-                        else None
-                    ),
                 ),
                 position=PositionView(dir=PositionDir(curr_dir), layers=curr_layers),
                 account=AccountView(equity=venue.get_account_equity()),

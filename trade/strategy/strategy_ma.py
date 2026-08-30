@@ -16,8 +16,8 @@ class MaStrategyConfig:
 
 
 class MaCrossoverStrategy(StrategyBase):
-    def __init__(self, config: MaStrategyConfig):
-        super().__init__(venue=None)
+    def __init__(self, config: MaStrategyConfig, bar_interval_ms: int):
+        super().__init__(venue=None, bar_interval_ms=bar_interval_ms)
         self.config = config
 
     def _process(self, state: MaObservation) -> TradeIntent:

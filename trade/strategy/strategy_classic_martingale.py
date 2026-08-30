@@ -54,13 +54,14 @@ class ClassicMartingaleStrategy(StrategyBase):
         self,
         venue: VenueBase,
         config: ClassicMartingaleConfig,
+        bar_interval_ms: int,
         leverage: float = 1.0,
         commission_pct: float = 0.0,
         maintenance_margin_pct: float = 0.0,
         margin_usage_cap_pct: float = 0.80,
         pessimistic: bool = True,
     ):
-        super().__init__(venue)
+        super().__init__(venue, bar_interval_ms)
         self.config = config
         self.leverage = max(1.0, float(leverage))
         self.commission_rate = max(0.0, float(commission_pct)) / 100.0
