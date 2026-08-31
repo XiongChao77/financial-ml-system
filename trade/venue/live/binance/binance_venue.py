@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from trade.core.protocol import OrderType, PositionDir
+from trade.core.protocol import OrderType, PositionDir, PositionView
 from trade.core.venue_base import VenueBase
 
 
@@ -63,9 +63,7 @@ class BinanceVenue(VenueBase):
                     value = handle.read().strip()
                 if value:
                     return value
-        raise FileNotFoundError(
-            f"No Binance credential file found in {directory}: {tuple(candidates)}"
-        )
+        raise FileNotFoundError(f"No Binance credential file found in {directory}: {tuple(candidates)}")
 
     def _request(
         self,
@@ -95,14 +93,9 @@ class BinanceVenue(VenueBase):
         try:
             body = response.json()
         except ValueError as exc:
-            raise RuntimeError(
-                f"Binance returned a non-JSON response for {path}: HTTP {response.status_code}"
-            ) from exc
+            raise RuntimeError(f"Binance returned a non-JSON response for {path}: HTTP {response.status_code}") from exc
         if not response.ok:
-            raise RuntimeError(
-                f"Binance request failed for {path}: HTTP {response.status_code}, "
-                f"code={body.get('code')}, message={body.get('msg')}"
-            )
+            raise RuntimeError(f"Binance request failed for {path}: HTTP {response.status_code}, " f"code={body.get('code')}, message={body.get('msg')}")
         return body
 
     def _load_filters(self) -> tuple[Decimal, Decimal, Decimal]:
@@ -161,17 +154,9 @@ class BinanceVenue(VenueBase):
         )
         if not isinstance(positions, list):
             raise RuntimeError("Binance returned an invalid position response")
-        active_positions = [
-            position
-            for position in positions
-            if position.get("symbol") == self.symbol
-            and float(position.get("positionAmt", 0.0)) != 0.0
-        ]
+        active_positions = [position for position in positions if position.get("symbol") == self.symbol and float(position.get("positionAmt", 0.0)) != 0.0]
         if len(active_positions) > 1:
-            raise RuntimeError(
-                "Binance account has simultaneous LONG and SHORT positions for "
-                f"{self.symbol}; this strategy supports one active position"
-            )
+            raise RuntimeError("Binance account has simultaneous LONG and SHORT positions for " f"{self.symbol}; this strategy supports one active position")
         if not active_positions:
             return None
 
@@ -181,9 +166,7 @@ class BinanceVenue(VenueBase):
             quantity = float(position.get("positionAmt", 0.0))
             if position_side not in {"LONG", "SHORT"}:
                 raise RuntimeError("Binance Hedge Mode position has no valid positionSide")
-            if (position_side == "LONG" and quantity <= 0) or (
-                position_side == "SHORT" and quantity >= 0
-            ):
+            if (position_side == "LONG" and quantity <= 0) or (position_side == "SHORT" and quantity >= 0):
                 raise RuntimeError("Binance Hedge Mode position direction is inconsistent")
         return position
 
@@ -194,24 +177,20 @@ class BinanceVenue(VenueBase):
             raise RuntimeError("Binance returned invalid account equity")
         return equity
 
-    def get_current_state(self):
+    def get_current_state(self) -> PositionView:
         position = self._position()
         if position is None:
-            return PositionDir.FLAT, 0, 0.0
+            return PositionView()
         if self.hedge_mode:
-            direction = (
-                PositionDir.POSITIVE
-                if position["positionSide"] == "LONG"
-                else PositionDir.NEGATIVE
-            )
+            direction = PositionDir.POSITIVE if position["positionSide"] == "LONG" else PositionDir.NEGATIVE
         else:
             quantity = float(position["positionAmt"])
             direction = PositionDir.POSITIVE if quantity > 0 else PositionDir.NEGATIVE
-        return direction, 1, float(position.get("entryPrice", 0.0))
-
-    def get_server_time(self):
-        payload = self._request("GET", "/fapi/v1/time")
-        return datetime.fromtimestamp(int(payload["serverTime"]) / 1000, tz=timezone.utc)
+        return PositionView(
+            dir=direction,
+            size=abs(float(position["positionAmt"])),
+            price=float(position.get("entryPrice", 0.0)),
+        )
 
     def get_last_position_open_time(self):
         position = self._position()
@@ -309,9 +288,7 @@ class BinanceVenue(VenueBase):
             signed=True,
         )
         if regular or conditional:
-            raise RuntimeError(
-                f"Refusing to open with existing Binance orders: {self.symbol}"
-            )
+            raise RuntimeError(f"Refusing to open with existing Binance orders: {self.symbol}")
 
     def _cancel_protective_orders(self) -> None:
         self._request(
@@ -333,24 +310,17 @@ class BinanceVenue(VenueBase):
     ):
         order_type, price = self.normalize_order_request(order_type, price)
         if order_type == OrderType.LIMIT and (stop_loss_pct or take_profit_pct):
-            raise ValueError(
-                "Binance resting limit entries with protective orders require "
-                "fill monitoring, which is not supported"
-            )
+            raise ValueError("Binance resting limit entries with protective orders require " "fill monitoring, which is not supported")
         if self._position() is not None:
             raise RuntimeError(f"Refusing to open over an existing Binance position: {self.symbol}")
         self._assert_no_open_orders()
 
         quantity = self._floor_to_step(float(size), self.quantity_step)
         if quantity < self.minimum_quantity:
-            raise ValueError(
-                f"Binance order quantity {quantity} is below minimum {self.minimum_quantity}"
-            )
+            raise ValueError(f"Binance order quantity {quantity} is below minimum {self.minimum_quantity}")
         side = "BUY" if is_buy else "SELL"
         exit_side = "SELL" if is_buy else "BUY"
-        position_side = (
-            "LONG" if is_buy else "SHORT"
-        ) if self.hedge_mode else None
+        position_side = ("LONG" if is_buy else "SHORT") if self.hedge_mode else None
         order_params = {
             "symbol": self.symbol,
             "side": side,
@@ -383,18 +353,14 @@ class BinanceVenue(VenueBase):
 
         try:
             if stop_loss_pct:
-                stop_price = executed_price * (
-                    1.0 - stop_loss_pct if is_buy else 1.0 + stop_loss_pct
-                )
+                stop_price = executed_price * (1.0 - stop_loss_pct if is_buy else 1.0 + stop_loss_pct)
                 self._place_stop_market_order(
                     exit_side,
                     self._trigger_price(stop_price),
                     position_side,
                 )
             if take_profit_pct:
-                take_profit_price = executed_price * (
-                    1.0 + take_profit_pct if is_buy else 1.0 - take_profit_pct
-                )
+                take_profit_price = executed_price * (1.0 + take_profit_pct if is_buy else 1.0 - take_profit_pct)
                 self._place_take_profit_limit_order(
                     exit_side,
                     self._trigger_price(take_profit_price),
@@ -402,9 +368,7 @@ class BinanceVenue(VenueBase):
                     position_side,
                 )
         except Exception:
-            self.logger.exception(
-                "Protective order creation failed; closing the new Binance position"
-            )
+            self.logger.exception("Protective order creation failed; closing the new Binance position")
             self.close_position()
             raise
         return order
@@ -416,9 +380,13 @@ class BinanceVenue(VenueBase):
         if position is None:
             return None
         position_quantity = float(position["positionAmt"])
-        close_quantity = abs(position_quantity) if size is None else min(
-            abs(position_quantity),
-            abs(float(size)),
+        close_quantity = (
+            abs(position_quantity)
+            if size is None
+            else min(
+                abs(position_quantity),
+                abs(float(size)),
+            )
         )
         quantity = self._floor_to_step(close_quantity, self.quantity_step)
         if quantity < self.minimum_quantity:

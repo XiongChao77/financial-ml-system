@@ -11,7 +11,7 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", "..", "..", ".."))
 
 from trade.venue.live.bybit.bybit_engine import BybitEngine
-from trade.core.protocol import ActionType, OrderType, PositionDir
+from trade.core.protocol import ActionType, OrderType, PositionDir, PositionView
 from trade.core.venue_base import VenueBase
 
 class BybitVenue(VenueBase):
@@ -62,19 +62,16 @@ class BybitVenue(VenueBase):
             return float(res['result']['list'][0]['coin'][0]['equity'])
         return 0.0
 
-    def get_current_state(self):
-        """
-        Returns: (PositionDir, layers, avg_price)
-        Compatible with TurtleStrategy interface expectations.
-        """
+    def get_current_state(self) -> PositionView:
+        """Return the current position direction, size, and average price."""
         try:
             res = self.engine.http.get_positions(category="linear", symbol=self.symbol)
             if res['retCode'] != 0: 
-                return PositionDir.FLAT, 0, 0.0
+                return PositionView()
             
             pos_list = res['result']['list']
             if not pos_list: 
-                return PositionDir.FLAT, 0, 0.0
+                return PositionView()
 
             pos = pos_list[0]
             size = float(pos['size'])
@@ -82,20 +79,15 @@ class BybitVenue(VenueBase):
             side = pos['side'] # 'Buy' or 'Sell'
 
             if size == 0:
-                return PositionDir.FLAT, 0, 0.0
+                return PositionView()
             
-            # Simplified layer estimate (turtle systems often track this externally).
-            # If strict layer logic is required, track it outside or infer via size/unit_size.
             direction = PositionDir.POSITIVE  if side == 'Buy' else PositionDir.NEGATIVE
-            return direction, 1, avg_price
+            return PositionView(dir=direction, size=size, price=avg_price)
 
         except Exception as e:
             self.logger.error(f"Failed to get position state: {e}")
-            return PositionDir.FLAT, 0, 0.0
+            return PositionView()
 
-    def get_server_time(self):
-        return datetime.now(timezone.utc)
-    
     def _latest_price(self) -> float:
         response = self.engine.http.get_tickers(
             category="linear",
@@ -247,11 +239,11 @@ class BybitVenue(VenueBase):
                 return None
             
             # Current position direction
-            pos_dir, _, _ = self.get_current_state()
-            if pos_dir == PositionDir.FLAT:
+            position = self.get_current_state()
+            if position.dir == PositionDir.FLAT:
                 return None
             
-            target_side = "Buy" if pos_dir == PositionDir.POSITIVE else "Sell"
+            target_side = "Buy" if position.dir == PositionDir.POSITIVE else "Sell"
             
             # Find the most recent fill in the opening direction
             for exe in executions:

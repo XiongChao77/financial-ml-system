@@ -2,7 +2,7 @@
 Feed layer: klines + model inference output.
 
 The test for this layer is "can it exist independently of a trading venue" --
-pred / pred_prob / atr_pct / label are all computed offline and know nothing about account or position,
+pred / pred_prob / expected_vol / label are computed offline and know nothing about account or position,
 so they belong to the feed; equity and current position are only known to the venue and stay out of here.
 
 PredictionFeed is its backtrader side carrier (maps df columns onto lines);
@@ -19,19 +19,13 @@ class PredictionFeed(bt.feeds.PandasData):
         "pred",
         "pred_prob",
         "label",
-        "atr_pct",
         "expected_vol",
-        "slow_atr",
-        "vol_regime",
         "bars_to_close",
     )
     params = (
         ("pred", -1),
         ("pred_prob", -1),
-        ("atr_pct", -1),        # auto-detected by column name
         ("expected_vol", -1),   # EWMA volatility used by BBM sizing
-        ("slow_atr", -1),       # auto-detected by column name
-        ("vol_regime", -1),     # auto-detected by column name
         ("label", -1),
         ("bars_to_close", -1),
     )

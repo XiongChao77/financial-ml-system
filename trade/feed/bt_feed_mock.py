@@ -137,7 +137,7 @@ class BtDataFeedMock(DataFeedBase):
         return int(self._source.iloc[next_position]["close_time_ms_utc"])
 
     def advance(self) -> Optional[int]:
-        """Expose one new candle and synchronously enqueue its close event."""
+        """Expose one candle and emit its open time through the live callback."""
 
         if not self._started or self._callback is None:
             raise RuntimeError("Replay feed must be started before advance")
@@ -147,9 +147,12 @@ class BtDataFeedMock(DataFeedBase):
         candle_close_time_ms = int(
             self._source.iloc[self._cursor]["close_time_ms_utc"]
         )
+        candle_open_time_ms = int(
+            self._source.iloc[self._cursor]["open_time_ms_utc"]
+        )
         with self._lock:
             self._cache = self._visible_cache()
-        self._callback(candle_close_time_ms)
+        self._callback(candle_open_time_ms)
         return candle_close_time_ms
 
     def backfill_cache(

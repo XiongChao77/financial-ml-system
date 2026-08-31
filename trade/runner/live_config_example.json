@@ -17,6 +17,7 @@
             "cTrader": {
                 "path": "../exchange/ctrader/account/keys/main",
                 "account_id": "12345678",
+                "firm":"the5ers",
                 "login":"531400400",
                 "password":"B8?@h4rW7x",
                 "profit_target": 0.1,
@@ -39,7 +40,7 @@
             "MT5":{
                 "path":"C:\\Program Files\\FTMO Global Markets MT5 Terminal\\terminal64.exe",
                 "cost":1200,
-                "firm":"FTMO/the5ers",
+                "firm":"ftmo",
                 "challenge_type":"1step",
                 "stage":"verification",
                 "login":"531400400",

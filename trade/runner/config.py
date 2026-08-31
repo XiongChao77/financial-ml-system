@@ -43,6 +43,7 @@ class BacktestEngineConfig:
 class ModelDataConfig:
     prep_output_dir: str = common.DATA_OUT_DIR
     train_output_dir: str = common.TRAIN_OUT_DIR
+    prediction_cache_dir: Optional[str] = None
     device: str = "auto"  # 'auto'/'cuda'/'cpu'
     use_prediction_cache: bool = False
 

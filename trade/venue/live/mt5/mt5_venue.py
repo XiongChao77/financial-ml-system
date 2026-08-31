@@ -2,7 +2,7 @@ import MetaTrader5 as mt5
 import logging,time
 from datetime import datetime, timezone
 from trade.core.venue_base import VenueBase
-from trade.core.protocol import OrderType, PositionDir
+from trade.core.protocol import Firm, OrderType, PositionDir, PositionView
 
 MT5_SYMBOL_FTMO_MAP = {"DOGEUSDT": "DOGEUSD", "ETHUSDT": "ETHUSD", "BTCUSDT": "BTCUSD"}
 
@@ -16,7 +16,10 @@ class MT5Venue(VenueBase):
         login=None,
         password=None,
         server=None,
+        *,
+        firm: Firm,
     ):
+        self.firm = Firm.parse(firm)
         self.symbol = MT5_SYMBOL_FTMO_MAP[symbol]
         self.magic = magic
         self.logger = logger
@@ -148,28 +151,21 @@ class MT5Venue(VenueBase):
         """Used by the daily risk audit"""
         return self._ensure_target_account().equity
 
-    def get_current_state(self):
-        """
-        Current position state (direction, layers, average entry price)
-        Note: price_open must be returned for TurtleStrategy's pyramiding check
-        """
+    def get_current_state(self) -> PositionView:
+        """Return the current position direction, size, and entry price."""
         self._ensure_target_account()
         positions = mt5.positions_get(symbol=self.symbol, magic=self.magic)
         if not positions:
-            return PositionDir.FLAT, 0, 0.0
+            return PositionView()
 
         pos = positions[0] 
         direction = PositionDir.POSITIVE  if pos.type == 0 else PositionDir.NEGATIVE
         
-        # Fix: return pos.price_open (average entry price) instead of pos.volume
-        # so that last_price in ftmo_turtle.py gets the correct value
-        return direction, 1, pos.price_open
-
-    def get_server_time(self):
-        self._ensure_target_account()
-        tick = mt5.symbol_info_tick(self.symbol)
-        server_time = datetime.fromtimestamp(tick.time)
-        return server_time
+        return PositionView(
+            dir=direction,
+            size=float(pos.volume),
+            price=float(pos.price_open),
+        )
 
     def submit_order(
         self,
@@ -392,3 +388,9 @@ class MT5Venue(VenueBase):
         except Exception as e:
             self.logger.error(f"Failed to get last position open time: {e}")
             return None
+
+    def get_daily_reset_date(self, candle_open_time_utc: datetime):
+        return self.get_firm_daily_reset_date(
+            candle_open_time_utc,
+            self.firm,
+        )

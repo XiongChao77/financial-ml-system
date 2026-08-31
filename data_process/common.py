@@ -1499,7 +1499,7 @@ def setup_session_logger(
     root_logger.setLevel(logging.DEBUG)
     if root_logger.handlers:
         root_logger.handlers = []
-    log_format_console = "%(log_color)s%(asctime)s-%(name)s-%(levelname)s- %(message)s"
+    log_format_console = "%(log_color)s%(asctime)s.%(msecs)03d-%(name)s-%(levelname)s- %(message)s"
     ch = logging.StreamHandler()
     ch.setLevel(console_level)
     color_formatter = colorlog.ColoredFormatter(
@@ -1518,7 +1518,10 @@ def setup_session_logger(
     root_logger.addHandler(ch)
     fh = logging.FileHandler(log_file_path, encoding="utf-8")
     fh.setLevel(file_level)
-    file_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    file_formatter = logging.Formatter(
+        "%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     fh.setFormatter(file_formatter)
     root_logger.addHandler(fh)
     root_logger.info(f"Session Logger Initialized. Log file: {log_file_path}")

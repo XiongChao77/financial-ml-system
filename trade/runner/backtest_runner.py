@@ -14,11 +14,11 @@ from dataclasses import asdict, replace
 from typing import Any, Optional, Type
 
 current_work_dir = os.path.dirname(__file__)
-sys.path.append(os.path.join(current_work_dir, "..",'..'))
+sys.path.append(os.path.join(current_work_dir, "..", ".."))
 
 # Import project modules
 from data_process.common import *
-from data_process import common 
+from data_process import common
 from data_process.utils import TaskIdentity, config_from_dict_train, param_hash
 from model import model_loader
 from model import data_loader
@@ -41,24 +41,17 @@ from trade.runner.config import (
 from trade.runner.frontend_report_store import write_latest_backtest_report
 from trade.venue.bt import cus_comminfo
 from model import train_config
-from trade.venue.bt.bt_venue_ml import MlBtVenue
 from trade.venue.bt.bt_venue_bbm import BbmBtVenue
-from trade.venue.bt.bt_venue_ma import MaBtVenue
-from trade.venue.bt.bt_venue_martingale import MartingaleBtVenue
-from trade.venue.bt.bt_venue_rules import RulesBtVenue
-from trade.venue.bt.bt_venue_turtle import TurtleBtVenue
 from trade.feed.prediction_feed import PredictionFeed
-from trade.strategy.strategy_ml import MlStrategyConfig
 from trade.strategy.strategy_bbm import BbmStrategyConfig
-from trade.strategy.strategy_ma import MaStrategyConfig
-from trade.strategy.strategy_martingale import MartingaleStrategyConfig
-from trade.strategy.strategy_rules import RulesStrategyConfig
-from trade.strategy.strategy_turtle import TurtleStrategyConfig
-log_file = os.path.join(TEMPORARY_DIR, 'trade_log_ftmo')
+
+log_file = os.path.join(TEMPORARY_DIR, "trade_log_ftmo")
+
 
 class TradeResult:
     def __init__(self) -> None:
         self.times = 0
+
 
 def log_parameters(params_obj, logger):
     """
@@ -66,27 +59,27 @@ def log_parameters(params_obj, logger):
     """
     # 1. Filter out Python internal __xx__ attributes and methods (callables).
     #    This works whether parameters are defined in __init__ or on the class.
-    all_keys = [k for k in dir(params_obj) 
-                if not k.startswith('__') and not callable(getattr(params_obj, k))]
-    
+    all_keys = [k for k in dir(params_obj) if not k.startswith("__") and not callable(getattr(params_obj, k))]
+
     # 2. Optionally sort by name for easier inspection
-    # all_keys.sort() 
+    # all_keys.sort()
 
     items_per_line = 4
-    
+
     for i in range(0, len(all_keys), items_per_line):
         chunk_keys = all_keys[i : i + items_per_line]
-        
+
         # 3. Build \"key: value\" strings using getattr for safety
         para_parts = []
         for k in chunk_keys:
             val = getattr(params_obj, k)
             para_parts.append(f"{k}: {val}")
-            
+
         para_str = " | ".join(para_parts)
-        
+
         # 4. Log with a prefix aligned with SUMMARY/EXPOSURE sections
         logger(f"Para    | {para_str}")
+
 
 def log_metrics_block(logger, prefix: str, metrics: dict, items_per_line: int = 4):
     """
@@ -98,7 +91,7 @@ def log_metrics_block(logger, prefix: str, metrics: dict, items_per_line: int = 
     keys = list(metrics.keys())
     for i in range(0, len(keys), items_per_line):
         parts = []
-        for k in keys[i:i + items_per_line]:
+        for k in keys[i : i + items_per_line]:
             v = metrics[k]
             parts.append(f"{k}: {v:.4g}" if isinstance(v, float) else f"{k}: {v}")
         logger.info(f"{prefix:<8}| " + " | ".join(parts))
@@ -111,7 +104,7 @@ def create_backtest_cerebro(
     broker_config: BrokerConfig,
     data: bt.feed.DataBase,
     predict_num: Optional[int] = None,
-    bar_interval_ms: int,
+    data_interval_ms: int,
     engine_config: Optional[BacktestEngineConfig] = None,
 ) -> bt.Cerebro:
     """Create the shared Backtrader runtime and preserve the original analyzers."""
@@ -125,7 +118,7 @@ def create_backtest_cerebro(
         strategy_config=strategy_config,
         initial_equity=broker_config.initial_equity,
         margin_warn_pct=broker_config.margin_warn_pct,
-        bar_interval_ms=bar_interval_ms,
+        data_interval_ms=data_interval_ms,
     )
     if predict_num is not None:
         params["predict_num"] = predict_num
@@ -133,9 +126,7 @@ def create_backtest_cerebro(
     cerebro.adddata(data)
     cerebro.broker.set_coc(engine_config.cheat_on_close)
     cerebro.broker.setcash(broker_config.initial_equity)
-    cerebro.broker.addcommissioninfo(
-        cus_comminfo.CommInfo_Cryptocurrency(commission=broker_config.commission_pct, leverage=broker_config.leverage,)
-    )
+    cerebro.broker.addcommissioninfo(cus_comminfo.CommInfo_Cryptocurrency(commission=broker_config.commission_pct, leverage=broker_config.leverage))
 
     cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days, compression=1, annualize=True, factor=365)
     cerebro.addanalyzer(btanalyzers.Returns, _name="returns", tann=365)
@@ -146,31 +137,14 @@ def create_backtest_cerebro(
 
 
 def _venue_for_strategy(strategy_config):
-    venue_by_config = (
-        (MlStrategyConfig, MlBtVenue),
-        (BbmStrategyConfig, BbmBtVenue),
-        (MartingaleStrategyConfig, MartingaleBtVenue),
-        (TurtleStrategyConfig, TurtleBtVenue),
-        (RulesStrategyConfig, RulesBtVenue),
-        (MaStrategyConfig, MaBtVenue),
-    )
+    venue_by_config = ((BbmStrategyConfig, BbmBtVenue),)
     for config_type, venue_cls in venue_by_config:
         if isinstance(strategy_config, config_type):
             return venue_cls
     raise TypeError(f"Unsupported strategy config: {type(strategy_config).__name__}")
 
 
-_STRATEGY_CONFIG_TYPES = {
-    config_type.__name__: config_type
-    for config_type in (
-        MlStrategyConfig,
-        BbmStrategyConfig,
-        MartingaleStrategyConfig,
-        TurtleStrategyConfig,
-        RulesStrategyConfig,
-        MaStrategyConfig,
-    )
-}
+_STRATEGY_CONFIG_TYPES = {config_type.__name__: config_type for config_type in (BbmStrategyConfig,)}
 
 
 def strategy_config_to_dict(strategy_config) -> dict:
@@ -210,32 +184,18 @@ def strategy_config_for_preparation(strategy_config, pre_para: Optional[BaseDefi
     Those four barrier multipliers are therefore preparation-derived values,
     not independent strategy sweep parameters.
     """
-    if (
-        pre_para is None
-        or pre_para.label_type != "TBM"
-        or not isinstance(strategy_config, BbmStrategyConfig)
-    ):
+    if pre_para is None or pre_para.label_type != "TBM" or not isinstance(strategy_config, BbmStrategyConfig):
         return strategy_config
 
-    if (
-        pre_para.stop_multiplier_rate_long is None
-        or pre_para.stop_multiplier_rate_short is None
-    ):
-        raise ValueError(
-            "TBM with BbmStrategyConfig requires both preparation stop "
-            "multiplier rates"
-        )
+    if pre_para.stop_multiplier_rate_long is None or pre_para.stop_multiplier_rate_short is None:
+        raise ValueError("TBM with BbmStrategyConfig requires both preparation stop " "multiplier rates")
 
     return replace(
         strategy_config,
         threshold_long=pre_para.vol_multiplier_long,
         threshold_short=pre_para.vol_multiplier_short,
-        stop_loss_long=(
-            pre_para.vol_multiplier_long * pre_para.stop_multiplier_rate_long
-        ),
-        stop_loss_short=(
-            pre_para.vol_multiplier_short * pre_para.stop_multiplier_rate_short
-        ),
+        stop_loss_long=(pre_para.vol_multiplier_long * pre_para.stop_multiplier_rate_long),
+        stop_loss_short=(pre_para.vol_multiplier_short * pre_para.stop_multiplier_rate_short),
     )
 
 
@@ -310,10 +270,7 @@ def _prediction_cache_path(
         ],
     }[period]
     source_files = _prediction_artifact_files(train_output_dir)
-    source_files.extend(
-        os.path.join(data_config.prep_output_dir, filename)
-        for filename in data_filenames
-    )
+    source_files.extend(os.path.join(data_config.prep_output_dir, filename) for filename in data_filenames)
     signatures = []
     for path in sorted(set(map(os.path.abspath, source_files))):
         stat = os.stat(path)
@@ -325,10 +282,13 @@ def _prediction_cache_path(
         "train_output_dir": os.path.abspath(train_output_dir),
         "sources": signatures,
     }
-    digest = hashlib.sha256(
-        json.dumps(identity, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:24]
-    return os.path.join(train_output_dir, "prediction_cache", f"{period}_{digest}.pkl")
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+    cache_dir = data_config.prediction_cache_dir
+    if cache_dir is None:
+        cache_dir = os.path.join(train_output_dir, "prediction_cache")
+    elif not os.path.isabs(cache_dir):
+        cache_dir = os.path.join(PROJECT_DIR, cache_dir)
+    return os.path.join(cache_dir, f"{period}_{digest}.pkl")
 
 
 @contextlib.contextmanager
@@ -379,24 +339,15 @@ def combine_model_period_frames(
     if set(long_columns) != set(forward_frame.columns):
         missing = sorted(set(long_columns) - set(forward_frame.columns))
         extra = sorted(set(forward_frame.columns) - set(long_columns))
-        raise ValueError(
-            "long/forward columns do not match "
-            f"(missing in forward={missing}, extra in forward={extra})"
-        )
+        raise ValueError("long/forward columns do not match " f"(missing in forward={missing}, extra in forward={extra})")
 
     long_part = long_frame.copy()
     forward_part = forward_frame[long_columns].copy()
     long_part[time_column] = pd.to_datetime(long_part[time_column], utc=True)
     forward_part[time_column] = pd.to_datetime(forward_part[time_column], utc=True)
-    if (
-        not long_part[time_column].is_monotonic_increasing
-        or not long_part[time_column].is_unique
-    ):
+    if not long_part[time_column].is_monotonic_increasing or not long_part[time_column].is_unique:
         raise ValueError("long period timestamps are not strictly increasing")
-    if (
-        not forward_part[time_column].is_monotonic_increasing
-        or not forward_part[time_column].is_unique
-    ):
+    if not forward_part[time_column].is_monotonic_increasing or not forward_part[time_column].is_unique:
         raise ValueError("forward period timestamps are not strictly increasing")
     if long_part[time_column].iloc[-1] >= forward_part[time_column].iloc[0]:
         raise ValueError("long and forward periods overlap or duplicate timestamps")
@@ -444,16 +395,8 @@ def _model_time_regions(
     if cached is not None:
         return cached
 
-    train_frame = (
-        current_frame
-        if period == "long"
-        else common.load_train_df_from_dir(data_config.prep_output_dir)
-    )
-    ood_frame = (
-        current_frame
-        if period == "forward"
-        else common.load_test_df_from_dir(data_config.prep_output_dir)
-    )
+    train_frame = current_frame if period == "long" else common.load_train_df_from_dir(data_config.prep_output_dir)
+    ood_frame = current_frame if period == "forward" else common.load_test_df_from_dir(data_config.prep_output_dir)
     valid_indices = data_loader.valid_window_end_indices(
         train_frame,
         feature_cols=handler.feature_cols,
@@ -607,10 +550,7 @@ def _load_model_data(
         data_config,
         period,
     )
-    logger.info(
-        f"prep_output_dir:{data_config.prep_output_dir}, "
-        f"train_output_dir:{data_config.train_output_dir}"
-    )
+    logger.info(f"prep_output_dir:{data_config.prep_output_dir}, " f"train_output_dir:{data_config.train_output_dir}")
     logger.info("Loaded model data | period=%s | bars=%d", period, len(frame))
 
     if data_config.use_prediction_cache:
@@ -621,10 +561,7 @@ def _load_model_data(
             except Exception as exc:
                 raise RuntimeError(f"Prediction cache is unreadable: {cache_path}") from exc
             if payload is None:
-                raise FileNotFoundError(
-                    "Prediction cache is missing or incompatible; call "
-                    f"precompute_prediction_cache() before backtesting: {cache_path}"
-                )
+                raise FileNotFoundError("Prediction cache is missing or incompatible; call " f"precompute_prediction_cache() before backtesting: {cache_path}")
             logger.info("Prediction cache hit; skipping model inference: %s", cache_path)
     else:
         payload = _infer_prediction_payload(
@@ -639,13 +576,10 @@ def _load_model_data(
 
     predictions = payload["predictions"]
     if not predictions.index.equals(frame.index):
-        raise RuntimeError(
-            "Prediction cache index does not match the prepared market data; "
-            "refusing to use misaligned signals"
-        )
+        raise RuntimeError("Prediction cache index does not match the prepared market data; " "refusing to use misaligned signals")
     for column in _PREDICTION_COLUMNS:
         frame[column] = predictions[column]
-    frame = frame.loc[payload["first_valid_idx"]:].copy()
+    frame = frame.loc[payload["first_valid_idx"] :].copy()
     model_stats = payload["model_stats"]
     sub_model_stats = payload["sub_model_stats"]
     time_regions = payload["time_regions"]
@@ -656,10 +590,7 @@ def _load_model_data(
         time_regions["test"]["start"],
         time_regions["ood"]["start"],
     )
-    logger.info(
-        f"Backtest range: {frame['open_time_date_utc'].min()} "
-        f"to {frame['open_time_date_utc'].max()}"
-    )
+    logger.info(f"Backtest range: {frame['open_time_date_utc'].min()} " f"to {frame['open_time_date_utc'].max()}")
     return frame, model_stats, sub_model_stats, pre_para, time_regions
 
 
@@ -714,12 +645,7 @@ def _build_feed(frame: pd.DataFrame, data_config):
         fromdate=pd.Timestamp(from_date).to_pydatetime() if from_date else None,
         todate=pd.Timestamp(to_date).to_pydatetime() if to_date else None,
     )
-    feed_params["atr_pct"] = (
-        "stop_loss_atr_pct" if "stop_loss_atr_pct" in frame.columns else None
-    )
-    feed_params["expected_vol"] = (
-        "expected_vol" if "expected_vol" in frame.columns else None
-    )
+    feed_params["expected_vol"] = "expected_vol" if "expected_vol" in frame.columns else None
     return PredictionFeed(**feed_params)
 
 
@@ -757,20 +683,12 @@ def main(logger: logging.Logger, config: RunnerConfig, period: str):
             config.data_config,
         )
     else:
-        raise TypeError(
-            f"Unsupported data config: {type(config.data_config).__name__}"
-        )
+        raise TypeError(f"Unsupported data config: {type(config.data_config).__name__}")
 
     strategy_config = strategy_config_for_preparation(
         config.strategy_config,
         pre_para,
     )
-    fixed_hold_bars = getattr(strategy_config, "fixed_hold_bars", None)
-    if fixed_hold_bars is not None and int(fixed_hold_bars) > 0:
-        frame["stop_loss_atr_pct"] = common.stop_loss_atr_pct(
-            frame,
-            int(fixed_hold_bars),
-        )
     venue_cls = _venue_for_strategy(strategy_config)
     feed = _build_feed(frame, config.data_config)
     cerebro = create_backtest_cerebro(
@@ -779,15 +697,10 @@ def main(logger: logging.Logger, config: RunnerConfig, period: str):
         broker_config=config.broker_config,
         data=feed,
         predict_num=pre_para.predict_num if pre_para is not None else None,
-        bar_interval_ms=common.get_interval_ms(
-            pre_para.interval if pre_para is not None else config.data_config.interval
-        ),
+        data_interval_ms=common.get_interval_ms(pre_para.interval if pre_para is not None else config.data_config.interval),
         engine_config=config.engine_config,
     )
-    logger.info(
-        f"Starting backtest | data={type(config.data_config).__name__} "
-        f"| venue={venue_cls.__name__}"
-    )
+    logger.info(f"Starting backtest | data={type(config.data_config).__name__} " f"| venue={venue_cls.__name__}")
     strat = cerebro.run()[0]
     report, report_details = generate_backtest_report(
         logger,
@@ -817,9 +730,7 @@ def main(logger: logging.Logger, config: RunnerConfig, period: str):
 
     result = {
         "schema_version": 2,
-        "generated_at": datetime_module.datetime.now(
-            datetime_module.timezone.utc
-        ).isoformat(),
+        "generated_at": datetime_module.datetime.now(datetime_module.timezone.utc).isoformat(),
         "candles": candles.to_dict(orient="records"),
         "report": report,
         "report_details": report_details,
@@ -850,10 +761,11 @@ def build_daily_df(daily_stats):
     if not daily_stats:
         return pd.DataFrame()
     df = pd.DataFrame(daily_stats)
-    if 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.sort_values('date').reset_index(drop=True)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").reset_index(drop=True)
     return df
+
 
 # 6 months (180 or 365 recommended for crypto)
 def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30):
@@ -872,8 +784,8 @@ def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30
 
     results = []
 
-    dates = df['date']
-    equity = df['end_equity'].values
+    dates = df["date"]
+    equity = df["end_equity"].values
 
     start_idx = 0
     n = len(df)
@@ -883,7 +795,7 @@ def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30
         end_date = start_date + pd.Timedelta(days=window_days)
 
         # Find the index where the window ends
-        candidate_idx = df.index[df['date'] <= end_date]
+        candidate_idx = df.index[df["date"] <= end_date]
         if len(candidate_idx) == 0:
             break
         end_idx = int(candidate_idx.max())
@@ -897,7 +809,7 @@ def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30
         years = (dates.iloc[end_idx] - dates.iloc[start_idx]).days / 365
         if years <= 0 or eq_start <= 0 or eq_end <= 0:
             next_date = start_date + pd.Timedelta(days=step_days)
-            next_idx = df.index[df['date'] >= next_date].min()
+            next_idx = df.index[df["date"] >= next_date].min()
             if pd.isna(next_idx):
                 break
             start_idx = int(next_idx)
@@ -906,10 +818,10 @@ def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30
         cagr = (eq_end / eq_start) ** (1 / years) - 1
 
         # Max drawdown (inside the window)
-        window_eq = equity[start_idx:end_idx + 1]
+        window_eq = equity[start_idx : end_idx + 1]
         if np.any(window_eq <= 0):
             next_date = start_date + pd.Timedelta(days=step_days)
-            next_idx = df.index[df['date'] >= next_date].min()
+            next_idx = df.index[df["date"] >= next_date].min()
             if pd.isna(next_idx):
                 break
             start_idx = int(next_idx)
@@ -920,22 +832,25 @@ def rolling_calmar(df: pd.DataFrame, window_days: int = 180, step_days: int = 30
 
         calmar = cagr / abs(max_dd) if max_dd < 0 else np.inf
 
-        results.append({
-            "start": dates.iloc[start_idx],
-            "end": dates.iloc[end_idx],
-            "cagr": cagr,
-            "max_dd": max_dd,
-            "calmar": calmar,
-        })
+        results.append(
+            {
+                "start": dates.iloc[start_idx],
+                "end": dates.iloc[end_idx],
+                "cagr": cagr,
+                "max_dd": max_dd,
+                "calmar": calmar,
+            }
+        )
 
         # Roll forward
         next_date = start_date + pd.Timedelta(days=step_days)
-        next_idx = df.index[df['date'] >= next_date].min()
+        next_idx = df.index[df["date"] >= next_date].min()
         if pd.isna(next_idx):
             break
         start_idx = int(next_idx)
 
     return pd.DataFrame(results)
+
 
 def summarize_rolling_calmar(rc_df: pd.DataFrame) -> dict:
     """
@@ -979,7 +894,6 @@ def summarize_rolling_calmar(rc_df: pd.DataFrame) -> dict:
     # Share of "qualifying" windows (you prefer Calmar>=2)
     out = {
         "rc_n": int(len(s)),  # Total number of valid rolling calmar values
-
         # Quantiles (finer grained)
         "rc_q01": float(q[0.01]),  # 1st percentile of rolling calmar
         "rc_q05": float(q[0.05]),  # 5th percentile of rolling calmar
@@ -990,48 +904,50 @@ def summarize_rolling_calmar(rc_df: pd.DataFrame) -> dict:
         "rc_q90": float(q[0.90]),  # 90th percentile of rolling calmar
         "rc_q95": float(q[0.95]),  # 95th percentile of rolling calmar
         "rc_q99": float(q[0.99]),  # best 99th percentile of rolling calmar
-
         # Ratios
         "rc_pos_ratio": float((s > 0).mean()),  # Proportion of positive rolling calmar values
         "rc_neg_ratio": float((s < 0).mean()),  # Proportion of negative rolling calmar values
         "rc_ge_1_ratio": float((s >= 1).mean()),  # Proportion of rolling calmar values >= 1
         "rc_ge_2_ratio": float((s >= 2).mean()),  # Proportion of rolling calmar values >= 2
         "rc_ge_3_ratio": float((s >= 3).mean()),  # Proportion of rolling calmar values >= 3
-
         # Tail (average level of the worst windows, more robust than min)
         "rc_es_05": expected_shortfall(s, 0.05),  # Average of the worst 5% rolling calmar values
         "rc_es_10": expected_shortfall(s, 0.10),  # Average of the worst 10% rolling calmar values
-
         # Persistence (ability to cross a death zone such as 2022-2023)
         "rc_longest_neg_run": longest_run(flags_neg),  # Longest consecutive run of negative rolling calmar values
         "rc_longest_ge1_run": longest_run(flags_ge1),  # Longest consecutive run of rolling calmar values >= 1
         "rc_longest_ge2_run": longest_run(flags_ge2),  # Longest consecutive run of rolling calmar values >= 2
-
         # Robustness / dispersion
         "rc_mean": float(s.mean()),  # Mean of rolling calmar values
         "rc_std": float(s.std(ddof=1)) if len(s) > 1 else 0.0,  # Standard deviation of rolling calmar values
         "rc_mad": mad,  # Median absolute deviation of rolling calmar values
         "rc_iqr": iqr,  # Interquartile range (Q3 - Q1) of rolling calmar values
-        "rc_cv": float(s.std(ddof=1) / s.mean()) if len(s) > 1 and s.mean() != 0 else float("nan"),  # Coefficient of variation (std/mean) of rolling calmar values
+        "rc_cv": (
+            float(s.std(ddof=1) / s.mean()) if len(s) > 1 and s.mean() != 0 else float("nan")
+        ),  # Coefficient of variation (std/mean) of rolling calmar values
     }
 
     # Optional: carry the distribution of the rolling cagr / max_dd as well (more interpretable)
     if "cagr" in rc_df.columns:
         c = rc_df["cagr"].replace([np.inf, -np.inf], np.nan).dropna()
         if len(c):
-            out.update({
-                "rc_cagr_median": float(c.median()),
-                "rc_cagr_q10": float(c.quantile(0.10)),
-                "rc_cagr_q25": float(c.quantile(0.25)),
-            })
+            out.update(
+                {
+                    "rc_cagr_median": float(c.median()),
+                    "rc_cagr_q10": float(c.quantile(0.10)),
+                    "rc_cagr_q25": float(c.quantile(0.25)),
+                }
+            )
     if "max_dd" in rc_df.columns:
         d = rc_df["max_dd"].replace([np.inf, -np.inf], np.nan).dropna()
         if len(d):
-            out.update({
-                "rc_dd_median": float(d.median()),
-                "rc_dd_q90": float(d.quantile(0.90)),  # drawdowns are negative, so q90 is the closest to 0
-                "rc_dd_min": float(d.min()),           # worst drawdown
-            })
+            out.update(
+                {
+                    "rc_dd_median": float(d.median()),
+                    "rc_dd_q90": float(d.quantile(0.90)),  # drawdowns are negative, so q90 is the closest to 0
+                    "rc_dd_min": float(d.min()),  # worst drawdown
+                }
+            )
 
     return out
 
@@ -1105,17 +1021,17 @@ def generate_backtest_report(
 
     # ----- basic numbers -----
     start_value = strat.broker.startingcash  # starting capital
-    end_value = strat.broker.getvalue()      # final capital
+    end_value = strat.broker.getvalue()  # final capital
     gross_return = (end_value - start_value) / start_value
-    cagr = ret_analyzer.get('rnorm', 0.0)
+    cagr = ret_analyzer.get("rnorm", 0.0)
     sr = sharpe.get("sharperatio", 0.0) or 0.0
 
     # ----- max drawdown -----
     maxdd_pct = dd.get("max", {}).get("drawdown", 0.0)
     maxdd_amt = dd.get("max", {}).get("moneydown", 0.0)
     maxdd_len = dd.get("max", {}).get("len", 0)
-    calmar = (cagr*100 / abs(maxdd_pct)) if maxdd_pct > 0 else 0.0
-    #rolling calmar
+    calmar = (cagr * 100 / abs(maxdd_pct)) if maxdd_pct > 0 else 0.0
+    # rolling calmar
     daily_account = perf.get("daily_account", [])
     if daily_account:
         df = build_daily_df(daily_account)
@@ -1127,14 +1043,14 @@ def generate_backtest_report(
     lost_longest = safe_get(trades, ["streak", "lost", "longest"], 0)
     won_longest = safe_get(trades, ["streak", "won", "longest"], 0)
     # --- read the intraday drawdown data ---
-    max_daily_dd = perf.get('max_daily_dd', 0.0) # e.g. -0.045
-    max_daily_date = perf.get('max_daily_dd_date', 'N/A')
-    max_violation_days = perf.get('daily_dd_max_violation_days', 0)
-    max_3_violation_days = perf.get('daily_dd_max_3_violation_days', 0)
-    violation_days = perf.get('daily_dd_violation_days', 0)
+    max_daily_dd = perf.get("max_daily_dd", 0.0)  # e.g. -0.045
+    max_daily_date = perf.get("max_daily_dd_date", "N/A")
+    max_violation_days = perf.get("daily_dd_max_violation_days", 0)
+    max_3_violation_days = perf.get("daily_dd_max_3_violation_days", 0)
+    violation_days = perf.get("daily_dd_violation_days", 0)
     # 1. Global minimum equity
-    global_min_equity = perf.get('global_min_equity', 0.0)
-    max_hwm_duration_days = perf.get('max_hwm_duration_days', 0)
+    global_min_equity = perf.get("global_min_equity", 0.0)
+    max_hwm_duration_days = perf.get("max_hwm_duration_days", 0)
     # 2. Distance from the starting capital (FTMO max loss)
     start_cash = strat.broker.startingcash
     dist_to_start_pct = (global_min_equity - start_cash) / start_cash
@@ -1154,26 +1070,24 @@ def generate_backtest_report(
     total_won = safe_get(trades, ["won", "total"], 0)
     total_lost = safe_get(trades, ["lost", "total"], 0)
     win_rate = (total_won / total_trades) if total_trades > 0 else 0.0
-    closed_trade_hold_bars = list(
-        getattr(strat, "closed_trade_hold_bars", [])
-    )
+    closed_trade_hold_bars = list(getattr(strat, "closed_trade_hold_bars", []))
     holding_period_stats = summarize_holding_periods(closed_trade_hold_bars)
 
-    # [fix 1] correct profit factor computation
-    # PF = total gross profit / abs(total gross loss)
-    gross_won_total = safe_get(trades, ["won", "pnl", "total"], 0.0)
-    gross_lost_total = abs(safe_get(trades, ["lost", "pnl", "total"], 0.0))
-    profit_factor = (gross_won_total / gross_lost_total) if gross_lost_total != 0 else 0.0
+    # Backtrader classifies winning and losing trades by commission-adjusted PnL.
+    # Profit factor is total winning PnL divided by absolute total losing PnL.
+    winning_pnl_total = safe_get(trades, ["won", "pnl", "total"], 0.0)
+    losing_pnl_total = abs(safe_get(trades, ["lost", "pnl", "total"], 0.0))
+    profit_factor = winning_pnl_total / losing_pnl_total if losing_pnl_total > 0 else None
 
     # ----- raw absolute PnL -----
     avg_pnl_net = safe_get(trades, ["pnl", "net", "average"], 0.0)  # after costs
-    avg_pnl_gross = safe_get(trades, ["pnl", "gross", "average"], 0.0) # before costs
+    avg_pnl_gross = safe_get(trades, ["pnl", "gross", "average"], 0.0)  # before costs
     avg_cost = avg_pnl_gross - avg_pnl_net
 
     # ============================================================
     # === [fix 2] per-trade return percentage (robust iteration) ===
     # ============================================================
-    
+
     # 1. Daily frequency
     if len(strat.datas) > 0 and len(strat.datas[0]) > 0:
         t_start = bt.num2date(strat.datas[0].datetime.array[0])
@@ -1195,7 +1109,7 @@ def generate_backtest_report(
     # ============================================================
     # --- 1. Long statistics ---
     long_total = safe_get(trades, ["long", "total"], 0)
-    long_won   = safe_get(trades, ["long", "won"], 0)   # number of wins
+    long_won = safe_get(trades, ["long", "won"], 0)  # number of wins
     # Long total pnl (amount)
     long_pnl_total = safe_get(trades, ["long", "pnl", "total"], 0.0)
     # Long win rate
@@ -1219,7 +1133,7 @@ def generate_backtest_report(
     daily_account = perf.get("daily_account", [])
     top_10_str = "N/A"
     robust_max_loss = 0.0
-    
+
     if daily_account:
         # Keep negative intraday drawdowns and sort them worst first.
         losses_values = []
@@ -1230,11 +1144,11 @@ def generate_backtest_report(
                 val = item
             if val < 0:
                 losses_values.append(val)
-        
+
         sorted_losses = sorted(losses_values)
         displayed_losses = sorted_losses[:10]
         top_10_str = " | ".join([f"{l*100:.2f}%" for l in displayed_losses])
-        
+
         # Robust max loss: drop the #1 outlier, average ranks 2-5
         robust_losses = sorted_losses[1:5]
         if robust_losses:
@@ -1243,11 +1157,7 @@ def generate_backtest_report(
             robust_max_loss = sorted_losses[0] if sorted_losses else 0.0
 
     # ---- strategy specific statistics ----
-    strategy_summary, strategy_details = (
-        strat.strategy_metrics()
-        if hasattr(strat, "strategy_metrics")
-        else ({}, {})
-    )
+    strategy_summary, strategy_details = strat.strategy_metrics() if hasattr(strat, "strategy_metrics") else ({}, {})
 
     params_snapshot = {
         "strategy": strategy_config_to_dict(strategy_config),
@@ -1290,7 +1200,6 @@ def generate_backtest_report(
             f"end": bt.num2date(strat.datas[0].datetime.array[-1]),
             f"regions": time_regions or {},
         },
-
         f"performance": {
             f"gross_return": gross_return,
             f"cagr": cagr,
@@ -1298,7 +1207,7 @@ def generate_backtest_report(
             f"sharpe": sr,
             f"start_value": start_value,
             f"end_value": end_value,
-            f"rc_summary":rc_summary,
+            f"rc_summary": rc_summary,
         },
         f"drawdown": {
             f"max_dd_pct": maxdd_pct,
@@ -1309,16 +1218,14 @@ def generate_backtest_report(
             f"dd_3_pct_days": max_3_violation_days,
             f"dd_4_pct_days": violation_days,
             f"dd_5_pct_days": max_violation_days,
-            f"max_hwm_duration_days":max_hwm_duration_days,
+            f"max_hwm_duration_days": max_hwm_duration_days,
         },
-
         f"exposure": {
             f"avg_pos": avg_pos,
             f"max_pos": max_pos,
             f"p95_pos": p95_pos,
             f"risk_per_trade_pct": size_param,
         },
-
         f"trades": {
             f"total": total_trades,
             f"daily_freq": daily_trades,
@@ -1331,6 +1238,7 @@ def generate_backtest_report(
             f"avg_pnl_net": avg_pnl_net,
             f"avg_pct_net": avg_pct_net,
             f"avg_cost": avg_cost,
+            f"profit_factor": profit_factor,
             f"long_pnl": long_pnl_total,
             f"long_win_rate": long_win_rate,
             f"short_pnl": short_pnl_total,
@@ -1351,7 +1259,7 @@ def generate_backtest_report(
 
     persisted_perf = dict(perf)
     period_details = {
-        f"raw_analyzer":{
+        f"raw_analyzer": {
             f"customize": persisted_perf,
         },
         f"strategy_detail": strategy_details,
@@ -1361,16 +1269,13 @@ def generate_backtest_report(
     # common.dump_params_json(train_cfg,logger)
     # common.dump_params_json(para,logger)
     # common.dump_params_json(pre_para,logger)
-        
+
     # summary output
-    logger.info("-" * 29 + f"PARAMS_HASH | {params_hash}"+"-" * 29)
+    logger.info("-" * 29 + f"PARAMS_HASH | {params_hash}" + "-" * 29)
 
     logger.info(f"RISK(Daily)| Top 10 Losses: [{top_10_str}]")
     if robust_max_loss:  # Only log if we calculated it
-        logger.info(
-            f"RISK(Daily)| Robust Max Loss (Avg 2nd-5th): "
-            f"{robust_max_loss*100:.2f}%"
-        )
+        logger.info(f"RISK(Daily)| Robust Max Loss (Avg 2nd-5th): " f"{robust_max_loss*100:.2f}%")
     logger.info(
         f"RISK(Daily)| Worst Day: "
         f"{period_report['drawdown']['max_daily_dd']*100:.2f}% "
@@ -1427,7 +1332,7 @@ def generate_backtest_report(
         f"(Cost: {period_report['trades']['avg_cost']:.2f}/trade)"
     )
 
-    log_metrics_block(logger, "STRATEGY", period_report['strategy'])
+    log_metrics_block(logger, "STRATEGY", period_report["strategy"])
 
     logger.info(
         f"DETAILS | Long: {period_report['trades']['long_pnl']} "
@@ -1447,12 +1352,13 @@ def generate_backtest_report(
     }
     return report, report_details
 
+
 if __name__ == "__main__":
     train_output_dir = os.path.join(common.TRAIN_OUT_DIR, train_config.SingleModelConfig.train_task)
     start_time = time.time()
-    pre_para:BaseDefine = common.load_pre_params_from_dir(train_output_dir)
-    exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR,'simulation'),pre_para.symbol, pre_para.interval)
-    logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, 'experiment.log'), console_level = logging.INFO,file_level=logging.INFO)
+    pre_para: BaseDefine = common.load_pre_params_from_dir(train_output_dir)
+    exp_dir = common.create_experiment_dir(os.path.join(common.PERSISTENCE_DIR, "simulation"), pre_para.symbol, pre_para.interval)
+    logger, _ = common.setup_session_logger(log_file_path=os.path.join(exp_dir, "experiment.log"), console_level=logging.INFO, file_level=logging.INFO)
     strategy_config = BbmStrategyConfig(fixed_hold_bars=int(pre_para.predict_num))
     # strategy_config = MlStrategyConfig(fixed_hold_bars =pre_para.predict_num )
     broker_config = BrokerConfig()
@@ -1461,11 +1367,7 @@ if __name__ == "__main__":
         broker_config=broker_config,
         save_dir=exp_dir,
         experiment_context=ExperimentContext(git_commit=common.git_revision()),
-        data_config=ModelDataConfig(
-            prep_output_dir=common.DATA_OUT_DIR,
-            train_output_dir=train_output_dir,
-            device ='auto'
-        ),
+        data_config=ModelDataConfig(prep_output_dir=common.DATA_OUT_DIR, train_output_dir=train_output_dir, device="auto"),
     )
     result = main(logger, runner_config, "all")
     output_path = os.path.join(exp_dir, "report.jsonl")

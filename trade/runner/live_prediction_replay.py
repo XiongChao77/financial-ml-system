@@ -46,9 +46,16 @@ class PredictionRecorder:
     def __call__(
         self,
         pipeline: StrategyPipeline,
-        candle_close_time_ms: int,
+        candle_open_time_ms: int,
         row: pd.Series,
     ) -> None:
+        row_open_time_ms = int(row["open_time_ms_utc"])
+        if row_open_time_ms != int(candle_open_time_ms):
+            raise ValueError(
+                "Prediction candle does not match the callback open time: "
+                f"callback={candle_open_time_ms}, prediction={row_open_time_ms}"
+            )
+        candle_close_time_ms = int(row["close_time_ms_utc"])
         record = {
             "strategy_id": pipeline.spec.strategy_id,
             "hash_id": pipeline.spec.hash_id,

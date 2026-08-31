@@ -29,6 +29,32 @@ EQUITY_SCALE = "log"  # Supported values: "linear", "log", or "both".
 MAX_LOG_END_VALUE_RATIO = 3.0
 RISK_COMPARISON_KEYS = ("risk_per_trade_pct", "max_daily_loss_pct")
 
+
+def clean_output_dir_except(output_dir_path, preserved_path):
+    """Remove output entries, optionally preserving one direct child path."""
+    output_dir_path = os.path.abspath(output_dir_path)
+    if preserved_path is not None:
+        preserved_path = os.path.abspath(preserved_path)
+        if os.path.dirname(preserved_path) != output_dir_path:
+            raise ValueError(
+                "The preserved output must be a direct child of the output directory: " f"output_dir={output_dir_path}, preserved={preserved_path}"
+            )
+
+    os.makedirs(output_dir_path, exist_ok=True)
+    removed_count = 0
+    with os.scandir(output_dir_path) as entries:
+        for entry in entries:
+            entry_path = os.path.abspath(entry.path)
+            if preserved_path is not None and entry_path == preserved_path:
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.unlink(entry.path)
+            removed_count += 1
+    return removed_count
+
+
 COMPARISON_OPERATORS = {
     ">=": operator.ge,
     "<=": operator.le,
@@ -382,6 +408,231 @@ def analyze_model_performance_correlation(all_results):
     print("Note: Pearson r close to 1 implies strong positive linear correlation; p-value < 0.05 (*) is statistically significant.")
 
 
+ML_PERFORMANCE_METRICS = {
+    "accuracy": "model_metrics.accuracy",
+    "directional_accuracy": "model_metrics.signal.directional_accuracy",
+    "f1_macro": "model_metrics.f1_macro",
+    "f1_weighted": "model_metrics.f1_weighted",
+    "precision_weighted": "model_metrics.precision_weighted",
+    "recall_weighted": "model_metrics.recall_weighted",
+}
+
+TRADING_PERFORMANCE_METRICS = {
+    "cagr": "performance.cagr",
+    "calmar": "performance.calmar",
+    "sharpe": "performance.sharpe",
+    "gross_return": "performance.gross_return",
+    "max_dd_pct": "drawdown.max_dd_pct",
+    "avg_pct_gross": "trades.avg_pct_gross",
+    "profit_factor": "trades.profit_factor",
+    "win_rate": "trades.win_rate",
+    "daily_freq": "trades.daily_freq",
+}
+
+
+def _finite_metric(report, path):
+    value = common.recursive_get(report, path)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _ml_trading_observations(all_results, period, group_by_model):
+    rows = []
+    metric_paths = {
+        **ML_PERFORMANCE_METRICS,
+        **TRADING_PERFORMANCE_METRICS,
+    }
+
+    for result in all_results:
+        period_result = result.get(period) or {}
+        params = period_result.get("params") or {}
+        identity = params.get("identity") or {}
+        prep_hash = identity.get("prep_hash")
+        train_hash = identity.get("train_hash")
+        if not prep_hash or not train_hash:
+            continue
+
+        row = {
+            "prep_hash": str(prep_hash),
+            "train_hash": str(train_hash),
+            "strategy_hash": str(params.get("hash") or result.get("hash") or ""),
+        }
+        row.update({metric_name: _finite_metric(period_result, metric_path) for metric_name, metric_path in metric_paths.items()})
+        rows.append(row)
+
+    strategy_frame = pd.DataFrame(rows)
+    if strategy_frame.empty or not group_by_model:
+        return strategy_frame, strategy_frame
+
+    metric_columns = list(metric_paths)
+    model_frame = strategy_frame.groupby(
+        ["prep_hash", "train_hash"],
+        as_index=False,
+    )[metric_columns].mean()
+    model_counts = strategy_frame.groupby(["prep_hash", "train_hash"]).size().rename("strategy_count").reset_index()
+    model_frame = model_frame.merge(
+        model_counts,
+        on=["prep_hash", "train_hash"],
+        how="left",
+    )
+    return strategy_frame, model_frame
+
+
+def _pair_correlation(frame, first_metric, second_metric, min_samples):
+    from scipy.stats import pearsonr, spearmanr
+
+    pair = frame[[first_metric, second_metric]].dropna()
+    sample_count = len(pair)
+    if sample_count < min_samples or pair[first_metric].nunique() < 2 or pair[second_metric].nunique() < 2:
+        return {
+            "sample_count": sample_count,
+            "pearson_r": None,
+            "pearson_p_value": None,
+            "spearman_r": None,
+            "spearman_p_value": None,
+        }
+
+    pearson = pearsonr(pair[first_metric], pair[second_metric])
+    spearman = spearmanr(pair[first_metric], pair[second_metric])
+    return {
+        "sample_count": sample_count,
+        "pearson_r": float(pearson.statistic),
+        "pearson_p_value": float(pearson.pvalue),
+        "spearman_r": float(spearman.statistic),
+        "spearman_p_value": float(spearman.pvalue),
+    }
+
+
+def _save_ml_trading_heatmap(correlations, value_column, title, output_path):
+    matrix = correlations.pivot(
+        index="ml_metric",
+        columns="trading_metric",
+        values=value_column,
+    )
+    if matrix.empty or matrix.isna().all().all():
+        return
+
+    figure_width = max(10, len(matrix.columns) * 1.4)
+    figure_height = max(5, len(matrix.index) * 0.8)
+    plt.figure(figsize=(figure_width, figure_height))
+    sns.heatmap(
+        matrix,
+        annot=True,
+        fmt=".2f",
+        cmap="RdYlBu_r",
+        vmin=-1,
+        vmax=1,
+        center=0,
+        linewidths=0.5,
+    )
+    plt.title(title)
+    plt.xlabel("Trading performance")
+    plt.ylabel("ML performance")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=160)
+    plt.close()
+
+
+def analyze_ml_trading_correlation(
+    all_results,
+    period="forward",
+    output_dir_path=None,
+    group_by_model=True,
+    min_samples=5,
+):
+    """Analyze ML evaluation metrics against trading performance for one period."""
+    if period not in {"long", "forward"}:
+        raise ValueError("period must be 'long' or 'forward'")
+    if min_samples < 3:
+        raise ValueError("min_samples must be at least 3")
+
+    strategy_frame, observation_frame = _ml_trading_observations(
+        all_results,
+        period,
+        group_by_model,
+    )
+    correlation_rows = []
+    for ml_metric in ML_PERFORMANCE_METRICS:
+        for trading_metric in TRADING_PERFORMANCE_METRICS:
+            correlation_rows.append(
+                {
+                    "ml_metric": ml_metric,
+                    "trading_metric": trading_metric,
+                    **_pair_correlation(
+                        observation_frame,
+                        ml_metric,
+                        trading_metric,
+                        min_samples,
+                    ),
+                }
+            )
+    correlations = pd.DataFrame(correlation_rows)
+
+    observation_label = "models" if group_by_model else "strategies"
+    print("\n" + "=" * 100)
+    print(
+        f"{period.title()} ML performance vs trading performance correlation | "
+        f"strategies={len(strategy_frame)}, {observation_label}={len(observation_frame)}"
+    )
+    print("=" * 100)
+    ranked = correlations.dropna(subset=["spearman_r"]).copy()
+    if ranked.empty:
+        print("Not enough non-constant observations to compute correlations")
+    else:
+        ranked["abs_spearman_r"] = ranked["spearman_r"].abs()
+        ranked.sort_values("abs_spearman_r", ascending=False, inplace=True)
+        print(
+            ranked[
+                [
+                    "ml_metric",
+                    "trading_metric",
+                    "sample_count",
+                    "pearson_r",
+                    "pearson_p_value",
+                    "spearman_r",
+                    "spearman_p_value",
+                ]
+            ]
+            .head(20)
+            .to_string(index=False, float_format=lambda value: f"{value:.4f}")
+        )
+    print("=" * 100)
+
+    if output_dir_path is not None:
+        os.makedirs(output_dir_path, exist_ok=True)
+        correlations_path = os.path.join(
+            output_dir_path,
+            f"{period}_ml_trading_correlations.csv",
+        )
+        observations_path = os.path.join(
+            output_dir_path,
+            f"{period}_ml_trading_observations.csv",
+        )
+        correlations.to_csv(correlations_path, index=False)
+        observation_frame.to_csv(observations_path, index=False)
+        _save_ml_trading_heatmap(
+            correlations,
+            "pearson_r",
+            f"{period.title()} ML vs Trading Pearson Correlation",
+            os.path.join(output_dir_path, f"{period}_ml_trading_pearson.png"),
+        )
+        _save_ml_trading_heatmap(
+            correlations,
+            "spearman_r",
+            f"{period.title()} ML vs Trading Spearman Correlation",
+            os.path.join(output_dir_path, f"{period}_ml_trading_spearman.png"),
+        )
+        print(f"Correlation outputs saved to: {output_dir_path}")
+
+    return {
+        "strategy_observations": strategy_frame,
+        "observations": observation_frame,
+        "correlations": correlations,
+    }
+
+
 def analyze_model_metrics_by_decile(all_results):
     """
     Bucket analysis: split return metrics (CAGR, Calmar, Sharpe) into 10 quantile buckets
@@ -508,9 +759,55 @@ def load_reports(path):
     return reports
 
 
-def save_raw_reports(selected_rows, exp_dir="", output_filename="reports_raw.jsonl"):
+def _copy_selected_model_artifacts(selected_rows, output_dir_path):
+    """Copy each unique selected model while preserving the train hierarchy."""
+    copied_models = set()
+
+    for row in selected_rows:
+        raw_data = row.get("raw")
+        if not raw_data:
+            continue
+
+        params = raw_data.get("params", {})
+        identity = params.get("identity", {})
+        prep_hash = str(identity.get("prep_hash", ""))
+        train_hash = str(identity.get("train_hash", ""))
+        train_output_dir = params.get("data", {}).get("train_output_dir")
+        report_hash = params.get("hash", "unknown")
+
+        if not prep_hash or not train_hash or not train_output_dir:
+            raise ValueError("Selected report is missing model artifact identity or path: " f"report_hash={report_hash}")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", prep_hash) or not re.fullmatch(r"[A-Za-z0-9_-]+", train_hash):
+            raise ValueError("Selected report contains an unsafe model artifact identity: " f"prep_hash={prep_hash}, train_hash={train_hash}")
+
+        source_dir = os.path.abspath(train_output_dir)
+        target_dir = os.path.join(
+            os.path.abspath(output_dir_path),
+            "train",
+            f"pre_{prep_hash}",
+            f"train_{train_hash}",
+        )
+        model_key = os.path.abspath(target_dir)
+        if model_key in copied_models:
+            continue
+        if not os.path.isdir(source_dir):
+            raise FileNotFoundError("Selected model artifact directory does not exist: " f"report_hash={report_hash}, path={source_dir}")
+
+        if source_dir != os.path.abspath(target_dir):
+            shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
+        copied_models.add(model_key)
+
+    print(f"Copied {len(copied_models)} unique model artifact directories to: " f"{os.path.join(output_dir_path, 'train')}")
+
+
+def save_raw_reports(
+    selected_rows,
+    exp_dir="",
+    output_filename="reports_raw.jsonl",
+    copy_models=False,
+):
     """
-    Extract 'raw' report field from rows and save to a jsonl file next to exp_dir.
+    Save raw reports and optionally copy their trained model artifacts.
     """
     if not selected_rows:
         print("Warning: No data to save")
@@ -528,32 +825,74 @@ def save_raw_reports(selected_rows, exp_dir="", output_filename="reports_raw.jso
                 raw_data = row.get("raw")
                 if raw_data:
                     f.write(json.dumps(raw_data, ensure_ascii=False) + "\n")
-                    source_details = report_details_path(raw_data, row["path"])
+                    source_details = find_report_details_path(
+                        raw_data,
+                        row["path"],
+                    )
                     target_details = report_details_path(raw_data, out_path)
                     if os.path.abspath(source_details) != os.path.abspath(target_details):
                         os.makedirs(os.path.dirname(target_details), exist_ok=True)
                         shutil.copy2(source_details, target_details)
 
+        if copy_models:
+            _copy_selected_model_artifacts(selected_rows, exp_dir)
+
         print(f"Raw data saved successfully!")
     except Exception as e:
         print(f"Failed to save: {str(e)}")
+        raise
 
 
 def report_details_path(report, report_path):
     identity = report["params"]["identity"]
     return os.path.join(
         os.path.dirname(report_path),
-        identity["prep_hash"],
-        identity["train_hash"],
-        identity["sim_hash"],
+        "sim_output",
+        identity["full_hash"],
         "report_details.json",
     )
 
 
+def report_details_candidates(report, report_path):
+    """Return sidecar locations for the saved report and its source experiment."""
+    candidates = [report_details_path(report, report_path)]
+    data_params = report.get("params", {}).get("data", {})
+    artifact_paths = (
+        (data_params.get("prep_output_dir"), 1),
+        (data_params.get("train_output_dir"), 1),
+    )
+
+    for artifact_path, levels_to_train_dir in artifact_paths:
+        if not artifact_path:
+            continue
+        train_dir = os.path.abspath(artifact_path)
+        for _ in range(levels_to_train_dir):
+            train_dir = os.path.dirname(train_dir)
+        if os.path.basename(train_dir) not in {"pre_output", "train_output"}:
+            continue
+        source_report_path = os.path.join(
+            os.path.dirname(train_dir),
+            "reports.jsonl",
+        )
+        candidate = report_details_path(report, source_report_path)
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    return candidates
+
+
 def load_report_details(report, report_path):
-    path = report_details_path(report, report_path)
+    path = find_report_details_path(report, report_path)
     with open(path, "r", encoding="utf-8") as source:
         return json.load(source)
+
+
+def find_report_details_path(report, report_path):
+    candidates = report_details_candidates(report, report_path)
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError("Report details file was not found in the saved output or source " f"experiment: candidates={candidates}")
 
 
 def period_report(report, period, report_details=None):
@@ -1228,6 +1567,8 @@ def main():
     exp_dir_list = [exp_dir1]
     filter_report = None
     filter_report = os.path.join(output_dir, "filtered_raw_reports.jsonl")
+    removed_count = clean_output_dir_except(output_dir, filter_report)
+    print(f"Cleaned output directory: removed {removed_count} entries; " f"preserved {filter_report}")
     report_files = []
     rows = []
     records = []
@@ -1257,6 +1598,8 @@ def main():
         #     criteria=["forward.cagr>=0.3","long.cagr>0.5","long.rc_pos_ratio>0.5","long.max_hwm_duration_days<180"],
         # )
         # exit()
+        analyze_ml_trading_correlation(uin_records, period="long", output_dir_path=os.path.join(output_dir, "ml_trading_correlation"), group_by_model=True)
+        analyze_ml_trading_correlation(uin_records, period="forward", output_dir_path=os.path.join(output_dir, "ml_trading_correlation"), group_by_model=True)
         uin_records = basic_filter(uin_records)
         # analyze_holdbar(uin_records,target_key="predict_num", period ='long',metric_key="cagr")
         # analyze_holdbar(uin_records,target_key="predict_num", period ='forward',metric_key="cagr")
@@ -1295,20 +1638,22 @@ def main():
     # analyze_model_performance_correlation(uin_records)
     # analyze_model_metrics_by_decile(uin_records)
     # exit()
-
-    uin_records, _ = filter_by_train_valid_test_cagr(uin_records, min_train_cagr=0.5, valid_test_ratio=0.2)
-    uin_records, _ = filter_by_criteria(uin_records, criteria=["forward.cagr>=0.1"])
+    _, uin_records = filter_by_train_valid_test_cagr(uin_records, min_train_cagr=0.5, valid_test_ratio=0.2)
+    # uin_records, _ = filter_by_criteria(uin_records, criteria=["forward.cagr>=0.1"])
     # uin_records = [record for record in uin_records if common.recursive_get(record, "long.params.train.model_cfg.model_type") == "conv_lstm"]
     start = 10
     show_count = 40
-    selected = uin_records
+    # analyze_ml_trading_correlation(uin_records, period="long", output_dir_path=os.path.join(output_dir, "ml_trading_correlation"), group_by_model=True)
+    # analyze_ml_trading_correlation(uin_records, period="forward", output_dir_path=os.path.join(output_dir, "ml_trading_correlation"), group_by_model=True)
+    # exit()
+    selected = uin_records[:20]
     selected_hash_filter = ["19bcaa57b5cb", "a48b13dc4e7b"]
     candidate = set(selected_hash_filter)
     # selected = [record for record in selected if record.get("hash") in candidate]
 
     show_performance(
         selected,
-        output_dir,
+        os.path.join(output_dir, "plot"),
         3,
         addition_info={
             "risk": "risk_per_trade_pct",
@@ -1317,14 +1662,6 @@ def main():
         },
         plot_ood=True,
     )
-    # exit()
-    # stable_selected1 = filter_stable(rc_median_results)
-    # print(f"-------------After filter_stable: {len(stable_selected1)} reports")
-    # # selected2 = filter_aggressive(rc_results)
-    # # print(f"-------------After filter_aggressive: {len(selected2)} reports")
-    # # merged_selected = merge_selected_sort(sorted_selected1[:5],selected2[:5],period ='long', sort_key='cagr')
-    # # print(f"-------------After all filter: {len(merged_selected)} reports")
-
     # rc_pos_ratio_results, unselected = filter_by_criteria(
     #     stable_selected1, criteria=["long.rc_pos_ratio>=0.7"]
     # )
@@ -1336,51 +1673,12 @@ def main():
     # # sorted_l_daily_freq = sorted(rc_results, key=itemgetter("l_daily_freq"), reverse=True)
     # top_k = 40
     # merged_selected = merge_selected_sort(sorted_l_sharpe[:top_k],sorted_calmar[:top_k],rc_pos_ratio_results[:top_k],period ='long', sort_key='cagr')
-    save_raw_reports(selected, output_dir, "selected_configs.jsonl")
-
-
-def filter_stable(selected):
-    results, unselected = filter_by_criteria(
+    save_raw_reports(
         selected,
-        criteria=[
-            "forward.cagr>=0.7",
-            "forward.calmar>=0",
-            "forward.win_rate>=30",
-        ],
+        output_dir,
+        "selected_configs.jsonl",
+        copy_models=True,
     )
-    print(f"After forward performance filter: {len(results)} reports")
-    results, long_unresults = filter_by_performance(
-        results, period="long", min_cagr=0.7, min_calmar=0.5
-    )  # ,min_rc_cagr_median = -0.2)#,min_rc_cagr_q25 = -0.2)
-    print(f"After long cagr filter: {len(results)} reports")
-    results, long_unresults = filter_by_performance(results, period="long", min_rc_cagr_median=0)
-    print(f"After long rc_cagr_median filter: {len(results)} reports")
-    results, forward_unresults = filter_by_performance(results, period="forward", min_cagr=0.7, min_calmar=0.5)
-    print(f"After forward performance filter: {len(results)} reports")
-    return results
-
-
-def filter_aggressive(selected):
-    # 1. Forward must be very strong (capture current regime)
-    results, _ = filter_by_criteria(
-        selected,
-        criteria=["forward.cagr>=1", "forward.calmar>=0"],
-    )
-    print(f"After forward performance filter: {len(results)} reports")
-    # 2. Long only needs to be acceptable, not extremely stable
-    results, _ = filter_by_performance(results, period="long", min_cagr=0.6, min_calmar=0.3)
-    print(f"After long performance filter: {len(results)} reports")
-    results, long_unresults = filter_by_performance(results, period="long", min_rc_cagr_median=0)
-    print(f"After long rc_cagr_median filter: {len(results)} reports")
-    results, _ = filter_by_performance(results, period="forward", min_cagr=1, min_calmar=0.4)
-    print(f"After forward performance filter: {len(results)} reports")
-    results, _ = filter_by_criteria(
-        results,
-        criteria=["forward.daily_freq>=0.7"],
-    )
-    print(f"After long daily_freq filter: {len(results)} reports")
-
-    return results
 
 
 def merge_selected_sort(*selected_lists, period="forward", sort_key=None, reverse=True):
