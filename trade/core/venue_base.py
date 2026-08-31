@@ -10,27 +10,52 @@ switching backtest framework or exchange should only touch this layer.
 """
 
 from abc import abstractmethod
+from datetime import UTC, date, datetime
 import math
+from zoneinfo import ZoneInfo
 
-from trade.core.protocol import OrderType
+from trade.core.protocol import Firm, OrderType, PositionView
+from trade.core.protocol import TradeIntent, ActionType, PositionDir
 
 
 class VenueBase:
+    FIRM_DAILY_RESET_TIMEZONES = {
+        Firm.FTMO: ZoneInfo("Europe/Prague"),
+        Firm.THE5ERS: ZoneInfo("Europe/Athens"),
+    }
+
     # ---------------- inbound: queries ----------------
     @abstractmethod
     def get_account_equity(self):
         pass
 
     @abstractmethod
-    def get_current_state(self):
+    def get_current_state(self) -> PositionView:
         pass
 
-    @abstractmethod
-    def get_server_time(self):
-        pass
+    @staticmethod
+    def _normalized_candle_time_utc(candle_open_time_utc: datetime) -> datetime:
+        if candle_open_time_utc is None or candle_open_time_utc.tzinfo is None:
+            raise ValueError("candle_open_time_utc must be timezone-aware")
+        return candle_open_time_utc.astimezone(UTC)
+
+    def get_daily_reset_date(self, candle_open_time_utc: datetime) -> date:
+        """Return the UTC candle date used by ordinary venues and backtests."""
+
+        return self._normalized_candle_time_utc(candle_open_time_utc).date()
+
+    def get_firm_daily_reset_date(
+        self,
+        candle_open_time_utc: datetime,
+        firm: Firm,
+    ) -> date:
+        reset_timezone = self.FIRM_DAILY_RESET_TIMEZONES[firm]
+        return self._normalized_candle_time_utc(
+            candle_open_time_utc
+        ).astimezone(reset_timezone).date()
 
     @abstractmethod
-    def get_last_position_open_time(self):  # return UTC time
+    def get_last_position_open_time(self):  # return utc
         pass
 
     # ---------------- outbound: orders ----------------
@@ -72,6 +97,21 @@ class VenueBase:
         price=None,
     ):
         pass
+
+    def execute_action(self, action: TradeIntent):
+        """Reworked to use the submit_order interface and pass the stop loss parameters"""
+        if action.action == ActionType.NOOP:
+            return
+        if action.action == ActionType.CLOSE:
+            self.close_position()
+        elif action.action == ActionType.OPEN:
+            is_buy = action.target_dir == PositionDir.POSITIVE
+            self.submit_order(
+                action.order_qty,
+                is_buy=is_buy,
+                stop_loss_pct=action.stop_loss_pct,
+                take_profit_pct=action.take_profit_pct,
+            )
 
     # ---------------- outbound: cash and life cycle (optional) ----------------
     def withdraw_cash(self, amount):

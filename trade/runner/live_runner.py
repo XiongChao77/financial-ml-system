@@ -22,7 +22,8 @@ import ntpath
 import os
 import queue
 import time
-from dataclasses import dataclass, field, fields
+from numbers import Real
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional
 from enum import Enum, auto
@@ -34,16 +35,18 @@ from model.model_loader import ModelHandler
 from trade.feed.feed_base import DataFeedBase
 from trade.core.protocol import (
     AccountView,
+    Firm,
     MarketView,
     Observation,
     PositionDir,
-    PositionView,
     Signal,
     TradeIntent,
 )
 from trade.runner.config import BrokerConfig
 from trade.venue.live.binance_data_feed import BinanceDataFeed
 from trade.core.venue_base import VenueBase
+from trade.venue.live.ctrader.ctrader_venue import CTraderOpenApiConnection
+from trade.venue.live.ctrader.ctrader_venue import CTraderVenue
 
 SUPPORTED_BINANCE_DATA_SOURCES = {
     "binance",
@@ -74,14 +77,17 @@ class LiveVenueConfigBase:
 
 @dataclass(frozen=True, kw_only=True)
 class LiveVenueConfigHedge:
+    firm: Firm
     hedge: bool = False
     # the rest only required when hedge is true
-    firm: Optional[str] = None
     cost: Optional[float] = None
     challenge_type: Optional[str] = None
     stage: Optional[str] = None
     hedge_venue: Optional[str] = None
     hedge_key_path: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "firm", Firm.parse(self.firm))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -123,7 +129,7 @@ class LiveStrategySpec:
     model_path: str
     device: str = "auto"
     compound: bool = True
-    market_config: common.MarketDataSourceConfig = None
+    base_define: common.BaseDefine = None
     train_config: Any = None
     strategy_config: Any = None
     broker_config: BrokerConfig = None
@@ -164,6 +170,10 @@ class FeedGroup:
     last_processed_candle_open_time_ms: Optional[int] = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
+    @property
+    def name(self) -> str:
+        return f"{self.market_config.symbol}_{self.market_config.interval}"
+
 
 DATA_CHECK_TIMER_DELAY_MS = 2000
 
@@ -193,6 +203,23 @@ def _resolve_data_check_timer_interval_ms(feed_groups: Iterable[FeedGroup]) -> t
             f"interval ({data_check_timer_interval_ms} ms); incompatible: " + ", ".join(incompatible)
         )
     return data_check_timer_interval_ms, data_check_timer_max_ms
+
+
+def _expected_closed_candle_open_time_ms(check_boundary_ms: int, interval_ms: int) -> int:
+    """Return the latest candle open time that should be closed at a boundary."""
+
+    return check_boundary_ms // interval_ms * interval_ms - interval_ms
+
+
+def _format_utc_ms(timestamp_ms: int) -> str:
+    """Format an epoch-millisecond timestamp for human-readable logs."""
+
+    return datetime.fromtimestamp(
+        int(timestamp_ms) / 1000,
+        tz=timezone.utc,
+    ).strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )[:-3]
 
 
 def _resolve_path(config_path: str, value: Any) -> str:
@@ -243,7 +270,8 @@ def load_params_from_report(
             train_params = loaded_params["train"]
             strategy_params = loaded_params["strategy"]
             for spec in specs_by_hash[hash_id]:
-                spec.market_config = common.MarketDataSourceConfig(**{field.name: market_params[field.name] for field in fields(common.MarketDataSourceConfig)})
+                # market_params["interval"] = "1m"
+                spec.base_define = common.BaseDefine(**market_params)
                 spec.train_config = config_from_dict_train(train_params)
                 spec.strategy_config = strategy_config_from_dict(strategy_params)
             params_by_hash[hash_id] = loaded_params
@@ -347,14 +375,56 @@ def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
     return strategy_entries
 
 
-def _prepare_market_frame(frame: pd.DataFrame, spec: LiveStrategySpec) -> pd.DataFrame:
+def _optional_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _prepare_market_frame(
+    frame: pd.DataFrame,
+    base_define: common.BaseDefine,
+) -> pd.DataFrame:
     if frame is None or frame.empty:
         raise ValueError("Live data feed returned no closed candles")
     prepared = frame.copy()
     prepared["open_time_ms_utc"] = pd.to_numeric(prepared["open_time_ms_utc"], errors="raise").astype("int64")
     prepared["close_time_ms_utc"] = pd.to_numeric(prepared["close_time_ms_utc"], errors="raise").astype("int64")
-    prepared = common.attch_open_time_sn(spec.market_config, prepared)
+    prepared = common.attch_open_time_sn(base_define, prepared)
+    prepared = common.calculate_thresholds(prepared, base_define)
     return prepared
+
+
+def _market_view(
+    predicted_frame: pd.DataFrame,
+) -> MarketView:
+    if predicted_frame is None or predicted_frame.empty:
+        raise ValueError("Model returned no live predictions")
+
+    row = predicted_frame.iloc[-1]
+    raw_signal = _optional_float(row.get("pred"))
+    signal = Signal.INVALID if raw_signal is None else Signal(int(raw_signal))
+
+    close = _optional_float(row.get("close"))
+    if close is None or close <= 0:
+        raise ValueError("Latest closed candle has no valid close price")
+
+    return MarketView(
+        price=close,
+        open=_optional_float(row.get("open")),
+        high=_optional_float(row.get("high")),
+        low=_optional_float(row.get("low")),
+        close=close,
+        signal=signal,
+        pred_prob=_optional_float(row.get("pred_prob"), 0.0) or 0.0,
+        expected_vol=_optional_float(row.get("expected_vol")),
+        bars_to_close=_optional_float(
+            row.get("bars_to_close"),
+            math.inf,
+        ),
+    )
 
 
 class LiveRunner:
@@ -373,6 +443,9 @@ class LiveRunner:
             raise ValueError("LiveRunner requires at least one strategy")
         self.logger = logger or logging.getLogger("trade.live")
         self._feed_factory = feed_factory or self._create_feed
+        self.ctrader_connection: CTraderOpenApiConnection | None = None
+        self._ctrader_connection_path: str | None = None
+        self._ctrader_environment: str | None = None
         self._venue_factory = venue_factory or self._create_venue
         self._prediction_callback = prediction_callback
         self._initialized = False
@@ -419,7 +492,7 @@ class LiveRunner:
     @staticmethod
     def _create_feature_generator(spec: LiveStrategySpec):
         return common.FeatureFactory(
-            common.get_interval_ms(spec.market_config.interval),
+            common.get_interval_ms(spec.base_define.interval),
             feature_conf_list=spec.train_config.feature_conf_list,
         )
 
@@ -427,8 +500,7 @@ class LiveRunner:
     def _load_model(spec: LiveStrategySpec):
         return ModelHandler(tarin_out_path=spec.model_path, device=spec.device)
 
-    @staticmethod
-    def _create_venue(spec: LiveStrategySpec, logger: logging.Logger):
+    def _create_venue(self, spec: LiveStrategySpec, logger: logging.Logger):
         config = spec.venue_config
         if config.venue == "mock":
             from trade.venue.mock_venue import MockVenue
@@ -441,85 +513,114 @@ class LiveRunner:
 
             return MT5Venue(
                 config.path,
-                spec.market_config.symbol,
+                spec.base_define.symbol,
                 int(spec.strategy_id),
                 logger=logger,
                 login=config.login,
                 password=config.password,
                 server=config.server,
+                firm=config.firm,
             )
         if config.venue == "bybit":
             from trade.venue.live.bybit.bybit_venue import BybitVenue
 
             return BybitVenue(
                 config.path,
-                spec.market_config.symbol,
+                spec.base_define.symbol,
                 f"{spec.strategy_id}:{spec.hash_id}",
                 logger=logger,
             )
         if config.venue == "ctrader":
-            from trade.venue.live.ctrader.ctrader_venue import CTraderVenue
-
-            return CTraderVenue(
-                config.path,
-                spec.market_config.symbol,
+            connection_path = os.path.realpath(config.path)
+            environment = "live"
+            if self.ctrader_connection is not None:
+                if connection_path != self._ctrader_connection_path:
+                    raise ValueError(
+                        "All cTrader venues sharing a connection must use the same "
+                        "credential path; "
+                        f"expected {self._ctrader_connection_path!r}, "
+                        f"got {connection_path!r}"
+                    )
+                if environment != self._ctrader_environment:
+                    raise ValueError(
+                        "All cTrader venues sharing a connection must use the same "
+                        "environment; "
+                        f"expected {self._ctrader_environment!r}, "
+                        f"got {environment!r}"
+                    )
+            ctrader_venue = CTraderVenue(
+                connection_path,
+                spec.base_define.symbol,
                 f"{spec.strategy_id}:{spec.hash_id}",
                 logger=logger,
                 account_id=config.account_id,
-                environment="live",
+                environment=environment,
+                api=self.ctrader_connection,
+                firm=config.firm,
             )
+            if self.ctrader_connection is None:
+                self.ctrader_connection = ctrader_venue.api
+                self._ctrader_connection_path = connection_path
+                self._ctrader_environment = environment
+            return ctrader_venue
+
         if config.venue == "binance":
             from trade.venue.live.binance.binance_venue import BinanceVenue
 
             return BinanceVenue(
                 config.path,
-                spec.market_config.symbol,
+                spec.base_define.symbol,
                 f"{spec.strategy_id}:{spec.hash_id}",
                 logger=logger,
             )
         raise ValueError(f"Unsupported venue: {config.venue}")
 
     @staticmethod
-    def _create_strategy(spec: LiveStrategySpec, venue: Any):
+    def _create_strategy(spec: LiveStrategySpec, venue: VenueBase):
         from trade.strategy.strategy_bbm import BbmSignalStrategy, BbmStrategyConfig
-        from trade.strategy.strategy_ml import MlSignalStrategy, MlStrategyConfig
 
         equity = float(venue.get_account_equity())
         if equity <= 0:
             raise RuntimeError("Venue returned invalid account equity for " f"{spec.strategy_id} ({spec.hash_id})")
         leverage = float(spec.broker_config.leverage)
-        bar_interval_ms = common.get_interval_ms(spec.market_config.interval)
+        data_interval_ms = common.get_interval_ms(spec.base_define.interval)
 
-        open_time = venue.get_last_position_open_time()
         held_bars = 0
-        if open_time is not None:
-            now = venue.get_server_time()
-            if now.tzinfo is None:
-                now = now.replace(tzinfo=timezone.utc)
-            if open_time.tzinfo is None:
-                open_time = open_time.replace(tzinfo=timezone.utc)
-            elapsed_ms = max(0, int((now - open_time).total_seconds() * 1000))
-            held_bars = elapsed_ms // common.get_interval_ms(spec.market_config.interval)
-
-        if isinstance(spec.strategy_config, MlStrategyConfig):
-            return MlSignalStrategy(
-                venue,
-                config=spec.strategy_config,
-                init_equity=equity,
-                bar_interval_ms=bar_interval_ms,
-                exist_hold_bars=int(held_bars),
-                leverage=leverage,
-            )
+        position = venue.get_current_state()
+        if position.dir in {PositionDir.POSITIVE, PositionDir.NEGATIVE}:
+            open_time = venue.get_last_position_open_time()
+            if open_time is None:
+                logger = logging.getLogger("trade")
+                logger.warning(
+                    "Open position has no opening timestamp | strategy=%s hash=%s",
+                    spec.strategy_id,
+                    spec.hash_id,
+                )
+            else:
+                now = datetime.now(timezone.utc)
+                if open_time.tzinfo is None:
+                    open_time = open_time.replace(tzinfo=timezone.utc)
+                else:
+                    open_time = open_time.astimezone(timezone.utc)
+                elapsed_ms = max(
+                    0,
+                    int((now - open_time).total_seconds() * 1000),
+                )
+                held_bars = elapsed_ms // data_interval_ms
         if isinstance(spec.strategy_config, BbmStrategyConfig):
+            effective_config = replace(
+                spec.strategy_config,
+                compound=spec.compound,
+            )
+            spec.strategy_config = effective_config
             return BbmSignalStrategy(
-                venue,
-                config=spec.strategy_config,
+                config=effective_config,
                 init_equity=equity,
-                bar_interval_ms=bar_interval_ms,
+                data_interval_ms=data_interval_ms,
                 exist_hold_bars=int(held_bars),
                 leverage=leverage,
             )
-        raise TypeError("Live runner currently supports MlStrategyConfig and " f"BbmStrategyConfig, got {type(spec.strategy_config).__name__}")
+        raise TypeError("Live runner currently supports BbmStrategyConfig, got " f"{type(spec.strategy_config).__name__}")
 
     def _build(self, specs: list[LiveStrategySpec]) -> None:
         grouped_pipelines: list[tuple[common.MarketDataSourceConfig, list[StrategyPipeline]]] = []
@@ -535,21 +636,30 @@ class LiveRunner:
 
             model = self._load_model(spec)
             feature_generator = self._create_feature_generator(spec)
+            market_config = common.MarketDataSourceConfig(
+                **{field.name: getattr(spec.base_define, field.name) for field in fields(common.MarketDataSourceConfig)}
+            )
             feed_entry = next(
                 filter(
-                    lambda item: item[0] == spec.market_config,
+                    lambda item: item[0] == market_config,
                     grouped_pipelines,
                 ),
                 None,
             )
             if feed_entry is None:
                 feed_pipelines: list[StrategyPipeline] = []
-                grouped_pipelines.append((spec.market_config, feed_pipelines))
+                grouped_pipelines.append((market_config, feed_pipelines))
             else:
                 feed_pipelines = feed_entry[1]
             venue = self._venue_factory(spec, self.logger)
             try:
                 strategy = self._create_strategy(spec, venue)
+                self.logger.info(
+                    "Strategy created | id=%s hash=%s venue=%s",
+                    spec.strategy_id,
+                    spec.hash_id,
+                    type(venue).__name__,
+                )
             except Exception:
                 shutdown = getattr(venue, "shutdown", None)
                 if callable(shutdown):
@@ -568,7 +678,7 @@ class LiveRunner:
                 venue=venue,
                 strategy=strategy,
                 feature_factory=feature_generator,
-                interval_ms=common.get_interval_ms(spec.market_config.interval),
+                interval_ms=common.get_interval_ms(spec.base_define.interval),
                 enable=spec.enable,
             )
             self.strategy_pipelines.append(pipeline)
@@ -607,8 +717,15 @@ class LiveRunner:
         now_ms = int(time.time() * 1000)
         self._next_min_expect_candle_open_time = (now_ms // self._data_check_timer_interval_ms) * self._data_check_timer_interval_ms
         self._next_data_check_timer_time_ms = self._next_min_expect_candle_open_time + self._data_check_timer_interval_ms + DATA_CHECK_TIMER_DELAY_MS
-        # self.logger.info(f"_next_data_check_timer_time_ms  {self._next_data_check_timer_time_ms }")
         delay_seconds = (self._next_data_check_timer_time_ms - now_ms) / 1000.0
+        self.logger.debug(
+            "DATA_CHECK timer scheduled | now_utc=%s shortest_interval_ms=%d " "expected_shortest_open_time_utc=%s fire_time_utc=%s " "delay_seconds=%.3f",
+            _format_utc_ms(now_ms),
+            self._data_check_timer_interval_ms,
+            _format_utc_ms(self._next_min_expect_candle_open_time),
+            _format_utc_ms(self._next_data_check_timer_time_ms),
+            delay_seconds,
+        )
         self.data_check_timer = threading.Timer(delay_seconds, self._data_check_timer_handler)
         self.data_check_timer.daemon = True
         self.data_check_timer.start()
@@ -617,27 +734,69 @@ class LiveRunner:
         if self._closed:
             return
         now_ms = int(time.time() * 1000)
-        fluctuate_ms = abs(now_ms - self._next_data_check_timer_time_ms)
-        if fluctuate_ms > 100:
-            self.logger.warning(f"data_check_timer fluctuate too much {fluctuate_ms}ms")
-        # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        # self.logger.info("_data_check_timer_handler %s", timestamp)
+        drift_ms = now_ms - self._next_data_check_timer_time_ms
+        if abs(drift_ms) > 100:
+            self.logger.warning(
+                "DATA_CHECK timer drift too large | drift_ms=%d " "scheduled_utc=%s actual_utc=%s",
+                drift_ms,
+                _format_utc_ms(self._next_data_check_timer_time_ms),
+                _format_utc_ms(now_ms),
+            )
+        check_boundary_ms = self._next_min_expect_candle_open_time + self._data_check_timer_interval_ms
+        self.logger.debug(
+            "DATA_CHECK timer fired | actual_utc=%s scheduled_utc=%s " "drift_ms=%d check_boundary_utc=%s feed_groups=%d",
+            _format_utc_ms(now_ms),
+            _format_utc_ms(self._next_data_check_timer_time_ms),
+            drift_ms,
+            _format_utc_ms(check_boundary_ms),
+            len(self.feed_groups),
+        )
         for group in self.feed_groups:
             with group.lock:
                 last_processed_candle_open_time_ms = group.last_processed_candle_open_time_ms
-            passed_time = self._next_min_expect_candle_open_time - last_processed_candle_open_time_ms
-            last_process_time = datetime.fromtimestamp(last_processed_candle_open_time_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-            self.logger.debug(
-                f"symbol {group.market_config.symbol} interval {group.market_config.interval} passed_time {passed_time}, last process time {last_process_time}"
+            expected_open_time_ms = _expected_closed_candle_open_time_ms(
+                check_boundary_ms,
+                group.interval_ms,
             )
-            if passed_time > 0 and passed_time >= group.interval_ms:
-                check_time = datetime.fromtimestamp(self._next_min_expect_candle_open_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-                last_process_time = datetime.fromtimestamp(last_processed_candle_open_time_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-
-                self.logger.warning(
-                    f"symbol {group.market_config.symbol} interval {group.market_config.interval} candle miss at time {check_time}, last process time {last_process_time}"
+            if last_processed_candle_open_time_ms is None:
+                self.logger.debug(
+                    "DATA_CHECK group skipped before initialization | symbol=%s " "interval=%s expected_open_time_utc=%s",
+                    group.market_config.symbol,
+                    group.market_config.interval,
+                    _format_utc_ms(expected_open_time_ms),
                 )
-                self._events.put(RunnerEvent(e_type=RunnerEventType.DATA_CHECK, group=group, timestamp_ms=self._next_min_expect_candle_open_time))
+                continue
+            lag_ms = expected_open_time_ms - last_processed_candle_open_time_ms
+            missing = lag_ms > 0
+            self.logger.debug(
+                "DATA_CHECK group evaluated | symbol=%s interval=%s interval_ms=%d "
+                "check_boundary_utc=%s expected_open_time_utc=%s "
+                "last_processed_open_time_utc=%s lag_ms=%d missing=%s",
+                group.market_config.symbol,
+                group.market_config.interval,
+                group.interval_ms,
+                _format_utc_ms(check_boundary_ms),
+                _format_utc_ms(expected_open_time_ms),
+                _format_utc_ms(last_processed_candle_open_time_ms),
+                lag_ms,
+                missing,
+            )
+            if missing:
+                self.logger.warning(
+                    "Candle missing at DATA_CHECK | symbol=%s interval=%s " "expected_open_time_utc=%s last_processed_open_time_utc=%s " "lag_ms=%d",
+                    group.market_config.symbol,
+                    group.market_config.interval,
+                    _format_utc_ms(expected_open_time_ms),
+                    _format_utc_ms(last_processed_candle_open_time_ms),
+                    lag_ms,
+                )
+                self._events.put(
+                    RunnerEvent(
+                        e_type=RunnerEventType.DATA_CHECK,
+                        group=group,
+                        timestamp_ms=expected_open_time_ms,
+                    )
+                )
         self._start_data_check_timer()
 
     def initialize(self) -> None:
@@ -690,91 +849,125 @@ class LiveRunner:
         return predicted
 
     def _dispatch_invalid_to_group(self, group: FeedGroup, candle_open_time_ms: int):
-        market = self._construct_market_view(None, Signal.INVALID, 1.0)
+        try:
+            frame = group.feed.get_latest_data()
+        except Exception:
+            frame = None
+            self.logger.exception(
+                "Failed to read cached data for INVALID dispatch | " "symbol=%s interval=%s",
+                group.market_config.symbol,
+                group.market_config.interval,
+            )
+        market = self._invalid_market_view(frame)
+        candle_open_time_utc = pd.Timestamp(
+            candle_open_time_ms,
+            unit="ms",
+            tz="UTC",
+        ).to_pydatetime()
         for pipeline in group.pipelines:
-            if pipeline.enable == True:
+            if not pipeline.enable:
+                continue
+            try:
                 observation = Observation(
                     market=market,
                     position=pipeline.venue.get_current_state(),
                     account=AccountView(equity=float(pipeline.venue.get_account_equity())),
-                    current_time=pipeline.venue.get_server_time(),
+                    candle_open_time_utc=candle_open_time_utc,
+                    daily_reset_date=pipeline.venue.get_daily_reset_date(candle_open_time_utc),
                 )
                 intent = pipeline.strategy.process(observation)
-                self.logger.info(
-                    "Strategy processed | id=%s hash=%s symbol=%s signal=%s action=%s",
+                pipeline.venue.execute_action(intent)
+                self.logger.warning(
+                    "Invalid candle processed | id=%s hash=%s symbol=%s " "open_time_utc=%s action=%s",
                     pipeline.spec.strategy_id,
                     pipeline.spec.hash_id,
-                    pipeline.spec.market_config.symbol,
-                    market.signal.name,
+                    pipeline.spec.base_define.symbol,
+                    _format_utc_ms(candle_open_time_ms),
                     intent.action.value,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Invalid signal dispatch failed | id=%s hash=%s symbol=%s",
+                    pipeline.spec.strategy_id,
+                    pipeline.spec.hash_id,
+                    pipeline.spec.base_define.symbol,
                 )
 
     def _dispatch(
         self,
         pipeline: StrategyPipeline,
         market: MarketView,
+        candle_open_time_utc: datetime,
     ) -> TradeIntent:
         observation = Observation(
             market=market,
             position=pipeline.venue.get_current_state(),
             account=AccountView(equity=float(pipeline.venue.get_account_equity())),
-            current_time=pipeline.venue.get_server_time(),
+            candle_open_time_utc=candle_open_time_utc,
+            daily_reset_date=pipeline.venue.get_daily_reset_date(candle_open_time_utc),
         )
         intent = pipeline.strategy.process(observation)
+        pipeline.venue.execute_action(intent)
         self.logger.info(
             "Strategy processed | id=%s hash=%s symbol=%s signal=%s action=%s",
             pipeline.spec.strategy_id,
             pipeline.spec.hash_id,
-            pipeline.spec.market_config.symbol,
+            pipeline.spec.base_define.symbol,
             market.signal.name,
             intent.action.value,
         )
         return intent
 
-    def _construct_market_view(self, frame: Optional[pd.DataFrame], signal, pred_prob) -> MarketView:
+    @staticmethod
+    def _invalid_market_view(frame: Optional[pd.DataFrame]) -> MarketView:
         row: Mapping[str, Any] = {}
         if frame is not None and not frame.empty:
             row = frame.iloc[-1]
-        last_close = row.get("close", 0)
+        last_close = _optional_float(row.get("close"), 0.0) or 0.0
         return MarketView(
             price=last_close,
-            open=row.get("open", 0),
-            high=row.get("high", 0),
-            low=row.get("low", 0),
+            open=_optional_float(row.get("open")),
+            high=_optional_float(row.get("high")),
+            low=_optional_float(row.get("low")),
             close=last_close,
-            signal=signal,
-            pred_prob=pred_prob,
-            atr_pct=0.0,
-            bars_to_close=math.inf,  # cryptocurrency
+            signal=Signal.INVALID,
+            pred_prob=1.0,
+            expected_vol=_optional_float(row.get("expected_vol")),
+            bars_to_close=_optional_float(
+                row.get("bars_to_close"),
+                math.inf,
+            ),
         )
 
     def _process_closed_candle(self, group: FeedGroup, last_processed_candle_open_time_ms, candle_open_time_ms: int) -> None:
         expected_open_time_ms = last_processed_candle_open_time_ms + group.interval_ms
         if candle_open_time_ms > expected_open_time_ms:
             missed_count = (candle_open_time_ms - expected_open_time_ms) // group.interval_ms
-            last_process_time = datetime.fromtimestamp(last_processed_candle_open_time_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-            new_candle_open_time = datetime.fromtimestamp(candle_open_time_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
             self.logger.warning(
-                f"symbol {group.market_config.symbol} interval {group.market_config.interval} miss count {missed_count} "
-                f"last_processed_candle_open_time: {last_process_time} new_candle_open_time: {new_candle_open_time}"
+                "Closed-kline gap detected | symbol=%s interval=%s " "miss_count=%d last_processed_open_time_utc=%s " "new_candle_open_time_utc=%s",
+                group.market_config.symbol,
+                group.market_config.interval,
+                missed_count,
+                _format_utc_ms(last_processed_candle_open_time_ms),
+                _format_utc_ms(candle_open_time_ms),
             )
 
         frame = group.feed.get_latest_data()
         if frame is None or frame.empty:
             self.logger.error(
-                "Closed-kline event has no cached data | symbol=%s interval=%s " "candle_open_time_ms=%d",
+                "Closed-kline event has no cached data | symbol=%s interval=%s " "candle_open_time_utc=%s",
                 group.market_config.symbol,
                 group.market_config.interval,
-                candle_open_time_ms,
+                _format_utc_ms(candle_open_time_ms),
             )
             self._dispatch_invalid_to_group(group, candle_open_time_ms)
         else:
             if frame.empty or int(frame.iloc[-1]["open_time_ms_utc"]) != candle_open_time_ms:
                 self.logger.error(
-                    "Closed-kline event is absent from cache | symbol=%s interval=%s " "candle_open_time_ms=%d",
+                    "Closed-kline event is absent from cache | symbol=%s interval=%s " "candle_open_time_utc=%s",
                     group.market_config.symbol,
                     group.market_config.interval,
-                    candle_open_time_ms,
+                    _format_utc_ms(candle_open_time_ms),
                 )
                 self._dispatch_invalid_to_group(group, candle_open_time_ms)
             else:
@@ -782,35 +975,93 @@ class LiveRunner:
                     if not pipeline.enable:
                         continue
                     try:
-                        prepared = _prepare_market_frame(frame, pipeline.spec)
+                        prepared = _prepare_market_frame(frame, pipeline.spec.base_define)
                         features = pipeline.feature_factory.generate(prepared)
                         predicted = self._predict(pipeline, features)
                         latest_prediction = predicted.iloc[-1]
                         if self._prediction_callback is not None:
-                            self._prediction_callback(
-                                pipeline,
-                                candle_open_time_ms,
-                                latest_prediction.copy(),
-                            )
-                        maket_view = self._construct_market_view(frame, latest_prediction["pred"], latest_prediction["pred_prob"])
-                        self._dispatch(pipeline, maket_view)
+                            self._prediction_callback(pipeline, candle_open_time_ms, latest_prediction.copy())
+                        market = _market_view(predicted)
+                        candle_open_time_utc = pd.Timestamp(
+                            candle_open_time_ms,
+                            unit="ms",
+                            tz="UTC",
+                        ).to_pydatetime()
+                        self._dispatch(
+                            pipeline,
+                            market,
+                            candle_open_time_utc,
+                        )
                     except Exception:
                         self.logger.exception(
                             "Strategy cycle failed; dispatching INVALID | " "id=%s hash=%s symbol=%s",
                             pipeline.spec.strategy_id,
                             pipeline.spec.hash_id,
-                            pipeline.spec.market_config.symbol,
+                            pipeline.spec.base_define.symbol,
                         )
                         try:
-                            maket_view = self._construct_market_view(frame, Signal.INVALID, 1.0)
-                            self._dispatch(pipeline, maket_view)
+                            market = self._invalid_market_view(frame)
+                            candle_open_time_utc = pd.Timestamp(
+                                candle_open_time_ms,
+                                unit="ms",
+                                tz="UTC",
+                            ).to_pydatetime()
+                            self._dispatch(
+                                pipeline,
+                                market,
+                                candle_open_time_utc,
+                            )
                         except Exception:
                             self.logger.exception(
                                 "Fallback INVALID dispatch failed | id=%s hash=%s symbol=%s",
                                 pipeline.spec.strategy_id,
                                 pipeline.spec.hash_id,
-                                pipeline.spec.market_config.symbol,
+                                pipeline.spec.base_define.symbol,
                             )
+
+    def _process_event(self, event: RunnerEvent) -> bool:
+        with event.group.lock:
+            last_processed_candle_open_time_ms = event.group.last_processed_candle_open_time_ms
+            if last_processed_candle_open_time_ms is not None and event.timestamp_ms <= last_processed_candle_open_time_ms:
+                self.logger.warning(
+                    "Stale runner event ignored | type=%s symbol=%s interval=%s " "last_processed_open_time_utc=%s received_open_time_utc=%s",
+                    event.e_type.name,
+                    event.group.market_config.symbol,
+                    event.group.market_config.interval,
+                    _format_utc_ms(last_processed_candle_open_time_ms),
+                    _format_utc_ms(event.timestamp_ms),
+                )
+                return False
+            event.group.last_processed_candle_open_time_ms = event.timestamp_ms
+
+        if event.e_type == RunnerEventType.CLOSED_CANDLE:
+            self.logger.debug("")
+            self._process_closed_candle(
+                event.group,
+                last_processed_candle_open_time_ms,
+                event.timestamp_ms,
+            )
+        elif event.e_type == RunnerEventType.DATA_CHECK:
+            self._dispatch_invalid_to_group(
+                event.group,
+                event.timestamp_ms,
+            )
+        else:
+            raise ValueError(f"Unsupported runner event type: {event.e_type!r}")
+        return True
+
+    def process_pending_events(self) -> int:
+        """Process every event currently queued without blocking."""
+        if self._closed:
+            raise RuntimeError("LiveRunner is already closed")
+        processed_count = 0
+        while True:
+            try:
+                event = self._events.get_nowait()
+            except queue.Empty:
+                return processed_count
+            if self._process_event(event):
+                processed_count += 1
 
     def run_forever(self) -> None:
         try:
@@ -823,23 +1074,13 @@ class LiveRunner:
                     event = self._events.get(
                         timeout=(self._data_check_timer_max_cycle_ms // 1000 + 1),
                     )
-                    with event.group.lock:
-                        last_processed_candle_open_time_ms = event.group.last_processed_candle_open_time_ms
-                        if last_processed_candle_open_time_ms is not None and event.timestamp_ms <= last_processed_candle_open_time_ms:  # expired event
-                            self.logger.warning(
-                                "Stale closed-kline event ignored | symbol=%s interval=%s " "last_processed_candle_open_time_ms=%d received_open_time_ms=%d",
-                                event.group.market_config.symbol,
-                                event.group.market_config.interval,
-                                last_processed_candle_open_time_ms,
-                                event.timestamp_ms,
-                            )
-                            continue
-                        event.group.last_processed_candle_open_time_ms = event.timestamp_ms
-                    if event.e_type == RunnerEventType.CLOSED_CANDLE:
-                        self._process_closed_candle(event.group, last_processed_candle_open_time_ms, event.timestamp_ms)
-                    elif event.e_type == RunnerEventType.DATA_CHECK:
-                        if event.timestamp_ms > last_processed_candle_open_time_ms:
-                            self._dispatch_invalid_to_group(event.group, self._next_min_expect_candle_open_time)
+                    self.logger.info(
+                        "Runner event received | group=%s type=%s time_utc=%s",
+                        event.group.name,
+                        event.e_type.name,
+                        _format_utc_ms(event.timestamp_ms),
+                    )
+                    self._process_event(event)
                 except queue.Empty:
                     pass
 
@@ -903,10 +1144,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logger, _ = common.setup_session_logger(
-        sub_folder="live_runner",
-        symbol="",
-    )
+    logger, _ = common.setup_session_logger(sub_folder="live_runner", symbol="", console_level=logging.DEBUG)
+    logging.getLogger("urllib3").setLevel(logging.INFO)
     runner = LiveRunner.from_config(
         args.config,
         logger=logger,

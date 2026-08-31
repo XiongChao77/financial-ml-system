@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import pandas as pd
@@ -11,6 +12,21 @@ import requests
 import websocket
 
 from trade.feed.feed_base import ClosedCandleCallback, DataFeedBase
+
+
+def _format_utc_ms(timestamp_ms: Any) -> str:
+    """Format an epoch-millisecond timestamp for human-readable logs."""
+
+    try:
+        timestamp = int(timestamp_ms)
+    except (TypeError, ValueError):
+        return str(timestamp_ms)
+    return datetime.fromtimestamp(
+        timestamp / 1000,
+        tz=timezone.utc,
+    ).strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )[:-3]
 
 
 class BinanceDataFeed(DataFeedBase):
@@ -23,7 +39,7 @@ class BinanceDataFeed(DataFeedBase):
     }
     WEBSOCKET_URLS: dict[str, str] = {
         "spot": "wss://stream.binance.com:9443/ws/{stream}",
-        "um": "wss://fstream.binance.com/ws/{stream}",
+        "um": "wss://fstream.binance.com/market/ws/{stream}",
         "cm": "wss://dstream.binance.com/ws/{stream}",
     }
 
@@ -31,6 +47,7 @@ class BinanceDataFeed(DataFeedBase):
     RECONNECT_DELAY_SECONDS = 5.0
     MAX_HISTORY_ATTEMPTS = 3
     HISTORY_RETRY_DELAY_SECONDS = 0.5
+    MAX_STARTUP_SYNC_ROUNDS = 10
 
     def __init__(
         self,
@@ -268,23 +285,24 @@ class BinanceDataFeed(DataFeedBase):
                 self.logger.warning(
                     "Binance history incomplete; retrying | "
                     "symbol=%s interval=%s attempt=%d/%d missing=%d "
-                    "first_missing_open_time_ms=%d "
-                    "last_missing_open_time_ms=%d",
+                    "first_missing_open_time_utc=%s "
+                    "last_missing_open_time_utc=%s",
                     self.symbol,
                     self.interval,
                     attempt,
                     self.MAX_HISTORY_ATTEMPTS,
                     len(missing_open_times),
-                    missing_open_times[0],
-                    missing_open_times[-1],
+                    _format_utc_ms(missing_open_times[0]),
+                    _format_utc_ms(missing_open_times[-1]),
                 )
                 time.sleep(self.HISTORY_RETRY_DELAY_SECONDS)
 
         if missing_open_times:
+            readable_missing_open_times = [_format_utc_ms(open_time_ms) for open_time_ms in missing_open_times]
             raise RuntimeError(
                 "Failed to acquire complete Binance historical market data "
                 f"after {self.MAX_HISTORY_ATTEMPTS} attempts: "
-                f"missing open times {missing_open_times}"
+                f"missing open times UTC {readable_missing_open_times}"
             )
 
         frame.reset_index(drop=True, inplace=True)
@@ -304,18 +322,141 @@ class BinanceDataFeed(DataFeedBase):
         if len(frame) != required_bars or not candle_durations.eq(interval_ms).all():
             raise RuntimeError("Failed to acquire complete Binance historical market data: " "invalid candle count or duration")
 
-        last_open_time_ms = int(frame.iloc[-1]["open_time_ms_utc"])
-
         with self._cache_lock:
             self.local_cache = frame
             self._interval_ms = int(interval_ms)
 
+        self._synchronize_cache_to_latest_closed(
+            required_bars,
+            interval_ms,
+        )
+
+        with self._cache_lock:
+            if self.local_cache is None or self.local_cache.empty:
+                raise RuntimeError("Binance data cache became unavailable during startup synchronization")
+            final_bar_count = len(self.local_cache)
+            last_open_time_ms = int(self.local_cache.iloc[-1]["open_time_ms_utc"])
+
         self.logger.info(
-            "Binance cache initialized | symbol=%s interval=%s bars=%d " "last_open_time_ms=%d",
+            "Binance cache initialized | symbol=%s interval=%s bars=%d " "last_open_time_utc=%s",
             self.symbol,
             self.interval,
-            len(frame),
-            last_open_time_ms,
+            final_bar_count,
+            _format_utc_ms(last_open_time_ms),
+        )
+
+    @staticmethod
+    def _latest_closed_open_time_ms(interval_ms: int) -> int:
+        now_ms = int(time.time() * 1000)
+        return now_ms // interval_ms * interval_ms - interval_ms
+
+    def _missing_required_tail_open_times(
+        self,
+        target_open_time_ms: int,
+        required_bars: int,
+        interval_ms: int,
+    ) -> list[int]:
+        first_required_open_time_ms = target_open_time_ms - (required_bars - 1) * interval_ms
+        expected_open_times = set(
+            range(
+                first_required_open_time_ms,
+                target_open_time_ms + interval_ms,
+                interval_ms,
+            )
+        )
+        with self._cache_lock:
+            if self.local_cache is None:
+                raise RuntimeError("Binance data cache is not initialized")
+            cached_open_times = self._get_open_time_set(self.local_cache)
+        return sorted(expected_open_times - cached_open_times)
+
+    def _synchronize_cache_to_latest_closed(
+        self,
+        required_bars: int,
+        interval_ms: int,
+    ) -> None:
+        """Catch up candles closed while the initial history was downloading."""
+
+        for sync_round in range(1, self.MAX_STARTUP_SYNC_ROUNDS + 1):
+            target_open_time_ms = self._latest_closed_open_time_ms(interval_ms)
+            missing_open_times = self._missing_required_tail_open_times(
+                target_open_time_ms,
+                required_bars,
+                interval_ms,
+            )
+
+            if missing_open_times:
+                self.logger.info(
+                    "Synchronizing Binance cache after history load | "
+                    "symbol=%s interval=%s round=%d/%d missing_bars=%d "
+                    "first_missing_open_time_utc=%s last_missing_open_time_utc=%s",
+                    self.symbol,
+                    self.interval,
+                    sync_round,
+                    self.MAX_STARTUP_SYNC_ROUNDS,
+                    len(missing_open_times),
+                    _format_utc_ms(missing_open_times[0]),
+                    _format_utc_ms(missing_open_times[-1]),
+                )
+
+            for attempt in range(1, self.MAX_HISTORY_ATTEMPTS + 1):
+                if not missing_open_times:
+                    break
+
+                try:
+                    with self._backfill_lock:
+                        self._backfill_cache_once(
+                            missing_open_times[0],
+                            missing_open_times[-1],
+                            interval_ms,
+                        )
+                except Exception:
+                    self.logger.exception(
+                        "Binance startup synchronization request failed | "
+                        "symbol=%s interval=%s round=%d/%d attempt=%d/%d "
+                        "first_missing_open_time_utc=%s last_missing_open_time_utc=%s",
+                        self.symbol,
+                        self.interval,
+                        sync_round,
+                        self.MAX_STARTUP_SYNC_ROUNDS,
+                        attempt,
+                        self.MAX_HISTORY_ATTEMPTS,
+                        _format_utc_ms(missing_open_times[0]),
+                        _format_utc_ms(missing_open_times[-1]),
+                    )
+
+                missing_open_times = self._missing_required_tail_open_times(
+                    target_open_time_ms,
+                    required_bars,
+                    interval_ms,
+                )
+                if missing_open_times and attempt < self.MAX_HISTORY_ATTEMPTS:
+                    time.sleep(self.HISTORY_RETRY_DELAY_SECONDS)
+
+            if missing_open_times:
+                readable_missing_open_times = [_format_utc_ms(open_time_ms) for open_time_ms in missing_open_times]
+                raise RuntimeError(
+                    "Failed to synchronize Binance cache to the latest closed candle: "
+                    f"missing open times UTC {readable_missing_open_times}"
+                )
+
+            latest_target_open_time_ms = self._latest_closed_open_time_ms(interval_ms)
+            if latest_target_open_time_ms <= target_open_time_ms:
+                return
+
+            self.logger.info(
+                "Binance startup synchronization crossed another candle boundary | "
+                "symbol=%s interval=%s synchronized_open_time_utc=%s "
+                "new_target_open_time_utc=%s",
+                self.symbol,
+                self.interval,
+                _format_utc_ms(target_open_time_ms),
+                _format_utc_ms(latest_target_open_time_ms),
+            )
+
+        raise RuntimeError(
+            "Failed to synchronize Binance cache because candle boundaries "
+            f"kept advancing after {self.MAX_STARTUP_SYNC_ROUNDS} rounds"
         )
 
     def start(self, on_closed_candle: ClosedCandleCallback) -> None:
@@ -409,11 +550,11 @@ class BinanceDataFeed(DataFeedBase):
 
             if kline.get("x") is not True:
                 self.logger.debug(
-                    "Received open Binance kline | " "symbol=%s interval=%s open_time_ms=%s close_time_ms=%s",
+                    "Received open Binance kline | symbol=%s interval=%s " "open_time_utc=%s close_time_utc=%s",
                     self.symbol,
                     self.interval,
-                    kline.get("t"),
-                    kline.get("T"),
+                    _format_utc_ms(kline.get("t")),
+                    _format_utc_ms(kline.get("T")),
                 )
                 return
 
@@ -429,13 +570,20 @@ class BinanceDataFeed(DataFeedBase):
         callback = self._on_closed_candle
         if candle_open_time_ms is not None and callback is not None:
             try:
+                self.logger.debug(
+                    "Received closed Binance kline | symbol=%s interval=%s " "open_time_utc=%s close_time_utc=%s",
+                    self.symbol,
+                    self.interval,
+                    _format_utc_ms(kline.get("t")),
+                    _format_utc_ms(kline.get("T")),
+                )
                 callback(candle_open_time_ms)
             except Exception:
                 self.logger.exception(
-                    "Closed-kline callback failed | " "symbol=%s interval=%s open_time_ms_utc=%d",
+                    "Closed-kline callback failed | symbol=%s interval=%s " "open_time_utc=%s",
                     self.symbol,
                     self.interval,
-                    candle_open_time_ms,
+                    _format_utc_ms(candle_open_time_ms),
                 )
 
     def _store_closed_kline(self, kline: dict[str, Any]) -> Optional[int]:
@@ -475,11 +623,11 @@ class BinanceDataFeed(DataFeedBase):
 
             if candle_open_time_ms <= latest_cached_open_time_ms:
                 self.logger.info(
-                    "Ignoring stale Binance closed kline | " "symbol=%s interval=%s open_time_ms=%d " "latest_cached_open_time_ms=%d",
+                    "Ignoring stale Binance closed kline | symbol=%s interval=%s " "open_time_utc=%s latest_cached_open_time_utc=%s",
                     self.symbol,
                     self.interval,
-                    candle_open_time_ms,
-                    latest_cached_open_time_ms,
+                    _format_utc_ms(candle_open_time_ms),
+                    _format_utc_ms(latest_cached_open_time_ms),
                 )
                 return None
 
@@ -494,16 +642,16 @@ class BinanceDataFeed(DataFeedBase):
 
                 self.logger.warning(
                     "Binance closed-kline gap detected | "
-                    "symbol=%s interval=%s latest_cached_open_time_ms=%d "
-                    "current_open_time_ms=%d "
-                    "first_missing_open_time_ms=%d "
-                    "last_missing_open_time_ms=%d",
+                    "symbol=%s interval=%s latest_cached_open_time_utc=%s "
+                    "current_open_time_utc=%s "
+                    "first_missing_open_time_utc=%s "
+                    "last_missing_open_time_utc=%s",
                     self.symbol,
                     self.interval,
-                    latest_cached_open_time_ms,
-                    candle_open_time_ms,
-                    missing_start_open_time_ms,
-                    missing_end_open_time_ms,
+                    _format_utc_ms(latest_cached_open_time_ms),
+                    _format_utc_ms(candle_open_time_ms),
+                    _format_utc_ms(missing_start_open_time_ms),
+                    _format_utc_ms(missing_end_open_time_ms),
                 )
 
             self.local_cache = pd.concat(
@@ -593,13 +741,13 @@ class BinanceDataFeed(DataFeedBase):
                     )
                 except Exception:
                     self.logger.exception(
-                        "Binance background backfill request failed | " "symbol=%s interval=%s attempt=%d/%d " "first_open_time_ms=%d last_open_time_ms=%d",
+                        "Binance background backfill request failed | " "symbol=%s interval=%s attempt=%d/%d " "first_open_time_utc=%s last_open_time_utc=%s",
                         self.symbol,
                         self.interval,
                         attempt,
                         self.MAX_HISTORY_ATTEMPTS,
-                        fetch_start_open_time_ms,
-                        fetch_end_open_time_ms,
+                        _format_utc_ms(fetch_start_open_time_ms),
+                        _format_utc_ms(fetch_end_open_time_ms),
                     )
 
                 with self._cache_lock:
@@ -611,12 +759,12 @@ class BinanceDataFeed(DataFeedBase):
 
                 if not missing_open_times:
                     self.logger.info(
-                        "Binance background backfill completed | " "symbol=%s interval=%s bars=%d " "first_open_time_ms=%d last_open_time_ms=%d",
+                        "Binance background backfill completed | " "symbol=%s interval=%s bars=%d " "first_open_time_utc=%s last_open_time_utc=%s",
                         self.symbol,
                         self.interval,
                         len(expected_open_times),
-                        start_open_time_ms,
-                        end_open_time_ms,
+                        _format_utc_ms(start_open_time_ms),
+                        _format_utc_ms(end_open_time_ms),
                     )
                     return
 
@@ -624,25 +772,25 @@ class BinanceDataFeed(DataFeedBase):
                     self.logger.warning(
                         "Binance background backfill incomplete; retrying | "
                         "symbol=%s interval=%s attempt=%d/%d missing=%d "
-                        "first_missing_open_time_ms=%d "
-                        "last_missing_open_time_ms=%d",
+                        "first_missing_open_time_utc=%s "
+                        "last_missing_open_time_utc=%s",
                         self.symbol,
                         self.interval,
                         attempt,
                         self.MAX_HISTORY_ATTEMPTS,
                         len(missing_open_times),
-                        missing_open_times[0],
-                        missing_open_times[-1],
+                        _format_utc_ms(missing_open_times[0]),
+                        _format_utc_ms(missing_open_times[-1]),
                     )
 
                     if self._stop_event.wait(self.HISTORY_RETRY_DELAY_SECONDS):
                         return
 
             self.logger.error(
-                "Binance background backfill failed | " "symbol=%s interval=%s missing=%s",
+                "Binance background backfill failed | symbol=%s interval=%s " "missing_open_times_utc=%s",
                 self.symbol,
                 self.interval,
-                missing_open_times,
+                [_format_utc_ms(open_time_ms) for open_time_ms in missing_open_times],
             )
 
     def _backfill_cache_once(

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from trade.core.protocol import OrderType, PositionView
 from trade.core.venue_base import VenueBase
 
@@ -11,7 +9,10 @@ from trade.core.venue_base import VenueBase
 class MockVenue(VenueBase):
     """Implement the venue contract without changing account or position state."""
 
-    def __init__(self, initial_equity: float = 10_000.0):
+    def __init__(
+        self,
+        initial_equity: float = 10_000.0,
+    ):
         if initial_equity <= 0:
             raise ValueError("initial_equity must be positive")
         self._equity = float(initial_equity)
@@ -21,9 +22,6 @@ class MockVenue(VenueBase):
 
     def get_current_state(self) -> PositionView:
         return PositionView()
-
-    def get_server_time(self) -> datetime:
-        return datetime.now(timezone.utc)
 
     def get_last_position_open_time(self):
         return None

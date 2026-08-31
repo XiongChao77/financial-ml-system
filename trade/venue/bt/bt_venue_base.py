@@ -1,8 +1,8 @@
-from enum import IntEnum
-from datetime import timezone
+from datetime import UTC, timezone
 import backtrader as bt
 import numpy as np
-import logging,sys,os
+import logging, sys, os
+
 current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", "..", ".."))
 # Import project modules
@@ -25,13 +25,14 @@ class TradeRole:
     TAKE_PROFIT = "tp"
     CLOSE = "close"
 
-class BtVenue(VenueBase,bt.Strategy):
+
+class BtVenue(VenueBase, bt.Strategy):
     params = dict(
-        strategy_config = None,  # opaque strategy-owned config; subclasses know its concrete type
-        initial_equity = None,   # runtime account baseline, not a strategy parameter
-        predict_num = None,    # look-ahead horizon of the label alignment audit; None skips the audit
-        margin_warn_pct = None,  # copied from BrokerConfig by the runner
-        bar_interval_ms = None,  # exact data cadence for strategy continuity checks
+        strategy_config=None,  # opaque strategy-owned config; subclasses know its concrete type
+        initial_equity=None,  # runtime account baseline, not a strategy parameter
+        predict_num=None,  # look-ahead horizon of the label alignment audit; None skips the audit
+        margin_warn_pct=None,  # copied from BrokerConfig by the runner
+        data_interval_ms=None,  # exact data cadence for strategy continuity checks
     )
 
     def __init__(self):
@@ -43,13 +44,15 @@ class BtVenue(VenueBase,bt.Strategy):
         self.closed_trade_hold_bars = []
 
         # === generic venue level metrics (shared by every strategy) ===
-        self.trade_logs = []          # per-order fill log, used by the frontend/report
-        self.max_margin_level = 0.0   # peak margin usage
-        self.all_preds = []           # predictions the strategy actually saw (input signal quality check)
+        self.trade_logs = []  # per-order fill log, used by the frontend/report
+        self.max_margin_level = 0.0  # peak margin usage
+        self.all_preds = []  # predictions the strategy actually saw (input signal quality check)
         self.all_labels = []
         self.audit_results = {
-            'long_total': 0, 'long_correct': 0,
-            'short_total': 0, 'short_correct': 0,
+            "long_total": 0,
+            "long_correct": 0,
+            "short_total": 0,
+            "short_correct": 0,
         }
         self.leverage = self.broker.getcommissioninfo(self.data).p.leverage
 
@@ -63,7 +66,7 @@ class BtVenue(VenueBase,bt.Strategy):
         self._audit_label_integrity(self.p.predict_num)
 
     def line_value(self, name, idx=0, default=None):
-        """Safely read an optional line off data (not every feed carries atr_pct/label etc.)"""
+        """Safely read an optional line from feeds with different schemas."""
         line = getattr(self.data, name, None)
         if line is None:
             return default
@@ -73,27 +76,35 @@ class BtVenue(VenueBase,bt.Strategy):
             return default
         return default if val is None else val
 
-    def current_position_dir(self) -> PositionDir:
-        if not self.position:
-            return PositionDir.FLAT
-        return PositionDir.POSITIVE if self.position.size > 0 else PositionDir.NEGATIVE
+    def get_current_state(self) -> PositionView:
+        if self.position.size > 0:
+            direction = PositionDir.POSITIVE
+        elif self.position.size < 0:
+            direction = PositionDir.NEGATIVE
+        else:
+            direction = PositionDir.FLAT
+        return PositionView(
+            dir=direction,
+            size=abs(float(self.position.size)),
+            price=float(self.position.price),
+        )
+
+    def _candle_open_time_utc(self):
+        candle_time = self.data.datetime.datetime(0)
+        if candle_time.tzinfo is None:
+            return candle_time.replace(tzinfo=UTC)
+        return candle_time.astimezone(UTC)
 
     # ================================================================
     # Inbound: assemble the feed's market signals + this venue's account/position into an Observation
     # ================================================================
-    def observe(self, layers=None) -> Observation:
-        """
-        Subclasses call self.observe() in next() to get the strategy layer input.
-        When layers is omitted it degrades to "in position means 1 layer"; strategies needing the real count (martingale) pass it explicitly.
-        """
+    def observe(self) -> Observation:
+        """Assemble the strategy observation for the current backtest bar."""
+        candle_open_time_utc = self._candle_open_time_utc()
         pred = self.line_value("pred")
         pred_prob = self.line_value("pred_prob")
-        atr_pct = self.line_value("atr_pct")
         expected_vol = self.line_value("expected_vol")
         bars_to_close = self.line_value("bars_to_close")
-        position_dir = self.current_position_dir()
-        if layers is None:
-            layers = 0 if position_dir == PositionDir.FLAT else 1
 
         market = MarketView(
             price=self.data.close[0],
@@ -103,25 +114,17 @@ class BtVenue(VenueBase,bt.Strategy):
             close=self.data.close[0],
             signal=Signal.INVALID if pred is None or np.isnan(pred) else Signal(int(pred)),
             pred_prob=0.0 if pred_prob is None or np.isnan(pred_prob) else float(pred_prob),
-            atr_pct=0.0 if atr_pct is None or np.isnan(atr_pct) else float(atr_pct),
-            expected_vol=(
-                None
-                if expected_vol is None or np.isnan(expected_vol)
-                else float(expected_vol)
-            ),
-            slow_atr=self.line_value("slow_atr"),
-            vol_regime=self.line_value("vol_regime"),
-            bars_to_close=(
-                float("inf")
-                if bars_to_close is None or np.isnan(bars_to_close)
-                else float(bars_to_close)
-            ),
+            expected_vol=(None if expected_vol is None or np.isnan(expected_vol) else float(expected_vol)),
+            bars_to_close=(float("inf") if bars_to_close is None or np.isnan(bars_to_close) else float(bars_to_close)),
         )
         return Observation(
             market=market,
-            position=PositionView(dir=position_dir, layers=layers, size=self.position.size, price= self.position.price ),
+            position=self.get_current_state(),
             account=AccountView(equity=self.broker.getvalue()),
-            current_time=self.data.datetime.datetime(0),
+            candle_open_time_utc=candle_open_time_utc,
+            daily_reset_date=self.get_daily_reset_date(
+                candle_open_time_utc
+            ),
         )
 
     def _audit_margin(self):
@@ -157,13 +160,13 @@ class BtVenue(VenueBase,bt.Strategy):
         current_price = self.data.close[0]
 
         if past_label == common.Signal.POSITIVE:
-            self.audit_results['long_total'] += 1
+            self.audit_results["long_total"] += 1
             if current_price > past_price:
-                self.audit_results['long_correct'] += 1
+                self.audit_results["long_correct"] += 1
         elif past_label == common.Signal.NEGATIVE:
-            self.audit_results['short_total'] += 1
+            self.audit_results["short_total"] += 1
             if current_price < past_price:
-                self.audit_results['short_correct'] += 1
+                self.audit_results["short_correct"] += 1
 
     def record_order_log(self, order, **extra):
         """Append one fill to trade_logs (uniform fields; sl/tp info of bracket orders comes along)"""
@@ -192,19 +195,17 @@ class BtVenue(VenueBase,bt.Strategy):
     # ================================================================
     def stop(self):
         # Let the strategy settle and print its own report first, then the venue side metrics
-        strategy = getattr(self, 'strategy', None)
-        if strategy is not None and hasattr(strategy, 'finalize'):
+        strategy = getattr(self, "strategy", None)
+        if strategy is not None and hasattr(strategy, "finalize"):
             strategy.finalize()
         self.print_signal_quality_report()
         self.print_label_audit_report()
-        self.logger.info(
-            f"Start Value: {self.broker.startingcash:.2f} | End Value: {self.broker.getvalue():.2f}"
-        )
+        self.logger.info(f"Start Value: {self.broker.startingcash:.2f} | End Value: {self.broker.getvalue():.2f}")
         self.logger.info(f"🚩 Backtest complete | Peak margin utilization: {self.max_margin_level:.2%}")
 
     def print_signal_quality_report(self):
         """Input signal macro-F1 recomputed on the strategy side (matches the training metric, catches bad data)"""
-        input_f1 = self.executor_metrics().get('input_f1')
+        input_f1 = self.executor_metrics().get("input_f1")
         if input_f1 is None:
             return
         self.logger.info("\n" + "🔍" + "=" * 25 + " Strategy Input Integrity Check " + "=" * 25)
@@ -217,19 +218,18 @@ class BtVenue(VenueBase,bt.Strategy):
     def executor_metrics(self) -> dict:
         """Generic venue level metrics (present for every strategy)"""
         metrics = {
-            'strategy': type(self).__name__,
-            'max_margin_level': float(self.max_margin_level),
+            "strategy": type(self).__name__,
+            "max_margin_level": float(self.max_margin_level),
         }
         if self.all_preds:
             from sklearn.metrics import f1_score
-            metrics['input_f1'] = float(
-                f1_score(np.array(self.all_labels), np.array(self.all_preds), average='macro')
-            )
-        for side in ('long', 'short'):
-            total = self.audit_results[f'{side}_total']
+
+            metrics["input_f1"] = float(f1_score(np.array(self.all_labels), np.array(self.all_preds), average="macro"))
+        for side in ("long", "short"):
+            total = self.audit_results[f"{side}_total"]
             if total:
-                metrics[f'label_{side}_consistency'] = self.audit_results[f'{side}_correct'] / total
-                metrics[f'label_{side}_count'] = total
+                metrics[f"label_{side}_consistency"] = self.audit_results[f"{side}_correct"] / total
+                metrics[f"label_{side}_count"] = total
         return metrics
 
     def strategy_metrics(self) -> tuple[dict, dict]:
@@ -244,18 +244,19 @@ class BtVenue(VenueBase,bt.Strategy):
 
     def print_label_audit_report(self):
         """Label alignment audit summary"""
-        if not (self.audit_results['long_total'] or self.audit_results['short_total']):
+        if not (self.audit_results["long_total"] or self.audit_results["short_total"]):
             return
         self.logger.info("\n" + "🔍" * 5 + " Label Alignment Audit " + "🔍" * 5)
-        for side in ['long', 'short']:
-            correct = self.audit_results[f'{side}_correct']
-            total = self.audit_results[f'{side}_total']
+        for side in ["long", "short"]:
+            correct = self.audit_results[f"{side}_correct"]
+            total = self.audit_results[f"{side}_total"]
             acc = (correct / total * 100) if total > 0 else 0
-            icon = "📈" if side == 'long' else "📉"
+            icon = "📈" if side == "long" else "📉"
             self.logger.info(f"{icon} {side.upper()} label consistency: {acc:.2f}% ({correct}/{total})")
 
-        total_acc = (self.audit_results['long_correct'] + self.audit_results['short_correct']) / \
-                    (max(1, self.audit_results['long_total'] + self.audit_results['short_total']))
+        total_acc = (self.audit_results["long_correct"] + self.audit_results["short_correct"]) / (
+            max(1, self.audit_results["long_total"] + self.audit_results["short_total"])
+        )
         if total_acc < 0.99:
             self.logger.error("🚨 Warning: label consistency is below 99%; the data pipeline may contain an index shift.")
         else:
@@ -287,13 +288,16 @@ class BtVenue(VenueBase,bt.Strategy):
     def close_position(self, size=None, **kwargs):
         self.logger.debug(f"close_position ammount :{size}")
         current_size = self.position.size
-        if size is None or size >= current_size:
+        if current_size == 0:
+            raise RuntimeError("currently no position")
+        if size is None or abs(size) >= abs(current_size):
             close_order = self.close(**kwargs)
             close_order.addinfo(role=TradeRole.CLOSE, close_type="full")
-            self._cancel_all_live_orders() # helper: cancel every pending order
+            self._cancel_all_live_orders()  # helper: cancel every pending order
             self.live_trades.clear()
         else:
             raise RuntimeError("reduce not support")
+
     # ----------------------------------------------------------------
     # Helper logic
     # ----------------------------------------------------------------
@@ -312,7 +316,7 @@ class BtVenue(VenueBase,bt.Strategy):
             # 1. Is this an increase in exposure (open or pyramid)?
             # i.e. buying while long or flat, or selling while short or flat
 
-            if order.info['role'] == 'open':
+            if order.info["role"] == "open":
                 type_str = "🚀 ENTRY/ADD"
             else:
                 # 2. If exposure is reduced, derive the intent from the order type and the pnl
@@ -356,9 +360,7 @@ class BtVenue(VenueBase,bt.Strategy):
     # --- subclass extension points: no need to override notify_order ---
     def on_order_filled(self, order):
         """Forward entry fills to strategies that maintain their own position ledger."""
-        is_entry = order.info.get("is_entry", False) or (
-            order.info.get("role") == TradeRole.OPEN
-        )
+        is_entry = order.info.get("is_entry", False) or (order.info.get("role") == TradeRole.OPEN)
         strategy = getattr(self, "strategy", None)
         on_fill = getattr(strategy, "on_fill", None)
         if is_entry and callable(on_fill):
@@ -414,17 +416,12 @@ class BtVenue(VenueBase,bt.Strategy):
         stop_price = None
         take_profit_price = None
         if stop_loss_pct:
-            stop_price = price * (
-                1.0 - stop_loss_pct if is_buy else 1.0 + stop_loss_pct
-            )
+            stop_price = price * (1.0 - stop_loss_pct if is_buy else 1.0 + stop_loss_pct)
         if take_profit_pct:
-            take_profit_price = price * (
-                1.0 + take_profit_pct if is_buy else 1.0 - take_profit_pct
-            )
+            take_profit_price = price * (1.0 + take_profit_pct if is_buy else 1.0 - take_profit_pct)
 
         self.logger.debug(
-            "_open_bracket type=%s price=%s size=%s stop_price=%s "
-            "take_profit_price=%s",
+            "_open_bracket type=%s price=%s size=%s stop_price=%s " "take_profit_price=%s",
             order_type.value,
             price,
             size,
@@ -436,22 +433,12 @@ class BtVenue(VenueBase,bt.Strategy):
             "stopprice": stop_price,
             "stopexec": bt.Order.Stop if stop_price is not None else None,
             "limitprice": take_profit_price,
-            "limitexec": (
-                bt.Order.Limit if take_profit_price is not None else None
-            ),
-            "exectype": (
-                bt.Order.Market
-                if order_type == OrderType.MARKET
-                else bt.Order.Limit
-            ),
+            "limitexec": (bt.Order.Limit if take_profit_price is not None else None),
+            "exectype": (bt.Order.Market if order_type == OrderType.MARKET else bt.Order.Limit),
         }
         if order_type == OrderType.LIMIT:
             bracket_args["price"] = price
-        orders = (
-            self.buy_bracket(**bracket_args)
-            if is_buy
-            else self.sell_bracket(**bracket_args)
-        )
+        orders = self.buy_bracket(**bracket_args) if is_buy else self.sell_bracket(**bracket_args)
         padded_orders = list(orders) + [None, None, None]
         main_order, stop_order, limit_order = padded_orders[:3]
         common_info = {
@@ -489,5 +476,7 @@ class BtVenue(VenueBase,bt.Strategy):
     def _cancel_all_live_orders(self):
         """Clean up every pending order before reversing"""
         for trade in self.live_trades:
-            if trade['stop']: self.cancel(trade['stop'])
-            if trade['limit']: self.cancel(trade['limit'])
+            if trade["stop"]:
+                self.cancel(trade["stop"])
+            if trade["limit"]:
+                self.cancel(trade["limit"])

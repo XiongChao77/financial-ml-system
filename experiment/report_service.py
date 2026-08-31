@@ -231,13 +231,14 @@ def report_details_path(record: ReportRecord, reports_root: str | Path) -> Path:
     if not isinstance(identity, Mapping):
         raise ValueError("Report params has no identity object")
 
-    components = []
-    for key in ("prep_hash", "train_hash", "sim_hash"):
-        value = str(identity.get(key) or "")
-        if not value or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in value):
-            raise ValueError(f"Invalid report identity component: {key}")
-        components.append(value)
-    return report_file.parent.joinpath(*components, "report_details.json")
+    full_hash = str(identity.get("full_hash") or "")
+    if not full_hash or any(
+        character
+        not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        for character in full_hash
+    ):
+        raise ValueError("Invalid report identity component: full_hash")
+    return report_file.parent / "sim_output" / full_hash / "report_details.json"
 
 
 def load_report_details(

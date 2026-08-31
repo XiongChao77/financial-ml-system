@@ -13,6 +13,7 @@ Key design goals
 from __future__ import annotations
 
 import argparse
+import atexit
 import copy
 import fcntl
 import importlib
@@ -217,6 +218,10 @@ TASKS_SPEC_FILE = "tasks_spec.json"
 REPORTS_FILE = "reports.jsonl"
 TRAIN_REPORTS_FILE = "train_reports.jsonl"
 SELECTED_FILE = "selected_configs.jsonl"
+PRE_OUTPUT_DIR = "pre_output"
+TRAIN_OUTPUT_DIR = "train_output"
+PREDICTION_CACHE_DIR = "prediction_cache"
+SIM_OUTPUT_DIR = "sim_output"
 
 construct_experiment_tasks = experiment_tasks.construct_experiment_tasks
 MAX_PREP = experiment_tasks.MAX_PREP
@@ -237,27 +242,28 @@ class ExperimentTaskError(RuntimeError):
 # -----------------------------------------------------------------------------
 # Path layout helpers
 # -----------------------------------------------------------------------------
-def _batch_train_dir(exp_dir: str) -> str:
-    """
-    Put all intermediate artifacts under TEMPORARY_DIR so persistence stays clean.
-    """
-    if exp_dir.startswith(common.PERSISTENCE_DIR):
-        rel = os.path.relpath(exp_dir, common.PERSISTENCE_DIR)
-        return os.path.join(common.PERSISTENCE_DIR, rel, "train")
-    base = os.path.basename(exp_dir.rstrip(os.sep)) or "run"
-    return os.path.join(common.PERSISTENCE_DIR, "batch_temp", base, "train")
+def _prep_output_dir(exp_dir: str, pre_h: str) -> str:
+    return os.path.join(exp_dir, PRE_OUTPUT_DIR, pre_h)
 
 
-def _prep_output_dir(temp_dir: str, pre_h: str) -> str:
-    return os.path.join(temp_dir, f"pre_{pre_h}")
+def _train_output_dir(exp_dir: str, pre_h: str, tr_h: str) -> str:
+    return os.path.join(exp_dir, TRAIN_OUTPUT_DIR, f"{pre_h}_{tr_h}")
 
 
-def _train_output_dir(temp_dir: str, pre_h: str, tr_h: str) -> str:
-    return os.path.join(temp_dir, f"pre_{pre_h}", f"train_{tr_h}")
+def _prediction_cache_output_dir(exp_dir: str, pre_h: str, tr_h: str) -> str:
+    return os.path.join(exp_dir, PREDICTION_CACHE_DIR, f"{pre_h}_{tr_h}")
 
 
-def _sim_output_dir(temp_dir: str, pre_h: str, tr_h: str, sim_h: str) -> str:
-    return os.path.join(temp_dir, f"pre_{pre_h}", f"train_{tr_h}", f"sim_{sim_h}")
+def _sim_output_dir(exp_dir: str, full_h: str) -> str:
+    return os.path.join(exp_dir, SIM_OUTPUT_DIR, full_h)
+
+
+def _cleanup_ephemeral_outputs(exp_dir: str, logger: logging.Logger) -> None:
+    for directory_name in (PREDICTION_CACHE_DIR, PRE_OUTPUT_DIR):
+        path = os.path.join(exp_dir, directory_name)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+            logger.info("Removed ephemeral output directory: %s", path)
 
 
 # -----------------------------------------------------------------------------
@@ -458,14 +464,14 @@ def load_pending_tasks(exp_dir: str, done_set: set[str]) -> Tuple[Dict[str, Any]
     return pending, total_counts
 
 
-def _create_output_dirs(task_spec: Dict[str, Any], temp_dir: str) -> None:
+def _create_output_dirs(task_spec: Dict[str, Any], exp_dir: str) -> None:
     """
     Create prep/train output dirs for all pending tasks.
     """
     for pre_h, pre_node in task_spec.items():
-        os.makedirs(_prep_output_dir(temp_dir, pre_h), exist_ok=True)
+        os.makedirs(_prep_output_dir(exp_dir, pre_h), exist_ok=True)
         for tr_h in pre_node["train"]:
-            os.makedirs(_train_output_dir(temp_dir, pre_h, tr_h), exist_ok=True)
+            os.makedirs(_train_output_dir(exp_dir, pre_h, tr_h), exist_ok=True)
 
 
 # -----------------------------------------------------------------------------
@@ -592,7 +598,7 @@ def create_task_spec(logger, exp_dir, done_set: set[str]):
 # -----------------------------------------------------------------------------
 # Worker loops
 # -----------------------------------------------------------------------------
-def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Queue, temp_dir: str):
+def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Queue, exp_dir: str):
     logger = _worker_logger(worker_log_file)
     while True:
         try:
@@ -607,7 +613,7 @@ def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Que
             para = common.BaseDefine(**pre_task["params"])
             t0 = time.time()
             try:
-                prep_dir = _prep_output_dir(temp_dir, pre_h)
+                prep_dir = _prep_output_dir(exp_dir, pre_h)
                 preparation.main(logger, para=para, prep_output_dir=prep_dir)
             except Exception:
                 logger.exception(f"Prep failed: {pre_h}")
@@ -619,7 +625,7 @@ def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Que
             # Build train items for this prep hash (pass only json-safe dicts across processes)
             train_items = []
             for tr_h, tr_node in pre_task.get("train", {}).items():
-                save_dir = _train_output_dir(temp_dir, pre_h, tr_h)
+                save_dir = _train_output_dir(exp_dir, pre_h, tr_h)
                 train_items.append(
                     {
                         "pre_h": pre_h,
@@ -629,6 +635,11 @@ def _worker_prep(worker_log_file: str, task_queue: mp.Queue, train_queue: mp.Que
                         "sim_tasks": copy.deepcopy(tr_node.get("sim_tasks", [])),
                         "prep_output_dir": prep_dir,
                         "save_dir": save_dir,
+                        "prediction_cache_dir": _prediction_cache_output_dir(
+                            exp_dir,
+                            pre_h,
+                            tr_h,
+                        ),
                     }
                 )
 
@@ -640,6 +651,7 @@ def _precompute_backtest_predictions(
     *,
     prep_output_dir: str,
     train_output_dir: str,
+    prediction_cache_dir: str,
     train_cfg: Any,
     device: str,
 ) -> None:
@@ -649,6 +661,7 @@ def _precompute_backtest_predictions(
         data_config = backtest_runner.ModelDataConfig(
             prep_output_dir=prep_output_dir,
             train_output_dir=train_output_dir,
+            prediction_cache_dir=prediction_cache_dir,
             device=device,
             use_prediction_cache=True,
         )
@@ -679,6 +692,7 @@ def _train_task(
     sim_tasks = item.get("sim_tasks", [])
     prep_output_dir = item["prep_output_dir"]
     save_dir = item["save_dir"]
+    prediction_cache_dir = item["prediction_cache_dir"]
 
     t0 = time.time()
     try:
@@ -702,13 +716,25 @@ def _train_task(
                 logger,
                 prep_output_dir=prep_output_dir,
                 train_output_dir=save_dir,
+                prediction_cache_dir=prediction_cache_dir,
                 train_cfg=t_cfg,
                 device="auto",
             )
 
         # IMPORTANT: enqueue sims BEFORE reporting train_done (so main can safely send None after last train_done)
         for sim in sim_tasks:
-            sim_task_queue.put((pre_h, pre_params, tr_h, train_params, sim, save_dir, {}))
+            sim_task_queue.put(
+                (
+                    pre_h,
+                    pre_params,
+                    tr_h,
+                    train_params,
+                    sim,
+                    save_dir,
+                    prediction_cache_dir,
+                    {},
+                )
+            )
         # The training report (task_type/metrics/save_dir etc.) is also appended to train_reports.jsonl.
         # In single model mode this is just an extra archive; in combo_model mode it is the only data source
         # the later fuse stage uses to group by (pre_key, train_compatibility) and pair the sub-models.
@@ -744,7 +770,7 @@ def _worker_sim(
     task_queue: mp.Queue,
     result_queue: mp.Queue,
     reports_path: str,
-    temp_dir: str,
+    exp_dir: str,
     experiment_context: ExperimentContext,
 ):
     logger = _worker_logger(worker_log_file)
@@ -763,7 +789,16 @@ def _worker_sim(
         # run_combo_fusion_and_backtest), the worker no longer derives the path from (pre_h, tr_h)
         # -- so the same worker pool can run both the single model training output directory and the
         # combined model directory produced by the combo_model fuse; the backtest stage is identical for both.
-        pre_h, pre_params, tr_h, train_params, sim, train_output_dir, extra_report_fields = msg
+        (
+            pre_h,
+            pre_params,
+            tr_h,
+            train_params,
+            sim,
+            train_output_dir,
+            prediction_cache_dir,
+            extra_report_fields,
+        ) = msg
         sim_h = sim["hash"]
         sim_params = sim["params"]
         strategy_config = backtest_runner.strategy_config_from_dict(
@@ -772,7 +807,7 @@ def _worker_sim(
         broker_config = backtest_runner.BrokerConfig(
             **sim_params["broker_config"],
         )
-        prep_dir = _prep_output_dir(temp_dir, pre_h)
+        prep_dir = _prep_output_dir(exp_dir, pre_h)
 
         t0 = time.time()
         try:
@@ -793,12 +828,13 @@ def _worker_sim(
                     strategy_config=strategy_config,
                     broker_config=broker_config,
                     save_dir=os.path.join(
-                        _sim_output_dir(temp_dir, pre_h, tr_h, sim_h),
+                        _sim_output_dir(exp_dir, identity.full_hash),
                         period,
                     ),
                     data_config=backtest_runner.ModelDataConfig(
                         prep_output_dir=prep_dir,
                         train_output_dir=train_output_dir,
+                        prediction_cache_dir=prediction_cache_dir,
                         device="cpu",
                         use_prediction_cache=True,
                     ),
@@ -859,10 +895,7 @@ def _write_report_details(
     report_details: Dict[str, Any],
 ) -> str:
     detail_output_path = os.path.join(
-        os.path.dirname(output_path),
-        identity.prep_hash,
-        identity.train_hash,
-        identity.sim_hash,
+        _sim_output_dir(os.path.dirname(output_path), identity.full_hash),
         "report_details.json",
     )
     os.makedirs(os.path.dirname(detail_output_path), exist_ok=True)
@@ -899,9 +932,7 @@ def _drain_sim_results(
     logger: logging.Logger,
     eta_msg,
     pending_sim_hashes: Dict[Tuple[str, str], Set[str]],
-    temp_dir: str,
     valid: bool,
-    task_spec,
 ) -> None:
     while True:
         try:
@@ -1328,7 +1359,7 @@ def train_and_cross_test(
 def run_combo_fusion_and_backtest(
     logger: logging.Logger,
     train_reports_path: str,
-    temp_dir: str,
+    exp_dir: str,
     simulation_task: List[Any],
     reports_path: str,
     sim_task_queue: mp.Queue,
@@ -1422,7 +1453,7 @@ def run_combo_fusion_and_backtest(
             logger.info(f"[combo fuse] skip fusion_hash={fusion_hash} (already in reports)")
             continue
 
-        fusion_dir = os.path.join(temp_dir, f"pre_{pre_h}", "fusion", f"compat_{compat}", f"fusion_{fusion_hash}")
+        fusion_dir = _train_output_dir(exp_dir, pre_h, fusion_hash)
         os.makedirs(fusion_dir, exist_ok=True)
 
         logger.info(f"[combo fuse] fusing {role_1}={r1['tr_h']} + {role_2}={r2['tr_h']} -> {fusion_hash}")
@@ -1435,8 +1466,13 @@ def run_combo_fusion_and_backtest(
         # its cache here on CPU before any sim worker can observe the task.
         _precompute_backtest_predictions(
             logger,
-            prep_output_dir=_prep_output_dir(temp_dir, pre_h),
+            prep_output_dir=_prep_output_dir(exp_dir, pre_h),
             train_output_dir=fusion_dir,
+            prediction_cache_dir=_prediction_cache_output_dir(
+                exp_dir,
+                pre_h,
+                fusion_hash,
+            ),
             train_cfg=_config_from_dict_train(r1["train_params"]),
             device="cpu",
         )
@@ -1474,6 +1510,7 @@ def run_combo_fusion_and_backtest(
                     r1["train_params"],
                     {"hash": sim_h, "identity": identity.as_dict(), "params": sim_d},
                     fusion_dir,
+                    _prediction_cache_output_dir(exp_dir, pre_h, fusion_hash),
                     extra_report_fields,
                 )
             )
@@ -1496,7 +1533,14 @@ def run_combo_fusion_and_backtest(
         for process in sim_workers:
             if process.exitcode not in (None, 0):
                 raise ExperimentTaskError(f"combo simulation process {process.name} exited " f"with code {process.exitcode}")
-        _drain_sim_results(sim_result_queue, stats, logger, _no_eta, pending_sim_hashes, temp_dir, valid, {})
+        _drain_sim_results(
+            sim_result_queue,
+            stats,
+            logger,
+            _no_eta,
+            pending_sim_hashes,
+            valid,
+        )
         if stats["simulation"]["count"] < n_sim_total:
             time.sleep(0.5)
     logger.info(f"[combo fuse] all {n_sim_total} backtest tasks done.")
@@ -1545,9 +1589,7 @@ def main():
             SELECTED_FILE,
         )
         if not os.path.exists(selected_configs_source):
-            raise FileNotFoundError(
-                f"Valid config file not found: {selected_configs_source}"
-            )
+            raise FileNotFoundError(f"Valid config file not found: {selected_configs_source}")
         exp_dir = os.path.join(
             common.PERSISTENCE_DIR,
             "batch_experiments",
@@ -1668,6 +1710,7 @@ def main():
         )
 
     logger = _setup_root_logger(exp_dir)
+    atexit.register(_cleanup_ephemeral_outputs, exp_dir, logger)
     logger.info("Experiment Git commit: %s", experiment_context.git_commit)
     logger.info("Experiment source snapshot: %s", os.environ.get(SNAPSHOT_PATH_ENV))
     if args.valid:
@@ -1682,9 +1725,6 @@ def main():
     begin_time = time.time()
     reports_path = os.path.join(exp_dir, REPORTS_FILE)
     train_reports_path = os.path.join(exp_dir, TRAIN_REPORTS_FILE)
-
-    temp_dir = _batch_train_dir(exp_dir)
-    os.makedirs(temp_dir, exist_ok=True)
 
     combo_simulation_task = None
 
@@ -1726,6 +1766,7 @@ def main():
         task_spec, combo_simulation_task = create_task_spec(logger, exp_dir, None)
     if not task_spec:
         logger.info("✅ No pending tasks.")
+        _cleanup_ephemeral_outputs(exp_dir, logger)
         _assert_experiment_revision(
             experiment_context,
             check_git_clean=args.check_git_clean,
@@ -1745,7 +1786,7 @@ def main():
     prep_workers = []
     for i in range(MAX_PREP):
         worker_log = os.path.join(exp_dir, f"prep_{i}.log")
-        p = mp.Process(target=_worker_prep, args=(worker_log, prep_task_queue, train_task_queue, temp_dir))
+        p = mp.Process(target=_worker_prep, args=(worker_log, prep_task_queue, train_task_queue, exp_dir))
         p.start()
         prep_workers.append(p)
 
@@ -1769,7 +1810,7 @@ def main():
                     sim_task_queue,
                     sim_result_queue,
                     reports_path,
-                    temp_dir,
+                    exp_dir,
                     experiment_context,
                 ),
             )
@@ -1777,7 +1818,6 @@ def main():
             sim_workers.append(p)
     run_task_spec(
         task_spec,
-        temp_dir,
         exp_dir,
         prep_task_queue,
         train_task_queue,
@@ -1815,7 +1855,7 @@ def main():
                     combo_sim_task_queue,
                     combo_sim_result_queue,
                     reports_path,
-                    temp_dir,
+                    exp_dir,
                     experiment_context,
                 ),
             )
@@ -1826,7 +1866,7 @@ def main():
             run_combo_fusion_and_backtest(
                 logger=logger,
                 train_reports_path=train_reports_path,
-                temp_dir=temp_dir,
+                exp_dir=exp_dir,
                 simulation_task=combo_simulation_task or [],
                 reports_path=reports_path,
                 sim_task_queue=combo_sim_task_queue,
@@ -1846,6 +1886,8 @@ def main():
                 if p.is_alive():
                     p.terminate()
 
+    _cleanup_ephemeral_outputs(exp_dir, logger)
+
     logger.info("\n" + "=" * 40)
     elapsed = time.time() - begin_time
 
@@ -1863,7 +1905,6 @@ def main():
 
 def run_task_spec(
     task_spec,
-    temp_dir,
     exp_dir,
     prep_task_queue,
     train_task_queue,
@@ -1884,7 +1925,7 @@ def run_task_spec(
             sim_ids = {sim["hash"] for sim in tr_node.get("sim_tasks", [])}
             if sim_ids:
                 pending_sim_hashes[(pre_h, tr_h)] = sim_ids
-    _create_output_dirs(task_spec, temp_dir)
+    _create_output_dirs(task_spec, exp_dir)
     prep_task_queue.put(task_spec)
 
     # ETA printer
@@ -1979,11 +2020,25 @@ def run_task_spec(
 
             _try_start_train_procs()
             _drain_train_results()
-            _drain_sim_results(sim_result_queue, stats, logger, eta_msg, pending_sim_hashes, temp_dir, valid, task_spec)
+            _drain_sim_results(
+                sim_result_queue,
+                stats,
+                logger,
+                eta_msg,
+                pending_sim_hashes,
+                valid,
+            )
 
         # final drains
         _drain_train_results()
-        _drain_sim_results(sim_result_queue, stats, logger, eta_msg, pending_sim_hashes, temp_dir, valid, task_spec)
+        _drain_sim_results(
+            sim_result_queue,
+            stats,
+            logger,
+            eta_msg,
+            pending_sim_hashes,
+            valid,
+        )
     finally:
         # Stop the entire process tree immediately on either success or failure.
         for p in train_procs + prep_workers + sim_workers:

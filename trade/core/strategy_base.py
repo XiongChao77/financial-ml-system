@@ -15,30 +15,33 @@ from trade.core.venue_base import VenueBase
 
 class StrategyBase(ABC):
 
-    def __init__(self, venue: Optional[VenueBase], bar_interval_ms: int):
+    def __init__(self, data_interval_ms: int):
         super().__init__()
-        if bar_interval_ms is None or bar_interval_ms <= 0:
-            raise ValueError("bar_interval_ms must be positive")
-        self.venue = venue
+        if data_interval_ms is None or data_interval_ms <= 0:
+            raise ValueError("data_interval_ms must be positive")
         self.last_action: TradeIntent = None
         self.last_state: Observation = None
-        self._last_bar_time = None
-        self.bar_interval_ms = int(bar_interval_ms)
+        self._last_candle_open_time_utc = None
+        self.data_interval_ms = int(data_interval_ms)
 
     def process(self, *args, **kwargs) -> TradeIntent:
         """Validate the incoming bar, then dispatch to the strategy decision logic.
 
         Most strategies receive an ``Observation``.  The older dataframe based
-        strategies pass ``current_time`` as a keyword argument; keeping both
+        strategies pass ``candle_open_time_utc`` as a keyword argument; keeping both
         forms here gives every strategy the same continuity check and warning
         hook.
         """
         state = args[0] if args and isinstance(args[0], Observation) else kwargs.get("state")
-        current_time = state.current_time if isinstance(state, Observation) else kwargs.get("current_time")
-        self._check_bar_continuity(current_time)
+        candle_open_time_utc = (
+            state.candle_open_time_utc
+            if isinstance(state, Observation)
+            else kwargs.get("candle_open_time_utc")
+        )
+        self._check_data_continuity(candle_open_time_utc)
 
         action = self._process(*args, **kwargs)
-        self._last_bar_time = current_time
+        self._last_candle_open_time_utc = candle_open_time_utc
         if isinstance(state, Observation):
             self.last_state = state
         if action.action != ActionType.NOOP:
@@ -54,17 +57,29 @@ class StrategyBase(ABC):
         logger = getattr(self, "logger", logging.getLogger("trade"))
         logger.error(message)
 
-    def _check_bar_continuity(self, current_time) -> None:
-        if current_time is None or self._last_bar_time is None:
+    def _check_data_continuity(self, candle_open_time_utc) -> None:
+        if candle_open_time_utc is None or self._last_candle_open_time_utc is None:
             return
 
         try:
-            actual_interval_ms = int(round((current_time - self._last_bar_time).total_seconds() * 1000))
+            actual_interval_ms = int(
+                round(
+                    (
+                        candle_open_time_utc
+                        - self._last_candle_open_time_utc
+                    ).total_seconds()
+                    * 1000
+                )
+            )
         except (AttributeError, TypeError, ValueError) as exc:
-            self.strategy_warning("K-line continuity check failed: " f"previous={self._last_bar_time!r}, current={current_time!r}, error={exc}")
+            self.strategy_warning(
+                "K-line continuity check failed: "
+                f"previous={self._last_candle_open_time_utc!r}, "
+                f"current={candle_open_time_utc!r}, error={exc}"
+            )
             return
 
-        expected_interval_ms = self.bar_interval_ms
+        expected_interval_ms = self.data_interval_ms
         if actual_interval_ms == expected_interval_ms:
             return
 
@@ -81,7 +96,8 @@ class StrategyBase(ABC):
 
         self.strategy_warning(
             "K-line discontinuity detected: "
-            f"previous={self._last_bar_time}, current={current_time}, "
+            f"previous={self._last_candle_open_time_utc}, "
+            f"current={candle_open_time_utc}, "
             f"expected_interval_ms={expected_interval_ms}, "
             f"actual_interval_ms={actual_interval_ms}, {detail}"
         )
@@ -91,29 +107,8 @@ class StrategyBase(ABC):
         pass
 
     def finalize(self):
-        """
-        Wrap-up hook: called once when the venue life cycle ends, to print the strategy side summary.
-        (Distinct from venue.stop(): venue.stop() is the venue life cycle,
-         finalize() is the strategy settling its own books.)
-        """
         pass
 
     def report(self) -> tuple[dict, dict]:
         """Return ``(report_summary, report_details)`` for this strategy."""
         return {}, {}
-
-    def execute_action(self, action: TradeIntent):
-        """Reworked to use the submit_order interface and pass the stop loss parameters"""
-        if action.action == ActionType.NOOP:
-            return
-
-        if action.action == ActionType.CLOSE:
-            self.venue.close_position()
-        elif action.action == ActionType.OPEN:
-            is_buy = action.target_dir == PositionDir.POSITIVE
-            self.venue.submit_order(
-                action.order_qty,
-                is_buy=is_buy,
-                stop_loss_pct=action.stop_loss_pct,
-                take_profit_pct=action.take_profit_pct,
-            )

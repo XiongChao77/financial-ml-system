@@ -37,8 +37,18 @@ except ModuleNotFoundError as exc:
 
 MAX_PREP = experiment_tasks.MAX_PREP
 MAX_TRAIN = experiment_tasks.MAX_TRAIN
-MAX_SIM = experiment_tasks.MAX_SIM
+MAX_SIM = 4
 INFERENCE_BATCH_SIZE = experiment_tasks.INFERENCE_BATCH_SIZE
+ENABLE_RETRAINED_TEST = False
+
+MODEL_PERIOD_BY_MODE = {
+    "original_model": "long",
+    "retrained_model": "forward",
+}
+ENABLED_MODEL_MODES = (
+    "original_model",
+    *(("retrained_model",) if ENABLE_RETRAINED_TEST else ()),
+)
 
 
 class CrossTestError(RuntimeError):
@@ -287,7 +297,7 @@ def prep_worker(
             return
 
 
-def original_sim_worker(
+def sim_worker(
     worker_log_file: str,
     task_queue: mp.Queue,
     result_queue: mp.Queue,
@@ -296,18 +306,32 @@ def original_sim_worker(
 ) -> None:
     logger = worker_logger(worker_log_file)
 
+    import torch
+
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+    logger.info(
+        "Simulation worker CPU threads limited to one " "(intra_op=%d, inter_op=%d)",
+        torch.get_num_threads(),
+        torch.get_num_interop_threads(),
+    )
+
     from trade.runner import backtest_runner
 
     while True:
         try:
-            job = task_queue.get(timeout=0.5)
+            payload = task_queue.get(timeout=0.5)
         except Empty:
             continue
 
-        if job is None:
+        if payload is None:
             return
 
+        mode = payload["mode"]
+        job = payload["job"]
+        train_metrics = payload.get("train_metrics")
         t0 = time.time()
+
         try:
             params = job["params"]
             strategy_hash = job["strategy_hash"]
@@ -318,18 +342,25 @@ def original_sim_worker(
             strategy_config = backtest_runner.strategy_config_from_dict(params["strategy"])
             broker_config = backtest_runner.BrokerConfig(**params["broker"])
 
-            original_train_dir = os.path.join(
-                common.PERSISTENCE_DIR,
-                "batch_experiments",
-                "valid_train_out",
-                strategy_hash,
-            )
-            if not os.path.isdir(original_train_dir):
-                raise FileNotFoundError(f"Original training artifact is missing: {original_train_dir}")
+            if mode == "original_model":
+                train_output_dir = os.path.join(
+                    common.PERSISTENCE_DIR,
+                    "batch_experiments",
+                    "valid_train_out",
+                    strategy_hash,
+                )
+                if not os.path.isdir(train_output_dir):
+                    raise FileNotFoundError(f"Original training artifact is missing: {train_output_dir}")
+            elif mode == "retrained_model":
+                train_output_dir = job["retrain_dir"]
+            else:
+                raise ValueError(f"Unknown simulation mode: {mode}")
+
+            period = MODEL_PERIOD_BY_MODE[mode]
 
             data_config = backtest_runner.ModelDataConfig(
                 prep_output_dir=job["prep_dir"],
-                train_output_dir=original_train_dir,
+                train_output_dir=train_output_dir,
                 device="cpu",
                 use_prediction_cache=True,
             )
@@ -338,7 +369,7 @@ def original_sim_worker(
                 logger,
                 data_config,
                 train_cfg,
-                "long",
+                period,
                 inference_batch_size=INFERENCE_BATCH_SIZE,
             )
 
@@ -347,7 +378,7 @@ def original_sim_worker(
                 broker_config=broker_config,
                 save_dir=backtest_output_dir(
                     output_dir,
-                    "original_model",
+                    mode,
                     strategy_hash,
                     symbol,
                     interval,
@@ -359,7 +390,7 @@ def original_sim_worker(
             report = backtest_runner.main(
                 logger,
                 runner_config,
-                "long",
+                period,
             )["report"]
 
             validate_report_market(
@@ -367,19 +398,23 @@ def original_sim_worker(
                 symbol,
                 interval,
             )
+            validate_report_period(report, period)
 
             result_queue.put(
                 (
-                    "original_done",
+                    "sim_done",
+                    mode,
                     job,
                     time.time() - t0,
+                    train_metrics,
                     report,
                 )
             )
         except Exception:
             result_queue.put(
                 (
-                    "original_failed",
+                    "sim_failed",
+                    mode,
                     job,
                     time.time() - t0,
                     traceback.format_exc(),
@@ -439,101 +474,6 @@ def retrain_worker(
             return
 
 
-def retrained_sim_worker(
-    worker_log_file: str,
-    task_queue: mp.Queue,
-    result_queue: mp.Queue,
-    output_dir: str,
-    experiment_context: ExperimentContext,
-) -> None:
-    logger = worker_logger(worker_log_file)
-
-    from trade.runner import backtest_runner
-
-    while True:
-        try:
-            payload = task_queue.get(timeout=0.5)
-        except Empty:
-            continue
-
-        if payload is None:
-            return
-
-        job, train_metrics = payload
-        t0 = time.time()
-
-        try:
-            params = job["params"]
-            strategy_hash = job["strategy_hash"]
-            symbol = job["target_symbol"]
-            interval = job["target_interval"]
-
-            train_cfg = config_from_dict_train(params["train"])
-            strategy_config = backtest_runner.strategy_config_from_dict(params["strategy"])
-            broker_config = backtest_runner.BrokerConfig(**params["broker"])
-
-            data_config = backtest_runner.ModelDataConfig(
-                prep_output_dir=job["prep_dir"],
-                train_output_dir=job["retrain_dir"],
-                device="cpu",
-                use_prediction_cache=True,
-            )
-
-            backtest_runner.precompute_prediction_cache(
-                logger,
-                data_config,
-                train_cfg,
-                "long",
-                inference_batch_size=INFERENCE_BATCH_SIZE,
-            )
-
-            runner_config = backtest_runner.RunnerConfig(
-                strategy_config=strategy_config,
-                broker_config=broker_config,
-                save_dir=backtest_output_dir(
-                    output_dir,
-                    "retrained_model",
-                    strategy_hash,
-                    symbol,
-                    interval,
-                ),
-                data_config=data_config,
-                experiment_context=experiment_context,
-            )
-
-            report = backtest_runner.main(
-                logger,
-                runner_config,
-                "long",
-            )["report"]
-
-            validate_report_market(
-                report,
-                symbol,
-                interval,
-            )
-
-            result_queue.put(
-                (
-                    "retrained_done",
-                    job,
-                    time.time() - t0,
-                    train_metrics,
-                    report,
-                )
-            )
-        except Exception:
-            result_queue.put(
-                (
-                    "retrained_failed",
-                    job,
-                    time.time() - t0,
-                    traceback.format_exc(),
-                )
-            )
-            return
-
-
 def validate_report_market(
     report: Dict[str, Any],
     expected_symbol: str,
@@ -543,6 +483,18 @@ def validate_report_market(
 
     if report_common.get("symbol") != expected_symbol or report_common.get("interval") != expected_interval:
         raise RuntimeError("Cross-test report market mismatch: " f"expected={expected_symbol}_{expected_interval}, " f"report_common={report_common}")
+
+
+def validate_report_period(
+    report: Dict[str, Any],
+    expected_period: str,
+) -> None:
+    report_periods = set((report.get("results") or {}).keys())
+    if report_periods != {expected_period}:
+        raise RuntimeError(
+            "Cross-test report period mismatch: "
+            f"expected={[expected_period]}, actual={sorted(report_periods)}"
+        )
 
 
 def send_none(queue: mp.Queue, count: int) -> None:
@@ -587,19 +539,15 @@ def run_parallel_pipeline(
     prep_queue = manager.Queue()
     prep_result_queue = manager.Queue()
 
-    original_sim_queue = manager.Queue()
-    original_result_queue = manager.Queue()
-
     retrain_queue = manager.Queue()
     retrain_result_queue = manager.Queue()
 
-    retrained_sim_queue = manager.Queue()
-    retrained_result_queue = manager.Queue()
+    sim_queue = manager.Queue()
+    sim_result_queue = manager.Queue()
 
     prep_workers: List[mp.Process] = []
-    original_sim_workers: List[mp.Process] = []
     retrain_workers: List[mp.Process] = []
-    retrained_sim_workers: List[mp.Process] = []
+    sim_workers: List[mp.Process] = []
 
     for index in range(MAX_PREP):
         process = mp.Process(
@@ -614,79 +562,57 @@ def run_parallel_pipeline(
         process.start()
         prep_workers.append(process)
 
+    if ENABLE_RETRAINED_TEST:
+        for index in range(MAX_TRAIN):
+            process = mp.Process(
+                target=retrain_worker,
+                name=f"CrossRetrain-{index}",
+                args=(
+                    os.path.join(output_dir, f"retrain_{index}.log"),
+                    retrain_queue,
+                    retrain_result_queue,
+                ),
+            )
+            process.start()
+            retrain_workers.append(process)
+
     for index in range(MAX_SIM):
         process = mp.Process(
-            target=original_sim_worker,
-            name=f"CrossOriginalSim-{index}",
+            target=sim_worker,
+            name=f"CrossSim-{index}",
             args=(
-                os.path.join(output_dir, f"original_sim_{index}.log"),
-                original_sim_queue,
-                original_result_queue,
+                os.path.join(output_dir, f"sim_{index}.log"),
+                sim_queue,
+                sim_result_queue,
                 output_dir,
                 experiment_context,
             ),
         )
         process.start()
-        original_sim_workers.append(process)
+        sim_workers.append(process)
 
-    for index in range(MAX_TRAIN):
-        process = mp.Process(
-            target=retrain_worker,
-            name=f"CrossRetrain-{index}",
-            args=(
-                os.path.join(output_dir, f"retrain_{index}.log"),
-                retrain_queue,
-                retrain_result_queue,
-            ),
-        )
-        process.start()
-        retrain_workers.append(process)
-
-    for index in range(MAX_SIM):
-        process = mp.Process(
-            target=retrained_sim_worker,
-            name=f"CrossRetrainedSim-{index}",
-            args=(
-                os.path.join(output_dir, f"retrained_sim_{index}.log"),
-                retrained_sim_queue,
-                retrained_result_queue,
-                output_dir,
-                experiment_context,
-            ),
-        )
-        process.start()
-        retrained_sim_workers.append(process)
-
-    all_workers = prep_workers + original_sim_workers + retrain_workers + retrained_sim_workers
+    all_workers = prep_workers + retrain_workers + sim_workers
 
     results: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     total_jobs = len(jobs)
+    total_sim_tasks = total_jobs * len(ENABLED_MODEL_MODES)
 
     prep_done = 0
-    original_done = 0
     retrain_done = 0
-    retrained_done = 0
+    sim_done = 0
 
     for job in jobs:
         results[job_id(job)] = {
             "job": job,
-            "original_model": None,
-            "retrained_model": None,
+            **{model_mode: None for model_mode in ENABLED_MODEL_MODES},
         }
         prep_queue.put(job)
 
     try:
-        while retrained_done < total_jobs or original_done < total_jobs:
+        while sim_done < total_sim_tasks:
             ensure_workers_alive("prep", prep_workers)
-            ensure_workers_alive(
-                "original simulation",
-                original_sim_workers,
-            )
             ensure_workers_alive("retrain", retrain_workers)
-            ensure_workers_alive(
-                "retrained simulation",
-                retrained_sim_workers,
-            )
+            ensure_workers_alive("simulation", sim_workers)
 
             try:
                 message = prep_result_queue.get(timeout=0.1)
@@ -698,7 +624,6 @@ def run_parallel_pipeline(
 
                 if kind == "prep_failed":
                     raise CrossTestError("Preparation failed for " f"{job_id(job)} after {elapsed:.2f}s:\n" f"{payload[0]}")
-
                 if kind != "prep_done":
                     raise CrossTestError(f"Unexpected prep result: {message!r}")
 
@@ -711,88 +636,78 @@ def run_parallel_pipeline(
                     elapsed,
                 )
 
-                original_sim_queue.put(job)
-                retrain_queue.put(job)
-
-            while True:
-                try:
-                    message = original_result_queue.get_nowait()
-                except Empty:
-                    break
-
-                kind, job, elapsed, *payload = message
-                if kind == "original_failed":
-                    raise CrossTestError("Original-model simulation failed for " f"{job_id(job)} after {elapsed:.2f}s:\n" f"{payload[0]}")
-
-                if kind != "original_done":
-                    raise CrossTestError(f"Unexpected original-model result: {message!r}")
-
-                report = payload[0]
-                results[job_id(job)]["original_model"] = {
-                    "cagr": report["results"]["long"]["performance"]["cagr"],
-                    "report": report,
-                }
-                original_done += 1
-
-                logger.info(
-                    "Original model %d/%d done: %s in %.2fs",
-                    original_done,
-                    total_jobs,
-                    job_id(job),
-                    elapsed,
+                sim_queue.put(
+                    {
+                        "mode": "original_model",
+                        "job": job,
+                    }
                 )
+                if ENABLE_RETRAINED_TEST:
+                    retrain_queue.put(job)
+
+            if ENABLE_RETRAINED_TEST:
+                while True:
+                    try:
+                        message = retrain_result_queue.get_nowait()
+                    except Empty:
+                        break
+
+                    kind, job, elapsed, *payload = message
+
+                    if kind == "retrain_failed":
+                        raise CrossTestError("Retraining failed for " f"{job_id(job)} after {elapsed:.2f}s:\n" f"{payload[0]}")
+                    if kind != "retrain_done":
+                        raise CrossTestError(f"Unexpected retrain result: {message!r}")
+
+                    train_metrics = payload[0]
+                    retrain_done += 1
+
+                    logger.info(
+                        "Retrain %d/%d done: %s in %.2fs",
+                        retrain_done,
+                        total_jobs,
+                        job_id(job),
+                        elapsed,
+                    )
+
+                    sim_queue.put(
+                        {
+                            "mode": "retrained_model",
+                            "job": job,
+                            "train_metrics": train_metrics,
+                        }
+                    )
 
             while True:
                 try:
-                    message = retrain_result_queue.get_nowait()
+                    message = sim_result_queue.get_nowait()
                 except Empty:
                     break
 
-                kind, job, elapsed, *payload = message
-                if kind == "retrain_failed":
-                    raise CrossTestError("Retraining failed for " f"{job_id(job)} after {elapsed:.2f}s:\n" f"{payload[0]}")
+                kind, mode, job, elapsed, *payload = message
 
-                if kind != "retrain_done":
-                    raise CrossTestError(f"Unexpected retrain result: {message!r}")
-
-                train_metrics = payload[0]
-                retrain_done += 1
-
-                logger.info(
-                    "Retrain %d/%d done: %s in %.2fs",
-                    retrain_done,
-                    total_jobs,
-                    job_id(job),
-                    elapsed,
-                )
-
-                retrained_sim_queue.put((job, train_metrics))
-
-            while True:
-                try:
-                    message = retrained_result_queue.get_nowait()
-                except Empty:
-                    break
-
-                kind, job, elapsed, *payload = message
-                if kind == "retrained_failed":
-                    raise CrossTestError("Retrained-model simulation failed for " f"{job_id(job)} after {elapsed:.2f}s:\n" f"{payload[0]}")
-
-                if kind != "retrained_done":
-                    raise CrossTestError(f"Unexpected retrained-model result: {message!r}")
+                if kind == "sim_failed":
+                    raise CrossTestError(f"{mode} simulation failed for " f"{job_id(job)} after {elapsed:.2f}s:\n" f"{payload[0]}")
+                if kind != "sim_done":
+                    raise CrossTestError(f"Unexpected simulation result: {message!r}")
 
                 train_metrics, report = payload
-                results[job_id(job)]["retrained_model"] = {
-                    "cagr": report["results"]["long"]["performance"]["cagr"],
-                    "train_metrics": train_metrics,
+                period = MODEL_PERIOD_BY_MODE[mode]
+                result_entry = {
+                    "cagr": report["results"][period]["performance"]["cagr"],
                     "report": report,
                 }
-                retrained_done += 1
+                if mode == "retrained_model":
+                    result_entry["train_metrics"] = train_metrics
+
+                results[job_id(job)][mode] = result_entry
+                sim_done += 1
 
                 logger.info(
-                    "Retrained model %d/%d done: %s in %.2fs",
-                    retrained_done,
-                    total_jobs,
+                    "Simulation %d/%d done: mode=%s job=%s in %.2fs",
+                    sim_done,
+                    total_sim_tasks,
+                    mode,
                     job_id(job),
                     elapsed,
                 )
@@ -801,10 +716,89 @@ def run_parallel_pipeline(
 
     finally:
         send_none(prep_queue, MAX_PREP)
-        send_none(original_sim_queue, MAX_SIM)
-        send_none(retrain_queue, MAX_TRAIN)
-        send_none(retrained_sim_queue, MAX_SIM)
+        send_none(retrain_queue, len(retrain_workers))
+        send_none(sim_queue, MAX_SIM)
         terminate_workers(all_workers)
+
+
+def _test_type(
+    original_symbol: str,
+    original_interval: str,
+    target_symbol: str,
+    target_interval: str,
+) -> str:
+    if target_symbol != original_symbol and target_interval == original_interval:
+        return "cross_asset"
+    if target_symbol == original_symbol and target_interval != original_interval:
+        return "cross_period"
+    raise ValueError(
+        "Cross-test target must change exactly one market dimension: "
+        f"original={original_symbol}_{original_interval}, "
+        f"target={target_symbol}_{target_interval}"
+    )
+
+
+def _summary_metrics_from_report(
+    report: Dict[str, Any],
+    period: str,
+) -> Dict[str, Any]:
+    results = report.get("results") or {}
+    period_result = results.get(period) or {}
+
+    performance = period_result.get("performance") or {}
+    trades = period_result.get("trades") or {}
+
+    return {
+        "cagr": performance.get("cagr"),
+        "avg_pct_gross": trades.get("avg_pct_gross"),
+    }
+
+
+def _aggregate_model_summary(
+    grouped_targets: Dict[str, Dict[str, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    cagr_values: List[float] = []
+    avg_pct_gross_values: List[float] = []
+
+    for test_group in ("cross_period", "cross_asset"):
+        for metrics in grouped_targets[test_group].values():
+            cagr = metrics.get("cagr")
+            avg_pct_gross = metrics.get("avg_pct_gross")
+
+            if isinstance(cagr, (int, float)):
+                cagr_values.append(float(cagr))
+
+            if isinstance(avg_pct_gross, (int, float)):
+                avg_pct_gross_values.append(float(avg_pct_gross))
+
+    def mean(values: List[float]) -> Any:
+        if not values:
+            return None
+        return sum(values) / len(values)
+
+    def median(values: List[float]) -> Any:
+        if not values:
+            return None
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        if len(ordered) % 2 == 1:
+            return ordered[middle]
+        return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+    positive_ratio = None
+    if cagr_values:
+        positive_ratio = sum(1 for value in cagr_values if value > 0) / len(cagr_values)
+
+    return {
+        "overall": {
+            "mean_cagr": mean(cagr_values),
+            "median_cagr": median(cagr_values),
+            "positive_ratio": positive_ratio,
+            "mean_avg_pct_gross": mean(avg_pct_gross_values),
+        },
+        "cross_period": grouped_targets["cross_period"],
+        "cross_asset": grouped_targets["cross_asset"],
+    }
 
 
 def aggregate_results(
@@ -816,30 +810,75 @@ def aggregate_results(
     for record in records:
         params = validate_record(record)
         strategy_hash = params["hash"]
-        original_common = params["common"]
+        original_symbol = params["common"]["symbol"]
+        original_interval = params["common"]["interval"]
 
-        strategy_result: Dict[str, Any] = {
-            "strategy_hash": strategy_hash,
-            "original_symbol": original_common["symbol"],
-            "original_interval": original_common["interval"],
-            "targets": {},
+        summary_targets: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {
+            model_mode: {
+                "cross_period": {},
+                "cross_asset": {},
+            }
+            for model_mode in ENABLED_MODEL_MODES
+        }
+
+        reports: Dict[str, Dict[str, Dict[str, Any]]] = {
+            model_mode: {
+                "cross_period": {},
+                "cross_asset": {},
+            }
+            for model_mode in ENABLED_MODEL_MODES
         }
 
         for (
             result_strategy_hash,
-            symbol,
-            interval,
+            target_symbol,
+            target_interval,
         ), result in flat_results.items():
             if result_strategy_hash != strategy_hash:
                 continue
 
-            key = target_key(symbol, interval)
-            strategy_result["targets"][key] = {
-                "symbol": symbol,
-                "interval": interval,
-                "original_model": result["original_model"],
-                "retrained_model": result["retrained_model"],
-            }
+            test_type = _test_type(
+                original_symbol,
+                original_interval,
+                target_symbol,
+                target_interval,
+            )
+            key = target_key(target_symbol, target_interval)
+
+            for model_mode in ENABLED_MODEL_MODES:
+                model_result = result.get(model_mode)
+                if not model_result:
+                    continue
+
+                report = model_result["report"]
+
+                period = MODEL_PERIOD_BY_MODE[model_mode]
+                summary_targets[model_mode][test_type][key] = _summary_metrics_from_report(
+                    report,
+                    period,
+                )
+
+                report_entry: Dict[str, Any] = {
+                    "report": report,
+                }
+
+                if model_mode == "retrained_model":
+                    report_entry["train_metrics"] = model_result.get("train_metrics")
+
+                reports[model_mode][test_type][key] = report_entry
+
+        strategy_result: Dict[str, Any] = {
+            "strategy": {
+                "hash": strategy_hash,
+                "symbol": original_symbol,
+                "interval": original_interval,
+            },
+            "summary": {
+                model_mode: _aggregate_model_summary(summary_targets[model_mode])
+                for model_mode in ENABLED_MODEL_MODES
+            },
+            "reports": reports,
+        }
 
         aggregated.append(strategy_result)
 
@@ -868,8 +907,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Parallel cross-test runner. For every selected strategy and "
-            "target market, test both the original trained model and a "
-            "model retrained on the target market with the same TrainConfig."
+            "target market, run the model modes enabled by the module-level "
+            "feature flags."
         )
     )
     parser.add_argument(
@@ -890,7 +929,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--check-git-clean",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Require a clean Git working tree",
     )
     return parser.parse_args()
@@ -930,11 +969,13 @@ def main() -> None:
     jobs = build_jobs(records, output_dir)
 
     logger.info(
-        "Cross-test jobs=%d | MAX_PREP=%d | MAX_TRAIN=%d | MAX_SIM=%d",
+        "Cross-test jobs=%d | MAX_PREP=%d | active_train_workers=%d | "
+        "MAX_SIM=%d | model_modes=%s",
         len(jobs),
         MAX_PREP,
-        MAX_TRAIN,
+        MAX_TRAIN if ENABLE_RETRAINED_TEST else 0,
         MAX_SIM,
+        ENABLED_MODEL_MODES,
     )
     logger.info("Output directory: %s", output_dir)
     logger.info("Git commit: %s", experiment_context.git_commit)
