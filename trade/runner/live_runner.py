@@ -45,6 +45,7 @@ from trade.core.protocol import (
     Signal,
     TradeIntent,
 )
+from trade.core.execution import ExecutionReport
 from trade.runner.config import BrokerConfig
 from trade.monitoring.live_monitoring import (
     LiveMonitoringConfig,
@@ -55,6 +56,10 @@ from trade.monitoring.live_monitoring import (
 from trade.recording.prediction_trace import (
     LivePredictionTraceRecorder,
     PredictionTraceConfig,
+)
+from trade.recording.execution_trace import (
+    ExecutionTraceConfig,
+    LiveExecutionTraceRecorder,
 )
 from trade.venue.live.binance_data_feed import BinanceDataFeed
 from trade.core.venue_base import VenueBase
@@ -190,14 +195,17 @@ class FeedGroup:
         return f"{self.market_config.symbol}_{self.market_config.interval}"
 
 
-DATA_CHECK_TIMER_DELAY_MS = 2000
+DATA_CHECK_TIMER_DELAY_MS = 5000
 
 
 @dataclass(frozen=True)
 class LiveRunnerConfiguration:
     strategies: list[LiveStrategySpec]
+    runner_id: str
+    output_dir: str
     monitoring: LiveMonitoringConfig | None = None
     prediction_trace: PredictionTraceConfig | None = None
+    execution_trace: ExecutionTraceConfig | None = None
 
 
 def _resolve_data_check_timer_interval_ms(feed_groups: Iterable[FeedGroup]) -> tuple[int, int]:
@@ -291,10 +299,8 @@ def load_params_from_report(
             market_params = loaded_params["common"]
             train_params = loaded_params["train"]
             strategy_params = loaded_params["strategy"]
-            strategy_params["max_daily_loss_pct"] = 0.035
 
             for spec in specs_by_hash[hash_id]:
-                # market_params["interval"] = "1m"
                 spec.base_define = common.BaseDefine(**market_params)
                 spec.train_config = config_from_dict_train(train_params)
                 spec.strategy_config = strategy_config_from_dict(strategy_params)
@@ -350,16 +356,87 @@ def _strategy_entries(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return strategies
 
 
+def _validate_runner_id(value: Any) -> str:
+    runner_id = str(value or "").strip() or "live-runner"
+    if (
+        runner_id in {".", ".."}
+        or "/" in runner_id
+        or "\\" in runner_id
+        or "\x00" in runner_id
+    ):
+        raise ValueError(
+            "runner_id must be a single safe directory name without path separators"
+        )
+    return runner_id
+
+
+def _runner_identity_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    runner_id: str | None = None,
+) -> tuple[str, str]:
+    raw_monitoring = payload.get("monitoring")
+    if raw_monitoring is not None and not isinstance(raw_monitoring, Mapping):
+        raise TypeError("monitoring must be a JSON object")
+    monitoring_runner_id = (
+        raw_monitoring.get("runner_id")
+        if isinstance(raw_monitoring, Mapping)
+        else None
+    )
+    final_runner_id = _validate_runner_id(
+        runner_id
+        or os.environ.get("LIVE_RUNNER_ID")
+        or payload.get("runner_id")
+        or monitoring_runner_id
+    )
+    output_dir = os.path.abspath(
+        os.path.join(
+            common.PERSISTENCE_DIR,
+            "live_runner",
+            final_runner_id,
+        )
+    )
+    return final_runner_id, output_dir
+
+
+def load_live_runner_identity(
+    path: str,
+    *,
+    runner_id: str | None = None,
+) -> tuple[str, str]:
+    """Read only the runner identity needed to initialize its session log."""
+
+    config_path = os.path.abspath(path)
+    with open(config_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, Mapping):
+        raise TypeError("Live configuration root must be an object")
+    return _runner_identity_from_payload(payload, runner_id=runner_id)
+
+
 def _prediction_trace_config(
-    config_path: str,
     value: Mapping[str, Any] | None,
+    output_dir: str,
 ) -> PredictionTraceConfig | None:
     if value is None:
         return None
     if not isinstance(value, Mapping):
         raise TypeError("prediction_trace must be a JSON object")
     return PredictionTraceConfig(
-        output_dir=_resolve_path(config_path, value.get("output_dir")),
+        output_dir=os.path.join(output_dir, "prediction_traces"),
+    )
+
+
+def _execution_trace_config(
+    value: Mapping[str, Any] | None,
+    output_dir: str,
+) -> ExecutionTraceConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("execution_trace must be a JSON object")
+    return ExecutionTraceConfig(
+        output_dir=os.path.join(output_dir, "execution_traces"),
     )
 
 
@@ -369,13 +446,18 @@ def load_live_runner_configuration(
     publish_url: str | None = None,
     runner_id: str | None = None,
 ) -> LiveRunnerConfiguration:
-    """Restore strategies and optional read-only monitoring settings."""
+    """Restore a live runner and scope its writable outputs to its runner ID."""
 
     config_path = os.path.abspath(path)
     with open(config_path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, Mapping):
         raise TypeError("Live configuration root must be an object")
+
+    final_runner_id, output_dir = _runner_identity_from_payload(
+        payload,
+        runner_id=runner_id,
+    )
 
     report_path = _resolve_path(config_path, payload.get("report"))
     if not report_path.lower().endswith(".jsonl"):
@@ -419,16 +501,23 @@ def load_live_runner_configuration(
     monitoring = monitoring_config_from_mapping(
         payload.get("monitoring"),
         publish_url=publish_url or os.environ.get("LIVE_MONITORING_PUBLISH_URL"),
-        runner_id=runner_id or os.environ.get("LIVE_RUNNER_ID"),
+        runner_id=final_runner_id,
     )
     prediction_trace = _prediction_trace_config(
-        config_path,
         payload.get("prediction_trace"),
+        output_dir,
+    )
+    execution_trace = _execution_trace_config(
+        payload.get("execution_trace"),
+        output_dir,
     )
     return LiveRunnerConfiguration(
         strategies=strategy_entries,
+        runner_id=final_runner_id,
+        output_dir=output_dir,
         monitoring=monitoring,
         prediction_trace=prediction_trace,
+        execution_trace=execution_trace,
     )
 
 
@@ -503,8 +592,11 @@ class LiveRunner:
         feed_factory: Optional[Callable[[common.MarketDataSourceConfig, int], DataFeedBase]] = None,
         venue_factory: Optional[Callable[[LiveStrategySpec, logging.Logger], Any]] = None,
         prediction_callback: Optional[Callable[[StrategyPipeline, int, pd.Series], None]] = None,
+        runner_id: str | None = None,
+        output_dir: str | None = None,
         monitoring_config: LiveMonitoringConfig | None = None,
         prediction_trace_config: PredictionTraceConfig | None = None,
+        execution_trace_config: ExecutionTraceConfig | None = None,
     ):
         if not specs:
             raise ValueError("LiveRunner requires at least one strategy")
@@ -514,11 +606,26 @@ class LiveRunner:
         self._ctrader_connection_path: str | None = None
         self._venue_factory = venue_factory or self._create_venue
         self._prediction_callback = prediction_callback
+        self.runner_id = _validate_runner_id(
+            runner_id
+            or (
+                monitoring_config.runner_id
+                if monitoring_config is not None
+                else None
+            )
+        )
+        self.output_dir = (
+            os.path.abspath(output_dir)
+            if output_dir is not None
+            else None
+        )
         self._monitoring_config = monitoring_config
         self._prediction_trace_config = prediction_trace_config
+        self._execution_trace_config = execution_trace_config
         self._live_registry: LiveStateRegistry | None = None
         self._monitoring_service: LiveMonitoringService | None = None
         self._prediction_trace: LivePredictionTraceRecorder | None = None
+        self._execution_trace: LiveExecutionTraceRecorder | None = None
         self._prediction_trace_failed = False
         self._initialized = False
         self._closed = False
@@ -537,6 +644,16 @@ class LiveRunner:
                 self._prediction_trace = LivePredictionTraceRecorder(
                     self._prediction_trace_config,
                     self.feed_groups,
+                )
+            if self._execution_trace_config is not None:
+                self._execution_trace = LiveExecutionTraceRecorder(
+                    self._execution_trace_config,
+                    runner_id=self.runner_id,
+                    logger=self.logger,
+                )
+                self.logger.info(
+                    "Live execution trace started | files=%s",
+                    self._execution_trace.paths,
                 )
             self._live_registry = LiveStateRegistry(self.strategy_pipelines)
             if self._monitoring_config is not None:
@@ -563,11 +680,23 @@ class LiveRunner:
             publish_url=publish_url,
             runner_id=runner_id,
         )
+        return cls.from_configuration(configuration, logger=logger)
+
+    @classmethod
+    def from_configuration(
+        cls,
+        configuration: LiveRunnerConfiguration,
+        *,
+        logger: Optional[logging.Logger] = None,
+    ) -> "LiveRunner":
         return cls(
             configuration.strategies,
             logger=logger,
+            runner_id=configuration.runner_id,
+            output_dir=configuration.output_dir,
             monitoring_config=configuration.monitoring,
             prediction_trace_config=configuration.prediction_trace,
+            execution_trace_config=configuration.execution_trace,
         )
 
     @staticmethod
@@ -628,14 +757,9 @@ class LiveRunner:
             )
         if config.venue == "ctrader":
             connection_path = os.path.realpath(config.path)
-            if (
-                self._ctrader_connection_path is not None
-                and connection_path != self._ctrader_connection_path
-            ):
+            if self._ctrader_connection_path is not None and connection_path != self._ctrader_connection_path:
                 raise ValueError(
-                    "All cTrader venues must use the same credential path; "
-                    f"expected {self._ctrader_connection_path!r}, "
-                    f"got {connection_path!r}"
+                    "All cTrader venues must use the same credential path; " f"expected {self._ctrader_connection_path!r}, " f"got {connection_path!r}"
                 )
             self._ctrader_connection_path = connection_path
 
@@ -644,9 +768,7 @@ class LiveRunner:
                 "live",
                 logger,
             )
-            account_id, environment = discovery_connection.resolve_account(
-                config.trader_login
-            )
+            account_id, environment = discovery_connection.resolve_account(config.trader_login)
             logger.info(
                 "cTrader account route resolved | trader_login=%s account=%s environment=%s",
                 config.trader_login,
@@ -756,19 +878,13 @@ class LiveRunner:
 
         initial_equity = float(spec.broker_config.initial_equity)
         if not math.isfinite(initial_equity) or initial_equity <= 0:
-            raise ValueError(
-                "cTrader broker_config.initial_equity must be positive and finite"
-            )
+            raise ValueError("cTrader broker_config.initial_equity must be positive and finite")
         actual_balance = float(venue.get_dashboard_balance().balance)
         if not math.isfinite(actual_balance) or actual_balance <= 0:
             raise RuntimeError("cTrader returned an invalid account balance")
 
-        lower_balance = initial_equity * (
-            1.0 - cls.CTRADER_INITIAL_BALANCE_TOLERANCE
-        )
-        upper_balance = initial_equity * (
-            1.0 + cls.CTRADER_INITIAL_BALANCE_TOLERANCE
-        )
+        lower_balance = initial_equity * (1.0 - cls.CTRADER_INITIAL_BALANCE_TOLERANCE)
+        upper_balance = initial_equity * (1.0 + cls.CTRADER_INITIAL_BALANCE_TOLERANCE)
         if actual_balance < lower_balance or actual_balance > upper_balance:
             raise ValueError(
                 "cTrader account balance is outside the configured initial_equity "
@@ -1060,7 +1176,8 @@ class LiveRunner:
                     daily_reset_date=pipeline.venue.get_daily_reset_date(candle_open_time_utc),
                 )
                 intent = pipeline.strategy.process(observation)
-                pipeline.venue.execute_action(intent)
+                execution_report = pipeline.venue.execute_action(intent)
+                self._record_execution(pipeline, execution_report)
                 self._record_live_cycle(
                     pipeline,
                     pd.Series({"pred": Signal.INVALID.value}),
@@ -1098,7 +1215,8 @@ class LiveRunner:
             daily_reset_date=pipeline.venue.get_daily_reset_date(candle_open_time_utc),
         )
         intent = pipeline.strategy.process(observation)
-        pipeline.venue.execute_action(intent)
+        execution_report = pipeline.venue.execute_action(intent)
+        self._record_execution(pipeline, execution_report)
         self.logger.info(
             "Strategy processed | id=%s hash=%s symbol=%s signal=%s action=%s",
             pipeline.spec.strategy_id,
@@ -1108,6 +1226,28 @@ class LiveRunner:
             intent.action.value,
         )
         return intent
+
+    def _record_execution(
+        self,
+        pipeline: StrategyPipeline,
+        report: Any,
+    ) -> None:
+        recorder = getattr(self, "_execution_trace", None)
+        if recorder is None or not isinstance(report, ExecutionReport):
+            return
+        try:
+            recorder.record(
+                report,
+                strategy_id=pipeline.spec.strategy_id,
+                strategy_hash=pipeline.spec.hash_id,
+                venue=type(pipeline.venue).__name__,
+                symbol=pipeline.spec.base_define.symbol,
+            )
+        except Exception:
+            self.logger.exception(
+                "Live execution trace enqueue failed | strategy=%s",
+                pipeline.spec.strategy_id,
+            )
 
     def _record_live_cycle(
         self,
@@ -1346,6 +1486,12 @@ class LiveRunner:
             except Exception:
                 self.logger.exception("Live prediction trace shutdown failed")
             self._prediction_trace = None
+        if getattr(self, "_execution_trace", None) is not None:
+            try:
+                self._execution_trace.close()
+            except Exception:
+                self.logger.exception("Live execution trace shutdown failed")
+            self._execution_trace = None
         for pipeline in self.strategy_pipelines:
             try:
                 pipeline.strategy.finalize()
@@ -1414,19 +1560,36 @@ def main() -> None:
     parser.add_argument(
         "--runner-id",
         default=None,
-        help="Override monitoring.runner_id from the live configuration",
+        help="Override the runner ID used for monitoring and output paths",
     )
     args = parser.parse_args()
 
-    logger, _ = common.setup_session_logger(sub_folder="live_runner", symbol="", console_level=logging.DEBUG)
-    logging.getLogger("urllib3").setLevel(logging.INFO)
-    logging.getLogger("websocket").setLevel(logging.INFO)
-    runner = LiveRunner.from_config(
+    runner_id, output_dir = load_live_runner_identity(
         args.config,
-        logger=logger,
-        publish_url=args.publish_url,
         runner_id=args.runner_id,
     )
+    log_dir = os.path.join(output_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_filename = datetime.now(timezone.utc).strftime(
+        "session_%Y%m%dT%H%M%S%fZ.log"
+    )
+    logger, _ = common.setup_session_logger(
+        log_file_path=os.path.join(log_dir, log_filename),
+        console_level=logging.DEBUG,
+    )
+    logging.getLogger("urllib3").setLevel(logging.INFO)
+    logging.getLogger("websocket").setLevel(logging.INFO)
+    logger.info(
+        "Live runner output directory | runner_id=%s path=%s",
+        runner_id,
+        output_dir,
+    )
+    configuration = load_live_runner_configuration(
+        args.config,
+        publish_url=args.publish_url,
+        runner_id=runner_id,
+    )
+    runner = LiveRunner.from_configuration(configuration, logger=logger)
     runner.run_forever()
 
 

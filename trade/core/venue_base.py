@@ -11,14 +11,17 @@ switching backtest framework or exchange should only touch this layer.
 
 from abc import abstractmethod
 from datetime import UTC, date, datetime, timedelta, timezone
+import logging
 import math
 from zoneinfo import ZoneInfo
 
 from trade.core.protocol import Firm, OrderType, PositionView
 from trade.core.protocol import TradeIntent, ActionType, PositionDir
+from trade.core.execution import ExecutionFill, ExecutionReport
 
 
 class VenueBase:
+    MAX_ENTRY_SPREAD_PCT = 0.0015
     FIRM_DAILY_RESET_TIMEZONES = {
         Firm.FTMO: ZoneInfo("Europe/Prague"),
         # The5ers defines its reset as a fixed UTC+3 boundary without DST.
@@ -99,20 +102,89 @@ class VenueBase:
     ):
         pass
 
+    def get_bid_ask(self) -> tuple[float, float] | None:
+        """Return an executable bid/ask pair when the venue supports live quotes."""
+
+        return None
+
+    def _execution_fills(self, result, *, is_buy: bool) -> tuple[ExecutionFill, ...]:
+        """Convert a venue response into normalized fills."""
+
+        return ()
+
+    def _entry_spread(self) -> tuple[float, float, float] | None:
+        quote = self.get_bid_ask()
+        if quote is None:
+            return None
+        bid, ask = map(float, quote)
+        if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask < bid:
+            raise RuntimeError(f"Venue returned an invalid bid/ask quote: bid={bid}, ask={ask}")
+        midpoint = (bid + ask) / 2.0
+        return bid, ask, (ask - bid) / midpoint
+
     def execute_action(self, action: TradeIntent):
         """Reworked to use the submit_order interface and pass the stop loss parameters"""
         if action.action == ActionType.NOOP:
-            return
+            return None
         if action.action == ActionType.CLOSE:
-            self.close_position()
+            return self.close_position()
         elif action.action == ActionType.OPEN:
             is_buy = action.target_dir == PositionDir.POSITIVE
-            self.submit_order(
+            spread = self._entry_spread()
+            bid = ask = spread_pct = float("nan")
+            if spread is not None:
+                bid, ask, spread_pct = spread
+                if spread_pct > self.MAX_ENTRY_SPREAD_PCT:
+                    logger = getattr(self, "logger", None) or logging.getLogger(
+                        "trade.venue"
+                    )
+                    logger.warning(
+                        "Entry rejected because spread exceeds limit | "
+                        "symbol=%s bid=%g ask=%g spread_pct=%.4f%% limit_pct=%.4f%%",
+                        getattr(self, "symbol", "unknown"),
+                        bid,
+                        ask,
+                        spread_pct * 100.0,
+                        self.MAX_ENTRY_SPREAD_PCT * 100.0,
+                    )
+                    return ExecutionReport(
+                        side="buy" if is_buy else "sell",
+                        requested_quantity=float(action.order_qty),
+                        decision_price=float(action.price),
+                        decision_at_utc=action.created_at_utc,
+                        bid=bid,
+                        ask=ask,
+                        spread_pct=spread_pct,
+                        status="rejected",
+                        reason="spread_limit",
+                    )
+
+            result = self.submit_order(
                 action.order_qty,
                 is_buy=is_buy,
                 stop_loss_pct=action.stop_loss_pct,
                 take_profit_pct=action.take_profit_pct,
             )
+            try:
+                fills = self._execution_fills(result, is_buy=is_buy)
+            except Exception:
+                logger = getattr(self, "logger", None) or logging.getLogger(
+                    "trade.venue"
+                )
+                logger.exception("Failed to extract execution fills")
+                fills = ()
+            return ExecutionReport(
+                side="buy" if is_buy else "sell",
+                requested_quantity=float(action.order_qty),
+                decision_price=float(action.price),
+                decision_at_utc=action.created_at_utc,
+                bid=bid,
+                ask=ask,
+                spread_pct=spread_pct,
+                status="filled" if fills else "submitted",
+                fills=fills,
+            )
+        raise ValueError(f"Unsupported trade action: {action.action!r}")
 
     # ---------------- outbound: cash and life cycle (optional) ----------------
     def withdraw_cash(self, amount):

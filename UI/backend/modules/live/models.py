@@ -20,6 +20,13 @@ class AccountSnapshot(StrictModel):
     equity: float
 
 
+class PositionComponentSnapshot(StrictModel):
+    quantity: float
+    entry_price: float
+    stop_loss_price: float | None = Field(default=None, gt=0.0)
+    take_profit_price: float | None = Field(default=None, gt=0.0)
+
+
 class PositionSnapshot(StrictModel):
     symbol: str
     side: Literal["long", "short"]
@@ -32,6 +39,11 @@ class PositionSnapshot(StrictModel):
     leverage: float | None = None
     liquidation_price: float | None = None
     margin_mode: Literal["cross", "isolated", "unknown"] = "unknown"
+    opened_at: AwareDatetime | None = None
+    remaining_holding_seconds: float | None = Field(default=None, ge=0.0)
+    stop_loss_price: float | None = Field(default=None, gt=0.0)
+    take_profit_price: float | None = Field(default=None, gt=0.0)
+    components: list[PositionComponentSnapshot] = Field(default_factory=list)
 
 
 class SignalSnapshot(StrictModel):
@@ -61,6 +73,9 @@ class StrategySnapshot(StrictModel):
     strategy_id: str = Field(min_length=1)
     symbol: str = Field(min_length=1)
     interval: str = Field(min_length=1)
+    risk_per_trade_pct: float = Field(ge=0.0, le=1.0)
+    max_daily_loss_pct: float = Field(ge=0.0, le=1.0)
+    max_holding_seconds: float | None = Field(default=None, ge=0.0)
     status: Literal["running", "stopped"]
     account: AccountSnapshot | None = None
     position: PositionSnapshot | None = None

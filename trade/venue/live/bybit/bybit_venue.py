@@ -15,9 +15,11 @@ from trade.core.dashboard_base import (
     AccountBalance,
     AccountDashboard,
     AccountPosition,
+    AccountPositionComponent,
     MarginMode,
     PositionSide,
 )
+from trade.core.execution import ExecutionFill
 from trade.core.protocol import ActionType, OrderType, PositionDir, PositionView
 from trade.core.venue_base import VenueBase
 
@@ -128,6 +130,8 @@ class BybitVenue(VenueBase, AccountDashboard):
             if trade_mode
             else MarginMode.UNKNOWN
         )
+        stop_loss_price = float(position.get("stopLoss", 0.0) or 0.0) or None
+        take_profit_price = float(position.get("takeProfit", 0.0) or 0.0) or None
         return AccountPosition(
             symbol=self.symbol,
             side=(
@@ -146,6 +150,16 @@ class BybitVenue(VenueBase, AccountDashboard):
             liquidation_price=float(position.get("liqPrice", 0.0) or 0.0)
             or None,
             margin_mode=margin_mode,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            components=(
+                AccountPositionComponent(
+                    quantity=quantity,
+                    entry_price=entry_price,
+                    stop_loss_price=stop_loss_price,
+                    take_profit_price=take_profit_price,
+                ),
+            ),
         )
 
     def get_current_state(self) -> PositionView:
@@ -177,6 +191,45 @@ class BybitVenue(VenueBase, AccountDashboard):
         if not math.isfinite(price) or price <= 0:
             raise RuntimeError("Bybit returned an invalid ticker price")
         return price
+
+    def get_bid_ask(self) -> tuple[float, float]:
+        response = self.engine.http.get_tickers(
+            category="linear",
+            symbol=self.symbol,
+        )
+        ticker = response["result"]["list"][0]
+        return float(ticker["bid1Price"]), float(ticker["ask1Price"])
+
+    def _execution_fills(self, result, *, is_buy: bool) -> tuple[ExecutionFill, ...]:
+        if not isinstance(result, dict) or result.get("retCode") != 0:
+            return ()
+        order_id = result.get("result", {}).get("orderId")
+        if not order_id:
+            return ()
+        response = self.engine.http.get_executions(
+            category="linear",
+            symbol=self.symbol,
+            orderId=order_id,
+            limit=100,
+        )
+        return tuple(
+            ExecutionFill(
+                price=float(execution["execPrice"]),
+                quantity=float(execution["execQty"]),
+                order_id=str(execution.get("orderId", order_id)),
+                deal_id=str(execution.get("execId", "")),
+                executed_at_utc=(
+                    datetime.fromtimestamp(
+                        int(execution["execTime"]) / 1000.0,
+                        tz=timezone.utc,
+                    )
+                    if execution.get("execTime") is not None
+                    else None
+                ),
+            )
+            for execution in response.get("result", {}).get("list", [])
+            if execution.get("execType") == "Trade"
+        )
 
     def submit_order(
         self,
@@ -275,9 +328,11 @@ class BybitVenue(VenueBase, AccountDashboard):
                 )
             else:
                 self.logger.error(f"❌ Order failed: {res['retMsg']}")
+            return res
 
         except Exception as e:
             self.logger.error(f"Order exception: {e}")
+            raise
 
     def close_position(self):
         """Close all open positions for this symbol."""
