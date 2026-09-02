@@ -202,6 +202,7 @@ DATA_CHECK_TIMER_DELAY_MS = 5000
 class LiveRunnerConfiguration:
     strategies: list[LiveStrategySpec]
     runner_id: str
+    run_id: str
     output_dir: str
     monitoring: LiveMonitoringConfig | None = None
     prediction_trace: PredictionTraceConfig | None = None
@@ -399,6 +400,15 @@ def _runner_identity_from_payload(
     return final_runner_id, output_dir
 
 
+def _new_live_run_id() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _live_run_output_dir(runner_output_dir: str, run_id: str) -> str:
+    normalized_run_id = _validate_runner_id(run_id)
+    return os.path.join(runner_output_dir, normalized_run_id)
+
+
 def load_live_runner_identity(
     path: str,
     *,
@@ -415,26 +425,26 @@ def load_live_runner_identity(
 
 
 def _prediction_trace_config(
-    value: Mapping[str, Any] | None,
+    enabled: Any,
     output_dir: str,
 ) -> PredictionTraceConfig | None:
-    if value is None:
+    if not isinstance(enabled, bool):
+        raise TypeError("prediction_trace must be a JSON boolean")
+    if not enabled:
         return None
-    if not isinstance(value, Mapping):
-        raise TypeError("prediction_trace must be a JSON object")
     return PredictionTraceConfig(
         output_dir=os.path.join(output_dir, "prediction_traces"),
     )
 
 
 def _execution_trace_config(
-    value: Mapping[str, Any] | None,
+    enabled: Any,
     output_dir: str,
 ) -> ExecutionTraceConfig | None:
-    if value is None:
+    if not isinstance(enabled, bool):
+        raise TypeError("execution_trace must be a JSON boolean")
+    if not enabled:
         return None
-    if not isinstance(value, Mapping):
-        raise TypeError("execution_trace must be a JSON object")
     return ExecutionTraceConfig(
         output_dir=os.path.join(output_dir, "execution_traces"),
     )
@@ -445,8 +455,9 @@ def load_live_runner_configuration(
     *,
     publish_url: str | None = None,
     runner_id: str | None = None,
+    run_id: str | None = None,
 ) -> LiveRunnerConfiguration:
-    """Restore a live runner and scope its writable outputs to its runner ID."""
+    """Restore a live runner and scope its outputs to one run directory."""
 
     config_path = os.path.abspath(path)
     with open(config_path, "r", encoding="utf-8") as handle:
@@ -454,10 +465,12 @@ def load_live_runner_configuration(
     if not isinstance(payload, Mapping):
         raise TypeError("Live configuration root must be an object")
 
-    final_runner_id, output_dir = _runner_identity_from_payload(
+    final_runner_id, runner_output_dir = _runner_identity_from_payload(
         payload,
         runner_id=runner_id,
     )
+    final_run_id = run_id or _new_live_run_id()
+    output_dir = _live_run_output_dir(runner_output_dir, final_run_id)
 
     report_path = _resolve_path(config_path, payload.get("report"))
     if not report_path.lower().endswith(".jsonl"):
@@ -504,16 +517,17 @@ def load_live_runner_configuration(
         runner_id=final_runner_id,
     )
     prediction_trace = _prediction_trace_config(
-        payload.get("prediction_trace"),
+        payload.get("prediction_trace", False),
         output_dir,
     )
     execution_trace = _execution_trace_config(
-        payload.get("execution_trace"),
+        payload.get("execution_trace", False),
         output_dir,
     )
     return LiveRunnerConfiguration(
         strategies=strategy_entries,
         runner_id=final_runner_id,
+        run_id=final_run_id,
         output_dir=output_dir,
         monitoring=monitoring,
         prediction_trace=prediction_trace,
@@ -1564,17 +1578,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    runner_id, output_dir = load_live_runner_identity(
+    runner_id, runner_output_dir = load_live_runner_identity(
         args.config,
         runner_id=args.runner_id,
     )
+    run_id = _new_live_run_id()
+    output_dir = _live_run_output_dir(runner_output_dir, run_id)
     log_dir = os.path.join(output_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
-    log_filename = datetime.now(timezone.utc).strftime(
-        "session_%Y%m%dT%H%M%S%fZ.log"
-    )
     logger, _ = common.setup_session_logger(
-        log_file_path=os.path.join(log_dir, log_filename),
+        log_file_path=os.path.join(log_dir, "session.log"),
         console_level=logging.DEBUG,
     )
     logging.getLogger("urllib3").setLevel(logging.INFO)
@@ -1588,6 +1601,7 @@ def main() -> None:
         args.config,
         publish_url=args.publish_url,
         runner_id=runner_id,
+        run_id=run_id,
     )
     runner = LiveRunner.from_configuration(configuration, logger=logger)
     runner.run_forever()
