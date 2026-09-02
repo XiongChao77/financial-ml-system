@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from trade.core.protocol import OrderType, PositionView
+from trade.core.dashboard_base import AccountBalance, AccountDashboard
 from trade.core.venue_base import VenueBase
 
 
-class MockVenue(VenueBase):
+class MockVenue(VenueBase, AccountDashboard):
     """Implement the venue contract without changing account or position state."""
 
     def __init__(
@@ -22,6 +23,12 @@ class MockVenue(VenueBase):
 
     def get_current_state(self) -> PositionView:
         return PositionView()
+
+    def get_dashboard_balance(self) -> AccountBalance:
+        return AccountBalance(balance=self._equity, equity=self._equity)
+
+    def get_dashboard_position(self):
+        return None
 
     def get_last_position_open_time(self):
         return None

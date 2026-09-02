@@ -21,6 +21,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from UI.backend.modules.backtests import router as backtests_router
 from UI.backend.modules.experiments import router as experiments_router
 from UI.backend.modules.labels import router as labels_router
+from UI.backend.modules.live import router as live_router
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -35,13 +36,14 @@ def create_app() -> FastAPI:
     application.include_router(experiments_router)
     application.include_router(backtests_router)
     application.include_router(labels_router)
+    application.include_router(live_router)
 
     @application.get("/api/health", tags=["system"])
     def health() -> dict[str, Any]:
         return {
             "status": "ok",
             "application": "Strategy Center",
-            "modules": ["experiments", "backtests", "labels"],
+            "modules": ["live", "experiments", "backtests", "labels"],
             "frontend_built": (FRONTEND_DIST / "index.html").is_file(),
         }
 

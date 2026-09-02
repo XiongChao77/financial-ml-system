@@ -435,10 +435,7 @@ class BinanceDataFeed(DataFeedBase):
 
             if missing_open_times:
                 readable_missing_open_times = [_format_utc_ms(open_time_ms) for open_time_ms in missing_open_times]
-                raise RuntimeError(
-                    "Failed to synchronize Binance cache to the latest closed candle: "
-                    f"missing open times UTC {readable_missing_open_times}"
-                )
+                raise RuntimeError("Failed to synchronize Binance cache to the latest closed candle: " f"missing open times UTC {readable_missing_open_times}")
 
             latest_target_open_time_ms = self._latest_closed_open_time_ms(interval_ms)
             if latest_target_open_time_ms <= target_open_time_ms:
@@ -454,10 +451,7 @@ class BinanceDataFeed(DataFeedBase):
                 _format_utc_ms(latest_target_open_time_ms),
             )
 
-        raise RuntimeError(
-            "Failed to synchronize Binance cache because candle boundaries "
-            f"kept advancing after {self.MAX_STARTUP_SYNC_ROUNDS} rounds"
-        )
+        raise RuntimeError("Failed to synchronize Binance cache because candle boundaries " f"kept advancing after {self.MAX_STARTUP_SYNC_ROUNDS} rounds")
 
     def start(self, on_closed_candle: ClosedCandleCallback) -> None:
         """Start the reconnecting WebSocket listener for closed-kline events."""
@@ -549,13 +543,13 @@ class BinanceDataFeed(DataFeedBase):
                 return
 
             if kline.get("x") is not True:
-                self.logger.debug(
-                    "Received open Binance kline | symbol=%s interval=%s " "open_time_utc=%s close_time_utc=%s",
-                    self.symbol,
-                    self.interval,
-                    _format_utc_ms(kline.get("t")),
-                    _format_utc_ms(kline.get("T")),
-                )
+                # self.logger.debug(
+                #     "Received open Binance kline | symbol=%s interval=%s " "open_time_utc=%s close_time_utc=%s",
+                #     self.symbol,
+                #     self.interval,
+                #     _format_utc_ms(kline.get("t")),
+                #     _format_utc_ms(kline.get("T")),
+                # )
                 return
 
             candle_open_time_ms = self._store_closed_kline(kline)

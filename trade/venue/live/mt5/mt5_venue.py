@@ -1,12 +1,19 @@
 import MetaTrader5 as mt5
 import logging,time
 from datetime import datetime, timezone
+from trade.core.dashboard_base import (
+    AccountBalance,
+    AccountDashboard,
+    AccountPosition,
+    MarginMode,
+    PositionSide,
+)
 from trade.core.venue_base import VenueBase
 from trade.core.protocol import Firm, OrderType, PositionDir, PositionView
 
 MT5_SYMBOL_FTMO_MAP = {"DOGEUSDT": "DOGEUSD", "ETHUSDT": "ETHUSD", "BTCUSDT": "BTCUSD"}
 
-class MT5Venue(VenueBase):
+class MT5Venue(VenueBase, AccountDashboard):
     def __init__(
         self,
         path,
@@ -151,20 +158,96 @@ class MT5Venue(VenueBase):
         """Used by the daily risk audit"""
         return self._ensure_target_account().equity
 
+    def get_dashboard_balance(self) -> AccountBalance:
+        account = self._ensure_target_account()
+        return AccountBalance(
+            balance=float(account.balance),
+            equity=float(account.equity),
+        )
+
+    def _strategy_positions(self):
+        self._ensure_target_account()
+        return list(mt5.positions_get(symbol=self.symbol, magic=self.magic) or [])
+
+    @staticmethod
+    def _aggregate_position_values(positions):
+        if not positions:
+            return None
+        directions = {int(position.type) for position in positions}
+        if len(directions) != 1:
+            raise RuntimeError(
+                "MT5 strategy has simultaneous long and short positions"
+            )
+        total_volume = sum(float(position.volume) for position in positions)
+        if total_volume <= 0:
+            return None
+        entry_price = sum(
+            float(position.volume) * float(position.price_open)
+            for position in positions
+        ) / total_volume
+        return directions.pop(), total_volume, entry_price
+
+    def get_dashboard_position(self) -> AccountPosition | None:
+        positions = self._strategy_positions()
+        aggregated = self._aggregate_position_values(positions)
+        if aggregated is None:
+            return None
+        direction, total_volume, entry_price = aggregated
+        mark_price = sum(
+            float(position.volume)
+            * float(getattr(position, "price_current", 0.0) or 0.0)
+            for position in positions
+        ) / total_volume
+        if mark_price <= 0:
+            tick = mt5.symbol_info_tick(self.symbol)
+            if tick is None:
+                raise RuntimeError(f"MT5 returned no current price for {self.symbol}")
+            mark_price = float(tick.bid if direction == 0 else tick.ask)
+        unrealized_pnl = sum(
+            float(getattr(position, "profit", 0.0) or 0.0)
+            for position in positions
+        )
+        symbol_info = mt5.symbol_info(self.symbol)
+        contract_size = float(
+            getattr(symbol_info, "trade_contract_size", 0.0) or 0.0
+        )
+        notional = (
+            total_volume * mark_price * contract_size
+            if contract_size > 0
+            else None
+        )
+        account = self._ensure_target_account()
+        cost = total_volume * entry_price * contract_size
+        return AccountPosition(
+            symbol=self.symbol,
+            side=PositionSide.LONG if direction == 0 else PositionSide.SHORT,
+            quantity=total_volume,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            notional=notional,
+            unrealized_pnl=unrealized_pnl,
+            unrealized_pnl_pct=(
+                unrealized_pnl / cost if contract_size > 0 and cost > 0 else None
+            ),
+            leverage=float(getattr(account, "leverage", 0.0) or 0.0) or None,
+            liquidation_price=None,
+            margin_mode=MarginMode.UNKNOWN,
+        )
+
     def get_current_state(self) -> PositionView:
         """Return the current position direction, size, and entry price."""
-        self._ensure_target_account()
-        positions = mt5.positions_get(symbol=self.symbol, magic=self.magic)
-        if not positions:
+        aggregated = self._aggregate_position_values(self._strategy_positions())
+        if aggregated is None:
             return PositionView()
-
-        pos = positions[0] 
-        direction = PositionDir.POSITIVE  if pos.type == 0 else PositionDir.NEGATIVE
-        
+        position_type, total_volume, entry_price = aggregated
         return PositionView(
-            dir=direction,
-            size=float(pos.volume),
-            price=float(pos.price_open),
+            dir=(
+                PositionDir.POSITIVE
+                if position_type == 0
+                else PositionDir.NEGATIVE
+            ),
+            size=total_volume,
+            price=entry_price,
         )
 
     def submit_order(

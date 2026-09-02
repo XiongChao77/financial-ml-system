@@ -17,11 +17,18 @@ from urllib.parse import urlencode
 
 import requests
 
+from trade.core.dashboard_base import (
+    AccountBalance,
+    AccountDashboard,
+    AccountPosition,
+    MarginMode,
+    PositionSide,
+)
 from trade.core.protocol import OrderType, PositionDir, PositionView
 from trade.core.venue_base import VenueBase
 
 
-class BinanceVenue(VenueBase):
+class BinanceVenue(VenueBase, AccountDashboard):
     """Binance USD-M futures venue with fail-closed bracket creation."""
 
     BASE_URL = "https://fapi.binance.com"
@@ -176,6 +183,62 @@ class BinanceVenue(VenueBase):
         if not math.isfinite(equity) or equity <= 0:
             raise RuntimeError("Binance returned invalid account equity")
         return equity
+
+    def get_dashboard_balance(self) -> AccountBalance:
+        account = self._request("GET", "/fapi/v3/account", signed=True)
+        balance = float(account.get("totalWalletBalance", 0.0))
+        equity = float(account.get("totalMarginBalance", 0.0))
+        if not all(math.isfinite(value) for value in (balance, equity)):
+            raise RuntimeError("Binance returned invalid dashboard balance data")
+        return AccountBalance(balance=balance, equity=equity)
+
+    def get_dashboard_position(self) -> AccountPosition | None:
+        position = self._position()
+        if position is None:
+            return None
+        quantity = abs(float(position["positionAmt"]))
+        entry_price = float(position.get("entryPrice", 0.0))
+        mark_price = float(position.get("markPrice", 0.0) or 0.0)
+        if mark_price <= 0:
+            mark_price = self._latest_price()
+        unrealized_pnl = float(position.get("unRealizedProfit", 0.0) or 0.0)
+        cost = entry_price * quantity
+        raw_margin_mode = str(position.get("marginType", "")).casefold()
+        margin_mode = {
+            "cross": MarginMode.CROSS,
+            "crossed": MarginMode.CROSS,
+            "isolated": MarginMode.ISOLATED,
+        }.get(raw_margin_mode, MarginMode.UNKNOWN)
+        if self.hedge_mode:
+            side = (
+                PositionSide.LONG
+                if position["positionSide"] == "LONG"
+                else PositionSide.SHORT
+            )
+        else:
+            side = (
+                PositionSide.LONG
+                if float(position["positionAmt"]) > 0
+                else PositionSide.SHORT
+            )
+        notional = abs(float(position.get("notional", mark_price * quantity)))
+        leverage = float(position.get("leverage", 0.0) or 0.0) or None
+        liquidation_price = (
+            float(position.get("liquidationPrice", 0.0) or 0.0) or None
+        )
+        return AccountPosition(
+            symbol=self.symbol,
+            side=side,
+            quantity=quantity,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            notional=notional,
+            unrealized_pnl=unrealized_pnl,
+            unrealized_pnl_pct=unrealized_pnl / cost if cost > 0 else None,
+            leverage=leverage,
+            liquidation_price=liquidation_price,
+            margin_mode=margin_mode,
+        )
 
     def get_current_state(self) -> PositionView:
         position = self._position()

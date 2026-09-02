@@ -1,0 +1,25 @@
+.live-page { min-width: 0; }
+.live-list-panel { padding: 0; overflow: hidden; }
+.live-list-panel .page-state { min-height: 280px; }
+.live-strategy-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.live-strategy-table th { padding: 12px 16px; border-bottom: 1px solid var(--border); color: var(--muted); background: #f7f9fc; text-align: left; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; }
+.live-strategy-table td { padding: 14px 16px; border-bottom: 1px solid #edf0f5; color: #34405a; font-variant-numeric: tabular-nums; }
+.live-strategy-table tbody tr:last-child td { border-bottom: 0; }
+.live-strategy-row { cursor: pointer; outline: none; transition: background 120ms ease; }
+.live-strategy-row:hover, .live-strategy-row:focus { background: #f7f9fe; }
+.live-strategy-row.unavailable td { color: #a0a8b8; }
+.strategy-id-cell { color: var(--brand) !important; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 750; }
+.value-unavailable { color: #a0a8b8 !important; }
+.live-request-failed { opacity: 0.46; filter: grayscale(0.65); }
+.live-detail-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 13px; margin-bottom: 18px; }
+.live-detail-header h1 { margin: 0; color: var(--text); font-size: 26px; line-height: 1.2; letter-spacing: -0.03em; }
+.back-button { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid #d8deea; border-radius: 9px; color: #46516a; background: #fff; font-size: 18px; }
+.back-button:hover { background: #f6f8fc; }
+.live-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.live-detail-card { min-height: 220px; transition: opacity 150ms ease, filter 150ms ease; }
+.live-detail-card.unavailable { opacity: 0.48; filter: grayscale(0.7); }
+.live-detail-card dl { margin: 0; }
+.live-detail-card dl > div { display: grid; grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.2fr); gap: 16px; padding: 10px 0; border-top: 1px solid #edf0f5; }
+.live-detail-card dt { color: var(--muted); font-size: 11px; }
+.live-detail-card dd { overflow: hidden; margin: 0; color: #283753; text-align: right; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 750; font-variant-numeric: tabular-nums; }
+@media (max-width: 1100px) { .live-detail-grid { grid-template-columns: 1fr; } }

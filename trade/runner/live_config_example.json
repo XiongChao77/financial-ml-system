@@ -1,8 +1,14 @@
 {
     "report":"../../output/reports.jsonl",
+    "monitoring": {
+        "publish_url": "http://127.0.0.1:8000/internal/live/snapshots",
+        "runner_id": "runner-main",
+        "publish_interval_seconds": 1,
+        "request_timeout_seconds": 0.5
+    },
     "strategy":{
         "ctrader-live-the5ers-1": {
-            "enable": false,
+            "run_live": false,
             "compound": true,
             "hash": "ctrader-report-hash",
             "model_path": "../../quant_output/experiment/valid_train_out/ctrader-report-hash",
@@ -16,7 +22,7 @@
             "venue": "cTrader",
             "cTrader": {
                 "path": "../exchange/ctrader/account/keys/main",
-                "account_id": "12345678",
+                "trader_login": "12345678",
                 "firm":"the5ers",
                 "login":"531400400",
                 "password":"B8?@h4rW7x",
@@ -27,7 +33,7 @@
         "id2":
         {
             "hash":"6b41d3de9072",
-            "enable": true,
+            "run_live": true,
             "compound": true,
             "model_path":"./model",
             "broker_config":{

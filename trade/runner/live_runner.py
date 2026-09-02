@@ -19,7 +19,7 @@ import json
 import logging
 import math
 import ntpath
-import os
+import os, sys
 import queue
 import time
 from numbers import Real
@@ -29,6 +29,9 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from enum import Enum, auto
 import pandas as pd
 import threading
+
+current_work_dir = os.path.dirname(__file__)
+sys.path.append(os.path.join(current_work_dir, "..", ".."))
 from data_process import common
 from data_process.utils import config_from_dict_train
 from model.model_loader import ModelHandler
@@ -43,8 +46,15 @@ from trade.core.protocol import (
     TradeIntent,
 )
 from trade.runner.config import BrokerConfig
+from trade.monitoring.live_monitoring import (
+    LiveMonitoringConfig,
+    LiveMonitoringService,
+    LiveStateRegistry,
+    monitoring_config_from_mapping,
+)
 from trade.venue.live.binance_data_feed import BinanceDataFeed
 from trade.core.venue_base import VenueBase
+from trade.core.strategy_base import StrategyBase
 from trade.venue.live.ctrader.ctrader_venue import CTraderOpenApiConnection
 from trade.venue.live.ctrader.ctrader_venue import CTraderVenue
 
@@ -106,7 +116,7 @@ class LiveVenueConfigMt5(LiveVenueConfigBase, LiveVenueConfigHedge):
 class LiveVenueConfigCtrader(LiveVenueConfigBase, LiveVenueConfigHedge):
     """Live-only connection data. Secrets are deliberately omitted from repr."""
 
-    account_id: str
+    trader_login: str
 
     profit_target: float
     max_loss: float
@@ -125,7 +135,7 @@ SUPPORTED_VENUES = {
 class LiveStrategySpec:
     strategy_id: str
     hash_id: str
-    enable: bool
+    run_live: bool
     model_path: str
     device: str = "auto"
     compound: bool = True
@@ -136,8 +146,8 @@ class LiveStrategySpec:
     venue_config: LiveVenueConfigBase = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.enable, bool):
-            raise TypeError("Live strategy enable must be a boolean")
+        if not isinstance(self.run_live, bool):
+            raise TypeError("Live strategy run_live must be a boolean")
         if not isinstance(self.compound, bool):
             raise TypeError("Live strategy compound must be a boolean")
 
@@ -147,10 +157,9 @@ class StrategyPipeline:
     spec: LiveStrategySpec
     model: ModelHandler
     venue: VenueBase
-    strategy: Any
+    strategy: StrategyBase
     feature_factory: Any
     interval_ms: int
-    enable: bool
 
     @property
     def required_bars(self) -> int:
@@ -163,7 +172,6 @@ class StrategyPipeline:
 class FeedGroup:
     market_config: common.MarketDataSourceConfig
     interval_ms: int
-    enable: bool
     feed: DataFeedBase
     required_bars: int
     pipelines: list[StrategyPipeline]
@@ -176,6 +184,12 @@ class FeedGroup:
 
 
 DATA_CHECK_TIMER_DELAY_MS = 2000
+
+
+@dataclass(frozen=True)
+class LiveRunnerConfiguration:
+    strategies: list[LiveStrategySpec]
+    monitoring: LiveMonitoringConfig | None = None
 
 
 def _resolve_data_check_timer_interval_ms(feed_groups: Iterable[FeedGroup]) -> tuple[int, int]:
@@ -269,6 +283,8 @@ def load_params_from_report(
             market_params = loaded_params["common"]
             train_params = loaded_params["train"]
             strategy_params = loaded_params["strategy"]
+            strategy_params["max_daily_loss_pct"] = 0.035
+
             for spec in specs_by_hash[hash_id]:
                 # market_params["interval"] = "1m"
                 spec.base_define = common.BaseDefine(**market_params)
@@ -326,8 +342,13 @@ def _strategy_entries(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return strategies
 
 
-def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
-    """Restore every strategy from live-only config plus its canonical report."""
+def load_live_runner_configuration(
+    path: str,
+    *,
+    publish_url: str | None = None,
+    runner_id: str | None = None,
+) -> LiveRunnerConfiguration:
+    """Restore strategies and optional read-only monitoring settings."""
 
     config_path = os.path.abspath(path)
     with open(config_path, "r", encoding="utf-8") as handle:
@@ -344,10 +365,12 @@ def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
     for raw_id, raw_entry in raw_strategy_entries.items():
         strategy_id = str(raw_id).strip()
         entry = dict(raw_entry)
-        enable = entry["enable"]
+        run_live = entry["run_live"]
         compound = entry.get("compound", True)
-        if not isinstance(enable, bool):
-            raise TypeError(f"Live strategy {strategy_id!r} enable must be a JSON boolean")
+        if not isinstance(run_live, bool):
+            raise TypeError(f"Live strategy {strategy_id!r} run_live must be a JSON boolean")
+        if not run_live:
+            continue
         if not isinstance(compound, bool):
             raise TypeError(f"Live strategy {strategy_id!r} compound must be a JSON boolean")
         hash_id = entry["hash"]
@@ -358,7 +381,7 @@ def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
             LiveStrategySpec(
                 strategy_id=strategy_id,
                 hash_id=hash_id,
-                enable=enable,
+                run_live=run_live,
                 model_path=model_path,
                 device=str(entry.get("device", "auto")),
                 compound=compound,
@@ -368,11 +391,25 @@ def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
         )
 
     if not strategy_entries:
-        raise ValueError("Live configuration contains no strategies")
+        raise ValueError("Live configuration contains no run_live strategies")
 
     load_params_from_report(strategy_entries, report_path)
 
-    return strategy_entries
+    monitoring = monitoring_config_from_mapping(
+        payload.get("monitoring"),
+        publish_url=publish_url or os.environ.get("LIVE_MONITORING_PUBLISH_URL"),
+        runner_id=runner_id or os.environ.get("LIVE_RUNNER_ID"),
+    )
+    return LiveRunnerConfiguration(
+        strategies=strategy_entries,
+        monitoring=monitoring,
+    )
+
+
+def load_live_strategy_specs(path: str) -> list[LiveStrategySpec]:
+    """Restore live strategy specifications without starting monitoring."""
+
+    return load_live_runner_configuration(path).strategies
 
 
 def _optional_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -438,6 +475,7 @@ class LiveRunner:
         feed_factory: Optional[Callable[[common.MarketDataSourceConfig, int], DataFeedBase]] = None,
         venue_factory: Optional[Callable[[LiveStrategySpec, logging.Logger], Any]] = None,
         prediction_callback: Optional[Callable[[StrategyPipeline, int, pd.Series], None]] = None,
+        monitoring_config: LiveMonitoringConfig | None = None,
     ):
         if not specs:
             raise ValueError("LiveRunner requires at least one strategy")
@@ -448,6 +486,9 @@ class LiveRunner:
         self._ctrader_environment: str | None = None
         self._venue_factory = venue_factory or self._create_venue
         self._prediction_callback = prediction_callback
+        self._monitoring_config = monitoring_config
+        self._live_registry: LiveStateRegistry | None = None
+        self._monitoring_service: LiveMonitoringService | None = None
         self._initialized = False
         self._closed = False
         self.strategy_pipelines: list[StrategyPipeline] = []
@@ -461,6 +502,13 @@ class LiveRunner:
         self._data_check_timer_cycle_count = 0
         try:
             self._build(specs)
+            self._live_registry = LiveStateRegistry(self.strategy_pipelines)
+            if self._monitoring_config is not None:
+                self._monitoring_service = LiveMonitoringService(
+                    self._monitoring_config,
+                    self._live_registry,
+                    logger=self.logger,
+                )
         except Exception:
             self.close()
             raise
@@ -470,9 +518,20 @@ class LiveRunner:
         cls,
         path: str,
         logger: Optional[logging.Logger] = None,
+        *,
+        publish_url: str | None = None,
+        runner_id: str | None = None,
     ) -> "LiveRunner":
-        live_config = load_live_strategy_specs(path)
-        return cls(live_config, logger=logger)
+        configuration = load_live_runner_configuration(
+            path,
+            publish_url=publish_url,
+            runner_id=runner_id,
+        )
+        return cls(
+            configuration.strategies,
+            logger=logger,
+            monitoring_config=configuration.monitoring,
+        )
 
     @staticmethod
     def _create_feed(
@@ -553,7 +612,7 @@ class LiveRunner:
                 spec.base_define.symbol,
                 f"{spec.strategy_id}:{spec.hash_id}",
                 logger=logger,
-                account_id=config.account_id,
+                trader_login=config.trader_login,
                 environment=environment,
                 api=self.ctrader_connection,
                 firm=config.firm,
@@ -626,9 +685,9 @@ class LiveRunner:
         grouped_pipelines: list[tuple[common.MarketDataSourceConfig, list[StrategyPipeline]]] = []
 
         for spec in specs:
-            if not spec.enable:
+            if not spec.run_live:
                 self.logger.info(
-                    "Disabled strategy skipped | id=%s hash=%s",
+                    "Non-live strategy skipped | id=%s hash=%s",
                     spec.strategy_id,
                     spec.hash_id,
                 )
@@ -679,25 +738,22 @@ class LiveRunner:
                 strategy=strategy,
                 feature_factory=feature_generator,
                 interval_ms=common.get_interval_ms(spec.base_define.interval),
-                enable=spec.enable,
             )
             self.strategy_pipelines.append(pipeline)
             feed_pipelines.append(pipeline)
 
         if not self.strategy_pipelines:
-            raise ValueError("LiveRunner requires at least one enabled strategy")
+            raise ValueError("LiveRunner requires at least one run_live strategy")
 
         for market_config, pipelines in grouped_pipelines:
             required_bars = max(pipeline.required_bars for pipeline in pipelines)
             interval_ms = common.get_interval_ms(market_config.interval)
-            group_enable = any(pipeline.enable for pipeline in pipelines)
 
             feed = self._feed_factory(market_config, required_bars + 500)
             self.feed_groups.append(
                 FeedGroup(
                     market_config=market_config,
                     interval_ms=interval_ms,
-                    enable=group_enable,
                     feed=feed,
                     required_bars=required_bars,
                     pipelines=pipelines,
@@ -705,9 +761,8 @@ class LiveRunner:
             )
 
         self.logger.info(
-            "Live runner built | strategies=%d enable=%d shared_feeds=%d",
+            "Live runner built | strategies=%d shared_feeds=%d",
             len(self.strategy_pipelines),
-            sum(pipeline.enable for pipeline in self.strategy_pipelines),
             len(self.feed_groups),
         )
 
@@ -828,6 +883,8 @@ class LiveRunner:
             )
         self._start_data_check_timer()
         self._initialized = True
+        if self._monitoring_service is not None:
+            self._monitoring_service.start()
         self.logger.info(
             "WebSocket feeds started | data_check_timer_interval_ms=%d delay_ms=%d",
             self._data_check_timer_interval_ms,
@@ -865,8 +922,6 @@ class LiveRunner:
             tz="UTC",
         ).to_pydatetime()
         for pipeline in group.pipelines:
-            if not pipeline.enable:
-                continue
             try:
                 observation = Observation(
                     market=market,
@@ -877,6 +932,13 @@ class LiveRunner:
                 )
                 intent = pipeline.strategy.process(observation)
                 pipeline.venue.execute_action(intent)
+                self._record_live_cycle(
+                    pipeline,
+                    pd.Series({"pred": Signal.INVALID.value}),
+                    market,
+                    intent,
+                    candle_open_time_utc,
+                )
                 self.logger.warning(
                     "Invalid candle processed | id=%s hash=%s symbol=%s " "open_time_utc=%s action=%s",
                     pipeline.spec.strategy_id,
@@ -917,6 +979,33 @@ class LiveRunner:
             intent.action.value,
         )
         return intent
+
+    def _record_live_cycle(
+        self,
+        pipeline: StrategyPipeline,
+        predicted_row: pd.Series,
+        market: MarketView,
+        intent: TradeIntent,
+        updated_at: datetime,
+    ) -> None:
+        """Update UI-only memory without affecting the trading path."""
+
+        registry = getattr(self, "_live_registry", None)
+        if registry is None:
+            return
+        try:
+            registry.record_cycle(
+                pipeline,
+                predicted_row,
+                market,
+                intent,
+                updated_at,
+            )
+        except Exception:
+            self.logger.exception(
+                "Live UI cycle recording failed | strategy=%s",
+                pipeline.spec.strategy_id,
+            )
 
     @staticmethod
     def _invalid_market_view(frame: Optional[pd.DataFrame]) -> MarketView:
@@ -972,8 +1061,6 @@ class LiveRunner:
                 self._dispatch_invalid_to_group(group, candle_open_time_ms)
             else:
                 for pipeline in group.pipelines:
-                    if not pipeline.enable:
-                        continue
                     try:
                         prepared = _prepare_market_frame(frame, pipeline.spec.base_define)
                         features = pipeline.feature_factory.generate(prepared)
@@ -987,9 +1074,16 @@ class LiveRunner:
                             unit="ms",
                             tz="UTC",
                         ).to_pydatetime()
-                        self._dispatch(
+                        intent = self._dispatch(
                             pipeline,
                             market,
+                            candle_open_time_utc,
+                        )
+                        self._record_live_cycle(
+                            pipeline,
+                            latest_prediction,
+                            market,
+                            intent,
                             candle_open_time_utc,
                         )
                     except Exception:
@@ -1006,9 +1100,16 @@ class LiveRunner:
                                 unit="ms",
                                 tz="UTC",
                             ).to_pydatetime()
-                            self._dispatch(
+                            intent = self._dispatch(
                                 pipeline,
                                 market,
+                                candle_open_time_utc,
+                            )
+                            self._record_live_cycle(
+                                pipeline,
+                                pd.Series({"pred": Signal.INVALID.value}),
+                                market,
+                                intent,
                                 candle_open_time_utc,
                             )
                         except Exception:
@@ -1096,6 +1197,12 @@ class LiveRunner:
         if self.data_check_timer is not None:
             self.data_check_timer.cancel()
             self.data_check_timer = None
+        if getattr(self, "_monitoring_service", None) is not None:
+            try:
+                self._monitoring_service.stop()
+            except Exception:
+                self.logger.exception("Live monitoring shutdown failed")
+            self._monitoring_service = None
         for pipeline in self.strategy_pipelines:
             try:
                 pipeline.strategy.finalize()
@@ -1142,6 +1249,16 @@ def main() -> None:
         default=os.path.join(os.path.dirname(__file__), "../../LiveTrading/live_config.json"),
         help="Path to the live strategy JSON configuration",
     )
+    parser.add_argument(
+        "--publish-url",
+        default=None,
+        help="Override monitoring.publish_url from the live configuration",
+    )
+    parser.add_argument(
+        "--runner-id",
+        default=None,
+        help="Override monitoring.runner_id from the live configuration",
+    )
     args = parser.parse_args()
 
     logger, _ = common.setup_session_logger(sub_folder="live_runner", symbol="", console_level=logging.DEBUG)
@@ -1149,6 +1266,8 @@ def main() -> None:
     runner = LiveRunner.from_config(
         args.config,
         logger=logger,
+        publish_url=args.publish_url,
+        runner_id=args.runner_id,
     )
     runner.run_forever()
 

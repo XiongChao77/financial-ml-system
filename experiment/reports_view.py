@@ -1162,6 +1162,28 @@ def _format_additional_info_value(value, source_key=None):
     return str(value)
 
 
+def _resolve_additional_info_value(report, source_key):
+    """Resolve exact paths and period-relative metric shorthand."""
+
+    missing = object()
+    value = common.recursive_get(report, source_key, default=missing)
+    if value is not missing:
+        return value
+
+    if not isinstance(source_key, str) or "." not in source_key:
+        return None
+    period, relative_key = source_key.split(".", 1)
+    period_report = report.get(period)
+    if not isinstance(period_report, dict):
+        return None
+
+    metric_path = {
+        **ML_PERFORMANCE_METRICS,
+        **TRADING_PERFORMANCE_METRICS,
+    }.get(relative_key, relative_key)
+    return common.recursive_get(period_report, metric_path)
+
+
 def _model_group_key(report):
     """Return the identity of the trained model artifact used by a strategy."""
     params = report.get("long", {}).get("params", {})
@@ -1221,7 +1243,7 @@ def show_performance(
     additional_values = [
         [
             _format_additional_info_value(
-                common.recursive_get(report, source_key),
+                _resolve_additional_info_value(report, source_key),
                 source_key,
             )
             for _, source_key in additional_columns
@@ -1638,8 +1660,8 @@ def main():
     # analyze_model_performance_correlation(uin_records)
     # analyze_model_metrics_by_decile(uin_records)
     # exit()
-    _, uin_records = filter_by_train_valid_test_cagr(uin_records, min_train_cagr=0.5, valid_test_ratio=0.2)
-    # uin_records, _ = filter_by_criteria(uin_records, criteria=["forward.cagr>=0.1"])
+    uin_records, fail = filter_by_train_valid_test_cagr(uin_records, min_train_cagr=0.5, valid_test_ratio=0.2)
+    uin_records, _ = filter_by_criteria(fail, criteria=["forward.cagr>=0.1"])
     # uin_records = [record for record in uin_records if common.recursive_get(record, "long.params.train.model_cfg.model_type") == "conv_lstm"]
     start = 10
     show_count = 40
@@ -1658,6 +1680,7 @@ def main():
         addition_info={
             "risk": "risk_per_trade_pct",
             "daily_loss": "max_daily_loss_pct",
+            "avg_pct_gross": "forward.avg_pct_gross",
             # "hold_bars": "fixed_hold_bars",
         },
         plot_ood=True,
