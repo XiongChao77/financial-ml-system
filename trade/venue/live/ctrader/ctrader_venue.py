@@ -11,6 +11,13 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Iterable
 
+from trade.core.dashboard_base import (
+    AccountBalance,
+    AccountDashboard,
+    AccountPosition,
+    MarginMode,
+    PositionSide,
+)
 from trade.core.protocol import Firm, OrderType, PositionDir, PositionView
 from trade.core.venue_base import VenueBase
 from ctrader_open_api import Client, EndPoints, Protobuf, TcpProtocol
@@ -26,7 +33,7 @@ CTRADER_SYMBOL_MAP = {
     "BNBUSDT": "BNBUSD",
     "BTCUSDT": "BTCUSD",
     "DASHUSDT": "DASHUSD",
-    "DOGEUSDT": "DOGEUSD",
+    "DOGEUSDT": "DOGUSD",
     "DOTUSDT": "DOTUSD",
     "ETCUSDT": "ETCUSD",
     "ETHUSDT": "ETHUSD",
@@ -102,6 +109,7 @@ class CTraderOpenApiConnection:
         self._ever_authenticated = False
 
         self._granted_account_ids: set[int] = set()
+        self._account_ids_by_trader_login: dict[int, tuple[int, ...]] = {}
         self._authenticated_account_ids: set[int] = set()
         self._registered_account_ids: set[int] = set()
         self._account_ref_counts: dict[int, int] = {}
@@ -415,9 +423,60 @@ class CTraderOpenApiConnection:
             "ProtoOAGetAccountListByAccessTokenReq",
             accessToken=self._access_token,
         )
-        granted_ids = {int(item.ctidTraderAccountId) for item in accounts.ctidTraderAccount}
+        expected_live = self.environment == "live"
+        account_ids_by_login: dict[int, set[int]] = {}
+        granted_ids: set[int] = set()
+        for item in accounts.ctidTraderAccount:
+            if self._message_has_field(item, "isLive"):
+                if bool(item.isLive) != expected_live:
+                    continue
+            account_id = int(item.ctidTraderAccountId)
+            granted_ids.add(account_id)
+            if not self._message_has_field(item, "traderLogin"):
+                continue
+            trader_login = int(item.traderLogin)
+            account_ids_by_login.setdefault(trader_login, set()).add(account_id)
         self._granted_account_ids = granted_ids
+        self._account_ids_by_trader_login = {trader_login: tuple(sorted(account_ids)) for trader_login, account_ids in account_ids_by_login.items()}
         return granted_ids
+
+    @staticmethod
+    def _message_has_field(message, field_name: str) -> bool:
+        has_field = getattr(message, "HasField", None)
+        if callable(has_field):
+            try:
+                return bool(has_field(field_name))
+            except (TypeError, ValueError):
+                pass
+        return getattr(message, field_name, None) is not None
+
+    def resolve_account_id(self, trader_login: int | str) -> int:
+        """Resolve a UI-visible trader login to an Open API account ID."""
+
+        try:
+            normalized_login = int(trader_login)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("cTrader trader_login must be an integer") from exc
+        if normalized_login <= 0:
+            raise ValueError("cTrader trader_login must be positive")
+
+        with self._authentication_lock:
+            account_ids = self._account_ids_by_trader_login.get(
+                normalized_login,
+                (),
+            )
+            if not account_ids:
+                self._reload_granted_accounts()
+                account_ids = self._account_ids_by_trader_login.get(
+                    normalized_login,
+                    (),
+                )
+            if not account_ids:
+                raise ValueError(f"cTrader trader login {normalized_login} is not granted " f"for the {self.environment} environment")
+            if len(account_ids) > 1:
+                candidates = ", ".join(str(account_id) for account_id in account_ids)
+                raise ValueError(f"cTrader trader login {normalized_login} is ambiguous for " f"the {self.environment} environment; account IDs: {candidates}")
+            return account_ids[0]
 
     def _authenticate_account(self, account_id: int) -> None:
         with self._authentication_lock:
@@ -449,9 +508,7 @@ class CTraderOpenApiConnection:
         with self._authentication_lock:
             if self._closed:
                 raise RuntimeError("cTrader connection is closed")
-            self._account_ref_counts[account_id] = (
-                self._account_ref_counts.get(account_id, 0) + 1
-            )
+            self._account_ref_counts[account_id] = self._account_ref_counts.get(account_id, 0) + 1
             self._registered_account_ids.add(account_id)
             try:
                 self._authenticate_account(account_id)
@@ -489,9 +546,7 @@ class CTraderOpenApiConnection:
 
         if remove_account_quotes:
             with self._quote_lock:
-                quote_keys = [
-                    key for key in self._quotes if key[0] == account_id
-                ]
+                quote_keys = [key for key in self._quotes if key[0] == account_id]
                 for quote_key in quote_keys:
                     self._quotes.pop(quote_key, None)
                     self._quote_events.pop(quote_key, None)
@@ -583,17 +638,15 @@ class CTraderOpenApiConnection:
             return
         try:
             if self._connected.is_set():
-                from ctrader_open_api.messages import OpenApiCommonMessages_pb2
-
-                message = OpenApiCommonMessages_pb2.ProtoHeartbeatEvent()
 
                 def send() -> None:
-                    deferred = self._client.send(message)
-                    deferred.addErrback(
+                    connected = self._client.whenConnected(failAfterFailures=1)
+                    connected.addCallbacks(
+                        lambda protocol: protocol.heartbeat(),
                         lambda failure: self._logger.warning(
                             "cTrader heartbeat failed: %s",
                             failure,
-                        )
+                        ),
                     )
 
                 self._call_in_reactor(send)
@@ -639,28 +692,19 @@ class CTraderOpenApiConnection:
             subscribeToSpotTimestamp=True,
         )
         if not event.wait(self._timeout):
-            raise TimeoutError(
-                f"Timed out waiting for cTrader quote for account {account_id}, "
-                f"symbol {symbol_id}"
-            )
+            raise TimeoutError(f"Timed out waiting for cTrader quote for account {account_id}, " f"symbol {symbol_id}")
 
     def latest_price(self, account_id: int, symbol_id: int, *, is_buy: bool) -> float:
         quote_key = (int(account_id), int(symbol_id))
         with self._quote_lock:
             event = self._quote_events.setdefault(quote_key, threading.Event())
         if not event.wait(self._timeout):
-            raise TimeoutError(
-                f"No cTrader quote available for account {quote_key[0]}, "
-                f"symbol {quote_key[1]}"
-            )
+            raise TimeoutError(f"No cTrader quote available for account {quote_key[0]}, " f"symbol {quote_key[1]}")
         field = "ask" if is_buy else "bid"
         with self._quote_lock:
             price = self._quotes.get(quote_key, {}).get(field)
         if price is None or not math.isfinite(float(price)) or float(price) <= 0:
-            raise RuntimeError(
-                f"cTrader quote has no valid {field} for account {quote_key[0]}, "
-                f"symbol {quote_key[1]}"
-            )
+            raise RuntimeError(f"cTrader quote has no valid {field} for account {quote_key[0]}, " f"symbol {quote_key[1]}")
         return float(price)
 
     @property
@@ -696,7 +740,7 @@ class CTraderOpenApiConnection:
         self._stop_connection()
 
 
-class CTraderVenue(VenueBase):
+class CTraderVenue(VenueBase, AccountDashboard):
     """cTrader venue scoped to one account, symbol, and strategy label."""
 
     MARKET_ORDER = 1
@@ -711,7 +755,7 @@ class CTraderVenue(VenueBase):
         magic: str | None = None,
         *,
         logger: logging.Logger | None = None,
-        account_id: int | str | None = None,
+        trader_login: int | str | None = None,
         environment: str = "live",
         timeout: float = 10.0,
         api: Any = None,
@@ -721,15 +765,16 @@ class CTraderVenue(VenueBase):
         self.logger = logger
         self.label = str(magic)[:100]
         self.symbol = CTRADER_SYMBOL_MAP.get(str(symbol).upper(), str(symbol))
-        if account_id in (None, ""):
-            raise ValueError("account_id is required for CTraderVenue")
+        if trader_login in (None, ""):
+            raise ValueError("trader_login is required for CTraderVenue")
         self.api = api or CTraderOpenApiConnection(
             key_path,
             environment=environment,
             timeout=timeout,
             logger=self.logger,
         )
-        self.account_id = int(account_id)
+        self.trader_login = int(trader_login)
+        self.account_id = self.api.resolve_account_id(self.trader_login)
         self._account_acquired = False
         self._closed = False
         try:
@@ -753,7 +798,21 @@ class CTraderVenue(VenueBase):
             "ProtoOATraderReq",
             ctidTraderAccountId=self.account_id,
         )
-        self._limited_risk = bool(getattr(trader_response.trader, "isLimitedRisk", False))
+        trader = trader_response.trader
+        response_account_id = int(getattr(trader, "ctidTraderAccountId", self.account_id))
+        if response_account_id != self.account_id:
+            raise RuntimeError(
+                "cTrader trader response account ID does not match the resolved " f"account: expected {self.account_id}, got {response_account_id}"
+            )
+        if CTraderOpenApiConnection._message_has_field(trader, "traderLogin"):
+            response_trader_login = int(trader.traderLogin)
+            if response_trader_login != self.trader_login:
+                raise RuntimeError(
+                    "cTrader trader response login does not match the configured "
+                    f"trader_login: expected {self.trader_login}, "
+                    f"got {response_trader_login}"
+                )
+        self._limited_risk = bool(getattr(trader, "isLimitedRisk", False))
 
         symbols = self.api.request(
             "ProtoOASymbolsListReq",
@@ -784,7 +843,8 @@ class CTraderVenue(VenueBase):
         self._guaranteed_stop_loss = bool(getattr(symbol_info, "guaranteedStopLoss", False))
         self.api.subscribe_spots(self.account_id, self.symbol_id)
         self.logger.info(
-            "cTrader venue ready | account=%s symbol=%s symbol_id=%s label=%s",
+            "cTrader venue ready | trader_login=%s account=%s symbol=%s " "symbol_id=%s label=%s",
+            self.trader_login,
             self.account_id,
             self.symbol,
             self.symbol_id,
@@ -812,11 +872,73 @@ class CTraderVenue(VenueBase):
             raise RuntimeError("cTrader returned invalid account equity")
         return equity
 
+    def get_dashboard_balance(self) -> AccountBalance:
+        trader_response = self.api.request(
+            "ProtoOATraderReq",
+            ctidTraderAccountId=self.account_id,
+        )
+        trader = trader_response.trader
+        balance = self._money(
+            trader.balance,
+            getattr(trader, "moneyDigits", 0),
+        )
+        pnl_response = self.api.request(
+            "ProtoOAGetPositionUnrealizedPnLReq",
+            ctidTraderAccountId=self.account_id,
+        )
+        unrealized_pnl = sum(self._money(item.netUnrealizedPnL, pnl_response.moneyDigits) for item in pnl_response.positionUnrealizedPnL)
+        equity = balance + unrealized_pnl
+        if not all(math.isfinite(value) for value in (balance, equity)):
+            raise RuntimeError("cTrader returned invalid dashboard balance data")
+        return AccountBalance(balance=balance, equity=equity)
+
+    def get_dashboard_position(self) -> AccountPosition | None:
+        positions = self._positions()
+        if not positions:
+            return None
+        sides = {int(position.tradeData.tradeSide) for position in positions}
+        if len(sides) != 1:
+            raise RuntimeError("cTrader strategy label has simultaneous long and short positions")
+        side_value = sides.pop()
+        total_volume = sum(int(position.tradeData.volume) for position in positions)
+        if total_volume <= 0:
+            return None
+        quantity = total_volume / 100.0
+        entry_price = sum(int(position.tradeData.volume) * float(position.price) for position in positions) / total_volume
+        mark_price = self.api.latest_price(
+            self.account_id,
+            self.symbol_id,
+            is_buy=side_value == self.SELL,
+        )
+        pnl_response = self.api.request(
+            "ProtoOAGetPositionUnrealizedPnLReq",
+            ctidTraderAccountId=self.account_id,
+        )
+        position_ids = {int(position.positionId) for position in positions}
+        unrealized_pnl = sum(
+            self._money(item.netUnrealizedPnL, pnl_response.moneyDigits)
+            for item in pnl_response.positionUnrealizedPnL
+            if int(getattr(item, "positionId", -1)) in position_ids
+        )
+        cost = quantity * entry_price
+        return AccountPosition(
+            symbol=self.symbol,
+            side=(PositionSide.LONG if side_value == self.BUY else PositionSide.SHORT),
+            quantity=quantity,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            notional=quantity * mark_price,
+            unrealized_pnl=unrealized_pnl,
+            unrealized_pnl_pct=unrealized_pnl / cost if cost > 0 else None,
+            leverage=None,
+            liquidation_price=None,
+            margin_mode=MarginMode.UNKNOWN,
+        )
+
     def _positions(self) -> list[Any]:
         response = self.api.request(
             "ProtoOAReconcileReq",
             ctidTraderAccountId=self.account_id,
-            returnProtectionOrders=False,
         )
         return [
             position
@@ -850,10 +972,18 @@ class CTraderVenue(VenueBase):
         return datetime.fromtimestamp(max(timestamps) / 1000.0, tz=timezone.utc)
 
     def get_daily_reset_date(self, candle_open_time_utc: datetime):
-        return self.get_firm_daily_reset_date(
+        daily_reset_date = self.get_firm_daily_reset_date(
             candle_open_time_utc,
             self.firm,
         )
+        self.logger.info(
+            "cTrader daily reset date | trader_login=%s firm=%s " "candle_open_time_utc=%s daily_reset_date=%s",
+            self.trader_login,
+            self.firm.value,
+            candle_open_time_utc.isoformat(),
+            daily_reset_date.isoformat(),
+        )
+        return daily_reset_date
 
     def _normalize_volume(self, size: float) -> int:
         requested = int((Decimal(str(size)) * 100).to_integral_value(rounding=ROUND_DOWN))

@@ -8,7 +8,7 @@ npm install
 npm run dev
 
 Open http://localhost:5173. Vite proxies every same-origin /api request to
-the backend on port 8000. Labels is the default page.
+the backend on port 8000. Live is the default page.
 
 Single-process deployment:
 

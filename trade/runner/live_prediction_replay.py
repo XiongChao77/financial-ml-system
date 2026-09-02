@@ -299,7 +299,7 @@ def run_prediction_replay(
                 candle_close_time_ms = group.feed.advance()
                 if candle_close_time_ms is None:
                     raise RuntimeError("Replay feed ended before its advertised candle")
-                expected_records += sum(pipeline.enable for pipeline in group.pipelines)
+                expected_records += len(group.pipelines)
             runner.process_pending_events()
 
         predictions = recorder.to_frame()

@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 
 class PositionSide(Enum):
@@ -28,13 +29,13 @@ class AccountPosition:
 
     entry_price: float
     mark_price: float
-    notional: float
+    notional: Optional[float]
 
     unrealized_pnl: float
-    unrealized_pnl_pct: float
+    unrealized_pnl_pct: Optional[float]
 
-    leverage: float
-    liquidation_price: float
+    leverage: Optional[float]
+    liquidation_price: Optional[float]
 
     margin_mode: MarginMode = MarginMode.UNKNOWN
 
@@ -53,6 +54,6 @@ class AccountDashboard(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_dashboard_positions(self) -> list[AccountPosition]:
-        """Return all currently active positions."""
+    def get_dashboard_position(self) -> Optional[AccountPosition]:
+        """Return the single logical strategy position, if one exists."""
         raise NotImplementedError

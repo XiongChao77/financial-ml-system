@@ -12,9 +12,12 @@ and place these UTF-8 text files in the configured `key_path` directory:
 - `client_id`
 - `client_secret`
 - `access_token`
-- `account_id` (optional when the token grants exactly one account)
 
-The live runner also accepts `account_id` directly in the venue configuration.
+Set `trader_login` in the live runner venue configuration to the account login
+shown in the cTrader UI. During startup, the connection resolves it to the
+internal `ctidTraderAccountId` returned by
+`ProtoOAGetAccountListByAccessTokenRes`. The access token must grant that account,
+and the account's Live/Demo environment must match the connection environment.
 Use `environment: "demo"` while validating a new setup and change it to `"live"`
 only after the complete order lifecycle has been tested. `broker_symbol` is
 optional and can be used when the broker's symbol differs from the market data

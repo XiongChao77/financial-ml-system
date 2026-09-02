@@ -442,8 +442,11 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
 
     def print_feature_stats(self) -> None:
         """
-        Print statistics (Mean, Std, Min, Max) for all features to review normalization quality.
-        Following the previous logic, we mainly inspect the distribution of the last step in each window.
+        Print feature statistics suitable for both batch and live inference.
+
+        With multiple windows, inspect the last time step across samples. With
+        one live window, inspect all time steps in that window so the standard
+        deviation is meaningful instead of being zero by definition.
         """
         if self.X is None or self.X.shape[0] == 0:
             self.logger.warning("⚠️ No data available for stats review.")
@@ -458,18 +461,22 @@ class TimeSeriesWindowDataset(torch.utils.data.Dataset):
             # If mismatched, some unexpected feature slipped in; stop immediately
             raise RuntimeError(msg)
 
-        # Extract last-step data [Batch, Feature]
-        # X shape: [N, Window, Feature]
-        last_step_data = self.X[:, -1, :].numpy()
+        # X shape: [Sample, Time, Feature].
+        if self.X.shape[0] == 1:
+            stats_data = self.X[0, :, :].numpy()
+            scope = f"single window across time steps | time_steps: {len(stats_data)}"
+        else:
+            stats_data = self.X[:, -1, :].numpy()
+            scope = f"last step across samples | samples: {len(stats_data)}"
 
         self.logger.info("\n" + "=" * 90)
-        self.logger.info(f"📊 Data processing review (feature stats - last step) | samples: {len(last_step_data)}")
+        self.logger.info(f"📊 Data processing review (feature stats - {scope})")
         self.logger.info("-" * 90)
         self.logger.info(f"{'Feature Name':<35} | {'Mean':>10} | {'Std':>10} | {'Min':>10} | {'Max':>10}")
         self.logger.info("-" * 90)
 
         for i, name in enumerate(self.feature_names):
-            feat_slice = last_step_data[:, i]
+            feat_slice = stats_data[:, i]
             mean_v = np.mean(feat_slice)
             std_v = np.std(feat_slice)
             min_v = np.min(feat_slice)

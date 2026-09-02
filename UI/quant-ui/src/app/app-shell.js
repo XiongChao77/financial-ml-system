@@ -1,5 +1,5 @@
 const NAVIGATION = [
-  { id: "live", label: "Live", short: "LV", disabled: true },
+  { id: "live", label: "Live", short: "LV" },
   { id: "experiments", label: "Experiments", short: "EX" },
   { id: "backtests", label: "Backtests", short: "BT" },
   { id: "labels", label: "Labels", short: "LB" },

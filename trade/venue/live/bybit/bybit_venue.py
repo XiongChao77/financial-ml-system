@@ -11,10 +11,17 @@ current_work_dir = os.path.dirname(__file__)
 sys.path.append(os.path.join(current_work_dir, "..", "..", "..", ".."))
 
 from trade.venue.live.bybit.bybit_engine import BybitEngine
+from trade.core.dashboard_base import (
+    AccountBalance,
+    AccountDashboard,
+    AccountPosition,
+    MarginMode,
+    PositionSide,
+)
 from trade.core.protocol import ActionType, OrderType, PositionDir, PositionView
 from trade.core.venue_base import VenueBase
 
-class BybitVenue(VenueBase):
+class BybitVenue(VenueBase, AccountDashboard):
     def __init__(
         self,
         key_path,
@@ -62,18 +69,91 @@ class BybitVenue(VenueBase):
             return float(res['result']['list'][0]['coin'][0]['equity'])
         return 0.0
 
+    def get_dashboard_balance(self) -> AccountBalance:
+        response = self.engine.http.get_wallet_balance(
+            accountType="UNIFIED",
+            coin="USDT",
+        )
+        if response.get("retCode") != 0:
+            raise RuntimeError(
+                f"Bybit wallet request failed: {response.get('retMsg', 'unknown error')}"
+            )
+        accounts = response.get("result", {}).get("list", [])
+        coins = accounts[0].get("coin", []) if accounts else []
+        coin = next((item for item in coins if item.get("coin") == "USDT"), None)
+        if coin is None:
+            raise RuntimeError("Bybit wallet response has no USDT balance")
+        balance = float(coin.get("walletBalance", 0.0))
+        equity = float(coin.get("equity", 0.0))
+        if not all(math.isfinite(value) for value in (balance, equity)):
+            raise RuntimeError("Bybit returned invalid dashboard balance data")
+        return AccountBalance(balance=balance, equity=equity)
+
+    def _dashboard_position_payload(self):
+        response = self.engine.http.get_positions(
+            category="linear",
+            symbol=self.symbol,
+        )
+        if response.get("retCode") != 0:
+            raise RuntimeError(
+                f"Bybit position request failed: {response.get('retMsg', 'unknown error')}"
+            )
+        active = [
+            position
+            for position in response.get("result", {}).get("list", [])
+            if float(position.get("size", 0.0) or 0.0) > 0
+        ]
+        if len(active) > 1:
+            raise RuntimeError(
+                f"Bybit returned multiple active positions for {self.symbol}"
+            )
+        return active[0] if active else None
+
+    def get_dashboard_position(self) -> AccountPosition | None:
+        position = self._dashboard_position_payload()
+        if position is None:
+            return None
+        quantity = float(position["size"])
+        entry_price = float(position.get("avgPrice", 0.0) or 0.0)
+        mark_price = float(position.get("markPrice", 0.0) or 0.0)
+        if mark_price <= 0:
+            mark_price = self._latest_price()
+        unrealized_pnl = float(position.get("unrealisedPnl", 0.0) or 0.0)
+        cost = entry_price * quantity
+        trade_mode = str(position.get("tradeMode", ""))
+        margin_mode = (
+            MarginMode.CROSS
+            if trade_mode == "0"
+            else MarginMode.ISOLATED
+            if trade_mode
+            else MarginMode.UNKNOWN
+        )
+        return AccountPosition(
+            symbol=self.symbol,
+            side=(
+                PositionSide.LONG
+                if position.get("side") == "Buy"
+                else PositionSide.SHORT
+            ),
+            quantity=quantity,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            notional=float(position.get("positionValue", 0.0) or 0.0)
+            or quantity * mark_price,
+            unrealized_pnl=unrealized_pnl,
+            unrealized_pnl_pct=unrealized_pnl / cost if cost > 0 else None,
+            leverage=float(position.get("leverage", 0.0) or 0.0) or None,
+            liquidation_price=float(position.get("liqPrice", 0.0) or 0.0)
+            or None,
+            margin_mode=margin_mode,
+        )
+
     def get_current_state(self) -> PositionView:
         """Return the current position direction, size, and average price."""
         try:
-            res = self.engine.http.get_positions(category="linear", symbol=self.symbol)
-            if res['retCode'] != 0: 
+            pos = self._dashboard_position_payload()
+            if pos is None:
                 return PositionView()
-            
-            pos_list = res['result']['list']
-            if not pos_list: 
-                return PositionView()
-
-            pos = pos_list[0]
             size = float(pos['size'])
             avg_price = float(pos['avgPrice']) if size > 0 else 0.0
             side = pos['side'] # 'Buy' or 'Sell'

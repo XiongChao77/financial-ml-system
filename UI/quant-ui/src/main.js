@@ -7,6 +7,7 @@ import { createRouter } from "./app/router.js";
 import { mountLabelsPage } from "./modules/labels/labels-page.js";
 import { mountBacktestsPage } from "./modules/backtests/backtests-page.js";
 import { mountExperimentsPage } from "./modules/experiments/experiments-page.js";
+import { mountLivePage } from "./modules/live/live-page.js";
 
 const root = document.querySelector("#app");
 const shell = createAppShell(root);
@@ -15,11 +16,12 @@ const router = createRouter({
   outlet: shell.outlet,
   navItems: shell.navItems,
   routes: {
+    live: mountLivePage,
     labels: mountLabelsPage,
     backtests: mountBacktestsPage,
     experiments: mountExperimentsPage,
   },
-  defaultRoute: "labels",
+  defaultRoute: "live",
 });
 
 router.start();
