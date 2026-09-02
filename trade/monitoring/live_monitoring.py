@@ -13,6 +13,7 @@ from typing import Any, Mapping, Optional
 
 import requests
 
+from data_process import common
 from trade.core.dashboard_base import AccountDashboard
 
 
@@ -59,6 +60,7 @@ class LiveStateRegistry:
         self._lock = threading.Lock()
         self._pipelines = {pipeline.spec.strategy_id: pipeline for pipeline in pipelines}
         self._signals: dict[str, dict[str, Any]] = {}
+        self._position_open_times: dict[str, tuple[str, datetime]] = {}
 
     def record_cycle(
         self,
@@ -82,6 +84,8 @@ class LiveStateRegistry:
         }
         with self._lock:
             self._signals[pipeline.spec.strategy_id] = payload
+            if intent.action.value in {"open", "close"}:
+                self._position_open_times.pop(pipeline.spec.strategy_id, None)
 
     def strategy_snapshots(self, status: str = "running") -> list[dict[str, Any]]:
         with self._lock:
@@ -95,14 +99,74 @@ class LiveStateRegistry:
             for strategy_id, pipeline in self._pipelines.items()
         ]
 
+    def _position_opened_at(self, pipeline, dashboard_position) -> datetime | None:
+        strategy_id = pipeline.spec.strategy_id
+        side = dashboard_position.side.value
+        with self._lock:
+            cached = self._position_open_times.get(strategy_id)
+        if cached is not None and cached[0] == side:
+            return cached[1]
+
+        opened_at = dashboard_position.opened_at
+        if opened_at is None:
+            opened_at = pipeline.venue.get_last_position_open_time()
+        if opened_at is None:
+            return None
+        if not isinstance(opened_at, datetime):
+            raise TypeError("Venue returned a non-datetime position opening time")
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=UTC)
+        else:
+            opened_at = opened_at.astimezone(UTC)
+        with self._lock:
+            self._position_open_times[strategy_id] = (side, opened_at)
+        return opened_at
+
+    def _clear_position_opened_at(self, strategy_id: str) -> None:
+        with self._lock:
+            self._position_open_times.pop(strategy_id, None)
+
     @staticmethod
-    def _snapshot_pipeline(pipeline, signal, status: str) -> dict[str, Any]:
+    def _max_holding_seconds(pipeline) -> float | None:
+        fixed_hold_bars = getattr(
+            pipeline.spec.strategy_config,
+            "fixed_hold_bars",
+            None,
+        )
+        if fixed_hold_bars is None:
+            return None
+        bars = int(fixed_hold_bars)
+        if bars < 0 or bars != fixed_hold_bars:
+            raise ValueError("fixed_hold_bars must be a non-negative integer")
+        interval_ms = getattr(pipeline, "interval_ms", None)
+        if interval_ms is None:
+            interval_ms = common.get_interval_ms(
+                pipeline.spec.base_define.interval
+            )
+        interval_ms = int(interval_ms)
+        return bars * interval_ms / 1000.0
+
+    def _snapshot_pipeline(self, pipeline, signal, status: str) -> dict[str, Any]:
         account = None
         position = None
+        dashboard_position = None
         account_available = False
         position_available = False
         errors = []
         venue = pipeline.venue
+        strategy_config = pipeline.spec.strategy_config
+        risk_per_trade_pct = _finite_number(
+            getattr(strategy_config, "risk_per_trade_pct", None)
+        )
+        max_daily_loss_pct = _finite_number(
+            getattr(strategy_config, "max_daily_loss_pct", None)
+        )
+        max_holding_seconds = self._max_holding_seconds(pipeline)
+        if risk_per_trade_pct is None or max_daily_loss_pct is None:
+            raise RuntimeError(
+                "Live strategy risk configuration must contain finite "
+                "risk_per_trade_pct and max_daily_loss_pct values"
+            )
 
         if not isinstance(venue, AccountDashboard):
             errors.append(
@@ -131,10 +195,47 @@ class LiveStateRegistry:
                     {"component": "position", "message": str(exc) or type(exc).__name__}
                 )
 
+        if dashboard_position is None:
+            if position_available:
+                self._clear_position_opened_at(pipeline.spec.strategy_id)
+        else:
+            opened_at = None
+            try:
+                opened_at = self._position_opened_at(
+                    pipeline,
+                    dashboard_position,
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "component": "position_timing",
+                        "message": str(exc) or type(exc).__name__,
+                    }
+                )
+            remaining_holding_seconds = None
+            if opened_at is not None and max_holding_seconds is not None:
+                elapsed_seconds = max(
+                    0.0,
+                    (_utc_now() - opened_at).total_seconds(),
+                )
+                remaining_holding_seconds = max(
+                    0.0,
+                    max_holding_seconds - elapsed_seconds,
+                )
+            position.update(
+                {
+                    "opened_at": None if opened_at is None else _iso(opened_at),
+                    "remaining_holding_seconds": remaining_holding_seconds,
+                }
+            )
+
         return {
             "strategy_id": pipeline.spec.strategy_id,
             "symbol": pipeline.spec.base_define.symbol,
             "interval": pipeline.spec.base_define.interval,
+            "risk_per_trade_pct": risk_per_trade_pct,
+            "max_daily_loss_pct": max_daily_loss_pct,
+            "max_holding_seconds": max_holding_seconds,
             "status": status,
             "account": account,
             "position": position,

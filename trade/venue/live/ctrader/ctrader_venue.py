@@ -16,9 +16,11 @@ from trade.core.dashboard_base import (
     AccountBalance,
     AccountDashboard,
     AccountPosition,
+    AccountPositionComponent,
     MarginMode,
     PositionSide,
 )
+from trade.core.execution import ExecutionFill
 from trade.core.protocol import Firm, OrderType, PositionDir, PositionView
 from trade.core.venue_base import VenueBase
 from ctrader_open_api import Client, EndPoints, Protobuf, TcpProtocol
@@ -729,17 +731,25 @@ class CTraderOpenApiConnection:
             raise TimeoutError(f"Timed out waiting for cTrader quote for account {account_id}, " f"symbol {symbol_id}")
 
     def latest_price(self, account_id: int, symbol_id: int, *, is_buy: bool) -> float:
+        bid, ask = self.latest_bid_ask(account_id, symbol_id)
+        return ask if is_buy else bid
+
+    def latest_bid_ask(self, account_id: int, symbol_id: int) -> tuple[float, float]:
         quote_key = (int(account_id), int(symbol_id))
         with self._quote_lock:
             event = self._quote_events.setdefault(quote_key, threading.Event())
         if not event.wait(self._timeout):
             raise TimeoutError(f"No cTrader quote available for account {quote_key[0]}, " f"symbol {quote_key[1]}")
-        field = "ask" if is_buy else "bid"
         with self._quote_lock:
-            price = self._quotes.get(quote_key, {}).get(field)
-        if price is None or not math.isfinite(float(price)) or float(price) <= 0:
-            raise RuntimeError(f"cTrader quote has no valid {field} for account {quote_key[0]}, " f"symbol {quote_key[1]}")
-        return float(price)
+            quote = self._quotes.get(quote_key, {})
+            bid = quote.get("bid")
+            ask = quote.get("ask")
+        if bid is None or ask is None:
+            raise RuntimeError(
+                f"cTrader quote has no complete bid/ask for account {quote_key[0]}, "
+                f"symbol {quote_key[1]}"
+            )
+        return float(bid), float(ask)
 
     @property
     def granted_account_ids(self) -> tuple[int, ...]:
@@ -953,6 +963,24 @@ class CTraderVenue(VenueBase, AccountDashboard):
             raise RuntimeError("cTrader returned invalid dashboard balance data")
         return AccountBalance(balance=balance, equity=equity)
 
+    def _aggregate_protection_price(
+        self,
+        positions: list[Any],
+        field_name: str,
+    ) -> float | None:
+        weighted_price = 0.0
+        total_volume = 0
+        for position in positions:
+            volume = int(position.tradeData.volume)
+            price = float(getattr(position, field_name, 0.0) or 0.0)
+            if volume <= 0 or not math.isfinite(price) or price <= 0:
+                return None
+            weighted_price += volume * price
+            total_volume += volume
+        if total_volume <= 0:
+            return None
+        return round(weighted_price / total_volume, self.digits)
+
     def get_dashboard_position(self) -> AccountPosition | None:
         positions = self._positions()
         if not positions:
@@ -981,6 +1009,35 @@ class CTraderVenue(VenueBase, AccountDashboard):
             for item in pnl_response.positionUnrealizedPnL
             if int(getattr(item, "positionId", -1)) in position_ids
         )
+        stop_loss_price = self._aggregate_protection_price(
+            positions,
+            "stopLoss",
+        )
+        take_profit_price = self._aggregate_protection_price(
+            positions,
+            "takeProfit",
+        )
+        components = tuple(
+            AccountPositionComponent(
+                quantity=int(position.tradeData.volume) / 100.0,
+                entry_price=float(position.price),
+                stop_loss_price=(
+                    round(
+                        float(getattr(position, "stopLoss", 0.0) or 0.0),
+                        self.digits,
+                    )
+                    or None
+                ),
+                take_profit_price=(
+                    round(
+                        float(getattr(position, "takeProfit", 0.0) or 0.0),
+                        self.digits,
+                    )
+                    or None
+                ),
+            )
+            for position in positions
+        )
         cost = quantity * entry_price
         return AccountPosition(
             symbol=self.symbol,
@@ -994,6 +1051,9 @@ class CTraderVenue(VenueBase, AccountDashboard):
             leverage=None,
             liquidation_price=None,
             margin_mode=MarginMode.UNKNOWN,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            components=components,
         )
 
     def _positions(self) -> list[Any]:
@@ -1083,6 +1143,40 @@ class CTraderVenue(VenueBase, AccountDashboard):
         if not math.isfinite(percentage) or percentage <= 0:
             raise ValueError(f"{name} must be a positive finite ratio")
         return percentage
+
+    def get_bid_ask(self) -> tuple[float, float]:
+        return self.api.latest_bid_ask(self.account_id, self.symbol_id)
+
+    def _execution_fills(self, result, *, is_buy: bool) -> tuple[ExecutionFill, ...]:
+        responses = result if isinstance(result, list) else [result]
+        fills = []
+        for response in responses:
+            deal = getattr(response, "deal", None)
+            if deal is None:
+                continue
+            price = float(getattr(deal, "executionPrice", 0.0) or 0.0)
+            raw_volume = int(
+                getattr(deal, "filledVolume", 0)
+                or getattr(deal, "volume", 0)
+                or 0
+            )
+            if price <= 0 or raw_volume <= 0:
+                continue
+            timestamp_ms = int(getattr(deal, "executionTimestamp", 0) or 0)
+            fills.append(
+                ExecutionFill(
+                    price=price,
+                    quantity=raw_volume / 100.0,
+                    order_id=str(getattr(deal, "orderId", "") or ""),
+                    deal_id=str(getattr(deal, "dealId", "") or ""),
+                    executed_at_utc=(
+                        datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+                        if timestamp_ms > 0
+                        else None
+                    ),
+                )
+            )
+        return tuple(fills)
 
     def submit_order(
         self,

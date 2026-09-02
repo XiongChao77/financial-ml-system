@@ -1,14 +1,13 @@
 {
+    "runner_id": "runner-main",
     "report":"../../output/reports.jsonl",
     "monitoring": {
         "publish_url": "http://127.0.0.1:8000/internal/live/snapshots",
-        "runner_id": "runner-main",
         "publish_interval_seconds": 1,
         "request_timeout_seconds": 0.5
     },
-    "prediction_trace": {
-        "output_dir": "../../quant_output/live_prediction_traces"
-    },
+    "prediction_trace": {},
+    "execution_trace": {},
     "strategy":{
         "ctrader-live-the5ers-1": {
             "run_live": false,

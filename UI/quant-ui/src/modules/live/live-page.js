@@ -184,6 +184,9 @@ function mountDetail(container, context, strategyId) {
       ["Strategy ID", payload.strategy_id],
       ["Symbol", payload.symbol],
       ["Interval", payload.interval],
+      ["Risk per trade", formatPercent(payload.risk_per_trade_pct)],
+      ["Max daily loss", formatPercent(payload.max_daily_loss_pct)],
+      ["Max holding time", formatDuration(payload.max_holding_seconds)],
       ["Status", payload.available ? titleCase(payload.status) : null],
     ]);
 
@@ -200,8 +203,13 @@ function mountDetail(container, context, strategyId) {
       ["Size", position ? formatPrice(position.quantity, 6) : "—"],
       ["Entry", position ? formatPrice(position.entry_price) : "—"],
       ["Current price", position ? formatPrice(position.mark_price) : "—"],
+      ["Stop loss", position ? formatProtectionPrice(position.stop_loss_price, position.entry_price, position.side) : "—"],
+      ["Take profit", position ? formatProtectionPrice(position.take_profit_price, position.entry_price, position.side) : "—"],
+      ["Opened at", position ? formatDateTime(position.opened_at) : "—"],
+      ["Remaining holding time", position ? formatDuration(position.remaining_holding_seconds) : "—"],
       ["Unrealized PnL", position ? formatMoney(position.unrealized_pnl, true) : "$0.00"],
     ]);
+    renderPositionComponents(container, positionAvailable, position);
 
     const signalAvailable = payload.available && payload.availability?.latest_signal;
     const signal = payload.latest_signal;
@@ -255,12 +263,54 @@ function detailCard(name, title) {
 function renderCard(container, name, available, fields) {
   const card = container.querySelector(`[data-card="${name}"]`);
   card.classList.toggle("unavailable", !available);
-  card.querySelector("dl").innerHTML = fields.map(([label, value]) => `
-    <div>
-      <dt>${escapeHtml(label)}</dt>
-      <dd class="${value === null || value === undefined ? "value-unavailable" : ""}">${escapeHtml(value ?? "—")}</dd>
+  card.querySelector("dl").innerHTML = fields.map(([label, value]) => {
+    const unavailable = value === null || value === undefined || value === "—";
+    return `
+      <div>
+        <dt>${escapeHtml(label)}</dt>
+        <dd class="${unavailable ? "value-unavailable" : ""}">${escapeHtml(value ?? "—")}</dd>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderPositionComponents(container, available, position) {
+  const card = container.querySelector('[data-card="position"]');
+  card.querySelector('[data-role="position-components"]')?.remove();
+  if (!available || !position) return;
+
+  const components = Array.isArray(position.components) && position.components.length
+    ? position.components
+    : [position];
+  const section = document.createElement("section");
+  section.className = "live-position-components";
+  section.dataset.role = "position-components";
+  section.innerHTML = `
+    <h3>Venue positions</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Size</th>
+            <th>Entry price</th>
+            <th>SL</th>
+            <th>TP</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${components.map((component) => `
+            <tr>
+              <td>${escapeHtml(formatPrice(component.quantity, 6))}</td>
+              <td>${escapeHtml(formatPrice(component.entry_price))}</td>
+              <td>${escapeHtml(formatProtectionPrice(component.stop_loss_price, component.entry_price, position.side))}</td>
+              <td>${escapeHtml(formatProtectionPrice(component.take_profit_price, component.entry_price, position.side))}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
     </div>
-  `).join("");
+  `;
+  card.append(section);
 }
 
 function renderStatus(value, available) {
@@ -285,10 +335,53 @@ function formatProbability(value) {
   return Number.isFinite(number) ? `${(number * 100).toFixed(1)}%` : "—";
 }
 
+function formatPercent(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  const number = Number(value);
+  return Number.isFinite(number) ? `${(number * 100).toFixed(2)}%` : "—";
+}
+
+function formatProtectionPrice(value, entryPrice, side) {
+  const formattedPrice = formatPrice(value);
+  const price = Number(value);
+  const entry = Number(entryPrice);
+  const direction = side === "long" ? 1 : side === "short" ? -1 : null;
+  if (
+    formattedPrice === "—"
+    || !Number.isFinite(entry)
+    || entry <= 0
+    || direction === null
+  ) {
+    return formattedPrice;
+  }
+  const returnPct = direction * (price / entry - 1) * 100;
+  const sign = returnPct > 0 ? "+" : "";
+  return `${formattedPrice} (${sign}${returnPct.toFixed(2)}%)`;
+}
+
 function formatDateTime(value) {
   if (!value) return "—";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+}
+
+function formatDuration(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) return "—";
+  let seconds = Math.ceil(numericValue);
+  const days = Math.floor(seconds / 86_400);
+  seconds %= 86_400;
+  const hours = Math.floor(seconds / 3_600);
+  seconds %= 3_600;
+  const minutes = Math.floor(seconds / 60);
+  seconds %= 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours || days) parts.push(`${hours}h`);
+  if (minutes || hours || days) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
 }
 
 function titleCase(value) {

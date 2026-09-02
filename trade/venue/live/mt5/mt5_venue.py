@@ -5,10 +5,12 @@ from trade.core.dashboard_base import (
     AccountBalance,
     AccountDashboard,
     AccountPosition,
+    AccountPositionComponent,
     MarginMode,
     PositionSide,
 )
 from trade.core.venue_base import VenueBase
+from trade.core.execution import ExecutionFill
 from trade.core.protocol import Firm, OrderType, PositionDir, PositionView
 
 MT5_SYMBOL_FTMO_MAP = {"DOGEUSDT": "DOGEUSD", "ETHUSDT": "ETHUSD", "BTCUSDT": "BTCUSD"}
@@ -211,6 +213,32 @@ class MT5Venue(VenueBase, AccountDashboard):
         contract_size = float(
             getattr(symbol_info, "trade_contract_size", 0.0) or 0.0
         )
+        digits = int(getattr(symbol_info, "digits", 0) or 0)
+        stop_loss_prices = {
+            round(float(getattr(position, "sl", 0.0) or 0.0), digits)
+            for position in positions
+            if float(getattr(position, "sl", 0.0) or 0.0) > 0
+        }
+        take_profit_prices = {
+            round(float(getattr(position, "tp", 0.0) or 0.0), digits)
+            for position in positions
+            if float(getattr(position, "tp", 0.0) or 0.0) > 0
+        }
+        components = tuple(
+            AccountPositionComponent(
+                quantity=float(position.volume),
+                entry_price=float(position.price_open),
+                stop_loss_price=(
+                    round(float(getattr(position, "sl", 0.0) or 0.0), digits)
+                    or None
+                ),
+                take_profit_price=(
+                    round(float(getattr(position, "tp", 0.0) or 0.0), digits)
+                    or None
+                ),
+            )
+            for position in positions
+        )
         notional = (
             total_volume * mark_price * contract_size
             if contract_size > 0
@@ -232,6 +260,15 @@ class MT5Venue(VenueBase, AccountDashboard):
             leverage=float(getattr(account, "leverage", 0.0) or 0.0) or None,
             liquidation_price=None,
             margin_mode=MarginMode.UNKNOWN,
+            stop_loss_price=(
+                stop_loss_prices.pop() if len(stop_loss_prices) == 1 else None
+            ),
+            take_profit_price=(
+                take_profit_prices.pop()
+                if len(take_profit_prices) == 1
+                else None
+            ),
+            components=components,
         )
 
     def get_current_state(self) -> PositionView:
@@ -429,6 +466,33 @@ class MT5Venue(VenueBase, AccountDashboard):
             f"slippage={slippage_pct * 100:.4f}%"
         )
         return responses
+
+    def get_bid_ask(self) -> tuple[float, float]:
+        self._ensure_target_account()
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            raise RuntimeError(f"MT5 tick is unavailable for {self.symbol}")
+        return float(tick.bid), float(tick.ask)
+
+    def _execution_fills(self, result, *, is_buy: bool) -> tuple[ExecutionFill, ...]:
+        responses = result if isinstance(result, list) else [result]
+        fills = []
+        for response in responses:
+            if response is None:
+                continue
+            price = float(getattr(response, "price", 0.0) or 0.0)
+            quantity = float(getattr(response, "volume", 0.0) or 0.0)
+            if price <= 0 or quantity <= 0:
+                continue
+            fills.append(
+                ExecutionFill(
+                    price=price,
+                    quantity=quantity,
+                    order_id=str(getattr(response, "order", "") or ""),
+                    deal_id=str(getattr(response, "deal", "") or ""),
+                )
+            )
+        return tuple(fills)
         
     def close_position(self, **kwargs):
         """Close every position of the current magic number"""

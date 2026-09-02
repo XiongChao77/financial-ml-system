@@ -22,4 +22,13 @@
 .live-detail-card dl > div { display: grid; grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.2fr); gap: 16px; padding: 10px 0; border-top: 1px solid #edf0f5; }
 .live-detail-card dt { color: var(--muted); font-size: 11px; }
 .live-detail-card dd { overflow: hidden; margin: 0; color: #283753; text-align: right; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.live-position-components { margin-top: 14px; padding-top: 14px; border-top: 1px solid #dfe4ed; }
+.live-position-components h3 { margin: 0 0 9px; color: var(--muted); font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; }
+.live-position-components table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.live-position-components th, .live-position-components td { padding: 8px 7px; border-bottom: 1px solid #edf0f5; text-align: right; white-space: nowrap; }
+.live-position-components th:first-child, .live-position-components td:first-child { padding-left: 0; text-align: left; }
+.live-position-components th:last-child, .live-position-components td:last-child { padding-right: 0; }
+.live-position-components th { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.live-position-components td { color: #34405a; font-weight: 700; }
+.live-position-components tbody tr:last-child td { border-bottom: 0; }
 @media (max-width: 1100px) { .live-detail-grid { grid-template-columns: 1fr; } }

@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 
@@ -22,6 +23,14 @@ class AccountBalance:
 
 
 @dataclass(frozen=True)
+class AccountPositionComponent:
+    quantity: float
+    entry_price: float
+    stop_loss_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class AccountPosition:
     symbol: str
     side: PositionSide
@@ -38,6 +47,10 @@ class AccountPosition:
     liquidation_price: Optional[float]
 
     margin_mode: MarginMode = MarginMode.UNKNOWN
+    opened_at: Optional[datetime] = None
+    stop_loss_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    components: tuple[AccountPositionComponent, ...] = ()
 
 
 class AccountDashboard(ABC):
