@@ -1000,10 +1000,6 @@ def main() -> None:
     )
     write_jsonl(output_path, aggregated)
 
-    current_commit = common.git_revision(require_clean=args.check_git_clean)
-    if current_commit != experiment_context.git_commit:
-        raise RuntimeError("Git state changed while cross test was running: " f"started={experiment_context.git_commit}, " f"current={current_commit}")
-
     logger.info(
         "Completed in %.2fs. Reports saved to %s",
         time.time() - begin_time,

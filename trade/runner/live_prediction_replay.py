@@ -149,6 +149,53 @@ def _with_candle_close_times(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     return prepared
 
 
+def prediction_frame_for_strategy(
+    frame: pd.DataFrame,
+    *,
+    strategy_id: Optional[str],
+    name: str,
+) -> pd.DataFrame:
+    """Select standard prediction columns from long or captured wide data."""
+
+    prepared = frame.copy()
+    wide_columns = (
+        {
+            column: f"{strategy_id}__{column}"
+            for column in PREDICTION_COLUMNS
+        }
+        if strategy_id is not None
+        else {}
+    )
+    if wide_columns and all(
+        source in prepared.columns for source in wide_columns.values()
+    ):
+        if "is_warmup" not in prepared.columns:
+            raise ValueError(f"{name} captured predictions require is_warmup")
+        warmup = prepared["is_warmup"].astype(str).str.strip().str.lower()
+        prepared = prepared.loc[~warmup.isin({"true", "1"})].copy()
+        prepared.rename(
+            columns={source: target for target, source in wide_columns.items()},
+            inplace=True,
+        )
+        prepared = prepared.loc[prepared["pred"].notna()].copy()
+        prepared["strategy_id"] = str(strategy_id)
+        return prepared
+
+    if "strategy_id" in prepared.columns:
+        strategy_ids = prepared["strategy_id"].dropna().astype(str).unique()
+        selected_strategy_id = strategy_id
+        if selected_strategy_id is None:
+            if len(strategy_ids) != 1:
+                raise ValueError(
+                    f"strategy_id is required when {name} contains multiple strategies"
+                )
+            selected_strategy_id = strategy_ids[0]
+        prepared = prepared.loc[
+            prepared["strategy_id"].astype(str) == str(selected_strategy_id)
+        ].copy()
+    return prepared
+
+
 def compare_prediction_frames(
     replay: pd.DataFrame,
     backtest: pd.DataFrame,
@@ -159,21 +206,18 @@ def compare_prediction_frames(
 ) -> PredictionComparison:
     """Compare every replay prediction with the same backtest candle."""
 
-    replay_frame = replay.copy()
-    if "strategy_id" in replay_frame.columns:
-        strategy_ids = replay_frame["strategy_id"].dropna().astype(str).unique()
-        if strategy_id is None:
-            if len(strategy_ids) != 1:
-                raise ValueError(
-                    "strategy_id is required when replay output contains multiple strategies"
-                )
-            strategy_id = strategy_ids[0]
-        replay_frame = replay_frame.loc[
-            replay_frame["strategy_id"].astype(str) == str(strategy_id)
-        ].copy()
-
+    replay_frame = prediction_frame_for_strategy(
+        replay,
+        strategy_id=strategy_id,
+        name="Replay",
+    )
+    backtest_frame = prediction_frame_for_strategy(
+        backtest,
+        strategy_id=strategy_id,
+        name="Backtest",
+    )
     replay_frame = _with_candle_close_times(replay_frame, "Replay")
-    backtest_frame = _with_candle_close_times(backtest, "Backtest")
+    backtest_frame = _with_candle_close_times(backtest_frame, "Backtest")
     missing_columns = [
         column
         for column in PREDICTION_COLUMNS
@@ -326,6 +370,11 @@ def main() -> None:
         help="Optional root containing canonical raw market-data paths",
     )
     parser.add_argument(
+        "--market-trace",
+        default=None,
+        help="Prediction trace CSV used as the market source for one feed group",
+    )
+    parser.add_argument(
         "--backtest-predictions",
         default=None,
         help="Optional backtest prediction file to compare",
@@ -336,7 +385,23 @@ def main() -> None:
     logger = logging.getLogger("trade.live_replay")
     specs = load_live_strategy_specs(args.config)
     resolver = None
-    if args.data_root:
+    if args.market_trace:
+        market_keys = {
+            (
+                spec.base_define.data_source,
+                spec.base_define.trading_type,
+                spec.base_define.symbol,
+                spec.base_define.interval,
+            )
+            for spec in specs
+        }
+        if len(market_keys) != 1:
+            raise ValueError(
+                "--market-trace requires every enabled strategy to share one feed group"
+            )
+        trace_path = os.path.abspath(args.market_trace)
+        resolver = lambda _market: trace_path  # noqa: E731
+    elif args.data_root:
         resolver = lambda market: common.market_data_path(  # noqa: E731
             market,
             root_dir=args.data_root,

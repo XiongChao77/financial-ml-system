@@ -10,7 +10,7 @@ switching backtest framework or exchange should only touch this layer.
 """
 
 from abc import abstractmethod
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 import math
 from zoneinfo import ZoneInfo
 
@@ -21,7 +21,8 @@ from trade.core.protocol import TradeIntent, ActionType, PositionDir
 class VenueBase:
     FIRM_DAILY_RESET_TIMEZONES = {
         Firm.FTMO: ZoneInfo("Europe/Prague"),
-        Firm.THE5ERS: ZoneInfo("Europe/Athens"),
+        # The5ers defines its reset as a fixed UTC+3 boundary without DST.
+        Firm.THE5ERS: timezone(timedelta(hours=3)),
     }
 
     # ---------------- inbound: queries ----------------
