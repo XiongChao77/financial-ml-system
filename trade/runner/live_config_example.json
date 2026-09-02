@@ -6,8 +6,8 @@
         "publish_interval_seconds": 1,
         "request_timeout_seconds": 0.5
     },
-    "prediction_trace": {},
-    "execution_trace": {},
+    "prediction_trace": true,
+    "execution_trace": true,
     "strategy":{
         "ctrader-live-the5ers-1": {
             "run_live": false,
