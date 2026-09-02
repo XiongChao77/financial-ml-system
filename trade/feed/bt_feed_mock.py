@@ -82,6 +82,15 @@ class BtDataFeedMock(DataFeedBase):
                 unit="ms",
                 utc=True,
             )
+        if "is_warmup" in prepared.columns:
+            normalized = prepared["is_warmup"].astype(str).str.strip().str.lower()
+            invalid = ~normalized.isin({"true", "false", "1", "0"})
+            if invalid.any():
+                values = sorted(normalized.loc[invalid].unique().tolist())
+                raise ValueError(
+                    f"Replay market data contains invalid is_warmup values: {values}"
+                )
+            prepared["is_warmup"] = normalized.isin({"true", "1"})
 
         prepared.sort_values("close_time_ms_utc", inplace=True)
         prepared.reset_index(drop=True, inplace=True)
@@ -94,10 +103,29 @@ class BtDataFeedMock(DataFeedBase):
             raise ValueError("required_bars must be positive")
         if interval_ms <= 0:
             raise ValueError("interval_ms must be positive")
-        if len(self._source) <= required_bars:
+        warmup_bars = int(required_bars)
+        if "is_warmup" in self._source.columns:
+            warmup_values = self._source["is_warmup"].to_numpy(dtype=bool)
+            live_positions = (~warmup_values).nonzero()[0]
+            if not len(live_positions):
+                raise ValueError(
+                    "Replay prediction trace must contain at least one live candle"
+                )
+            warmup_bars = int(live_positions[0])
+            if warmup_values[warmup_bars:].any():
+                raise ValueError(
+                    "Replay prediction trace warm-up rows must form one prefix"
+                )
+            if warmup_bars < required_bars:
+                raise ValueError(
+                    "Replay prediction trace has insufficient warm-up bars: "
+                    f"need>={required_bars}, actual={warmup_bars}"
+                )
+
+        if len(self._source) <= warmup_bars:
             raise ValueError(
                 "Replay market data must contain warm-up bars plus at least one "
-                f"replay bar: need>{required_bars}, actual={len(self._source)}"
+                f"replay bar: need>{warmup_bars}, actual={len(self._source)}"
             )
 
         close_times = self._source["close_time_ms_utc"].to_numpy(dtype="int64")
@@ -112,7 +140,7 @@ class BtDataFeedMock(DataFeedBase):
             )
 
         self._interval_ms = int(interval_ms)
-        self._cursor = int(required_bars) - 1
+        self._cursor = warmup_bars - 1
         with self._lock:
             self._cache = self._visible_cache()
 

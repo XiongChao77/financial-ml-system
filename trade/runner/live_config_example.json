@@ -6,10 +6,13 @@
         "publish_interval_seconds": 1,
         "request_timeout_seconds": 0.5
     },
+    "prediction_trace": {
+        "output_dir": "../../quant_output/live_prediction_traces"
+    },
     "strategy":{
         "ctrader-live-the5ers-1": {
             "run_live": false,
-            "compound": true,
+            "compound": false,
             "hash": "ctrader-report-hash",
             "model_path": "../../quant_output/experiment/valid_train_out/ctrader-report-hash",
             "device": "cpu",

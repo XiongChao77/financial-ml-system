@@ -52,6 +52,10 @@ from trade.monitoring.live_monitoring import (
     LiveStateRegistry,
     monitoring_config_from_mapping,
 )
+from trade.recording.prediction_trace import (
+    LivePredictionTraceRecorder,
+    PredictionTraceConfig,
+)
 from trade.venue.live.binance_data_feed import BinanceDataFeed
 from trade.core.venue_base import VenueBase
 from trade.core.strategy_base import StrategyBase
@@ -150,6 +154,9 @@ class LiveStrategySpec:
             raise TypeError("Live strategy run_live must be a boolean")
         if not isinstance(self.compound, bool):
             raise TypeError("Live strategy compound must be a boolean")
+        venue_name = str(getattr(self.venue_config, "venue", "")).strip().casefold()
+        if venue_name == "ctrader" and self.compound:
+            raise ValueError("cTrader live strategies require compound=false")
 
 
 @dataclass
@@ -190,6 +197,7 @@ DATA_CHECK_TIMER_DELAY_MS = 2000
 class LiveRunnerConfiguration:
     strategies: list[LiveStrategySpec]
     monitoring: LiveMonitoringConfig | None = None
+    prediction_trace: PredictionTraceConfig | None = None
 
 
 def _resolve_data_check_timer_interval_ms(feed_groups: Iterable[FeedGroup]) -> tuple[int, int]:
@@ -342,6 +350,19 @@ def _strategy_entries(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return strategies
 
 
+def _prediction_trace_config(
+    config_path: str,
+    value: Mapping[str, Any] | None,
+) -> PredictionTraceConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("prediction_trace must be a JSON object")
+    return PredictionTraceConfig(
+        output_dir=_resolve_path(config_path, value.get("output_dir")),
+    )
+
+
 def load_live_runner_configuration(
     path: str,
     *,
@@ -400,9 +421,14 @@ def load_live_runner_configuration(
         publish_url=publish_url or os.environ.get("LIVE_MONITORING_PUBLISH_URL"),
         runner_id=runner_id or os.environ.get("LIVE_RUNNER_ID"),
     )
+    prediction_trace = _prediction_trace_config(
+        config_path,
+        payload.get("prediction_trace"),
+    )
     return LiveRunnerConfiguration(
         strategies=strategy_entries,
         monitoring=monitoring,
+        prediction_trace=prediction_trace,
     )
 
 
@@ -467,6 +493,8 @@ def _market_view(
 class LiveRunner:
     """Coordinate multiple model strategies while fetching each feed only once."""
 
+    CTRADER_INITIAL_BALANCE_TOLERANCE = 0.20
+
     def __init__(
         self,
         specs: list[LiveStrategySpec],
@@ -476,19 +504,22 @@ class LiveRunner:
         venue_factory: Optional[Callable[[LiveStrategySpec, logging.Logger], Any]] = None,
         prediction_callback: Optional[Callable[[StrategyPipeline, int, pd.Series], None]] = None,
         monitoring_config: LiveMonitoringConfig | None = None,
+        prediction_trace_config: PredictionTraceConfig | None = None,
     ):
         if not specs:
             raise ValueError("LiveRunner requires at least one strategy")
         self.logger = logger or logging.getLogger("trade.live")
         self._feed_factory = feed_factory or self._create_feed
-        self.ctrader_connection: CTraderOpenApiConnection | None = None
+        self._ctrader_connections: dict[str, CTraderOpenApiConnection] = {}
         self._ctrader_connection_path: str | None = None
-        self._ctrader_environment: str | None = None
         self._venue_factory = venue_factory or self._create_venue
         self._prediction_callback = prediction_callback
         self._monitoring_config = monitoring_config
+        self._prediction_trace_config = prediction_trace_config
         self._live_registry: LiveStateRegistry | None = None
         self._monitoring_service: LiveMonitoringService | None = None
+        self._prediction_trace: LivePredictionTraceRecorder | None = None
+        self._prediction_trace_failed = False
         self._initialized = False
         self._closed = False
         self.strategy_pipelines: list[StrategyPipeline] = []
@@ -502,6 +533,11 @@ class LiveRunner:
         self._data_check_timer_cycle_count = 0
         try:
             self._build(specs)
+            if self._prediction_trace_config is not None:
+                self._prediction_trace = LivePredictionTraceRecorder(
+                    self._prediction_trace_config,
+                    self.feed_groups,
+                )
             self._live_registry = LiveStateRegistry(self.strategy_pipelines)
             if self._monitoring_config is not None:
                 self._monitoring_service = LiveMonitoringService(
@@ -531,6 +567,7 @@ class LiveRunner:
             configuration.strategies,
             logger=logger,
             monitoring_config=configuration.monitoring,
+            prediction_trace_config=configuration.prediction_trace,
         )
 
     @staticmethod
@@ -591,22 +628,36 @@ class LiveRunner:
             )
         if config.venue == "ctrader":
             connection_path = os.path.realpath(config.path)
-            environment = "live"
-            if self.ctrader_connection is not None:
-                if connection_path != self._ctrader_connection_path:
-                    raise ValueError(
-                        "All cTrader venues sharing a connection must use the same "
-                        "credential path; "
-                        f"expected {self._ctrader_connection_path!r}, "
-                        f"got {connection_path!r}"
-                    )
-                if environment != self._ctrader_environment:
-                    raise ValueError(
-                        "All cTrader venues sharing a connection must use the same "
-                        "environment; "
-                        f"expected {self._ctrader_environment!r}, "
-                        f"got {environment!r}"
-                    )
+            if (
+                self._ctrader_connection_path is not None
+                and connection_path != self._ctrader_connection_path
+            ):
+                raise ValueError(
+                    "All cTrader venues must use the same credential path; "
+                    f"expected {self._ctrader_connection_path!r}, "
+                    f"got {connection_path!r}"
+                )
+            self._ctrader_connection_path = connection_path
+
+            discovery_connection = self._ctrader_connection(
+                connection_path,
+                "live",
+                logger,
+            )
+            account_id, environment = discovery_connection.resolve_account(
+                config.trader_login
+            )
+            logger.info(
+                "cTrader account route resolved | trader_login=%s account=%s environment=%s",
+                config.trader_login,
+                account_id,
+                environment,
+            )
+            account_connection = self._ctrader_connection(
+                connection_path,
+                environment,
+                logger,
+            )
             ctrader_venue = CTraderVenue(
                 connection_path,
                 spec.base_define.symbol,
@@ -614,13 +665,9 @@ class LiveRunner:
                 logger=logger,
                 trader_login=config.trader_login,
                 environment=environment,
-                api=self.ctrader_connection,
+                api=account_connection,
                 firm=config.firm,
             )
-            if self.ctrader_connection is None:
-                self.ctrader_connection = ctrader_venue.api
-                self._ctrader_connection_path = connection_path
-                self._ctrader_environment = environment
             return ctrader_venue
 
         if config.venue == "binance":
@@ -633,6 +680,22 @@ class LiveRunner:
                 logger=logger,
             )
         raise ValueError(f"Unsupported venue: {config.venue}")
+
+    def _ctrader_connection(
+        self,
+        connection_path: str,
+        environment: str,
+        logger: logging.Logger,
+    ) -> CTraderOpenApiConnection:
+        connection = self._ctrader_connections.get(environment)
+        if connection is None:
+            connection = CTraderOpenApiConnection(
+                connection_path,
+                environment=environment,
+                logger=logger,
+            )
+            self._ctrader_connections[environment] = connection
+        return connection
 
     @staticmethod
     def _create_strategy(spec: LiveStrategySpec, venue: VenueBase):
@@ -681,6 +744,40 @@ class LiveRunner:
             )
         raise TypeError("Live runner currently supports BbmStrategyConfig, got " f"{type(spec.strategy_config).__name__}")
 
+    @classmethod
+    def _validate_ctrader_initial_balance(
+        cls,
+        spec: LiveStrategySpec,
+        venue: VenueBase,
+    ) -> None:
+        venue_name = str(getattr(spec.venue_config, "venue", "")).strip().casefold()
+        if venue_name != "ctrader":
+            return
+
+        initial_equity = float(spec.broker_config.initial_equity)
+        if not math.isfinite(initial_equity) or initial_equity <= 0:
+            raise ValueError(
+                "cTrader broker_config.initial_equity must be positive and finite"
+            )
+        actual_balance = float(venue.get_dashboard_balance().balance)
+        if not math.isfinite(actual_balance) or actual_balance <= 0:
+            raise RuntimeError("cTrader returned an invalid account balance")
+
+        lower_balance = initial_equity * (
+            1.0 - cls.CTRADER_INITIAL_BALANCE_TOLERANCE
+        )
+        upper_balance = initial_equity * (
+            1.0 + cls.CTRADER_INITIAL_BALANCE_TOLERANCE
+        )
+        if actual_balance < lower_balance or actual_balance > upper_balance:
+            raise ValueError(
+                "cTrader account balance is outside the configured initial_equity "
+                "tolerance: "
+                f"strategy={spec.strategy_id!r}, initial_equity={initial_equity:g}, "
+                f"actual_balance={actual_balance:g}, "
+                f"allowed_range=[{lower_balance:g}, {upper_balance:g}]"
+            )
+
     def _build(self, specs: list[LiveStrategySpec]) -> None:
         grouped_pipelines: list[tuple[common.MarketDataSourceConfig, list[StrategyPipeline]]] = []
 
@@ -712,6 +809,7 @@ class LiveRunner:
                 feed_pipelines = feed_entry[1]
             venue = self._venue_factory(spec, self.logger)
             try:
+                self._validate_ctrader_initial_balance(spec, venue)
                 strategy = self._create_strategy(spec, venue)
                 self.logger.info(
                     "Strategy created | id=%s hash=%s venue=%s",
@@ -877,6 +975,22 @@ class LiveRunner:
                 len(initial),
             )
 
+        if self._prediction_trace is not None:
+            for group in self.feed_groups:
+                warmup = group.feed.get_latest_data()
+                if warmup is None or warmup.empty:
+                    raise RuntimeError("Live feed has no warm-up data for prediction trace")
+                self._record_prediction_trace(
+                    "record_warmup",
+                    group,
+                    warmup,
+                )
+            if self._prediction_trace is not None:
+                self.logger.info(
+                    "Live prediction trace started | files=%s",
+                    self._prediction_trace.paths,
+                )
+
         for group in self.feed_groups:
             group.feed.start(
                 lambda open_time_ms, target=group: self._events.put(RunnerEvent(e_type=RunnerEventType.CLOSED_CANDLE, group=target, timestamp_ms=open_time_ms))
@@ -890,6 +1004,21 @@ class LiveRunner:
             self._data_check_timer_interval_ms,
             DATA_CHECK_TIMER_DELAY_MS,
         )
+
+    def _record_prediction_trace(self, method: str, *args) -> None:
+        recorder = self._prediction_trace
+        if recorder is None or self._prediction_trace_failed:
+            return
+        try:
+            getattr(recorder, method)(*args)
+        except Exception:
+            self._prediction_trace_failed = True
+            self.logger.exception("Live prediction trace disabled after a write failure")
+            try:
+                recorder.close()
+            except Exception:
+                self.logger.exception("Live prediction trace cleanup failed")
+            self._prediction_trace = None
 
     def _predict(self, pipeline: StrategyPipeline, features: pd.DataFrame) -> pd.DataFrame:
         sequence_length = int(pipeline.model.seq_len)
@@ -1060,12 +1189,14 @@ class LiveRunner:
                 )
                 self._dispatch_invalid_to_group(group, candle_open_time_ms)
             else:
+                trace_predictions: dict[str, pd.Series] = {}
                 for pipeline in group.pipelines:
                     try:
                         prepared = _prepare_market_frame(frame, pipeline.spec.base_define)
                         features = pipeline.feature_factory.generate(prepared)
                         predicted = self._predict(pipeline, features)
                         latest_prediction = predicted.iloc[-1]
+                        trace_predictions[pipeline.spec.strategy_id] = latest_prediction.copy()
                         if self._prediction_callback is not None:
                             self._prediction_callback(pipeline, candle_open_time_ms, latest_prediction.copy())
                         market = _market_view(predicted)
@@ -1119,6 +1250,12 @@ class LiveRunner:
                                 pipeline.spec.hash_id,
                                 pipeline.spec.base_define.symbol,
                             )
+                self._record_prediction_trace(
+                    "record_live",
+                    group,
+                    frame.iloc[-1].copy(),
+                    trace_predictions,
+                )
 
     def _process_event(self, event: RunnerEvent) -> bool:
         with event.group.lock:
@@ -1203,6 +1340,12 @@ class LiveRunner:
             except Exception:
                 self.logger.exception("Live monitoring shutdown failed")
             self._monitoring_service = None
+        if getattr(self, "_prediction_trace", None) is not None:
+            try:
+                self._prediction_trace.close()
+            except Exception:
+                self.logger.exception("Live prediction trace shutdown failed")
+            self._prediction_trace = None
         for pipeline in self.strategy_pipelines:
             try:
                 pipeline.strategy.finalize()
@@ -1227,6 +1370,20 @@ class LiveRunner:
                         "Venue shutdown failed: %s",
                         pipeline.spec.strategy_id,
                     )
+
+        for environment, connection in getattr(
+            self,
+            "_ctrader_connections",
+            {},
+        ).items():
+            try:
+                connection.shutdown()
+            except Exception:
+                self.logger.exception(
+                    "cTrader %s connection shutdown failed",
+                    environment,
+                )
+        self._ctrader_connections.clear()
 
         for feed_group in self.feed_groups:
             shutdown = getattr(feed_group.feed, "shutdown", None)
@@ -1263,6 +1420,7 @@ def main() -> None:
 
     logger, _ = common.setup_session_logger(sub_folder="live_runner", symbol="", console_level=logging.DEBUG)
     logging.getLogger("urllib3").setLevel(logging.INFO)
+    logging.getLogger("websocket").setLevel(logging.INFO)
     runner = LiveRunner.from_config(
         args.config,
         logger=logger,

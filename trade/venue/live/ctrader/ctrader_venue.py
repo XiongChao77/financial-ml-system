@@ -7,6 +7,7 @@ import math
 import os
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Iterable
@@ -60,6 +61,16 @@ CTRADER_SYMBOL_MAP = {
 }
 
 
+class _CTraderIsolatedTcpProtocol(TcpProtocol):
+    """Keep SDK send state isolated between Live and Demo clients."""
+
+    def __init__(self):
+        super().__init__()
+        self._send_queue = deque()
+        self._send_task = None
+        self._lastSendMessageTime = None
+
+
 class CTraderOpenApiConnection:
     """Run one shared cTrader Open API connection for multiple trading accounts."""
 
@@ -110,6 +121,7 @@ class CTraderOpenApiConnection:
 
         self._granted_account_ids: set[int] = set()
         self._account_ids_by_trader_login: dict[int, tuple[int, ...]] = {}
+        self._account_environments_by_id: dict[int, str] = {}
         self._authenticated_account_ids: set[int] = set()
         self._registered_account_ids: set[int] = set()
         self._account_ref_counts: dict[int, int] = {}
@@ -143,7 +155,11 @@ class CTraderOpenApiConnection:
         self._check_access_token(force_if_expiry_unknown=True)
 
         self._ensure_reactor()
-        self._client = Client(host, EndPoints.PROTOBUF_PORT, TcpProtocol)
+        self._client = Client(
+            host,
+            EndPoints.PROTOBUF_PORT,
+            _CTraderIsolatedTcpProtocol,
+        )
         self._client.setConnectedCallback(self._on_connected)
         self._client.setDisconnectedCallback(self._on_disconnected)
         self._client.setMessageReceivedCallback(self._on_message)
@@ -358,7 +374,10 @@ class CTraderOpenApiConnection:
 
     def _on_connected(self, _client) -> None:
         self._connected.set()
-        self._logger.info("cTrader Open API connection ready")
+        self._logger.info(
+            "cTrader Open API connection ready | environment=%s",
+            self.environment,
+        )
         if self._ever_authenticated and not self._closed:
             threading.Thread(
                 target=self._reauthenticate,
@@ -423,20 +442,23 @@ class CTraderOpenApiConnection:
             "ProtoOAGetAccountListByAccessTokenReq",
             accessToken=self._access_token,
         )
-        expected_live = self.environment == "live"
         account_ids_by_login: dict[int, set[int]] = {}
+        account_environments_by_id: dict[int, str] = {}
         granted_ids: set[int] = set()
         for item in accounts.ctidTraderAccount:
-            if self._message_has_field(item, "isLive"):
-                if bool(item.isLive) != expected_live:
-                    continue
             account_id = int(item.ctidTraderAccountId)
             granted_ids.add(account_id)
+            if self._message_has_field(item, "isLive"):
+                account_environment = "live" if bool(item.isLive) else "demo"
+            else:
+                account_environment = self.environment
+            account_environments_by_id[account_id] = account_environment
             if not self._message_has_field(item, "traderLogin"):
                 continue
             trader_login = int(item.traderLogin)
             account_ids_by_login.setdefault(trader_login, set()).add(account_id)
         self._granted_account_ids = granted_ids
+        self._account_environments_by_id = account_environments_by_id
         self._account_ids_by_trader_login = {trader_login: tuple(sorted(account_ids)) for trader_login, account_ids in account_ids_by_login.items()}
         return granted_ids
 
@@ -450,8 +472,8 @@ class CTraderOpenApiConnection:
                 pass
         return getattr(message, field_name, None) is not None
 
-    def resolve_account_id(self, trader_login: int | str) -> int:
-        """Resolve a UI-visible trader login to an Open API account ID."""
+    def resolve_account(self, trader_login: int | str) -> tuple[int, str]:
+        """Resolve a UI-visible trader login to its account ID and endpoint."""
 
         try:
             normalized_login = int(trader_login)
@@ -472,11 +494,23 @@ class CTraderOpenApiConnection:
                     (),
                 )
             if not account_ids:
-                raise ValueError(f"cTrader trader login {normalized_login} is not granted " f"for the {self.environment} environment")
+                raise ValueError(
+                    f"cTrader trader login {normalized_login} is not granted by the access token"
+                )
             if len(account_ids) > 1:
                 candidates = ", ".join(str(account_id) for account_id in account_ids)
-                raise ValueError(f"cTrader trader login {normalized_login} is ambiguous for " f"the {self.environment} environment; account IDs: {candidates}")
-            return account_ids[0]
+                raise ValueError(
+                    f"cTrader trader login {normalized_login} is ambiguous; "
+                    f"account IDs: {candidates}"
+                )
+            account_id = account_ids[0]
+            return account_id, self._account_environments_by_id[account_id]
+
+    def resolve_account_id(self, trader_login: int | str) -> int:
+        """Resolve a UI-visible trader login to an Open API account ID."""
+
+        account_id, _ = self.resolve_account(trader_login)
+        return account_id
 
     def _authenticate_account(self, account_id: int) -> None:
         with self._authentication_lock:
@@ -595,7 +629,7 @@ class CTraderOpenApiConnection:
             def failed(failure):
                 outcome["error"] = failure
                 completed.set()
-                return failure
+                return None
 
             deferred.addCallbacks(succeeded, failed)
 
@@ -764,7 +798,15 @@ class CTraderVenue(VenueBase, AccountDashboard):
         self.firm = Firm.parse(firm)
         self.logger = logger
         self.label = str(magic)[:100]
-        self.symbol = CTRADER_SYMBOL_MAP.get(str(symbol).upper(), str(symbol))
+        source_symbol = str(symbol).upper()
+        mapped_symbol = CTRADER_SYMBOL_MAP.get(source_symbol, str(symbol))
+        standard_usd_symbol = (
+            source_symbol[:-1] if source_symbol.endswith("USDT") else source_symbol
+        )
+        self._symbol_candidates = tuple(
+            dict.fromkeys((mapped_symbol, standard_usd_symbol))
+        )
+        self.symbol = mapped_symbol
         if trader_login in (None, ""):
             raise ValueError("trader_login is required for CTraderVenue")
         self.api = api or CTraderOpenApiConnection(
@@ -819,13 +861,32 @@ class CTraderVenue(VenueBase, AccountDashboard):
             ctidTraderAccountId=self.account_id,
             includeArchivedSymbols=False,
         )
-        target = self._normalized_symbol(self.symbol)
+        symbols_by_name = {
+            self._normalized_symbol(
+                str(getattr(item, "symbolName", getattr(item, "name", "")))
+            ): item
+            for item in symbols.symbol
+        }
         light_symbol = next(
-            (item for item in symbols.symbol if self._normalized_symbol(str(getattr(item, "symbolName", getattr(item, "name", "")))) == target),
+            (
+                symbols_by_name[self._normalized_symbol(candidate)]
+                for candidate in self._symbol_candidates
+                if self._normalized_symbol(candidate) in symbols_by_name
+            ),
             None,
         )
         if light_symbol is None:
-            raise ValueError(f"cTrader symbol is not available: {self.symbol}")
+            raise ValueError(
+                "cTrader symbol is not available: "
+                f"candidates={self._symbol_candidates}"
+            )
+        self.symbol = str(
+            getattr(
+                light_symbol,
+                "symbolName",
+                getattr(light_symbol, "name", self.symbol),
+            )
+        )
         self.symbol_id = int(light_symbol.symbolId)
 
         details = self.api.request(
