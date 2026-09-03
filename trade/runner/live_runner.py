@@ -359,15 +359,8 @@ def _strategy_entries(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _validate_runner_id(value: Any) -> str:
     runner_id = str(value or "").strip() or "live-runner"
-    if (
-        runner_id in {".", ".."}
-        or "/" in runner_id
-        or "\\" in runner_id
-        or "\x00" in runner_id
-    ):
-        raise ValueError(
-            "runner_id must be a single safe directory name without path separators"
-        )
+    if runner_id in {".", ".."} or "/" in runner_id or "\\" in runner_id or "\x00" in runner_id:
+        raise ValueError("runner_id must be a single safe directory name without path separators")
     return runner_id
 
 
@@ -379,17 +372,8 @@ def _runner_identity_from_payload(
     raw_monitoring = payload.get("monitoring")
     if raw_monitoring is not None and not isinstance(raw_monitoring, Mapping):
         raise TypeError("monitoring must be a JSON object")
-    monitoring_runner_id = (
-        raw_monitoring.get("runner_id")
-        if isinstance(raw_monitoring, Mapping)
-        else None
-    )
-    final_runner_id = _validate_runner_id(
-        runner_id
-        or os.environ.get("LIVE_RUNNER_ID")
-        or payload.get("runner_id")
-        or monitoring_runner_id
-    )
+    monitoring_runner_id = raw_monitoring.get("runner_id") if isinstance(raw_monitoring, Mapping) else None
+    final_runner_id = _validate_runner_id(runner_id or os.environ.get("LIVE_RUNNER_ID") or payload.get("runner_id") or monitoring_runner_id)
     output_dir = os.path.abspath(
         os.path.join(
             common.PERSISTENCE_DIR,
@@ -620,19 +604,8 @@ class LiveRunner:
         self._ctrader_connection_path: str | None = None
         self._venue_factory = venue_factory or self._create_venue
         self._prediction_callback = prediction_callback
-        self.runner_id = _validate_runner_id(
-            runner_id
-            or (
-                monitoring_config.runner_id
-                if monitoring_config is not None
-                else None
-            )
-        )
-        self.output_dir = (
-            os.path.abspath(output_dir)
-            if output_dir is not None
-            else None
-        )
+        self.runner_id = _validate_runner_id(runner_id or (monitoring_config.runner_id if monitoring_config is not None else None))
+        self.output_dir = os.path.abspath(output_dir) if output_dir is not None else None
         self._monitoring_config = monitoring_config
         self._prediction_trace_config = prediction_trace_config
         self._execution_trace_config = execution_trace_config
