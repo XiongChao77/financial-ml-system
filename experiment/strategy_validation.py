@@ -361,7 +361,7 @@ def sim_worker(
             data_config = backtest_runner.ModelDataConfig(
                 prep_output_dir=job["prep_dir"],
                 train_output_dir=train_output_dir,
-                device="cpu",
+                device="auto",
                 use_prediction_cache=True,
             )
 
@@ -491,10 +491,7 @@ def validate_report_period(
 ) -> None:
     report_periods = set((report.get("results") or {}).keys())
     if report_periods != {expected_period}:
-        raise RuntimeError(
-            "Cross-test report period mismatch: "
-            f"expected={[expected_period]}, actual={sorted(report_periods)}"
-        )
+        raise RuntimeError("Cross-test report period mismatch: " f"expected={[expected_period]}, actual={sorted(report_periods)}")
 
 
 def send_none(queue: mp.Queue, count: int) -> None:
@@ -873,10 +870,7 @@ def aggregate_results(
                 "symbol": original_symbol,
                 "interval": original_interval,
             },
-            "summary": {
-                model_mode: _aggregate_model_summary(summary_targets[model_mode])
-                for model_mode in ENABLED_MODEL_MODES
-            },
+            "summary": {model_mode: _aggregate_model_summary(summary_targets[model_mode]) for model_mode in ENABLED_MODEL_MODES},
             "reports": reports,
         }
 
@@ -906,9 +900,7 @@ def write_jsonl(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Parallel cross-test runner. For every selected strategy and "
-            "target market, run the model modes enabled by the module-level "
-            "feature flags."
+            "Parallel cross-test runner. For every selected strategy and " "target market, run the model modes enabled by the module-level " "feature flags."
         )
     )
     parser.add_argument(
@@ -969,8 +961,7 @@ def main() -> None:
     jobs = build_jobs(records, output_dir)
 
     logger.info(
-        "Cross-test jobs=%d | MAX_PREP=%d | active_train_workers=%d | "
-        "MAX_SIM=%d | model_modes=%s",
+        "Cross-test jobs=%d | MAX_PREP=%d | active_train_workers=%d | " "MAX_SIM=%d | model_modes=%s",
         len(jobs),
         MAX_PREP,
         MAX_TRAIN if ENABLE_RETRAINED_TEST else 0,

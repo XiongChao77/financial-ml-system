@@ -12,6 +12,7 @@ confmat_cnn.csv
 *exported_project_files*
 *debug_data*
 data_process/data/*
+data_process/download/binance/data/
 output*
 *keys*
 launch.json
@@ -21,7 +22,7 @@ data_process/label_viewer/public
 tests/*
 !tests/test_kline_source_validation.py
 !tests/test_binance_zip_downloader_manifest.py
-*data*
+dow
 tests/*
 .venv/*
 *test*

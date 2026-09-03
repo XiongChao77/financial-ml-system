@@ -1,0 +1,105 @@
+# Setup and Running
+
+This repository is primarily a research and engineering project rather than a turnkey trading application. The commands below assume that repository-specific data paths, experiment tasks, and artifact locations have been configured. Run all Python commands from the repository root.
+
+## Environment
+
+The Python project requires Python 3.12 or later. Install the research, modeling, backtesting, and UI dependencies with pip:
+
+```bash
+python -m pip install numpy scipy pandas scikit-learn matplotlib seaborn plotly \
+  notebook jupyterlab ipykernel statsmodels xgboost lightgbm tqdm joblib \
+  requests beautifulsoup4 torch pytorch-ignite colorlog backtrader pyarrow \
+  numba GitPython service-identity fastapi uvicorn websocket-client
+
+python -m pip install pybit ctrader-open-api  # Live trading venues
+```
+
+The Strategy Center frontend also requires Node.js and npm:
+
+```bash
+cd UI/quant-ui
+npm install
+```
+
+Live venues may require platform-specific broker software, API credentials, and account configuration in addition to the Python dependencies.
+
+## Running
+
+### 1. Data Preparation
+
+Download Binance market data, then clean, transform, label, and export the training dataset:
+
+```bash
+python -m data_process.download.binance.download_from_zip \
+  --symbols BTCUSDT ETHUSDT \
+  --intervals 15m 30m 1h
+python -m data_process.preparation
+```
+
+Preparation behavior is selected through the active configuration in `data_process/config.py`.
+
+### 2. Model Training
+
+Train the configured model and write its checkpoints and evaluation artifacts:
+
+```bash
+python -m model.train
+```
+
+### 3. Backtesting
+
+Evaluate the trained model through the current backtest runner:
+
+```bash
+python -m trade.runner.backtest_runner
+```
+
+### 4. Batch Experiments and Validation
+
+Run the combined preparation, training, and simulation workflow for the configured experiment tasks:
+
+```bash
+python -m experiment.batch_experiments
+```
+
+Generate the configured offline experiment visualizations:
+
+```bash
+python -m experiment.trigger_direction_report_view
+```
+
+Run cross-period and cross-asset validation for selected candidates:
+
+```bash
+python -m experiment.strategy_validation \
+  --selected-configs path/to/selected_configs.jsonl
+```
+
+The batch runner creates a source snapshot and requires a clean Git worktree by default. Experiment definitions are loaded from `experiment/task_constructors.py` when present, with `experiment/task_constructors_example.py` serving as the repository example.
+
+### 5. Strategy Center
+
+Strategy Center combines Labels, Backtests, Experiments, and Live Monitoring in one Vite frontend and one FastAPI backend. Start the development services in separate terminals:
+
+```bash
+uvicorn UI.backend.main:app --host 0.0.0.0 --port 8000
+```
+
+```bash
+cd UI/quant-ui
+npm run dev
+```
+
+Open `http://localhost:5173`. Run a single backend worker because live snapshots, loaded experiment datasets, and label-generation coordination are stored in process memory.
+
+### 6. Live Trading
+
+A validated strategy can be run through the unified live runner. Create a deployment-specific configuration for strategy artifacts, venues, credentials, symbol mappings, monitoring, and risk limits; `trade/runner/live_config_example.json` shows the expected structure.
+
+```bash
+python -m trade.runner.live_runner \
+  --config path/to/live_config.json
+```
+
+Use a demo or paper-trading account before committing capital. Passing historical validation reduces overfitting risk but does not guarantee future performance. Live monitoring and risk limits remain mandatory.
