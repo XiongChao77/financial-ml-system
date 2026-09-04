@@ -273,6 +273,7 @@ class BtVenue(VenueBase, bt.Strategy):
         *,
         order_type=OrderType.MARKET,
         price=None,
+        execution_id=None,
     ):
         order_type, price = self.normalize_order_request(order_type, price)
         entry_price = float(self.data.close[0]) if price is None else price
@@ -285,7 +286,7 @@ class BtVenue(VenueBase, bt.Strategy):
             order_type=order_type,
         )
 
-    def close_position(self, size=None, **kwargs):
+    def close_position(self, size=None, execution_id=None, **kwargs):
         self.logger.debug(f"close_position ammount :{size}")
         current_size = self.position.size
         if current_size == 0:

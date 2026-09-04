@@ -8,6 +8,8 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import re
+import shutil
 import sys
 import time
 import traceback
@@ -24,6 +26,11 @@ from model import train_config
 from trade.runner.config import ExperimentContext
 
 SELECTED_FILE = "selected_configs.jsonl"
+COMPARE_REPORTS_FILE = "compare_reports.jsonl"
+MODEL_ARCHIVE_DIR = "models"
+MODEL_ARCHIVE_MANIFEST_FILE = "model_archive_manifest.jsonl"
+BACKTEST_COMPARE_REPORTS_FILE = "backtest_compare_reports.jsonl"
+BACKTEST_REPORTS_FILE = "backtest_reproduction_reports.jsonl"
 
 CROSS_TEST_SYMBOLS = ("DOGEUSDT", "ETHUSDT", "BTCUSDT")
 CROSS_TEST_INTERVALS = ("15m", "30m", "1h")
@@ -108,6 +115,191 @@ def cross_test_targets(
 
 def target_key(symbol: str, interval: str) -> str:
     return f"{symbol}_{interval}"
+
+
+def training_validation_root() -> str:
+    return os.path.join(
+        common.PERSISTENCE_DIR,
+        "batch_experiments",
+        "valid_train_out",
+    )
+
+
+def original_model_dir(
+    selected_configs_path: str,
+    params: Dict[str, Any],
+) -> str:
+    """Resolve the model archived from the original experiment at selection time."""
+    identity = params.get("identity") or {}
+    prep_hash = str(identity.get("prep_hash", ""))
+    train_hash = str(identity.get("train_hash", ""))
+    strategy_hash = params.get("hash", "unknown")
+
+    for name, value in (("preparation", prep_hash), ("training", train_hash)):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            raise ValueError(
+                f"Selected strategy has an unsafe {name} artifact hash: "
+                f"strategy_hash={strategy_hash}, value={value!r}"
+            )
+
+    archive_root = os.path.abspath(
+        os.path.join(os.path.dirname(selected_configs_path), "train")
+    )
+    model_dir = os.path.abspath(
+        os.path.join(
+            archive_root,
+            f"pre_{prep_hash}",
+            f"train_{train_hash}",
+        )
+    )
+    if os.path.commonpath([archive_root, model_dir]) != archive_root:
+        raise ValueError(
+            f"Original model path escaped its archive root: {model_dir}"
+        )
+
+    required_files = ("model.pt", "meta.json", "train_config.json")
+    missing_files = [
+        filename
+        for filename in required_files
+        if not os.path.isfile(os.path.join(model_dir, filename))
+    ]
+    if missing_files:
+        raise FileNotFoundError(
+            "Original selected model artifact is incomplete: "
+            f"strategy_hash={strategy_hash}, path={model_dir}, "
+            f"missing={missing_files}"
+        )
+    return model_dir
+
+
+def compare_reports_source(selected_configs_path: str) -> str:
+    candidates = [
+        os.path.join(
+            os.path.dirname(os.path.abspath(selected_configs_path)),
+            COMPARE_REPORTS_FILE,
+        ),
+        os.path.join(training_validation_root(), COMPARE_REPORTS_FILE),
+    ]
+    for candidate in dict.fromkeys(candidates):
+        if os.path.isfile(candidate):
+            return candidate
+    raise FileNotFoundError(
+        "Comparison report for selected configs was not found: "
+        f"candidates={candidates}"
+    )
+
+
+def backtest_reproduction_source(filename: str) -> str:
+    path = os.path.join(
+        training_validation_root(),
+        "backtest_reproduction",
+        filename,
+    )
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"Backtest reproduction file was not found: {path}"
+        )
+    return path
+
+
+def archive_cross_test_inputs(
+    selected_configs_path: str,
+    records: List[Dict[str, Any]],
+    output_dir: str,
+    logger: logging.Logger,
+) -> None:
+    """Copy selection inputs and the exact original model artifacts into a run."""
+    selected_configs_path = os.path.abspath(selected_configs_path)
+    output_dir = os.path.abspath(output_dir)
+    compare_reports_path = os.path.abspath(
+        compare_reports_source(selected_configs_path)
+    )
+    backtest_compare_reports_path = os.path.abspath(
+        backtest_reproduction_source(COMPARE_REPORTS_FILE)
+    )
+    backtest_reports_path = os.path.abspath(
+        backtest_reproduction_source("reports.jsonl")
+    )
+
+    file_sources = (
+        (selected_configs_path, os.path.join(output_dir, SELECTED_FILE)),
+        (
+            compare_reports_path,
+            os.path.join(output_dir, COMPARE_REPORTS_FILE),
+        ),
+        (
+            backtest_compare_reports_path,
+            os.path.join(output_dir, BACKTEST_COMPARE_REPORTS_FILE),
+        ),
+        (
+            backtest_reports_path,
+            os.path.join(output_dir, BACKTEST_REPORTS_FILE),
+        ),
+    )
+    for source, destination in file_sources:
+        if source != os.path.abspath(destination):
+            shutil.copy2(source, destination)
+
+    copied_hashes = set()
+    archive_manifest: List[Dict[str, Any]] = []
+    for record in records:
+        strategy_hash = str(validate_record(record)["hash"])
+        if strategy_hash in copied_hashes:
+            continue
+
+        params = validate_record(record)
+        source_dir = original_model_dir(selected_configs_path, params)
+        destination_dir = os.path.join(
+            output_dir,
+            MODEL_ARCHIVE_DIR,
+            strategy_hash,
+        )
+        shutil.copytree(
+            source_dir,
+            destination_dir,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("prediction_cache"),
+        )
+        source_model_path = os.path.join(source_dir, "model.pt")
+        destination_model_path = os.path.join(destination_dir, "model.pt")
+        source_model_sha256 = common.sha256_file(source_model_path)
+        destination_model_sha256 = common.sha256_file(destination_model_path)
+        if destination_model_sha256 != source_model_sha256:
+            raise RuntimeError(
+                "Archived model checksum mismatch: "
+                f"strategy_hash={strategy_hash}, source={source_model_sha256}, "
+                f"destination={destination_model_sha256}"
+            )
+        archive_manifest.append(
+            {
+                "strategy_hash": strategy_hash,
+                "identity": params["identity"],
+                "selected_archive_source": source_dir,
+                "original_experiment_source": (params.get("data") or {}).get(
+                    "train_output_dir"
+                ),
+                "destination": destination_dir,
+                "model_sha256": source_model_sha256,
+            }
+        )
+        copied_hashes.add(strategy_hash)
+
+    write_jsonl(
+        os.path.join(output_dir, MODEL_ARCHIVE_MANIFEST_FILE),
+        archive_manifest,
+    )
+
+    logger.info(
+        "Archived cross-test inputs | selected_configs=%s | "
+        "compare_reports=%s | backtest_compare_reports=%s | "
+        "backtest_reports=%s | models=%d | destination=%s",
+        selected_configs_path,
+        compare_reports_path,
+        backtest_compare_reports_path,
+        backtest_reports_path,
+        len(copied_hashes),
+        output_dir,
+    )
 
 
 def prep_output_dir(
@@ -206,6 +398,7 @@ def validate_preparation(
 def build_jobs(
     records: List[Dict[str, Any]],
     output_dir: str,
+    selected_configs_path: str,
 ) -> List[Dict[str, Any]]:
     jobs: List[Dict[str, Any]] = []
 
@@ -229,6 +422,10 @@ def build_jobs(
                     "target_symbol": symbol,
                     "target_interval": interval,
                     "target_pre_params": asdict(target_pre_para),
+                    "original_model_dir": original_model_dir(
+                        selected_configs_path,
+                        params,
+                    ),
                     "prep_dir": prep_output_dir(
                         output_dir,
                         strategy_hash,
@@ -343,14 +540,7 @@ def sim_worker(
             broker_config = backtest_runner.BrokerConfig(**params["broker"])
 
             if mode == "original_model":
-                train_output_dir = os.path.join(
-                    common.PERSISTENCE_DIR,
-                    "batch_experiments",
-                    "valid_train_out",
-                    strategy_hash,
-                )
-                if not os.path.isdir(train_output_dir):
-                    raise FileNotFoundError(f"Original training artifact is missing: {train_output_dir}")
+                train_output_dir = job["original_model_dir"]
             elif mode == "retrained_model":
                 train_output_dir = job["retrain_dir"]
             else:
@@ -958,7 +1148,7 @@ def main() -> None:
 
     experiment_context = ExperimentContext(git_commit=common.git_revision(require_clean=args.check_git_clean))
 
-    jobs = build_jobs(records, output_dir)
+    jobs = build_jobs(records, output_dir, args.selected_configs)
 
     logger.info(
         "Cross-test jobs=%d | MAX_PREP=%d | active_train_workers=%d | " "MAX_SIM=%d | model_modes=%s",
@@ -990,6 +1180,12 @@ def main() -> None:
         "cross_test_reports.jsonl",
     )
     write_jsonl(output_path, aggregated)
+    archive_cross_test_inputs(
+        args.selected_configs,
+        records,
+        output_dir,
+        logger,
+    )
 
     logger.info(
         "Completed in %.2fs. Reports saved to %s",

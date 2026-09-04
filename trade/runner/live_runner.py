@@ -24,7 +24,7 @@ import queue
 import time
 from numbers import Real
 from dataclasses import dataclass, field, fields, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional
 from enum import Enum, auto
 import pandas as pd
@@ -45,7 +45,7 @@ from trade.core.protocol import (
     Signal,
     TradeIntent,
 )
-from trade.core.execution import ExecutionReport
+from trade.core.execution import ExecutionEvent, ExecutionReport
 from trade.runner.config import BrokerConfig
 from trade.monitoring.live_monitoring import (
     LiveMonitoringConfig,
@@ -209,7 +209,9 @@ class LiveRunnerConfiguration:
     execution_trace: ExecutionTraceConfig | None = None
 
 
-def _resolve_data_check_timer_interval_ms(feed_groups: Iterable[FeedGroup]) -> tuple[int, int]:
+def _resolve_data_check_timer_interval_ms(
+    feed_groups: Iterable[FeedGroup],
+) -> tuple[int, int]:
     """Return the shortest feed interval after validating aligned boundaries."""
 
     interval_entries = [
@@ -581,6 +583,7 @@ class LiveRunner:
     """Coordinate multiple model strategies while fetching each feed only once."""
 
     CTRADER_INITIAL_BALANCE_TOLERANCE = 0.20
+    EXECUTION_RECONCILIATION_LOOKBACK = timedelta(days=7)
 
     def __init__(
         self,
@@ -636,12 +639,27 @@ class LiveRunner:
                 self._execution_trace = LiveExecutionTraceRecorder(
                     self._execution_trace_config,
                     runner_id=self.runner_id,
+                    run_id=(os.path.basename(self.output_dir) if self.output_dir is not None else None),
                     logger=self.logger,
                 )
+                for pipeline in self.strategy_pipelines:
+                    register = getattr(
+                        pipeline.venue,
+                        "set_execution_event_callback",
+                        None,
+                    )
+                    if callable(register):
+                        register(
+                            lambda event, current=pipeline: self._record_execution_event(
+                                current,
+                                event,
+                            )
+                        )
                 self.logger.info(
                     "Live execution trace started | files=%s",
                     self._execution_trace.paths,
                 )
+                self._reconcile_execution_events()
             self._live_registry = LiveStateRegistry(self.strategy_pipelines)
             if self._monitoring_config is not None:
                 self._monitoring_service = LiveMonitoringService(
@@ -1096,7 +1114,13 @@ class LiveRunner:
 
         for group in self.feed_groups:
             group.feed.start(
-                lambda open_time_ms, target=group: self._events.put(RunnerEvent(e_type=RunnerEventType.CLOSED_CANDLE, group=target, timestamp_ms=open_time_ms))
+                lambda open_time_ms, target=group: self._events.put(
+                    RunnerEvent(
+                        e_type=RunnerEventType.CLOSED_CANDLE,
+                        group=target,
+                        timestamp_ms=open_time_ms,
+                    )
+                )
             )
         self._start_data_check_timer()
         self._initialized = True
@@ -1223,18 +1247,79 @@ class LiveRunner:
         if recorder is None or not isinstance(report, ExecutionReport):
             return
         try:
+            account_id = pipeline.venue.get_execution_account_id()
+            venue_symbol = pipeline.venue.get_execution_symbol()
             recorder.record(
                 report,
                 strategy_id=pipeline.spec.strategy_id,
                 strategy_hash=pipeline.spec.hash_id,
                 venue=type(pipeline.venue).__name__,
-                symbol=pipeline.spec.base_define.symbol,
+                account_id=account_id,
+                strategy_symbol=pipeline.spec.base_define.symbol,
+                venue_symbol=venue_symbol,
             )
         except Exception:
             self.logger.exception(
                 "Live execution trace enqueue failed | strategy=%s",
                 pipeline.spec.strategy_id,
             )
+        finally:
+            activate = getattr(
+                pipeline.venue,
+                "activate_execution_updates",
+                None,
+            )
+            if callable(activate):
+                activate(report.execution_id)
+
+    def _record_execution_event(
+        self,
+        pipeline: StrategyPipeline,
+        event: ExecutionEvent,
+    ) -> None:
+        recorder = getattr(self, "_execution_trace", None)
+        if recorder is None:
+            return
+        try:
+            recorder.record_event(
+                event,
+                strategy_id=pipeline.spec.strategy_id,
+                strategy_hash=pipeline.spec.hash_id,
+                venue=type(pipeline.venue).__name__,
+                account_id=pipeline.venue.get_execution_account_id(),
+                strategy_symbol=pipeline.spec.base_define.symbol,
+                venue_symbol=pipeline.venue.get_execution_symbol(),
+            )
+        except Exception:
+            self.logger.exception(
+                "Live execution event trace enqueue failed | strategy=%s",
+                pipeline.spec.strategy_id,
+            )
+
+    def _reconcile_execution_events(self) -> None:
+        since_utc = datetime.now(timezone.utc) - self.EXECUTION_RECONCILIATION_LOOKBACK
+        for pipeline in self.strategy_pipelines:
+            reconcile = getattr(
+                pipeline.venue,
+                "reconcile_execution_events",
+                None,
+            )
+            if not callable(reconcile):
+                continue
+            try:
+                count = int(reconcile(since_utc) or 0)
+                if count:
+                    self.logger.info(
+                        "Live execution history reconciled | strategy=%s " "events=%s since_utc=%s",
+                        pipeline.spec.strategy_id,
+                        count,
+                        since_utc.isoformat(),
+                    )
+            except Exception:
+                self.logger.exception(
+                    "Live execution history reconciliation failed | strategy=%s",
+                    pipeline.spec.strategy_id,
+                )
 
     def _record_live_cycle(
         self,
@@ -1284,7 +1369,12 @@ class LiveRunner:
             ),
         )
 
-    def _process_closed_candle(self, group: FeedGroup, last_processed_candle_open_time_ms, candle_open_time_ms: int) -> None:
+    def _process_closed_candle(
+        self,
+        group: FeedGroup,
+        last_processed_candle_open_time_ms,
+        candle_open_time_ms: int,
+    ) -> None:
         expected_open_time_ms = last_processed_candle_open_time_ms + group.interval_ms
         if candle_open_time_ms > expected_open_time_ms:
             missed_count = (candle_open_time_ms - expected_open_time_ms) // group.interval_ms
@@ -1473,12 +1563,6 @@ class LiveRunner:
             except Exception:
                 self.logger.exception("Live prediction trace shutdown failed")
             self._prediction_trace = None
-        if getattr(self, "_execution_trace", None) is not None:
-            try:
-                self._execution_trace.close()
-            except Exception:
-                self.logger.exception("Live execution trace shutdown failed")
-            self._execution_trace = None
         for pipeline in self.strategy_pipelines:
             try:
                 pipeline.strategy.finalize()
@@ -1517,6 +1601,13 @@ class LiveRunner:
                     environment,
                 )
         self._ctrader_connections.clear()
+
+        if getattr(self, "_execution_trace", None) is not None:
+            try:
+                self._execution_trace.close()
+            except Exception:
+                self.logger.exception("Live execution trace shutdown failed")
+            self._execution_trace = None
 
         for feed_group in self.feed_groups:
             shutdown = getattr(feed_group.feed, "shutdown", None)

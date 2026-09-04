@@ -13,11 +13,17 @@ from abc import abstractmethod
 from datetime import UTC, date, datetime, timedelta, timezone
 import logging
 import math
+import uuid
 from zoneinfo import ZoneInfo
 
 from trade.core.protocol import Firm, OrderType, PositionView
 from trade.core.protocol import TradeIntent, ActionType, PositionDir
-from trade.core.execution import ExecutionFill, ExecutionReport
+from trade.core.execution import (
+    ExecutionEvent,
+    ExecutionFill,
+    ExecutionOrder,
+    ExecutionReport,
+)
 
 
 class VenueBase:
@@ -54,9 +60,11 @@ class VenueBase:
         firm: Firm,
     ) -> date:
         reset_timezone = self.FIRM_DAILY_RESET_TIMEZONES[firm]
-        return self._normalized_candle_time_utc(
-            candle_open_time_utc
-        ).astimezone(reset_timezone).date()
+        return (
+            self._normalized_candle_time_utc(candle_open_time_utc)
+            .astimezone(reset_timezone)
+            .date()
+        )
 
     @abstractmethod
     def get_last_position_open_time(self):  # return utc
@@ -71,7 +79,11 @@ class VenueBase:
     def normalize_order_request(order_type=OrderType.MARKET, price=None):
         """Validate an entry order type and its optional limit price."""
         try:
-            normalized_type = order_type if isinstance(order_type, OrderType) else OrderType(str(order_type).strip().casefold())
+            normalized_type = (
+                order_type
+                if isinstance(order_type, OrderType)
+                else OrderType(str(order_type).strip().casefold())
+            )
         except ValueError as exc:
             raise ValueError("order_type must be 'market' or 'limit'") from exc
 
@@ -83,7 +95,9 @@ class VenueBase:
         try:
             normalized_price = float(price)
         except (TypeError, ValueError) as exc:
-            raise ValueError("A positive finite price is required for limit orders") from exc
+            raise ValueError(
+                "A positive finite price is required for limit orders"
+            ) from exc
         if not math.isfinite(normalized_price) or normalized_price <= 0:
             raise ValueError("A positive finite price is required for limit orders")
         return normalized_type, normalized_price
@@ -99,8 +113,51 @@ class VenueBase:
         *,
         order_type=OrderType.MARKET,
         price=None,
+        execution_id=None,
     ):
         pass
+
+    def normalize_order_quantity(self, size: float) -> float:
+        """Return the exact base-asset quantity that will be submitted."""
+
+        quantity = float(size)
+        if not math.isfinite(quantity) or quantity <= 0:
+            raise ValueError("Order quantity must be a positive finite value")
+        return quantity
+
+    def get_execution_account_id(self) -> str:
+        """Return a stable, non-secret venue account identifier when available."""
+
+        for name in ("account_id", "login", "trader_login"):
+            value = getattr(self, name, None)
+            if value not in (None, ""):
+                return str(value)
+        return ""
+
+    def get_execution_symbol(self) -> str:
+        """Return the actual instrument name used by the venue."""
+
+        return str(getattr(self, "symbol", ""))
+
+    def set_execution_event_callback(self, callback) -> None:
+        """Register the runner callback used for asynchronous venue events."""
+
+        self._execution_event_callback = callback
+
+    def _emit_execution_event(self, event: ExecutionEvent) -> None:
+        callback = getattr(self, "_execution_event_callback", None)
+        if callback is not None:
+            callback(event)
+
+    def activate_execution_updates(self, execution_id: str) -> None:
+        """Allow a venue to flush events buffered before the initial trace row."""
+
+        return None
+
+    def reconcile_execution_events(self, since_utc: datetime) -> int:
+        """Emit venue events missed while the runner was offline."""
+
+        return 0
 
     def get_bid_ask(self) -> tuple[float, float] | None:
         """Return an executable bid/ask pair when the venue supports live quotes."""
@@ -112,25 +169,148 @@ class VenueBase:
 
         return ()
 
-    def _entry_spread(self) -> tuple[float, float, float] | None:
+    def _execution_orders(
+        self,
+        result,
+        *,
+        submitted_quantity: float,
+        is_buy: bool,
+    ) -> tuple[ExecutionOrder, ...]:
+        """Convert a venue response into normalized child orders."""
+
+        return ()
+
+    def _quote_snapshot(self) -> tuple[float, float, float] | None:
         quote = self.get_bid_ask()
         if quote is None:
             return None
         bid, ask = map(float, quote)
         if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask < bid:
-            raise RuntimeError(f"Venue returned an invalid bid/ask quote: bid={bid}, ask={ask}")
+            raise RuntimeError(
+                f"Venue returned an invalid bid/ask quote: bid={bid}, ask={ask}"
+            )
         midpoint = (bid + ask) / 2.0
         return bid, ask, (ask - bid) / midpoint
 
+    def _build_execution_report(
+        self,
+        *,
+        execution_id: str,
+        action: TradeIntent,
+        order_role: str,
+        side: str,
+        requested_quantity: float,
+        submitted_quantity: float,
+        quote: tuple[float, float, float] | None,
+        quote_at_utc: datetime | None,
+        submitted_at_utc: datetime,
+        accepted_at_utc: datetime,
+        result,
+    ) -> ExecutionReport:
+        is_buy = side == "buy"
+        try:
+            fills = self._execution_fills(result, is_buy=is_buy)
+        except Exception:
+            logger = getattr(self, "logger", None) or logging.getLogger("trade.venue")
+            logger.exception("Failed to extract execution fills")
+            fills = ()
+        try:
+            orders = self._execution_orders(
+                result,
+                submitted_quantity=submitted_quantity,
+                is_buy=is_buy,
+            )
+        except Exception:
+            logger = getattr(self, "logger", None) or logging.getLogger("trade.venue")
+            logger.exception("Failed to extract submitted orders")
+            orders = ()
+        bid, ask, spread_pct = quote or (
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        )
+        order_statuses = {order.status for order in orders}
+        filled_quantity = sum(fill.quantity for fill in fills)
+        if fills:
+            status = (
+                "filled"
+                if filled_quantity + 1e-12 >= submitted_quantity
+                else "partially_filled"
+            )
+        elif "rejected" in order_statuses:
+            status = "rejected"
+        elif order_statuses == {"filled"}:
+            status = "filled"
+        elif "partially_filled" in order_statuses:
+            status = "partially_filled"
+        elif "accepted" in order_statuses:
+            status = "accepted"
+        else:
+            status = "submitted"
+        return ExecutionReport(
+            execution_id=execution_id,
+            order_role=order_role,
+            side=side,
+            requested_quantity=requested_quantity,
+            submitted_quantity=submitted_quantity,
+            decision_price=float(action.price),
+            decision_at_utc=action.created_at_utc,
+            quote_at_utc=quote_at_utc,
+            submitted_at_utc=submitted_at_utc,
+            accepted_at_utc=accepted_at_utc,
+            bid=bid,
+            ask=ask,
+            spread_pct=spread_pct,
+            status=status,
+            reason=action.reason,
+            fills=fills,
+            orders=orders,
+        )
+
     def execute_action(self, action: TradeIntent):
-        """Reworked to use the submit_order interface and pass the stop loss parameters"""
+        """Normalize and execute one strategy intent."""
+
         if action.action == ActionType.NOOP:
             return None
         if action.action == ActionType.CLOSE:
-            return self.close_position()
-        elif action.action == ActionType.OPEN:
+            position = self.get_current_state()
+            if position.dir not in {PositionDir.POSITIVE, PositionDir.NEGATIVE}:
+                return None
+            side = "sell" if position.dir == PositionDir.POSITIVE else "buy"
+            requested_quantity = (
+                float(action.order_qty)
+                if float(action.order_qty) > 0
+                else abs(float(position.size))
+            )
+            submitted_quantity = self.normalize_order_quantity(requested_quantity)
+            quote = self._quote_snapshot()
+            quote_at_utc = datetime.now(UTC)
+            execution_id = uuid.uuid4().hex
+            submitted_at_utc = datetime.now(UTC)
+            result = self.close_position(
+                size=submitted_quantity,
+                execution_id=execution_id,
+            )
+            accepted_at_utc = datetime.now(UTC)
+            return self._build_execution_report(
+                execution_id=execution_id,
+                action=action,
+                order_role="exit",
+                side=side,
+                requested_quantity=requested_quantity,
+                submitted_quantity=submitted_quantity,
+                quote=quote,
+                quote_at_utc=quote_at_utc,
+                submitted_at_utc=submitted_at_utc,
+                accepted_at_utc=accepted_at_utc,
+                result=result,
+            )
+        if action.action == ActionType.OPEN:
             is_buy = action.target_dir == PositionDir.POSITIVE
-            spread = self._entry_spread()
+            requested_quantity = float(action.order_qty)
+            submitted_quantity = self.normalize_order_quantity(requested_quantity)
+            spread = self._quote_snapshot()
+            quote_at_utc = datetime.now(UTC)
             bid = ask = spread_pct = float("nan")
             if spread is not None:
                 bid, ask, spread_pct = spread
@@ -149,9 +329,11 @@ class VenueBase:
                     )
                     return ExecutionReport(
                         side="buy" if is_buy else "sell",
-                        requested_quantity=float(action.order_qty),
+                        requested_quantity=requested_quantity,
+                        submitted_quantity=0.0,
                         decision_price=float(action.price),
                         decision_at_utc=action.created_at_utc,
+                        quote_at_utc=quote_at_utc,
                         bid=bid,
                         ask=ask,
                         spread_pct=spread_pct,
@@ -159,30 +341,28 @@ class VenueBase:
                         reason="spread_limit",
                     )
 
+            execution_id = uuid.uuid4().hex
+            submitted_at_utc = datetime.now(UTC)
             result = self.submit_order(
-                action.order_qty,
+                submitted_quantity,
                 is_buy=is_buy,
                 stop_loss_pct=action.stop_loss_pct,
                 take_profit_pct=action.take_profit_pct,
+                execution_id=execution_id,
             )
-            try:
-                fills = self._execution_fills(result, is_buy=is_buy)
-            except Exception:
-                logger = getattr(self, "logger", None) or logging.getLogger(
-                    "trade.venue"
-                )
-                logger.exception("Failed to extract execution fills")
-                fills = ()
-            return ExecutionReport(
+            accepted_at_utc = datetime.now(UTC)
+            return self._build_execution_report(
+                execution_id=execution_id,
+                action=action,
+                order_role="entry",
                 side="buy" if is_buy else "sell",
-                requested_quantity=float(action.order_qty),
-                decision_price=float(action.price),
-                decision_at_utc=action.created_at_utc,
-                bid=bid,
-                ask=ask,
-                spread_pct=spread_pct,
-                status="filled" if fills else "submitted",
-                fills=fills,
+                requested_quantity=requested_quantity,
+                submitted_quantity=submitted_quantity,
+                quote=spread,
+                quote_at_utc=quote_at_utc,
+                submitted_at_utc=submitted_at_utc,
+                accepted_at_utc=accepted_at_utc,
+                result=result,
             )
         raise ValueError(f"Unsupported trade action: {action.action!r}")
 

@@ -28,7 +28,11 @@ from trade.core.dashboard_base import (
     MarginMode,
     PositionSide,
 )
-from trade.core.execution import ExecutionFill
+from trade.core.execution import (
+    ExecutionEvent,
+    ExecutionFill,
+    ExecutionOrder,
+)
 from trade.core.protocol import OrderType, PositionDir, PositionView
 from trade.core.venue_base import VenueBase
 
@@ -61,6 +65,7 @@ class BinanceVenue(VenueBase, AccountDashboard):
         self.symbol = str(symbol).upper()
         self.magic = str(magic or "financial-ml-system")
         self._order_id_sequence = itertools.count()
+        self._execution_ids_by_client_order_id: dict[str, str] = {}
         self.logger = logger or logging.getLogger("trade.binance")
         self.timeout = float(timeout)
         self.session = session or requests.Session()
@@ -78,7 +83,9 @@ class BinanceVenue(VenueBase, AccountDashboard):
             self.api_key = self._load_first(key_path, self.API_KEY_FILES)
             self.api_secret = self._load_first(key_path, self.API_SECRET_FILES)
             self.session.headers.update({"X-MBX-APIKEY": self.api_key})
-            self.quantity_step, self.minimum_quantity, self.price_tick = self._load_filters()
+            self.quantity_step, self.minimum_quantity, self.price_tick = (
+                self._load_filters()
+            )
             self.hedge_mode = self._load_hedge_mode()
             self._restore_owned_protective_orders()
             if self._user_stream_enabled:
@@ -97,7 +104,9 @@ class BinanceVenue(VenueBase, AccountDashboard):
                     value = handle.read().strip()
                 if value:
                     return value
-        raise FileNotFoundError(f"No Binance credential file found in {directory}: {tuple(candidates)}")
+        raise FileNotFoundError(
+            f"No Binance credential file found in {directory}: {tuple(candidates)}"
+        )
 
     def _request(
         self,
@@ -142,7 +151,11 @@ class BinanceVenue(VenueBase, AccountDashboard):
     def _load_filters(self) -> tuple[Decimal, Decimal, Decimal]:
         payload = self._request("GET", "/fapi/v1/exchangeInfo")
         symbol_info = next(
-            (item for item in payload.get("symbols", []) if item.get("symbol") == self.symbol),
+            (
+                item
+                for item in payload.get("symbols", [])
+                if item.get("symbol") == self.symbol
+            ),
             None,
         )
         if symbol_info is None:
@@ -189,17 +202,45 @@ class BinanceVenue(VenueBase, AccountDashboard):
             safe_magic = f"{safe_magic[:owner_length - len(digest) - 1]}-{digest}"
         return f"{safe_magic}:{action}:"
 
-    def _new_client_order_id(self, action: str) -> str:
-        nonce = f"{time.time_ns():x}{next(self._order_id_sequence):x}"[-14:]
-        return f"{self._client_order_prefix(action)}{nonce}"
+    def _new_client_order_id(
+        self,
+        action: str,
+        execution_id: str | None = None,
+    ) -> str:
+        nonce_source = (
+            str(execution_id)
+            if execution_id
+            else f"{time.time_ns():x}{next(self._order_id_sequence):x}"
+        )
+        nonce = re.sub(r"[^A-Za-z0-9_-]", "_", nonce_source)[-14:]
+        client_order_id = f"{self._client_order_prefix(action)}{nonce}"
+        if execution_id:
+            self._execution_ids_by_client_order_id[client_order_id] = str(execution_id)
+        return client_order_id
+
+    def _owns_client_order_id(self, client_order_id: str) -> bool:
+        return any(
+            client_order_id.startswith(self._client_order_prefix(action))
+            for action in ("open", "close", "sl", "tp")
+        )
+
+    def get_execution_account_id(self) -> str:
+        return hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()[:16]
+
+    def normalize_order_quantity(self, size: float) -> float:
+        quantity = self._floor_to_step(float(size), self.quantity_step)
+        if quantity < self.minimum_quantity:
+            raise ValueError(
+                f"Binance order quantity {quantity} is below minimum "
+                f"{self.minimum_quantity}"
+            )
+        return float(quantity)
 
     def _owns_protective_order(self, order: dict[str, Any]) -> bool:
         client_algo_id = str(order.get("clientAlgoId", ""))
         return client_algo_id.startswith(
             self._client_order_prefix("sl")
-        ) or client_algo_id.startswith(
-            self._client_order_prefix("tp")
-        )
+        ) or client_algo_id.startswith(self._client_order_prefix("tp"))
 
     def _remember_protective_order(
         self,
@@ -213,16 +254,16 @@ class BinanceVenue(VenueBase, AccountDashboard):
         algo_id = response.get("algoId")
         returned_client_id = str(response.get("clientAlgoId") or client_algo_id)
         if algo_id is None and not returned_client_id:
-            raise RuntimeError("Binance protective order response has no order identifier")
+            raise RuntimeError(
+                "Binance protective order response has no order identifier"
+            )
         key = str(algo_id) if algo_id is not None else returned_client_id
         with self._protective_order_lock:
             self._protective_orders[key] = {
                 "algoId": algo_id,
                 "clientAlgoId": returned_client_id,
                 "role": role,
-                "triggerPrice": str(
-                    response.get("triggerPrice") or trigger_price
-                ),
+                "triggerPrice": str(response.get("triggerPrice") or trigger_price),
                 "price": str(response.get("price") or limit_price or ""),
             }
 
@@ -327,9 +368,7 @@ class BinanceVenue(VenueBase, AccountDashboard):
     def _start_listen_key(self) -> str:
         response = self._request("POST", "/fapi/v1/listenKey")
         listen_key = (
-            str(response.get("listenKey", ""))
-            if isinstance(response, dict)
-            else ""
+            str(response.get("listenKey", "")) if isinstance(response, dict) else ""
         )
         if not listen_key:
             raise RuntimeError("Binance returned an invalid user stream listen key")
@@ -362,7 +401,9 @@ class BinanceVenue(VenueBase, AccountDashboard):
                     with self._user_stream_lock:
                         self._user_stream_listen_key = listen_key
                 except Exception:
-                    self.logger.exception("Failed to create Binance user stream listen key")
+                    self.logger.exception(
+                        "Failed to create Binance user stream listen key"
+                    )
                     self._user_stream_stop.wait(self.USER_STREAM_RECONNECT_SECONDS)
                     continue
             app = websocket.WebSocketApp(
@@ -389,7 +430,9 @@ class BinanceVenue(VenueBase, AccountDashboard):
                     with self._user_stream_lock:
                         self._user_stream_listen_key = replacement
                 except Exception:
-                    self.logger.exception("Failed to refresh Binance user stream listen key")
+                    self.logger.exception(
+                        "Failed to refresh Binance user stream listen key"
+                    )
 
     def _run_user_stream_keepalive(self) -> None:
         while not self._user_stream_stop.wait(self.USER_STREAM_KEEPALIVE_SECONDS):
@@ -400,7 +443,9 @@ class BinanceVenue(VenueBase, AccountDashboard):
                 try:
                     replacement = self._start_listen_key()
                 except Exception:
-                    self.logger.exception("Failed to replace Binance user stream listen key")
+                    self.logger.exception(
+                        "Failed to replace Binance user stream listen key"
+                    )
                     continue
                 with self._user_stream_lock:
                     self._user_stream_listen_key = replacement
@@ -459,6 +504,7 @@ class BinanceVenue(VenueBase, AccountDashboard):
             relevant = any(position.get("s") == self.symbol for position in positions)
         elif event_type == "ORDER_TRADE_UPDATE":
             order = payload.get("o", {})
+            self._record_user_stream_execution(payload, order)
             relevant = order.get("s") == self.symbol and order.get("X") == "FILLED"
         if not relevant or self._position() is not None:
             return
@@ -466,6 +512,188 @@ class BinanceVenue(VenueBase, AccountDashboard):
             reason=f"user_stream_{event_type.lower()}",
             suppress_errors=True,
         )
+
+    def _record_user_stream_execution(
+        self,
+        payload: dict[str, Any],
+        order: dict[str, Any],
+    ) -> None:
+        if order.get("s") != self.symbol:
+            return
+        client_order_id = str(order.get("c", ""))
+        if not self._owns_client_order_id(client_order_id):
+            return
+        action = next(
+            (
+                candidate
+                for candidate in ("open", "close", "sl", "tp")
+                if client_order_id.startswith(self._client_order_prefix(candidate))
+            ),
+            "",
+        )
+        raw_status = str(order.get("X", "")).upper()
+        status = {
+            "NEW": "accepted",
+            "PARTIALLY_FILLED": "partially_filled",
+            "FILLED": "filled",
+            "CANCELED": "cancelled",
+            "EXPIRED": "expired",
+            "REJECTED": "rejected",
+        }.get(raw_status, raw_status.casefold() or "unknown")
+        order_id = str(order.get("i", ""))
+        execution_id = self._execution_ids_by_client_order_id.get(
+            client_order_id,
+            f"binance-{self.get_execution_account_id()}-{order_id}",
+        )
+        event_time_ms = int(order.get("T") or payload.get("E") or 0)
+        event_at_utc = (
+            datetime.fromtimestamp(event_time_ms / 1000.0, tz=timezone.utc)
+            if event_time_ms > 0
+            else datetime.now(timezone.utc)
+        )
+        last_quantity = float(order.get("l", 0.0) or 0.0)
+        last_price = float(order.get("L", 0.0) or 0.0)
+        trade_id = str(order.get("t", "") or "")
+        fill = None
+        if (
+            str(order.get("x", "")).upper() == "TRADE"
+            and last_quantity > 0
+            and last_price > 0
+        ):
+            fill = ExecutionFill(
+                price=last_price,
+                quantity=last_quantity,
+                order_id=order_id,
+                deal_id=trade_id,
+                client_order_id=client_order_id,
+                executed_at_utc=event_at_utc,
+            )
+        self._emit_execution_event(
+            ExecutionEvent(
+                event_id=(
+                    f"binance:{self.get_execution_account_id()}:"
+                    f"{self.symbol}:{order_id}:{trade_id or status}:"
+                    f"{event_time_ms}"
+                ),
+                execution_id=execution_id,
+                status=status,
+                event_at_utc=event_at_utc,
+                order_role="entry" if action == "open" else "exit",
+                side=str(order.get("S", "")).casefold(),
+                order_id=order_id,
+                client_order_id=client_order_id,
+                submitted_quantity=float(order.get("q", 0.0) or 0.0),
+                reason={"sl": "stop_loss", "tp": "take_profit"}.get(
+                    action,
+                    "",
+                ),
+                fill=fill,
+            )
+        )
+
+    def reconcile_execution_events(self, since_utc: datetime) -> int:
+        if since_utc.tzinfo is None:
+            raise ValueError("since_utc must be timezone-aware")
+        start_ms = int(since_utc.astimezone(timezone.utc).timestamp() * 1000)
+        cursor_end_ms = int(time.time() * 1000)
+        collected: dict[tuple[str, ...], dict[str, Any]] = {}
+        while cursor_end_ms >= start_ms:
+            trades = self._request(
+                "GET",
+                "/fapi/v1/userTrades",
+                {
+                    "symbol": self.symbol,
+                    "startTime": start_ms,
+                    "endTime": cursor_end_ms,
+                    "limit": self.TRADE_HISTORY_LIMIT,
+                },
+                signed=True,
+            )
+            if not isinstance(trades, list):
+                raise RuntimeError("Binance returned invalid account trade history")
+            if not trades:
+                break
+            for trade in trades:
+                collected[self._trade_identity(trade)] = trade
+            if len(trades) < self.TRADE_HISTORY_LIMIT:
+                break
+            earliest = min(int(trade.get("time", 0) or 0) for trade in trades)
+            if earliest <= start_ms:
+                break
+            cursor_end_ms = earliest - 1
+
+        orders: dict[str, dict[str, Any]] = {}
+        emitted = 0
+        for trade in sorted(collected.values(), key=self._trade_sort_key):
+            order_id = str(trade.get("orderId", "") or "")
+            if not order_id:
+                continue
+            order = orders.get(order_id)
+            if order is None:
+                order = self._request(
+                    "GET",
+                    "/fapi/v1/order",
+                    {"symbol": self.symbol, "orderId": order_id},
+                    signed=True,
+                )
+                if not isinstance(order, dict):
+                    continue
+                orders[order_id] = order
+            client_order_id = str(order.get("clientOrderId", ""))
+            if not self._owns_client_order_id(client_order_id):
+                continue
+            action = next(
+                candidate
+                for candidate in ("open", "close", "sl", "tp")
+                if client_order_id.startswith(self._client_order_prefix(candidate))
+            )
+            trade_time_ms = int(trade.get("time", 0) or 0)
+            executed_at_utc = datetime.fromtimestamp(
+                trade_time_ms / 1000.0,
+                tz=timezone.utc,
+            )
+            deal_id = str(trade.get("id", "") or "")
+            execution_id = self._execution_ids_by_client_order_id.get(
+                client_order_id,
+                f"binance-{self.get_execution_account_id()}-{order_id}",
+            )
+            fill = ExecutionFill(
+                price=float(trade["price"]),
+                quantity=float(trade["qty"]),
+                order_id=order_id,
+                deal_id=deal_id,
+                client_order_id=client_order_id,
+                executed_at_utc=executed_at_utc,
+            )
+            self._emit_execution_event(
+                ExecutionEvent(
+                    event_id=(
+                        f"binance:{self.get_execution_account_id()}:"
+                        f"{self.symbol}:{order_id}:{deal_id}:{trade_time_ms}"
+                    ),
+                    execution_id=execution_id,
+                    status=(
+                        "filled"
+                        if str(order.get("status", "")).upper() == "FILLED"
+                        else "partially_filled"
+                    ),
+                    event_at_utc=executed_at_utc,
+                    order_role="entry" if action == "open" else "exit",
+                    side=str(trade.get("side", "")).casefold(),
+                    order_id=order_id,
+                    client_order_id=client_order_id,
+                    submitted_quantity=float(
+                        order.get("origQty") or trade.get("qty") or 0.0
+                    ),
+                    reason={
+                        "sl": "stop_loss",
+                        "tp": "take_profit",
+                    }.get(action, "offline_reconciliation"),
+                    fill=fill,
+                )
+            )
+            emitted += 1
+        return emitted
 
     def _stop_user_stream(self) -> None:
         self._user_stream_stop.set()
@@ -492,9 +720,17 @@ class BinanceVenue(VenueBase, AccountDashboard):
         )
         if not isinstance(positions, list):
             raise RuntimeError("Binance returned an invalid position response")
-        active_positions = [position for position in positions if position.get("symbol") == self.symbol and float(position.get("positionAmt", 0.0)) != 0.0]
+        active_positions = [
+            position
+            for position in positions
+            if position.get("symbol") == self.symbol
+            and float(position.get("positionAmt", 0.0)) != 0.0
+        ]
         if len(active_positions) > 1:
-            raise RuntimeError("Binance account has simultaneous LONG and SHORT positions for " f"{self.symbol}; this strategy supports one active position")
+            raise RuntimeError(
+                "Binance account has simultaneous LONG and SHORT positions for "
+                f"{self.symbol}; this strategy supports one active position"
+            )
         if not active_positions:
             return None
 
@@ -503,9 +739,15 @@ class BinanceVenue(VenueBase, AccountDashboard):
             position_side = position.get("positionSide")
             quantity = float(position.get("positionAmt", 0.0))
             if position_side not in {"LONG", "SHORT"}:
-                raise RuntimeError("Binance Hedge Mode position has no valid positionSide")
-            if (position_side == "LONG" and quantity <= 0) or (position_side == "SHORT" and quantity >= 0):
-                raise RuntimeError("Binance Hedge Mode position direction is inconsistent")
+                raise RuntimeError(
+                    "Binance Hedge Mode position has no valid positionSide"
+                )
+            if (position_side == "LONG" and quantity <= 0) or (
+                position_side == "SHORT" and quantity >= 0
+            ):
+                raise RuntimeError(
+                    "Binance Hedge Mode position direction is inconsistent"
+                )
         return position
 
     def get_account_equity(self) -> float:
@@ -554,9 +796,7 @@ class BinanceVenue(VenueBase, AccountDashboard):
             )
         notional = abs(float(position.get("notional", mark_price * quantity)))
         leverage = float(position.get("leverage", 0.0) or 0.0) or None
-        liquidation_price = (
-            float(position.get("liquidationPrice", 0.0) or 0.0) or None
-        )
+        liquidation_price = float(position.get("liquidationPrice", 0.0) or 0.0) or None
         stop_loss_price = self._cached_protective_price("stop_loss")
         take_profit_price = self._cached_protective_price("take_profit")
         return AccountPosition(
@@ -610,12 +850,14 @@ class BinanceVenue(VenueBase, AccountDashboard):
             with self._protective_order_lock:
                 has_tracked_orders = bool(self._protective_orders)
             if has_tracked_orders:
-                self._cancel_owned_protective_orders(
-                    reason="flat_position_reconcile"
-                )
+                self._cancel_owned_protective_orders(reason="flat_position_reconcile")
             return PositionView()
         if self.hedge_mode:
-            direction = PositionDir.POSITIVE if position["positionSide"] == "LONG" else PositionDir.NEGATIVE
+            direction = (
+                PositionDir.POSITIVE
+                if position["positionSide"] == "LONG"
+                else PositionDir.NEGATIVE
+            )
         else:
             quantity = float(position["positionAmt"])
             direction = PositionDir.POSITIVE if quantity > 0 else PositionDir.NEGATIVE
@@ -840,8 +1082,7 @@ class BinanceVenue(VenueBase, AccountDashboard):
         new_sign = self._quantity_sign(new_quantity)
         if trade_sign == quantity_sign:
             weighted_price = (
-                abs(quantity) * average_price
-                + abs(trade_quantity) * trade_price
+                abs(quantity) * average_price + abs(trade_quantity) * trade_price
             ) / abs(new_quantity)
             return new_quantity, weighted_price
         if new_sign == 0:
@@ -859,9 +1100,7 @@ class BinanceVenue(VenueBase, AccountDashboard):
     ) -> None:
         try:
             opening_index = next(
-                index
-                for index, trade in enumerate(trades)
-                if trade is opening_trade
+                index for index, trade in enumerate(trades) if trade is opening_trade
             )
         except StopIteration as exc:
             raise RuntimeError(
@@ -934,9 +1173,7 @@ class BinanceVenue(VenueBase, AccountDashboard):
             return
 
         client_order_id = (
-            str(order.get("clientOrderId", ""))
-            if isinstance(order, dict)
-            else ""
+            str(order.get("clientOrderId", "")) if isinstance(order, dict) else ""
         )
         if not client_order_id.startswith(self._client_order_prefix("open")):
             self.logger.error(
@@ -972,6 +1209,9 @@ class BinanceVenue(VenueBase, AccountDashboard):
         if not isinstance(result, dict):
             return ()
         order_id = result.get("orderId")
+        client_order_id = str(
+            result.get("clientOrderId") or result.get("_trace_client_order_id") or ""
+        )
         if order_id is not None:
             try:
                 trades = self._request(
@@ -986,6 +1226,7 @@ class BinanceVenue(VenueBase, AccountDashboard):
                         quantity=float(trade["qty"]),
                         order_id=str(trade.get("orderId", order_id)),
                         deal_id=str(trade.get("id", "")),
+                        client_order_id=client_order_id,
                         executed_at_utc=(
                             datetime.fromtimestamp(
                                 int(trade["time"]) / 1000.0,
@@ -1015,6 +1256,7 @@ class BinanceVenue(VenueBase, AccountDashboard):
                 price=price,
                 quantity=quantity,
                 order_id=str(order_id or ""),
+                client_order_id=client_order_id,
                 executed_at_utc=(
                     datetime.fromtimestamp(
                         int(result.get("updateTime", 0)) / 1000.0,
@@ -1024,6 +1266,50 @@ class BinanceVenue(VenueBase, AccountDashboard):
                     else None
                 ),
                 is_aggregate=True,
+            ),
+        )
+
+    def _execution_orders(
+        self,
+        result,
+        *,
+        submitted_quantity: float,
+        is_buy: bool,
+    ) -> tuple[ExecutionOrder, ...]:
+        if not isinstance(result, dict):
+            return ()
+        order_id = str(result.get("orderId", "") or "")
+        client_order_id = str(
+            result.get("clientOrderId") or result.get("_trace_client_order_id") or ""
+        )
+        if not order_id and not client_order_id:
+            return ()
+        raw_status = str(result.get("status", "")).upper()
+        status = {
+            "NEW": "accepted",
+            "PARTIALLY_FILLED": "partially_filled",
+            "FILLED": "filled",
+            "CANCELED": "cancelled",
+            "EXPIRED": "expired",
+            "REJECTED": "rejected",
+        }.get(raw_status)
+        if status is None:
+            status = (
+                "filled"
+                if float(result.get("executedQty", 0.0) or 0.0) > 0
+                else "submitted"
+            )
+        quantity = float(
+            result.get("origQty")
+            or result.get("_trace_submitted_quantity")
+            or submitted_quantity
+        )
+        return (
+            ExecutionOrder(
+                order_id=order_id,
+                client_order_id=client_order_id,
+                submitted_quantity=quantity,
+                status=status,
             ),
         )
 
@@ -1038,8 +1324,9 @@ class BinanceVenue(VenueBase, AccountDashboard):
         side: str,
         trigger_price: str,
         position_side: str | None = None,
+        execution_id: str | None = None,
     ):
-        client_algo_id = self._new_client_order_id("sl")
+        client_algo_id = self._new_client_order_id("sl", execution_id)
         params = {
             "algoType": "CONDITIONAL",
             "symbol": self.symbol,
@@ -1072,9 +1359,10 @@ class BinanceVenue(VenueBase, AccountDashboard):
         trigger_price: str,
         quantity: Decimal,
         position_side: str | None = None,
+        execution_id: str | None = None,
     ):
         quantity_string = self._decimal_string(quantity)
-        client_algo_id = self._new_client_order_id("tp")
+        client_algo_id = self._new_client_order_id("tp", execution_id)
         params = {
             "algoType": "CONDITIONAL",
             "symbol": self.symbol,
@@ -1120,7 +1408,9 @@ class BinanceVenue(VenueBase, AccountDashboard):
             signed=True,
         )
         if regular or conditional:
-            raise RuntimeError(f"Refusing to open with existing Binance orders: {self.symbol}")
+            raise RuntimeError(
+                f"Refusing to open with existing Binance orders: {self.symbol}"
+            )
 
     def submit_order(
         self,
@@ -1131,18 +1421,22 @@ class BinanceVenue(VenueBase, AccountDashboard):
         *,
         order_type=OrderType.MARKET,
         price=None,
+        execution_id=None,
     ):
         order_type, price = self.normalize_order_request(order_type, price)
         if order_type == OrderType.LIMIT and (stop_loss_pct or take_profit_pct):
-            raise ValueError("Binance resting limit entries with protective orders require " "fill monitoring, which is not supported")
+            raise ValueError(
+                "Binance resting limit entries with protective orders require "
+                "fill monitoring, which is not supported"
+            )
         if self._position() is not None:
-            raise RuntimeError(f"Refusing to open over an existing Binance position: {self.symbol}")
+            raise RuntimeError(
+                f"Refusing to open over an existing Binance position: {self.symbol}"
+            )
         self._cancel_owned_protective_orders(reason="pre_open_flat_reconcile")
         self._assert_no_open_orders()
 
-        quantity = self._floor_to_step(float(size), self.quantity_step)
-        if quantity < self.minimum_quantity:
-            raise ValueError(f"Binance order quantity {quantity} is below minimum {self.minimum_quantity}")
+        quantity = Decimal(str(self.normalize_order_quantity(float(size))))
         side = "BUY" if is_buy else "SELL"
         exit_side = "SELL" if is_buy else "BUY"
         position_side = ("LONG" if is_buy else "SHORT") if self.hedge_mode else None
@@ -1152,7 +1446,10 @@ class BinanceVenue(VenueBase, AccountDashboard):
             "type": "MARKET" if order_type == OrderType.MARKET else "LIMIT",
             "quantity": self._decimal_string(quantity),
             "newOrderRespType": "RESULT",
-            "newClientOrderId": self._new_client_order_id("open"),
+            "newClientOrderId": self._new_client_order_id(
+                "open",
+                execution_id,
+            ),
         }
         if position_side is not None:
             order_params["positionSide"] = position_side
@@ -1170,6 +1467,8 @@ class BinanceVenue(VenueBase, AccountDashboard):
             order_params,
             signed=True,
         )
+        order["_trace_client_order_id"] = order_params["newClientOrderId"]
+        order["_trace_submitted_quantity"] = float(quantity)
         executed_price = None
         if stop_loss_pct or take_profit_pct:
             executed_price = float(order.get("avgPrice", 0.0) or 0.0)
@@ -1178,27 +1477,35 @@ class BinanceVenue(VenueBase, AccountDashboard):
 
         try:
             if stop_loss_pct:
-                stop_price = executed_price * (1.0 - stop_loss_pct if is_buy else 1.0 + stop_loss_pct)
+                stop_price = executed_price * (
+                    1.0 - stop_loss_pct if is_buy else 1.0 + stop_loss_pct
+                )
                 self._place_stop_market_order(
                     exit_side,
                     self._trigger_price(stop_price),
                     position_side,
+                    execution_id,
                 )
             if take_profit_pct:
-                take_profit_price = executed_price * (1.0 + take_profit_pct if is_buy else 1.0 - take_profit_pct)
+                take_profit_price = executed_price * (
+                    1.0 + take_profit_pct if is_buy else 1.0 - take_profit_pct
+                )
                 self._place_take_profit_limit_order(
                     exit_side,
                     self._trigger_price(take_profit_price),
                     quantity,
                     position_side,
+                    execution_id,
                 )
         except Exception:
-            self.logger.exception("Protective order creation failed; closing the new Binance position")
+            self.logger.exception(
+                "Protective order creation failed; closing the new Binance position"
+            )
             self.close_position()
             raise
         return order
 
-    def close_position(self, size=None, **kwargs):
+    def close_position(self, size=None, execution_id=None, **kwargs):
         if kwargs:
             raise TypeError(f"Unsupported Binance close arguments: {sorted(kwargs)}")
         position = self._position()
@@ -1223,7 +1530,10 @@ class BinanceVenue(VenueBase, AccountDashboard):
             "type": "MARKET",
             "quantity": self._decimal_string(quantity),
             "newOrderRespType": "RESULT",
-            "newClientOrderId": self._new_client_order_id("close"),
+            "newClientOrderId": self._new_client_order_id(
+                "close",
+                execution_id,
+            ),
         }
         if self.hedge_mode:
             order_params["positionSide"] = position["positionSide"]
@@ -1235,6 +1545,8 @@ class BinanceVenue(VenueBase, AccountDashboard):
             order_params,
             signed=True,
         )
+        result["_trace_client_order_id"] = order_params["newClientOrderId"]
+        result["_trace_submitted_quantity"] = float(quantity)
         self._cancel_owned_protective_orders(reason="explicit_close")
         return result
 
