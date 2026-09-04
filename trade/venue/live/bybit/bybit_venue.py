@@ -1,10 +1,13 @@
-import logging
-import sys,os
+import hashlib
 import itertools
+import logging
 import math
+import os
 import re
+import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_DOWN
 
 # Path setup
 current_work_dir = os.path.dirname(__file__)
@@ -19,9 +22,10 @@ from trade.core.dashboard_base import (
     MarginMode,
     PositionSide,
 )
-from trade.core.execution import ExecutionFill
+from trade.core.execution import ExecutionFill, ExecutionOrder
 from trade.core.protocol import ActionType, OrderType, PositionDir, PositionView
 from trade.core.venue_base import VenueBase
+
 
 class BybitVenue(VenueBase, AccountDashboard):
     def __init__(
@@ -45,11 +49,40 @@ class BybitVenue(VenueBase, AccountDashboard):
         self.min_qty = 0.0
         self._init_symbol_info()
 
-    def _new_order_link_id(self, action: str) -> str:
+    def get_execution_account_id(self) -> str:
+        api_key = str(getattr(self.engine, "api_key", "") or "")
+        if not api_key:
+            return ""
+        digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+        return f"api-key-{digest}"
+
+    def _new_order_link_id(
+        self,
+        action: str,
+        execution_id: str | None = None,
+    ) -> str:
         safe_magic = re.sub(r"[^A-Za-z0-9_-]", "_", self.magic)
-        nonce = f"{time.time_ns():x}{next(self._order_id_sequence):x}"[-14:]
+        nonce_source = (
+            str(execution_id)
+            if execution_id
+            else f"{time.time_ns():x}{next(self._order_id_sequence):x}"
+        )
+        nonce = re.sub(r"[^A-Za-z0-9_-]", "_", nonce_source)[-14:]
         suffix = f"_{action}_{nonce}"
         return f"{safe_magic[:36 - len(suffix)]}{suffix}"
+
+    def normalize_order_quantity(self, size: float) -> float:
+        quantity = Decimal(str(size))
+        step = Decimal(str(self.qty_step))
+        normalized = (
+            quantity / step
+        ).to_integral_value(rounding=ROUND_DOWN) * step
+        minimum = Decimal(str(self.min_qty))
+        if normalized < minimum:
+            raise ValueError(
+                f"Bybit order quantity {normalized} is below minimum {minimum}"
+            )
+        return float(normalized)
 
     def _init_symbol_info(self):
         """Sync exchange precision settings to prevent Invalid Volume errors."""
@@ -201,35 +234,71 @@ class BybitVenue(VenueBase, AccountDashboard):
         return float(ticker["bid1Price"]), float(ticker["ask1Price"])
 
     def _execution_fills(self, result, *, is_buy: bool) -> tuple[ExecutionFill, ...]:
-        if not isinstance(result, dict) or result.get("retCode") != 0:
-            return ()
-        order_id = result.get("result", {}).get("orderId")
-        if not order_id:
-            return ()
-        response = self.engine.http.get_executions(
-            category="linear",
-            symbol=self.symbol,
-            orderId=order_id,
-            limit=100,
-        )
-        return tuple(
-            ExecutionFill(
-                price=float(execution["execPrice"]),
-                quantity=float(execution["execQty"]),
-                order_id=str(execution.get("orderId", order_id)),
-                deal_id=str(execution.get("execId", "")),
-                executed_at_utc=(
-                    datetime.fromtimestamp(
-                        int(execution["execTime"]) / 1000.0,
-                        tz=timezone.utc,
-                    )
-                    if execution.get("execTime") is not None
-                    else None
-                ),
+        results = result if isinstance(result, list) else [result]
+        fills = []
+        for item in results:
+            if not isinstance(item, dict) or item.get("retCode") != 0:
+                continue
+            order_id = item.get("result", {}).get("orderId")
+            client_order_id = str(item.get("_trace_client_order_id", ""))
+            if not order_id:
+                continue
+            response = self.engine.http.get_executions(
+                category="linear",
+                symbol=self.symbol,
+                orderId=order_id,
+                limit=100,
             )
-            for execution in response.get("result", {}).get("list", [])
-            if execution.get("execType") == "Trade"
-        )
+            fills.extend(
+                ExecutionFill(
+                    price=float(execution["execPrice"]),
+                    quantity=float(execution["execQty"]),
+                    order_id=str(execution.get("orderId", order_id)),
+                    deal_id=str(execution.get("execId", "")),
+                    client_order_id=client_order_id,
+                    executed_at_utc=(
+                        datetime.fromtimestamp(
+                            int(execution["execTime"]) / 1000.0,
+                            tz=timezone.utc,
+                        )
+                        if execution.get("execTime") is not None
+                        else None
+                    ),
+                )
+                for execution in response.get("result", {}).get("list", [])
+                if execution.get("execType") == "Trade"
+            )
+        return tuple(fills)
+
+    def _execution_orders(
+        self,
+        result,
+        *,
+        submitted_quantity: float,
+        is_buy: bool,
+    ) -> tuple[ExecutionOrder, ...]:
+        results = result if isinstance(result, list) else [result]
+        orders = []
+        for item in results:
+            if not isinstance(item, dict) or item.get("retCode") != 0:
+                continue
+            payload = item.get("result", {})
+            order_id = str(payload.get("orderId", "") or "")
+            client_order_id = str(item.get("_trace_client_order_id", ""))
+            if not order_id and not client_order_id:
+                continue
+            orders.append(
+                ExecutionOrder(
+                    order_id=order_id,
+                    client_order_id=client_order_id,
+                    submitted_quantity=float(
+                        item.get("_trace_submitted_quantity")
+                        or submitted_quantity / max(1, len(results))
+                    ),
+                    status="submitted",
+                )
+            )
+        return tuple(orders)
 
     def submit_order(
         self,
@@ -240,6 +309,7 @@ class BybitVenue(VenueBase, AccountDashboard):
         *,
         order_type=OrderType.MARKET,
         price=None,
+        execution_id=None,
     ):
         """
         Place an order.
@@ -252,8 +322,7 @@ class BybitVenue(VenueBase, AccountDashboard):
         order_type, price = self.normalize_order_request(order_type, price)
 
         # 1. Align quantity to exchange precision
-        qty = round(float(size) / self.qty_step) * self.qty_step
-        qty = max(self.min_qty, qty)
+        qty = self.normalize_order_quantity(float(size))
         qty_str = str(qty)
 
         reference_price = self._latest_price() if price is None else price
@@ -299,7 +368,10 @@ class BybitVenue(VenueBase, AccountDashboard):
                 "qty": qty_str,
                 "positionIdx": 0,  # one-way position mode
                 "reduceOnly": False,
-                "orderLinkId": self._new_order_link_id("open"),
+                "orderLinkId": self._new_order_link_id(
+                    "open",
+                    execution_id,
+                ),
             }
             if order_type == OrderType.LIMIT:
                 order_params["price"] = str(reference_price)
@@ -321,6 +393,8 @@ class BybitVenue(VenueBase, AccountDashboard):
                 order_params["tpTriggerBy"] = "MarkPrice"
 
             res = self.engine.http.place_order(**order_params)
+            res["_trace_client_order_id"] = order_params["orderLinkId"]
+            res["_trace_submitted_quantity"] = qty
 
             if res["retCode"] == 0:
                 self.logger.info(
@@ -334,29 +408,51 @@ class BybitVenue(VenueBase, AccountDashboard):
             self.logger.error(f"Order exception: {e}")
             raise
 
-    def close_position(self):
+    def close_position(self, size=None, execution_id=None):
         """Close all open positions for this symbol."""
         try:
-            # Fetch positions
             res = self.engine.http.get_positions(category="linear", symbol=self.symbol)
+            responses = []
+            remaining = None if size is None else abs(float(size))
             for pos in res['result']['list']:
-                size = float(pos['size'])
-                if size > 0:
+                position_size = float(pos['size'])
+                close_size = (
+                    position_size
+                    if remaining is None
+                    else min(position_size, remaining)
+                )
+                if close_size > 0:
                     side = "Sell" if pos['side'] == "Buy" else "Buy"
-                    self.logger.info(f"Closing position: {pos['side']} {size}")
-                    
-                    self.engine.http.place_order(
+                    self.logger.info(
+                        f"Closing position: {pos['side']} {close_size}"
+                    )
+                    client_order_id = self._new_order_link_id(
+                        "close",
+                        execution_id,
+                    )
+                    response = self.engine.http.place_order(
                         category="linear",
                         symbol=self.symbol,
                         side=side,
                         orderType="Market",
-                        qty=str(size),
+                        qty=str(close_size),
                         positionIdx=0,
                         reduceOnly=True,
-                        orderLinkId=self._new_order_link_id("close"),
+                        orderLinkId=client_order_id,
                     )
+                    response["_trace_client_order_id"] = client_order_id
+                    response["_trace_submitted_quantity"] = close_size
+                    responses.append(response)
+                    if remaining is not None:
+                        remaining -= close_size
+                        if remaining <= 0:
+                            break
+            if not responses:
+                return None
+            return responses[0] if len(responses) == 1 else responses
         except Exception as e:
             self.logger.error(f"Close position exception: {e}")
+            raise
 
     def get_last_position_open_time(self):
         try:

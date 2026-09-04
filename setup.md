@@ -63,6 +63,18 @@ Run the combined preparation, training, and simulation workflow for the configur
 python -m experiment.batch_experiments
 ```
 
+Reproduce selected experiments with both a fresh training run and an independent
+backtest that loads the archived original model without training:
+
+```bash
+python -m experiment.batch_experiments --valid
+```
+
+Training-reproduction reports are written directly under `valid_train_out`.
+Original-model backtest reports and their comparison are written under
+`valid_train_out/backtest_reproduction`. This reproduction uses CPU inference so
+changing the available GPU does not change the validation execution path.
+
 Generate the configured offline experiment visualizations:
 
 ```bash
@@ -75,6 +87,12 @@ Run cross-period and cross-asset validation for selected candidates:
 python -m experiment.strategy_validation \
   --selected-configs path/to/selected_configs.jsonl
 ```
+
+Cross-test model artifacts are loaded from the original model archive beside
+`selected_configs.jsonl`; retrained validation artifacts are never promoted into
+the cross-test output. `model_archive_manifest.jsonl` records the source path and
+SHA-256 checksum for each copied model. The backtest reproduction report and its
+comparison are copied into the same cross-test directory.
 
 The batch runner creates a source snapshot and requires a clean Git worktree by default. Experiment definitions are loaded from `experiment/task_constructors.py` when present, with `experiment/task_constructors_example.py` serving as the repository example.
 
@@ -103,3 +121,14 @@ python -m trade.runner.live_runner \
 ```
 
 Use a demo or paper-trading account before committing capital. Passing historical validation reduces overfitting risk but does not guarantee future performance. Live monitoring and risk limits remain mandatory.
+
+### 7. Merge Execution Traces
+
+Each live-run process writes immutable execution traces inside its own run directory. Merge every run below a runner directory with:
+
+```bash
+python -m trade.recording.merge_execution_traces \
+  /path/to/quant_output/live_runner/runner-main
+```
+
+The command creates `merged_execution_traces` below the input directory with finalized executions, child orders, fills, lifecycle events, and a merge report. Re-running the command is idempotent. To write elsewhere, pass `--output-dir /path/to/output`.

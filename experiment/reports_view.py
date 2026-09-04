@@ -1089,7 +1089,7 @@ def filter_by_train_valid_test_cagr(reports, min_train_cagr, valid_test_ratio):
 def basic_filter(all_results):
     basic_filter_results, _ = filter_by_criteria(
         all_results,
-        criteria=["long.cagr>=0.4", "long.daily_freq>=0.3", "long.rc_pos_ratio>=0.6", "long.max_hwm_duration_days < 270"],
+        criteria=["long.cagr>=0.4", "long.daily_freq>=0.3", "long.rc_pos_ratio>=0.6", "long.max_hwm_duration_days < 300"],
     )
     print(f"After basic_filter: {len(basic_filter_results)}, " f"{len(basic_filter_results) / len(all_results) * 100:.2f}%")
     return basic_filter_results
@@ -1155,11 +1155,7 @@ def _format_additional_info_value(value, source_key=None):
     if value is None:
         return "-"
     source_name = str(source_key).rsplit(".", 1)[-1]
-    if (
-        source_name == "avg_pct_gross"
-        and isinstance(value, (int, float, np.number))
-        and not isinstance(value, bool)
-    ):
+    if source_name == "avg_pct_gross" and isinstance(value, (int, float, np.number)) and not isinstance(value, bool):
         return f"{float(value):.4f}"
     if source_name == "feature_conf_list" and isinstance(value, list):
         return f"Hash:{str(_analysis_list_hash(value))[:8]}"
@@ -1593,6 +1589,8 @@ def main():
     exp_dir6 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "ETHUSDT_15m", "2026-08-25", "06_01_55")
     exp_dir7 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "XLMUSDT_15m", "2026-08-24", "13_07_55")
     exp_dir8 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "ETHUSDT_15m", "2026-09-02", "22_01_49")
+    exp_dir9 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "BTCUSDT_15m", "2026-09-03", "20_33_34")
+
     exp_dir_list = [exp_dir8]
     filter_report = None
     filter_report = os.path.join(output_dir, "filtered_raw_reports.jsonl")
@@ -1667,15 +1665,15 @@ def main():
     # analyze_model_performance_correlation(uin_records)
     # analyze_model_metrics_by_decile(uin_records)
     # exit()
-    uin_records, fail = filter_by_train_valid_test_cagr(uin_records, min_train_cagr=0.3, valid_test_ratio=0.1)
-    uin_records, _ = filter_by_criteria(uin_records, criteria=["forward.cagr>=0", "forward.risk_per_trade_pct<0.04"])
+    uin_records, fail = filter_by_train_valid_test_cagr(uin_records, min_train_cagr=0.3, valid_test_ratio=0.05)
+    uin_records, _ = filter_by_criteria(uin_records, criteria=["forward.cagr>=0.1", "forward.risk_per_trade_pct<0.04"])
     # uin_records = [record for record in uin_records if common.recursive_get(record, "long.params.train.model_cfg.model_type") == "logistic_regression"]
     start = 10
     show_count = 40
     # analyze_ml_trading_correlation(uin_records, period="long", output_dir_path=os.path.join(output_dir, "ml_trading_correlation"), group_by_model=True)
     # analyze_ml_trading_correlation(uin_records, period="forward", output_dir_path=os.path.join(output_dir, "ml_trading_correlation"), group_by_model=True)
     # exit()
-    selected = uin_records[:20]
+    selected = uin_records
     selected_hash_filter = ["19bcaa57b5cb", "a48b13dc4e7b"]
     candidate = set(selected_hash_filter)
     # selected = [record for record in selected if record.get("hash") in candidate]

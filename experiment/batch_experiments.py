@@ -21,6 +21,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -222,6 +223,9 @@ PRE_OUTPUT_DIR = "pre_output"
 TRAIN_OUTPUT_DIR = "train_output"
 PREDICTION_CACHE_DIR = "prediction_cache"
 SIM_OUTPUT_DIR = "sim_output"
+BACKTEST_REPRODUCTION_DIR = "backtest_reproduction"
+ORIGINAL_PREDICTION_CACHE_DIR = "original_prediction_cache"
+BACKTEST_REPRODUCTION_DEVICE = "auto"
 
 construct_experiment_tasks = experiment_tasks.construct_experiment_tasks
 MAX_PREP = experiment_tasks.MAX_PREP
@@ -231,8 +235,6 @@ INFERENCE_BATCH_SIZE = experiment_tasks.INFERENCE_BATCH_SIZE
 SYMBOL = experiment_tasks.SYMBOL
 INTERVAL = experiment_tasks.INTERVAL
 TRAIN_MODE = experiment_tasks.TRAIN_MODE
-CROSS_TEST_SYMBOLS = ("DOGEUSDT", "ETHUSDT", "BTCUSDT")
-CROSS_TEST_INTERVALS = ("15m", "30m", "1h")
 
 
 class ExperimentTaskError(RuntimeError):
@@ -256,6 +258,28 @@ def _prediction_cache_output_dir(exp_dir: str, pre_h: str, tr_h: str) -> str:
 
 def _sim_output_dir(exp_dir: str, full_h: str) -> str:
     return os.path.join(exp_dir, SIM_OUTPUT_DIR, full_h)
+
+
+def _selected_model_artifact_dir(
+    selected_configs_path: str,
+    pre_h: str,
+    tr_h: str,
+) -> str:
+    """Resolve a model copied from its original experiment during selection."""
+    for name, value in (("preparation", pre_h), ("training", tr_h)):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", str(value)):
+            raise ValueError(f"Unsafe {name} artifact hash: {value!r}")
+
+    archive_root = os.path.abspath(os.path.join(os.path.dirname(selected_configs_path), "train"))
+    artifact_dir = os.path.abspath(os.path.join(archive_root, f"pre_{pre_h}", f"train_{tr_h}"))
+    if os.path.commonpath([archive_root, artifact_dir]) != archive_root:
+        raise ValueError("Selected model artifact escaped its archive root: " f"path={artifact_dir}")
+
+    required_files = ("model.pt", "meta.json", "train_config.json")
+    missing_files = [filename for filename in required_files if not os.path.isfile(os.path.join(artifact_dir, filename))]
+    if missing_files:
+        raise FileNotFoundError("Original selected model artifact is incomplete: " f"path={artifact_dir}, missing={missing_files}")
+    return artifact_dir
 
 
 def _cleanup_ephemeral_outputs(exp_dir: str, logger: logging.Logger) -> None:
@@ -765,6 +789,60 @@ def _train_task(
         )
 
 
+def _original_model_task(
+    worker_log_file: str,
+    item: Dict[str, Any],
+    sim_task_queue: mp.Queue,
+    result_queue: mp.Queue,
+) -> None:
+    """Load an archived original model and enqueue backtests without training."""
+    logger = _worker_logger(worker_log_file)
+    pre_h = item["pre_h"]
+    tr_h = item["tr_h"]
+    train_params = item["train_params"]
+    train_output_dir = item["train_output_dir"]
+    prediction_cache_dir = item["prediction_cache_dir"]
+    t0 = time.time()
+
+    try:
+        train_cfg = _config_from_dict_train(train_params, expected_hash=tr_h)
+        _precompute_backtest_predictions(
+            logger,
+            prep_output_dir=item["prep_output_dir"],
+            train_output_dir=train_output_dir,
+            prediction_cache_dir=prediction_cache_dir,
+            train_cfg=train_cfg,
+            device=BACKTEST_REPRODUCTION_DEVICE,
+        )
+
+        for sim in item.get("sim_tasks", []):
+            sim_task_queue.put(
+                (
+                    pre_h,
+                    item["pre_params"],
+                    tr_h,
+                    train_params,
+                    sim,
+                    train_output_dir,
+                    prediction_cache_dir,
+                    {"validation_mode": "original_model_backtest"},
+                )
+            )
+
+        result_queue.put(("original_model_ready", pre_h, tr_h, time.time() - t0, None))
+    except Exception:
+        logger.exception("Original model preparation failed: %s/%s", pre_h, tr_h)
+        result_queue.put(
+            (
+                "original_model_failed",
+                pre_h,
+                tr_h,
+                time.time() - t0,
+                traceback.format_exc(),
+            )
+        )
+
+
 def _worker_sim(
     worker_log_file: str,
     task_queue: mp.Queue,
@@ -772,6 +850,7 @@ def _worker_sim(
     reports_path: str,
     exp_dir: str,
     experiment_context: ExperimentContext,
+    prep_exp_dir: Optional[str] = None,
 ):
     logger = _worker_logger(worker_log_file)
 
@@ -807,7 +886,7 @@ def _worker_sim(
         broker_config = backtest_runner.BrokerConfig(
             **sim_params["broker_config"],
         )
-        prep_dir = _prep_output_dir(exp_dir, pre_h)
+        prep_dir = _prep_output_dir(prep_exp_dir or exp_dir, pre_h)
 
         t0 = time.time()
         try:
@@ -990,7 +1069,13 @@ def _send_none_to_workers(q: mp.Queue, n: int) -> None:
 # -----------------------------------------------------------------------------
 # Reporting: compare old/new (valid mode)
 # -----------------------------------------------------------------------------
-def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output_dir: str, logger: logging.Logger):
+def compare_old_new_reports(
+    old_reports_path: str,
+    new_reports_path: str,
+    output_dir: str,
+    logger: logging.Logger,
+    output_filename: str = "compare_reports.jsonl",
+):
     """
     Enhanced comparison between old (selected_configs) and new (reports) files.
     Supports CAGR precision comparison for \"long\" and \"forward\" periods (rounded to 1 decimal place).
@@ -1082,7 +1167,7 @@ def compare_old_new_reports(old_reports_path: str, new_reports_path: str, output
         logger.warning("⚠️ No matching hashes found to compare.")
         return None, 0, len(hashes_only_in_old), len(hashes_only_in_new)
 
-    output_path = os.path.join(output_dir, "compare_reports.jsonl")
+    output_path = os.path.join(output_dir, output_filename)
     failed_count = sum(1 for r in compare_results if not r["verify_all_passed"])
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -1178,182 +1263,6 @@ def _assert_experiment_revision(
     current_commit = common.git_revision(require_clean=check_git_clean)
     if current_commit != context.git_commit:
         raise RuntimeError("Git state changed while the experiment was running: " f"started={context.git_commit}, current={current_commit}")
-
-
-def _cross_test_targets(
-    original_symbol: str,
-    original_interval: str,
-) -> List[Tuple[str, str]]:
-    targets = [(symbol, original_interval) for symbol in CROSS_TEST_SYMBOLS if symbol != original_symbol]
-    targets.extend((original_symbol, interval) for interval in CROSS_TEST_INTERVALS if interval != original_interval)
-    return list(dict.fromkeys(targets))
-
-
-def _cross_test_prep_output_dir(output_dir: str, pre_para: common.BaseDefine) -> str:
-    prep_hash = TaskIdentity.prep_hash_for(asdict(pre_para))
-    return os.path.join(
-        output_dir,
-        "prep",
-        f"{pre_para.symbol}_{pre_para.interval}_{prep_hash}",
-    )
-
-
-def _validate_cross_test_preparation(
-    pre_para: common.BaseDefine,
-    prep_output_dir: str,
-) -> None:
-    expected_configuration_hash = TaskIdentity.prep_hash_for(asdict(pre_para))
-    manifest = common.load_data_manifest_from_dir(prep_output_dir)
-    actual_configuration_hash = manifest.get("configuration_hash")
-    if actual_configuration_hash != expected_configuration_hash:
-        raise RuntimeError(
-            "Cross-test preparation configuration mismatch: "
-            f"path={prep_output_dir}, expected={expected_configuration_hash}, "
-            f"actual={actual_configuration_hash}"
-        )
-
-    stored_pre_para = common.load_pre_params_from_dir(prep_output_dir)
-    stored_configuration_hash = TaskIdentity.prep_hash_for(asdict(stored_pre_para))
-    if stored_configuration_hash != expected_configuration_hash:
-        raise RuntimeError(
-            "Cross-test preparation metadata mismatch: "
-            f"path={prep_output_dir}, expected={expected_configuration_hash}, "
-            f"actual={stored_configuration_hash}"
-        )
-
-    source_path = common.market_data_path(pre_para)
-    expected_source = {
-        "filename": os.path.basename(source_path),
-        "size_bytes": os.path.getsize(source_path),
-        "sha256": common.sha256_file(source_path),
-    }
-    actual_source = manifest.get("source") or {}
-    mismatched_source = {
-        key: (expected_value, actual_source.get(key)) for key, expected_value in expected_source.items() if actual_source.get(key) != expected_value
-    }
-    if mismatched_source:
-        raise RuntimeError("Cross-test preparation source mismatch: " f"path={prep_output_dir}, mismatches={mismatched_source}")
-
-    required_data_paths = (
-        common.get_train_data_path_in_dir(prep_output_dir),
-        common.get_test_data_path_in_dir(prep_output_dir),
-    )
-    missing_data_paths = [path for path in required_data_paths if not os.path.isfile(path)]
-    if missing_data_paths:
-        raise RuntimeError("Cross-test preparation is incomplete: " f"missing={missing_data_paths}")
-
-
-def _ensure_cross_test_prepared(
-    logger: logging.Logger,
-    pre_para: common.BaseDefine,
-    prep_output_dir: str,
-) -> None:
-    manifest_path = common.get_data_manifest_path_in_dir(prep_output_dir)
-    if not os.path.isfile(manifest_path):
-        preparation.main(
-            logger,
-            para=pre_para,
-            prep_output_dir=prep_output_dir,
-        )
-    _validate_cross_test_preparation(pre_para, prep_output_dir)
-
-
-def train_and_cross_test(
-    logger: logging.Logger,
-    output_dir,
-    experiment_context: ExperimentContext,
-    task_spec: Optional[Dict[str, Any]] = None,
-):
-    from trade.runner import backtest_runner
-
-    task_spec = task_spec or {}
-    results = {}
-    for pre_node in task_spec.values():
-        pre_params = pre_node["params"]
-        pre_para = common.BaseDefine(**pre_params)
-        original_symbol = pre_para.symbol
-        original_interval = pre_para.interval
-        for tr_h, tr_node in pre_node["train"].items():
-            train_params = tr_node["params"]
-            train_cfg = _config_from_dict_train(train_params, expected_hash=tr_h)
-            for sim_task in tr_node["sim_tasks"]:
-                strategy_hash = sim_task["strategy_hash"]
-                train_save_dir = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "valid_train_out", strategy_hash)
-                if not os.path.isdir(train_save_dir):
-                    raise FileNotFoundError("Cross-test training artifact is missing; run validation first: " f"{train_save_dir}")
-                sim_params = sim_task["params"]
-                strategy_config = backtest_runner.strategy_config_from_dict(
-                    sim_params["strategy_config"],
-                )
-                broker_config = backtest_runner.BrokerConfig(
-                    **sim_params["broker_config"],
-                )
-                strategy_result = {
-                    "original_symbol": original_symbol,
-                    "original_interval": original_interval,
-                    "CAGR": {},
-                }
-                for target_symbol, target_interval in _cross_test_targets(
-                    original_symbol,
-                    original_interval,
-                ):
-                    target_pre_para = common.BaseDefine(**pre_params)
-                    target_pre_para.symbol = target_symbol
-                    target_pre_para.interval = target_interval
-                    prep_output_dir = _cross_test_prep_output_dir(
-                        output_dir,
-                        target_pre_para,
-                    )
-                    _ensure_cross_test_prepared(
-                        logger,
-                        target_pre_para,
-                        prep_output_dir,
-                    )
-                    data_config = backtest_runner.ModelDataConfig(
-                        prep_output_dir=prep_output_dir,
-                        train_output_dir=train_save_dir,
-                        device="cpu",
-                        use_prediction_cache=True,
-                    )
-                    backtest_runner.precompute_prediction_cache(
-                        logger,
-                        data_config,
-                        train_cfg,
-                        "long",
-                        inference_batch_size=INFERENCE_BATCH_SIZE,
-                    )
-                    target_key = f"{target_symbol}_{target_interval}"
-                    runner_config = backtest_runner.RunnerConfig(
-                        strategy_config=strategy_config,
-                        broker_config=broker_config,
-                        save_dir=os.path.join(
-                            output_dir,
-                            "artifacts",
-                            strategy_hash,
-                            target_key,
-                        ),
-                        data_config=data_config,
-                        experiment_context=experiment_context,
-                    )
-                    report = backtest_runner.main(
-                        logger,
-                        runner_config,
-                        "long",
-                    )["report"]
-                    report_common = report["params"]["common"]
-                    if report_common.get("symbol") != target_symbol or report_common.get("interval") != target_interval:
-                        raise RuntimeError("Cross-test report market mismatch: " f"target={target_key}, report_common={report_common}")
-                    strategy_result[target_key] = report
-                    strategy_result["CAGR"][target_key] = report["results"]["long"]["performance"]["cagr"]
-                results[strategy_hash] = strategy_result
-    output_path = os.path.join(output_dir, "cross_test_reports.jsonl")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        for s_hash, data in results.items():
-            record = {"strategy_hash": s_hash}
-            record.update(data)
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    logger.info(f"Successfully saved {len(results)} cross test records to {output_path}")
 
 
 def run_combo_fusion_and_backtest(
@@ -1551,7 +1460,6 @@ def main():
     parser.add_argument("-a", "--add", type=str, help="add more to exist expirement")
     parser.add_argument("-v", "--valid", action="store_true", default=False, help="Rerun selected_configs.jsonl then compare")
     parser.add_argument("-r", "--resume", type=str, help="Resume experiment from specified directory name under PERSISTENCE_DIR")
-    parser.add_argument("-c", "--cross_test", action="store_true", default=False, help="crosss test")
     parser.add_argument("-l", "--load", action="store_true", default=False, help="load condidate configs for verification,befor applying to market")
     parser.add_argument(
         "--check-git-clean",
@@ -1565,10 +1473,10 @@ def main():
         git_commit=common.git_revision(require_clean=args.check_git_clean),
     )
 
-    if TRAIN_MODE in train_config.COMBO_SUB_TASKS and (args.resume or args.add or args.valid or args.cross_test or args.load):
+    if TRAIN_MODE in train_config.COMBO_SUB_TASKS and (args.resume or args.add or args.valid or args.load):
         raise ValueError(
             "combo_model 模式 (TRAIN_MODE=TRIGGER_DIRECTION/LONG_SHORT_OVR) 暂不支持 "
-            "--resume/--add/--valid/--cross_test/--load，这些流程假设的是单模型模式下 "
+            "--resume/--add/--valid/--load，这些流程假设的是单模型模式下 "
             "sim_tasks 直接挂在训练节点上的 spec 形状。请用不带这些参数的全新实验跑一遍。"
         )
 
@@ -1599,19 +1507,6 @@ def main():
         os.makedirs(exp_dir, exist_ok=True)
         selected_configs = os.path.join(exp_dir, SELECTED_FILE)
         shutil.copy2(selected_configs_source, selected_configs)
-    elif args.cross_test:
-        selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
-        if not os.path.exists(selected_configs):
-            raise FileNotFoundError(f"Selected config file not found: {selected_configs}")
-        exp_dir = common.create_experiment_dir(
-            os.path.join(
-                common.PERSISTENCE_DIR,
-                "batch_experiments",
-                "cross_test",
-            ),
-            SYMBOL,
-            INTERVAL,
-        )
     elif args.load:
         selected_configs = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "selected_configs", SELECTED_FILE)
         records = common.load_selected_configs(selected_configs)  # just to validate file and format
@@ -1746,22 +1641,6 @@ def main():
         n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
         logger.info(f"📥 Loaded from {selected_configs}")
         logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim}")
-    elif args.cross_test:
-        task_spec = _load_task_from_configs(selected_configs)
-        n_prep, n_train, n_sim = _count_spec_tasks(task_spec)
-        logger.info(f"📥 Loaded from {selected_configs}")
-        logger.info(f"📊 Pending: prep={n_prep}, train={n_train}, sim={n_sim}")
-        train_and_cross_test(
-            logger,
-            exp_dir,
-            experiment_context,
-            task_spec,
-        )
-        _assert_experiment_revision(
-            experiment_context,
-            check_git_clean=args.check_git_clean,
-        )
-        exit()
     else:
         task_spec, combo_simulation_task = create_task_spec(logger, exp_dir, None)
     if not task_spec:
@@ -1837,6 +1716,19 @@ def main():
 
     if args.valid:
         compare_old_new_reports(selected_configs, reports_path, exp_dir, logger)
+        original_reports_path = run_original_model_backtests(
+            task_spec=task_spec,
+            exp_dir=exp_dir,
+            selected_configs_path=selected_configs_source,
+            experiment_context=experiment_context,
+            logger=logger,
+        )
+        compare_old_new_reports(
+            selected_configs,
+            original_reports_path,
+            os.path.dirname(original_reports_path),
+            logger,
+        )
 
     # combo_model mode: once every sub-model finished training, group by (pre_key, train_compatibility),
     # fuse the pairs into combined models and backtest them; the results also go to reports_path.
@@ -2046,6 +1938,174 @@ def run_task_spec(
                 p.terminate()
         for p in train_procs + prep_workers + sim_workers:
             p.join(timeout=5)
+
+
+def run_original_model_backtests(
+    task_spec: Dict[str, Any],
+    exp_dir: str,
+    selected_configs_path: str,
+    experiment_context: ExperimentContext,
+    logger: logging.Logger,
+) -> str:
+    """Reproduce backtests from archived original models without retraining."""
+    reproduction_dir = os.path.join(exp_dir, BACKTEST_REPRODUCTION_DIR)
+    reports_path = os.path.join(reproduction_dir, REPORTS_FILE)
+    prediction_cache_root = os.path.join(
+        reproduction_dir,
+        ORIGINAL_PREDICTION_CACHE_DIR,
+    )
+    os.makedirs(reproduction_dir, exist_ok=True)
+
+    model_items: List[Dict[str, Any]] = []
+    pending_sim_hashes: Dict[Tuple[str, str], Set[str]] = {}
+    for pre_h, pre_node in task_spec.items():
+        for tr_h, tr_node in pre_node["train"].items():
+            sim_tasks = copy.deepcopy(tr_node.get("sim_tasks", []))
+            model_items.append(
+                {
+                    "pre_h": pre_h,
+                    "tr_h": tr_h,
+                    "pre_params": copy.deepcopy(pre_node["params"]),
+                    "train_params": copy.deepcopy(tr_node["params"]),
+                    "sim_tasks": sim_tasks,
+                    "prep_output_dir": _prep_output_dir(exp_dir, pre_h),
+                    "train_output_dir": _selected_model_artifact_dir(
+                        selected_configs_path,
+                        pre_h,
+                        tr_h,
+                    ),
+                    "prediction_cache_dir": os.path.join(
+                        prediction_cache_root,
+                        f"{pre_h}_{tr_h}",
+                    ),
+                }
+            )
+            pending_sim_hashes[(pre_h, tr_h)] = {sim["hash"] for sim in sim_tasks}
+
+    total_models = len(model_items)
+    total_sims = sum(len(item["sim_tasks"]) for item in model_items)
+    if total_models == 0 or total_sims == 0:
+        raise RuntimeError("Backtest reproduction has no original model tasks")
+
+    manager = mp.Manager()
+    model_result_queue = manager.Queue()
+    sim_task_queue = manager.Queue()
+    sim_result_queue = manager.Queue()
+    sim_workers: List[mp.Process] = []
+    model_processes: List[mp.Process] = []
+
+    for index in range(MAX_SIM):
+        process = mp.Process(
+            target=_worker_sim,
+            name=f"OriginalBacktestSim-{index}",
+            args=(
+                os.path.join(reproduction_dir, f"sim_{index}.log"),
+                sim_task_queue,
+                sim_result_queue,
+                reports_path,
+                reproduction_dir,
+                experiment_context,
+                exp_dir,
+            ),
+        )
+        process.start()
+        sim_workers.append(process)
+
+    pending_models = list(model_items)
+    model_done = 0
+    stats = {"simulation": {"time": 0.0, "count": 0}}
+    process_index = 0
+    sim_stop_sent = False
+
+    def no_eta() -> str:
+        return ""
+
+    try:
+        while model_done < total_models or stats["simulation"]["count"] < total_sims:
+            active_processes: List[mp.Process] = []
+            for process in model_processes:
+                if process.is_alive():
+                    active_processes.append(process)
+                    continue
+                process.join(timeout=0)
+                if process.exitcode:
+                    raise ExperimentTaskError(f"Original model process {process.name} exited " f"with code {process.exitcode}")
+            model_processes = active_processes
+
+            while pending_models and len(model_processes) < MAX_TRAIN:
+                item = pending_models.pop(0)
+                process = mp.Process(
+                    target=_original_model_task,
+                    name=f"OriginalModel-{process_index}",
+                    args=(
+                        os.path.join(
+                            reproduction_dir,
+                            f"model_{process_index % MAX_TRAIN}.log",
+                        ),
+                        item,
+                        sim_task_queue,
+                        model_result_queue,
+                    ),
+                )
+                process.start()
+                model_processes.append(process)
+                process_index += 1
+
+            while True:
+                try:
+                    message = model_result_queue.get_nowait()
+                except Empty:
+                    break
+                kind, pre_h, tr_h, elapsed, detail = message
+                if kind == "original_model_failed":
+                    raise ExperimentTaskError("Original model preparation failed after " f"{elapsed:.2f}s for {pre_h}/{tr_h}:\n{detail}")
+                if kind != "original_model_ready":
+                    raise ExperimentTaskError(f"Unexpected original model result: {message!r}")
+                model_done += 1
+                logger.info(
+                    "Original model %d/%d ready without training: %s/%s in %.2fs",
+                    model_done,
+                    total_models,
+                    pre_h,
+                    tr_h,
+                    elapsed,
+                )
+
+            if model_done >= total_models and not sim_stop_sent:
+                _send_none_to_workers(sim_task_queue, MAX_SIM)
+                sim_stop_sent = True
+
+            for process in sim_workers:
+                if process.exitcode not in (None, 0):
+                    raise ExperimentTaskError(f"Original backtest process {process.name} exited " f"with code {process.exitcode}")
+
+            _drain_sim_results(
+                sim_result_queue,
+                stats,
+                logger,
+                no_eta,
+                pending_sim_hashes,
+                False,
+            )
+            if model_done < total_models or stats["simulation"]["count"] < total_sims:
+                time.sleep(0.2)
+
+        logger.info(
+            "Original-model backtest reproduction completed: models=%d, simulations=%d",
+            total_models,
+            total_sims,
+        )
+        return reports_path
+    finally:
+        if not sim_stop_sent:
+            _send_none_to_workers(sim_task_queue, MAX_SIM)
+        for process in model_processes + sim_workers:
+            if process.is_alive():
+                process.terminate()
+        for process in model_processes + sim_workers:
+            process.join(timeout=5)
+        if os.path.isdir(prediction_cache_root):
+            shutil.rmtree(prediction_cache_root)
 
 
 def _load_task_from_configs(path: str) -> Dict[str, Any]:

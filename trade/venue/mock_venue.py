@@ -45,6 +45,7 @@ class MockVenue(VenueBase, AccountDashboard):
         *,
         order_type=OrderType.MARKET,
         price=None,
+        execution_id=None,
     ):
         self.normalize_order_request(order_type, price)
         return None

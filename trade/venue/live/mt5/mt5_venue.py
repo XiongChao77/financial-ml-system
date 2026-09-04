@@ -1,6 +1,10 @@
-import MetaTrader5 as mt5
-import logging,time
+import logging
+import time
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_DOWN
+
+import MetaTrader5 as mt5
+
 from trade.core.dashboard_base import (
     AccountBalance,
     AccountDashboard,
@@ -10,10 +14,11 @@ from trade.core.dashboard_base import (
     PositionSide,
 )
 from trade.core.venue_base import VenueBase
-from trade.core.execution import ExecutionFill
+from trade.core.execution import ExecutionFill, ExecutionOrder
 from trade.core.protocol import Firm, OrderType, PositionDir, PositionView
 
 MT5_SYMBOL_FTMO_MAP = {"DOGEUSDT": "DOGEUSD", "ETHUSDT": "ETHUSD", "BTCUSDT": "BTCUSD"}
+
 
 class MT5Venue(VenueBase, AccountDashboard):
     def __init__(
@@ -277,13 +282,16 @@ class MT5Venue(VenueBase, AccountDashboard):
         if aggregated is None:
             return PositionView()
         position_type, total_volume, entry_price = aggregated
+        symbol_info = mt5.symbol_info(self.symbol)
+        if symbol_info is None:
+            raise RuntimeError(f"Symbol not found: {self.symbol}")
         return PositionView(
             dir=(
                 PositionDir.POSITIVE
                 if position_type == 0
                 else PositionDir.NEGATIVE
             ),
-            size=total_volume,
+            size=total_volume * float(symbol_info.trade_contract_size),
             price=entry_price,
         )
 
@@ -297,9 +305,10 @@ class MT5Venue(VenueBase, AccountDashboard):
         *,
         order_type=OrderType.MARKET,
         price=None,
+        execution_id=None,
     ):
         """
-        size: Notional value in currency units
+        size: Order quantity in base-asset units
         is_buy: Boolean, True for BUY, False for SELL
         stop_loss_pct: Percentage value, e.g. 0.02 for 2%
         take_profit_pct: Percentage value, e.g. 0.04 for 4%
@@ -312,10 +321,13 @@ class MT5Venue(VenueBase, AccountDashboard):
             self.logger.error(f"Symbol not found: {self.symbol}")
             return
 
-        # 2. Calculate total lots
-        total_raw_lots = float(size / symbol_info.trade_contract_size)
-        total_lots = round(total_raw_lots / symbol_info.volume_step) * symbol_info.volume_step
-        total_lots = round(total_lots, 2)
+        # 2. Convert base-asset quantity to lots and floor it to the venue step.
+        contract_size = Decimal(str(symbol_info.trade_contract_size))
+        volume_step = Decimal(str(symbol_info.volume_step))
+        total_lots_decimal = (
+            Decimal(str(size)) / contract_size / volume_step
+        ).to_integral_value(rounding=ROUND_DOWN) * volume_step
+        total_lots = float(total_lots_decimal)
 
         if total_lots < symbol_info.volume_min:
             self.logger.warning(f"Total lots {total_lots} below minimum {symbol_info.volume_min}")
@@ -325,22 +337,23 @@ class MT5Venue(VenueBase, AccountDashboard):
             f"Start execution: total_lots={total_lots} | max_per_order={symbol_info.volume_max}"
         )
 
-        remaining_lots = total_lots
+        remaining_lots = total_lots_decimal
+        maximum_lots = Decimal(str(symbol_info.volume_max))
+        minimum_lots = Decimal(str(symbol_info.volume_min))
         order_count = 0
         benchmark_price = None
         responses = []
 
         # 3. Execute split orders
         while remaining_lots > 0:
-            current_batch_lots = min(remaining_lots, symbol_info.volume_max)
+            current_batch_lots_decimal = min(remaining_lots, maximum_lots)
+            current_batch_lots_decimal = (
+                current_batch_lots_decimal / volume_step
+            ).to_integral_value(rounding=ROUND_DOWN) * volume_step
 
-            current_batch_lots = round(
-                round(current_batch_lots / symbol_info.volume_step) * symbol_info.volume_step,
-                2
-            )
-
-            if current_batch_lots < symbol_info.volume_min:
+            if current_batch_lots_decimal < minimum_lots:
                 break
+            current_batch_lots = float(current_batch_lots_decimal)
 
             if order_type == OrderType.MARKET:
                 tick = mt5.symbol_info_tick(self.symbol)
@@ -395,7 +408,11 @@ class MT5Venue(VenueBase, AccountDashboard):
                 "sl": sl_price,
                 "tp": tp_price,
                 "magic": self.magic,
-                "comment": f"Split_Order_{order_count}",
+                "comment": (
+                    f"exec_{str(execution_id)[-12:]}_{order_count}"
+                    if execution_id
+                    else f"Split_Order_{order_count}"
+                ),
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": (
                     mt5.ORDER_FILLING_IOC
@@ -423,8 +440,7 @@ class MT5Venue(VenueBase, AccountDashboard):
                 f"SL={sl_price} | TP={tp_price}"
             )
 
-            remaining_lots -= current_batch_lots
-            remaining_lots = round(max(0.0, remaining_lots), 2)
+            remaining_lots -= current_batch_lots_decimal
             order_count += 1
 
             if remaining_lots > 0:
@@ -474,9 +490,30 @@ class MT5Venue(VenueBase, AccountDashboard):
             raise RuntimeError(f"MT5 tick is unavailable for {self.symbol}")
         return float(tick.bid), float(tick.ask)
 
+    def normalize_order_quantity(self, size: float) -> float:
+        self._ensure_target_account()
+        symbol_info = mt5.symbol_info(self.symbol)
+        if symbol_info is None:
+            raise RuntimeError(f"Symbol not found: {self.symbol}")
+        raw_lots = Decimal(str(size)) / Decimal(
+            str(symbol_info.trade_contract_size)
+        )
+        step = Decimal(str(symbol_info.volume_step))
+        lots = (
+            raw_lots / step
+        ).to_integral_value(rounding=ROUND_DOWN) * step
+        if lots < Decimal(str(symbol_info.volume_min)):
+            raise ValueError(
+                f"MT5 order volume {lots} is below minimum "
+                f"{symbol_info.volume_min}"
+            )
+        return float(lots * Decimal(str(symbol_info.trade_contract_size)))
+
     def _execution_fills(self, result, *, is_buy: bool) -> tuple[ExecutionFill, ...]:
         responses = result if isinstance(result, list) else [result]
         fills = []
+        symbol_info = mt5.symbol_info(self.symbol)
+        contract_size = float(symbol_info.trade_contract_size)
         for response in responses:
             if response is None:
                 continue
@@ -487,31 +524,92 @@ class MT5Venue(VenueBase, AccountDashboard):
             fills.append(
                 ExecutionFill(
                     price=price,
-                    quantity=quantity,
+                    quantity=quantity * contract_size,
                     order_id=str(getattr(response, "order", "") or ""),
                     deal_id=str(getattr(response, "deal", "") or ""),
                 )
             )
         return tuple(fills)
+
+    def _execution_orders(
+        self,
+        result,
+        *,
+        submitted_quantity: float,
+        is_buy: bool,
+    ) -> tuple[ExecutionOrder, ...]:
+        responses = result if isinstance(result, list) else [result]
+        symbol_info = mt5.symbol_info(self.symbol)
+        contract_size = float(symbol_info.trade_contract_size)
+        orders = []
+        for response in responses:
+            if response is None:
+                continue
+            request = getattr(response, "request", None)
+            volume = float(
+                getattr(request, "volume", 0.0)
+                or getattr(response, "volume", 0.0)
+                or 0.0
+            )
+            orders.append(
+                ExecutionOrder(
+                    order_id=str(getattr(response, "order", "") or ""),
+                    client_order_id=str(
+                        getattr(request, "comment", "") or ""
+                    ),
+                    submitted_quantity=volume * contract_size,
+                    status=(
+                        "filled"
+                        if int(getattr(response, "deal", 0) or 0) > 0
+                        else "submitted"
+                    ),
+                )
+            )
+        return tuple(orders)
         
-    def close_position(self, **kwargs):
+    def close_position(self, size=None, execution_id=None, **kwargs):
         """Close every position of the current magic number"""
+        if kwargs:
+            raise TypeError(f"Unsupported MT5 close arguments: {sorted(kwargs)}")
         self._ensure_target_account()
         positions = mt5.positions_get(symbol=self.symbol, magic=self.magic)
+        symbol_info = mt5.symbol_info(self.symbol)
+        remaining_lots = (
+            None
+            if size is None
+            else float(size) / float(symbol_info.trade_contract_size)
+        )
+        responses = []
         for pos in positions:
+            close_lots = (
+                float(pos.volume)
+                if remaining_lots is None
+                else min(float(pos.volume), remaining_lots)
+            )
+            if close_lots <= 0:
+                break
             self._ensure_target_account()
             tick = mt5.symbol_info_tick(self.symbol)
-            mt5.order_send({
+            response = mt5.order_send({
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": self.symbol,
                 "position": pos.ticket,
-                "volume": pos.volume,
+                "volume": close_lots,
                 "type": mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY,
                 "price": tick.bid if pos.type == 0 else tick.ask,
                 "magic": self.magic,
+                "comment": (
+                    f"exec_{str(execution_id)[-12:]}_close"
+                    if execution_id
+                    else "strategy_close"
+                ),
                 # "type_filling": mt5.ORDER_FILLING_IOC,
             })
+            responses.append(response)
+            if remaining_lots is not None:
+                remaining_lots -= close_lots
         self.logger.info(f"order close {self.magic}")
+        return responses
 
     def get_last_position_open_time(self):
         try:
