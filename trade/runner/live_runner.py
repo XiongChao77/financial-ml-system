@@ -25,7 +25,7 @@ import time
 from numbers import Real
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Callable, ClassVar, Iterable, Mapping, Optional
 from enum import Enum, auto
 import pandas as pd
 import threading
@@ -37,6 +37,7 @@ from data_process.utils import config_from_dict_train
 from model.model_loader import ModelHandler
 from trade.feed.feed_base import DataFeedBase
 from trade.core.protocol import (
+    ActionType,
     AccountView,
     Firm,
     MarketView,
@@ -61,6 +62,8 @@ from trade.recording.execution_trace import (
     ExecutionTraceConfig,
     LiveExecutionTraceRecorder,
 )
+from trade.notification.notify import Notify
+from trade.notification.telegram_notify import TelegramNotify
 from trade.venue.live.binance_data_feed import BinanceDataFeed
 from trade.core.venue_base import VenueBase
 from trade.core.strategy_base import StrategyBase
@@ -129,6 +132,18 @@ class LiveVenueConfigCtrader(LiveVenueConfigBase, LiveVenueConfigHedge):
 
     profit_target: float
     max_loss: float
+    telegram_token_path: str
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        profit_target = float(self.profit_target)
+        max_loss = float(self.max_loss)
+        if not math.isfinite(profit_target) or profit_target <= 0:
+            raise ValueError("cTrader profit_target must be positive and finite")
+        if not math.isfinite(max_loss) or not 0 < max_loss < 1:
+            raise ValueError("cTrader max_loss must be between zero and one")
+        object.__setattr__(self, "profit_target", profit_target)
+        object.__setattr__(self, "max_loss", max_loss)
 
 
 SUPPORTED_VENUES = {
@@ -148,6 +163,7 @@ class LiveStrategySpec:
     model_path: str
     device: str = "auto"
     compound: bool = True
+    enable: bool = True
     base_define: common.BaseDefine = None
     train_config: Any = None
     strategy_config: Any = None
@@ -159,6 +175,8 @@ class LiveStrategySpec:
             raise TypeError("Live strategy run_live must be a boolean")
         if not isinstance(self.compound, bool):
             raise TypeError("Live strategy compound must be a boolean")
+        if not isinstance(self.enable, bool):
+            raise TypeError("Live strategy enable must be a boolean")
         venue_name = str(getattr(self.venue_config, "venue", "")).strip().casefold()
         if venue_name == "ctrader" and self.compound:
             raise ValueError("cTrader live strategies require compound=false")
@@ -172,12 +190,167 @@ class StrategyPipeline:
     strategy: StrategyBase
     feature_factory: Any
     interval_ms: int
+    runner_id: str = "live-runner"
+    enable: bool = True
+    notifier: Notify | None = None
+    notification_keys: set[str] = field(default_factory=set, repr=False)
+
+    PROFIT_TARGET_OVERSHOOT_MULTIPLIER: ClassVar[float] = 1.02
+    ROUND_TRIP_COMMISSION_SIDES: ClassVar[float] = 2.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enable, bool):
+            raise TypeError("Strategy pipeline enable must be a boolean")
+
+    def set_enabled(self, enable: bool) -> None:
+        if not isinstance(enable, bool):
+            raise TypeError("Strategy pipeline enable must be a boolean")
+        self.enable = enable
+        if enable:
+            self.notification_keys.clear()
 
     @property
     def required_bars(self) -> int:
         feature_history = int(self.feature_factory.get_global_min_history())
         model_history = max(1, int(self.model.seq_len)) * 2
         return feature_history + model_history
+
+    def _notify_once(self, key: str, message: str) -> None:
+        if key in self.notification_keys:
+            return
+        logger = getattr(self.venue, "logger", None) or logging.getLogger("trade.live")
+        if self.notifier is None:
+            logger.error("Notification unavailable | %s", message)
+            return
+        if self.notifier.send(message):
+            self.notification_keys.add(key)
+        else:
+            logger.error("Notification delivery failed | %s", message)
+
+    @staticmethod
+    def _rejected_entry(intent: TradeIntent, reason: str) -> ExecutionReport:
+        return ExecutionReport(
+            side=("buy" if intent.target_dir == PositionDir.POSITIVE else "sell"),
+            requested_quantity=float(intent.order_qty),
+            submitted_quantity=0.0,
+            decision_price=float(intent.price),
+            decision_at_utc=intent.created_at_utc,
+            bid=float("nan"),
+            ask=float("nan"),
+            spread_pct=float("nan"),
+            status="rejected",
+            reason=reason,
+        )
+
+    def _ctrader_entry_quantity(
+        self,
+        observation: Observation,
+        intent: TradeIntent,
+    ) -> tuple[float | None, str | None]:
+        initial_equity = float(self.spec.broker_config.initial_equity)
+        current_equity = float(observation.account.equity)
+        price = float(intent.price)
+        stop_loss_pct = float(intent.stop_loss_pct)
+        take_profit_pct = float(intent.take_profit_pct)
+        requested_quantity = float(intent.order_qty)
+        config = self.spec.venue_config
+
+        numeric_values = {
+            "initial_equity": initial_equity,
+            "current_equity": current_equity,
+            "price": price,
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
+            "requested_quantity": requested_quantity,
+        }
+        invalid = [name for name, value in numeric_values.items() if not math.isfinite(value) or value <= 0]
+        if invalid:
+            raise ValueError("cTrader entry risk validation received invalid values: " + ", ".join(invalid))
+
+        commission_pct = float(self.spec.broker_config.commission_pct)
+        if not math.isfinite(commission_pct) or commission_pct < 0:
+            raise ValueError("cTrader commission_pct must be non-negative and finite")
+
+        loss_floor = initial_equity * (1.0 - float(config.max_loss))
+        profit_target_equity = initial_equity * (1.0 + float(config.profit_target))
+        profit_ceiling = initial_equity * (1.0 + float(config.profit_target) * self.PROFIT_TARGET_OVERSHOOT_MULTIPLIER)
+        if current_equity <= loss_floor:
+            return None, "max_loss_reached"
+        if current_equity >= profit_target_equity:
+            return None, "profit_target_reached"
+
+        commission_rate = max(
+            0.0,
+            commission_pct / 100.0,
+        )
+        round_trip_commission = commission_rate * self.ROUND_TRIP_COMMISSION_SIDES
+        loss_per_unit = price * (stop_loss_pct + round_trip_commission)
+        profit_per_unit = price * max(
+            0.0,
+            take_profit_pct - round_trip_commission,
+        )
+
+        max_loss_quantity = (current_equity - loss_floor) / loss_per_unit
+        quantity = min(requested_quantity, max_loss_quantity)
+        if profit_per_unit > 0:
+            max_profit_quantity = (profit_ceiling - current_equity) / profit_per_unit
+            quantity = min(quantity, max_profit_quantity)
+
+        try:
+            normalized_quantity = float(self.venue.normalize_order_quantity(quantity))
+        except (TypeError, ValueError):
+            return None, "entry_quantity_below_minimum"
+        if not math.isfinite(normalized_quantity) or normalized_quantity <= 0 or normalized_quantity > quantity:
+            return None, "entry_quantity_below_minimum"
+        return normalized_quantity, None
+
+    def _execute_intent(self, observation: Observation, intent: TradeIntent):
+        if not self.enable:
+            return None
+        venue_name = str(getattr(self.spec.venue_config, "venue", "")).strip().casefold()
+        if venue_name != "ctrader" or intent.action != ActionType.OPEN:
+            return self.venue.execute_action(intent)
+
+        original_quantity = float(intent.order_qty)
+        quantity, rejection_reason = self._ctrader_entry_quantity(
+            observation,
+            intent,
+        )
+        if rejection_reason is not None:
+            current_equity = float(observation.account.equity)
+            initial_equity = float(self.spec.broker_config.initial_equity)
+            self.set_enabled(False)
+            message = (
+                f"date={datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} | "
+                f"runner_id={self.runner_id} | "
+                f"strategy_id={self.spec.strategy_id} | "
+                f"event={rejection_reason} | "
+                f"initial_equity={initial_equity:.2f} | "
+                f"current_equity={current_equity:.2f}"
+            )
+            self._notify_once(rejection_reason, message)
+            return self._rejected_entry(intent, rejection_reason)
+
+        assert quantity is not None
+        if quantity < original_quantity:
+            logger = getattr(self.venue, "logger", None) or logging.getLogger("trade.live")
+            logger.info(
+                "cTrader entry quantity reduced by account boundary | " "strategy=%s hash=%s symbol=%s requested=%g submitted=%g " "equity=%.2f",
+                self.spec.strategy_id,
+                self.spec.hash_id,
+                self.spec.base_define.symbol,
+                original_quantity,
+                quantity,
+                float(observation.account.equity),
+            )
+        intent.order_qty = quantity
+        report = self.venue.execute_action(intent)
+        if isinstance(report, ExecutionReport) and quantity < original_quantity:
+            report = replace(
+                report,
+                requested_quantity=original_quantity,
+            )
+        return report
 
 
 @dataclass
@@ -332,6 +505,8 @@ def _venue_section(entry: Mapping[str, Any], venue_kind: str) -> dict[str, Any]:
 def _parse_venue_config(
     config_path: str,
     entry: Mapping[str, Any],
+    *,
+    telegram_token_path: Any = None,
 ) -> LiveVenueConfigBase:
     venue_name = str(entry.get("venue", "")).strip().casefold()
     if venue_name not in SUPPORTED_VENUES:
@@ -345,10 +520,13 @@ def _parse_venue_config(
         path = os.path.realpath(_resolve_path(config_path, path))
     if not os.path.isdir(path):
         raise FileNotFoundError(f"{venue_name} key directory not found: {path}")
+    values = {field.name: section.get(field.name) for field in fields(venue_class) if field.name not in {"venue", "path"}}
+    if venue_name == "ctrader":
+        values["telegram_token_path"] = os.path.realpath(_resolve_path(config_path, telegram_token_path))
     return venue_class(
         venue=venue_name,
         path=path,
-        **{field.name: section.get(field.name) for field in fields(venue_class) if field.name not in {"venue", "path"}},
+        **values,
     )
 
 
@@ -463,18 +641,22 @@ def load_live_runner_configuration(
         raise ValueError(f"Live configuration report must be a JSONL file: {report_path}")
 
     raw_strategy_entries = _strategy_entries(payload)
+    telegram_token_path = payload.get("telegram_token")
     strategy_entries: list[LiveStrategySpec] = []
     for raw_id, raw_entry in raw_strategy_entries.items():
         strategy_id = str(raw_id).strip()
         entry = dict(raw_entry)
         run_live = entry["run_live"]
         compound = entry.get("compound", True)
+        enable = entry.get("enable", True)
         if not isinstance(run_live, bool):
             raise TypeError(f"Live strategy {strategy_id!r} run_live must be a JSON boolean")
         if not run_live:
             continue
         if not isinstance(compound, bool):
             raise TypeError(f"Live strategy {strategy_id!r} compound must be a JSON boolean")
+        if not isinstance(enable, bool):
+            raise TypeError(f"Live strategy {strategy_id!r} enable must be a JSON boolean")
         hash_id = entry["hash"]
         model_path = _resolve_path(config_path, entry["model_path"])
         if not os.path.isdir(model_path):
@@ -487,8 +669,13 @@ def load_live_runner_configuration(
                 model_path=model_path,
                 device=str(entry.get("device", "auto")),
                 compound=compound,
+                enable=enable,
                 broker_config=BrokerConfig(**entry["broker_config"]),
-                venue_config=_parse_venue_config(config_path, entry),
+                venue_config=_parse_venue_config(
+                    config_path,
+                    entry,
+                    telegram_token_path=telegram_token_path,
+                ),
             )
         )
 
@@ -592,6 +779,7 @@ class LiveRunner:
         logger: Optional[logging.Logger] = None,
         feed_factory: Optional[Callable[[common.MarketDataSourceConfig, int], DataFeedBase]] = None,
         venue_factory: Optional[Callable[[LiveStrategySpec, logging.Logger], Any]] = None,
+        notify_factory: Optional[Callable[[LiveStrategySpec, logging.Logger], Notify | None]] = None,
         prediction_callback: Optional[Callable[[StrategyPipeline, int, pd.Series], None]] = None,
         runner_id: str | None = None,
         output_dir: str | None = None,
@@ -606,6 +794,7 @@ class LiveRunner:
         self._ctrader_connections: dict[str, CTraderOpenApiConnection] = {}
         self._ctrader_connection_path: str | None = None
         self._venue_factory = venue_factory or self._create_venue
+        self._notify_factory = notify_factory or self._create_notifier
         self._prediction_callback = prediction_callback
         self.runner_id = _validate_runner_id(runner_id or (monitoring_config.runner_id if monitoring_config is not None else None))
         self.output_dir = os.path.abspath(output_dir) if output_dir is not None else None
@@ -729,6 +918,19 @@ class LiveRunner:
     @staticmethod
     def _load_model(spec: LiveStrategySpec):
         return ModelHandler(tarin_out_path=spec.model_path, device=spec.device)
+
+    @staticmethod
+    def _create_notifier(
+        spec: LiveStrategySpec,
+        logger: logging.Logger,
+    ) -> Notify | None:
+        config = spec.venue_config
+        if str(getattr(config, "venue", "")).strip().casefold() != "ctrader":
+            return None
+        return TelegramNotify(
+            config.telegram_token_path,
+            logger=logger,
+        )
 
     def _create_venue(self, spec: LiveStrategySpec, logger: logging.Logger):
         config = spec.venue_config
@@ -931,6 +1133,7 @@ class LiveRunner:
             venue = self._venue_factory(spec, self.logger)
             try:
                 self._validate_ctrader_initial_balance(spec, venue)
+                notifier = self._notify_factory(spec, self.logger)
                 strategy = self._create_strategy(spec, venue)
                 self.logger.info(
                     "Strategy created | id=%s hash=%s venue=%s",
@@ -957,6 +1160,9 @@ class LiveRunner:
                 strategy=strategy,
                 feature_factory=feature_generator,
                 interval_ms=common.get_interval_ms(spec.base_define.interval),
+                runner_id=self.runner_id,
+                enable=spec.enable,
+                notifier=notifier,
             )
             self.strategy_pipelines.append(pipeline)
             feed_pipelines.append(pipeline)
@@ -983,6 +1189,23 @@ class LiveRunner:
             "Live runner built | strategies=%d shared_feeds=%d",
             len(self.strategy_pipelines),
             len(self.feed_groups),
+        )
+
+    def set_strategy_enabled(self, strategy_id: str, enable: bool) -> None:
+        """Enable or disable one constructed strategy while the runner is active."""
+
+        if not isinstance(enable, bool):
+            raise TypeError("Strategy enable must be a boolean")
+        matches = [pipeline for pipeline in self.strategy_pipelines if pipeline.spec.strategy_id == strategy_id]
+        if not matches:
+            raise KeyError(f"Unknown live strategy ID: {strategy_id!r}")
+        if len(matches) > 1:
+            raise ValueError(f"Duplicate live strategy ID: {strategy_id!r}")
+        matches[0].set_enabled(enable)
+        self.logger.info(
+            "Live strategy runtime state changed | strategy_id=%s enable=%s",
+            strategy_id,
+            enable,
         )
 
     def _start_data_check_timer(self):
@@ -1178,6 +1401,8 @@ class LiveRunner:
             tz="UTC",
         ).to_pydatetime()
         for pipeline in group.pipelines:
+            if not bool(getattr(pipeline, "enable", True)):
+                continue
             try:
                 observation = Observation(
                     market=market,
@@ -1187,7 +1412,7 @@ class LiveRunner:
                     daily_reset_date=pipeline.venue.get_daily_reset_date(candle_open_time_utc),
                 )
                 intent = pipeline.strategy.process(observation)
-                execution_report = pipeline.venue.execute_action(intent)
+                execution_report = pipeline._execute_intent(observation, intent)
                 self._record_execution(pipeline, execution_report)
                 self._record_live_cycle(
                     pipeline,
@@ -1226,7 +1451,7 @@ class LiveRunner:
             daily_reset_date=pipeline.venue.get_daily_reset_date(candle_open_time_utc),
         )
         intent = pipeline.strategy.process(observation)
-        execution_report = pipeline.venue.execute_action(intent)
+        execution_report = pipeline._execute_intent(observation, intent)
         self._record_execution(pipeline, execution_report)
         self.logger.info(
             "Strategy processed | id=%s hash=%s symbol=%s signal=%s action=%s",
@@ -1269,7 +1494,7 @@ class LiveRunner:
                 "activate_execution_updates",
                 None,
             )
-            if callable(activate):
+            if callable(activate) and float(report.submitted_quantity or 0.0) > 0:
                 activate(report.execution_id)
 
     def _record_execution_event(
@@ -1408,6 +1633,8 @@ class LiveRunner:
             else:
                 trace_predictions: dict[str, pd.Series] = {}
                 for pipeline in group.pipelines:
+                    if not bool(getattr(pipeline, "enable", True)):
+                        continue
                     try:
                         prepared = _prepare_market_frame(frame, pipeline.spec.base_define)
                         features = pipeline.feature_factory.generate(prepared)

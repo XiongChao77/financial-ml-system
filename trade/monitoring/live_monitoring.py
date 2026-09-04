@@ -89,15 +89,9 @@ class LiveStateRegistry:
 
     def strategy_snapshots(self, status: str = "running") -> list[dict[str, Any]]:
         with self._lock:
-            signals = {
-                strategy_id: dict(payload)
-                for strategy_id, payload in self._signals.items()
-            }
+            signals = {strategy_id: dict(payload) for strategy_id, payload in self._signals.items()}
 
-        return [
-            self._snapshot_pipeline(pipeline, signals.get(strategy_id), status)
-            for strategy_id, pipeline in self._pipelines.items()
-        ]
+        return [self._snapshot_pipeline(pipeline, signals.get(strategy_id), status) for strategy_id, pipeline in self._pipelines.items()]
 
     def _position_opened_at(self, pipeline, dashboard_position) -> datetime | None:
         strategy_id = pipeline.spec.strategy_id
@@ -140,9 +134,7 @@ class LiveStateRegistry:
             raise ValueError("fixed_hold_bars must be a non-negative integer")
         interval_ms = getattr(pipeline, "interval_ms", None)
         if interval_ms is None:
-            interval_ms = common.get_interval_ms(
-                pipeline.spec.base_define.interval
-            )
+            interval_ms = common.get_interval_ms(pipeline.spec.base_define.interval)
         interval_ms = int(interval_ms)
         return bars * interval_ms / 1000.0
 
@@ -154,19 +146,21 @@ class LiveStateRegistry:
         position_available = False
         errors = []
         venue = pipeline.venue
+        venue_name = str(
+            getattr(
+                getattr(pipeline.spec, "venue_config", None),
+                "venue",
+                "",
+            )
+        ).strip()
+        if not venue_name:
+            venue_name = type(venue).__name__.removesuffix("Venue").casefold()
         strategy_config = pipeline.spec.strategy_config
-        risk_per_trade_pct = _finite_number(
-            getattr(strategy_config, "risk_per_trade_pct", None)
-        )
-        max_daily_loss_pct = _finite_number(
-            getattr(strategy_config, "max_daily_loss_pct", None)
-        )
+        risk_per_trade_pct = _finite_number(getattr(strategy_config, "risk_per_trade_pct", None))
+        max_daily_loss_pct = _finite_number(getattr(strategy_config, "max_daily_loss_pct", None))
         max_holding_seconds = self._max_holding_seconds(pipeline)
         if risk_per_trade_pct is None or max_daily_loss_pct is None:
-            raise RuntimeError(
-                "Live strategy risk configuration must contain finite "
-                "risk_per_trade_pct and max_daily_loss_pct values"
-            )
+            raise RuntimeError("Live strategy risk configuration must contain finite " "risk_per_trade_pct and max_daily_loss_pct values")
 
         if not isinstance(venue, AccountDashboard):
             errors.append(
@@ -180,9 +174,7 @@ class LiveStateRegistry:
                 account = asdict(venue.get_dashboard_balance())
                 account_available = True
             except Exception as exc:
-                errors.append(
-                    {"component": "account", "message": str(exc) or type(exc).__name__}
-                )
+                errors.append({"component": "account", "message": str(exc) or type(exc).__name__})
             try:
                 dashboard_position = venue.get_dashboard_position()
                 if dashboard_position is not None:
@@ -191,9 +183,7 @@ class LiveStateRegistry:
                     position["margin_mode"] = dashboard_position.margin_mode.value
                 position_available = True
             except Exception as exc:
-                errors.append(
-                    {"component": "position", "message": str(exc) or type(exc).__name__}
-                )
+                errors.append({"component": "position", "message": str(exc) or type(exc).__name__})
 
         if dashboard_position is None:
             if position_available:
@@ -231,12 +221,13 @@ class LiveStateRegistry:
 
         return {
             "strategy_id": pipeline.spec.strategy_id,
+            "venue": venue_name,
             "symbol": pipeline.spec.base_define.symbol,
             "interval": pipeline.spec.base_define.interval,
             "risk_per_trade_pct": risk_per_trade_pct,
             "max_daily_loss_pct": max_daily_loss_pct,
             "max_holding_seconds": max_holding_seconds,
-            "status": status,
+            "status": (status if bool(getattr(pipeline, "enable", True)) else "disabled"),
             "account": account,
             "position": position,
             "latest_signal": signal,
@@ -289,9 +280,7 @@ class LiveMonitoringService:
             cycle_started_at = time.monotonic()
             self.publish_once()
             elapsed = time.monotonic() - cycle_started_at
-            self._stop_event.wait(
-                max(0.0, self.config.publish_interval_seconds - elapsed)
-            )
+            self._stop_event.wait(max(0.0, self.config.publish_interval_seconds - elapsed))
 
     def _payload(self, status: str) -> dict[str, Any]:
         self._sequence += 1
@@ -335,15 +324,13 @@ class LiveMonitoringService:
             except (TypeError, ValueError):
                 result = None
             if isinstance(result, Mapping) and result.get("accepted") is False:
-                raise RuntimeError(
-                    f"Snapshot rejected: {result.get('reason', 'unknown reason')}"
-                )
+                raise RuntimeError(f"Snapshot rejected: {result.get('reason', 'unknown reason')}")
             return True
         except Exception as exc:
             now = time.monotonic()
             if now - self._last_error_log_at >= self.ERROR_LOG_INTERVAL_SECONDS:
                 self._last_error_log_at = now
-                self.logger.warning(
+                self.logger.debug(
                     "Live monitoring publish failed | runner=%s url=%s error=%s",
                     self.config.runner_id,
                     self.config.publish_url,
@@ -355,18 +342,11 @@ class LiveMonitoringService:
         self._stop_event.set()
         if self._thread is not None:
             thread = self._thread
-            thread.join(
-                timeout=(
-                    self.config.publish_interval_seconds
-                    + self.config.request_timeout_seconds
-                    + 0.5
-                )
-            )
+            thread.join(timeout=(self.config.publish_interval_seconds + self.config.request_timeout_seconds + 0.5))
             self._thread = None
             if thread.is_alive():
                 self.logger.warning(
-                    "Live monitoring thread did not stop before shutdown timeout | "
-                    "runner=%s",
+                    "Live monitoring thread did not stop before shutdown timeout | " "runner=%s",
                     self.config.runner_id,
                 )
                 return

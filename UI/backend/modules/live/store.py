@@ -185,8 +185,10 @@ class LiveSnapshotStore:
                 "items": [
                     {
                         "strategy_id": item["strategy_id"],
+                        "venue": item["venue"],
                         "symbol": item["symbol"],
                         "interval": item["interval"],
+                        "balance": self._balance(item),
                         "unrealized_pnl": self._unrealized_pnl(item),
                         "status": item["status"],
                         "available": item["available"],
@@ -204,6 +206,13 @@ class LiveSnapshotStore:
                     "stale_after_seconds": self.stale_seconds,
                 },
             }
+
+    @staticmethod
+    def _balance(item: dict[str, Any]) -> float | None:
+        if not item["available"] or not item["availability"]["account"]:
+            return None
+        account = item["account"]
+        return None if account is None else account["balance"]
 
     @staticmethod
     def _unrealized_pnl(item: dict[str, Any]) -> float | None:
