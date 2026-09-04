@@ -37,8 +37,10 @@ function mountList(container, context) {
             <thead>
               <tr>
                 <th>Strategy ID</th>
+                <th>Venue</th>
                 <th>Symbol</th>
                 <th>Interval</th>
+                <th>Balance</th>
                 <th>Unrealized PnL</th>
                 <th>Status</th>
               </tr>
@@ -75,18 +77,28 @@ function mountList(container, context) {
     tableWrap.classList.remove("live-request-failed");
     tableBody.innerHTML = items.map((item) => {
       const available = item.available === true;
-      const pnl = available ? formatMoney(item.unrealized_pnl, true) : "—";
-      const tone = Number(item.unrealized_pnl) > 0
+      const balanceAvailable = available
+        && item.balance !== null
+        && item.balance !== undefined
+        && Number.isFinite(Number(item.balance));
+      const pnlAvailable = available
+        && item.unrealized_pnl !== null
+        && item.unrealized_pnl !== undefined
+        && Number.isFinite(Number(item.unrealized_pnl));
+      const pnl = pnlAvailable ? formatMoney(item.unrealized_pnl, true) : "—";
+      const tone = pnlAvailable && Number(item.unrealized_pnl) > 0
         ? "positive"
-        : Number(item.unrealized_pnl) < 0
+        : pnlAvailable && Number(item.unrealized_pnl) < 0
           ? "negative"
           : "";
       return `
         <tr class="live-strategy-row${available ? "" : " unavailable"}" tabindex="0" data-strategy-id="${escapeHtml(item.strategy_id)}">
           <td class="strategy-id-cell">${escapeHtml(item.strategy_id)}</td>
+          <td>${escapeHtml(formatVenue(item.venue))}</td>
           <td>${escapeHtml(item.symbol)}</td>
           <td>${escapeHtml(item.interval)}</td>
-          <td class="${available ? tone : "value-unavailable"}">${pnl}</td>
+          <td class="${balanceAvailable ? "" : "value-unavailable"}">${balanceAvailable ? formatMoney(item.balance) : "—"}</td>
+          <td class="${pnlAvailable ? tone : "value-unavailable"}">${pnl}</td>
           <td>${renderStatus(item.status, available)}</td>
         </tr>
       `;
@@ -178,7 +190,7 @@ function mountDetail(container, context, strategyId) {
     status.textContent = payload.available
       ? titleCase(payload.status)
       : "Unavailable";
-    status.className = `status-pill ${payload.status === "running" && payload.available ? "success" : ""}`;
+    status.className = `status-pill ${statusPillTone(payload.status, payload.available)}`;
 
     renderCard(container, "strategy", true, [
       ["Strategy ID", payload.strategy_id],
@@ -187,7 +199,7 @@ function mountDetail(container, context, strategyId) {
       ["Risk per trade", formatPercent(payload.risk_per_trade_pct)],
       ["Max daily loss", formatPercent(payload.max_daily_loss_pct)],
       ["Max holding time", formatDuration(payload.max_holding_seconds)],
-      ["Status", payload.available ? titleCase(payload.status) : null],
+      ["Status", payload.available ? titleCase(payload.status) : null, statusValueTone(payload.status, payload.available)],
     ]);
 
     const accountAvailable = payload.available && payload.availability?.account;
@@ -207,7 +219,11 @@ function mountDetail(container, context, strategyId) {
       ["Take profit", position ? formatProtectionPrice(position.take_profit_price, position.entry_price, position.side) : "—"],
       ["Opened at", position ? formatDateTime(position.opened_at) : "—"],
       ["Remaining holding time", position ? formatDuration(position.remaining_holding_seconds) : "—"],
-      ["Unrealized PnL", position ? formatMoney(position.unrealized_pnl, true) : "$0.00"],
+      [
+        "Unrealized PnL",
+        position ? formatMoney(position.unrealized_pnl, true) : "$0.00",
+        pnlTone(position?.unrealized_pnl),
+      ],
     ]);
     renderPositionComponents(container, positionAvailable, position);
 
@@ -263,12 +279,15 @@ function detailCard(name, title) {
 function renderCard(container, name, available, fields) {
   const card = container.querySelector(`[data-card="${name}"]`);
   card.classList.toggle("unavailable", !available);
-  card.querySelector("dl").innerHTML = fields.map(([label, value]) => {
+  card.querySelector("dl").innerHTML = fields.map(([label, value, tone = ""]) => {
     const unavailable = value === null || value === undefined || value === "—";
+    const classes = [unavailable ? "value-unavailable" : "", unavailable ? "" : tone]
+      .filter(Boolean)
+      .join(" ");
     return `
       <div>
         <dt>${escapeHtml(label)}</dt>
-        <dd class="${unavailable ? "value-unavailable" : ""}">${escapeHtml(value ?? "—")}</dd>
+        <dd class="${classes}">${escapeHtml(value ?? "—")}</dd>
       </div>
     `;
   }).join("");
@@ -315,7 +334,34 @@ function renderPositionComponents(container, available, position) {
 
 function renderStatus(value, available) {
   if (!available || !value) return '<span class="status-pill">—</span>';
-  return `<span class="status-pill ${value === "running" ? "success" : ""}">${escapeHtml(titleCase(value))}</span>`;
+  return `<span class="status-pill ${statusPillTone(value, available)}">${escapeHtml(titleCase(value))}</span>`;
+}
+
+function statusPillTone(value, available) {
+  if (!available || !value) return "";
+  return value === "running" ? "success" : "error";
+}
+
+function statusValueTone(value, available) {
+  if (!available || !value) return "";
+  return value === "running" ? "positive" : "negative";
+}
+
+function pnlTone(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "";
+  return number > 0 ? "positive" : "negative";
+}
+
+function formatVenue(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return {
+    ctrader: "cTrader",
+    mt5: "MT5",
+    bybit: "Bybit",
+    binance: "Binance",
+    mock: "Mock",
+  }[normalized] || value || "—";
 }
 
 function formatMoney(value, signed = false) {

@@ -115,6 +115,10 @@ Open `http://localhost:5173`. Run a single backend worker because live snapshots
 
 A validated strategy can be run through the unified live runner. Create a deployment-specific configuration for strategy artifacts, venues, credentials, symbol mappings, monitoring, and risk limits; `trade/runner/live_config_example.json` shows the expected structure.
 
+For cTrader risk alerts, the root-level `telegram_token` path may point to a file containing `chat_id : bot_token`, a JSON file containing `bot_token` and `chat_id`, or a directory containing separate `bot_token` and `chat_id` files.
+
+`run_live` controls whether a strategy is constructed at startup. `enable` controls its initial runtime state; a constructed strategy can also be changed without stopping shared feeds by calling `runner.set_strategy_enabled(strategy_id, enable)`.
+
 ```bash
 python -m trade.runner.live_runner \
   --config path/to/live_config.json

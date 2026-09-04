@@ -28,6 +28,7 @@ SKIP_PERCENT = 0  # Percentage of front part to skip; 0 means no skip, select fr
 EQUITY_SCALE = "log"  # Supported values: "linear", "log", or "both".
 MAX_LOG_END_VALUE_RATIO = 3.0
 RISK_COMPARISON_KEYS = ("risk_per_trade_pct", "max_daily_loss_pct")
+KEY_STRATEGY_INDICATORS_FILE = "key_strategy_indicators.png"
 
 
 def clean_output_dir_except(output_dir_path, preserved_path):
@@ -1219,6 +1220,73 @@ def _model_group_numbers(reports):
     return numbers
 
 
+def plot_key_strategy_indicators(
+    column_labels,
+    table_rows,
+    output_dir,
+    file_name=KEY_STRATEGY_INDICATORS_FILE,
+):
+    """Render the console performance table as a portable PNG artifact."""
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, file_name)
+
+    column_widths = []
+    for column_index, label in enumerate(column_labels):
+        maximum_length = max(
+            len(str(label)),
+            max(
+                (len(str(row[column_index])) for row in table_rows if column_index < len(row)),
+                default=0,
+            ),
+        )
+        column_widths.append(maximum_length + 2)
+
+    total_width = sum(column_widths)
+    normalized_widths = [width / total_width for width in column_widths]
+    figure_width = max(16.0, min(36.0, total_width * 0.115))
+    figure_height = max(3.0, 1.3 + (len(table_rows) + 1) * 0.38)
+
+    figure, axis = plt.subplots(figsize=(figure_width, figure_height))
+    axis.axis("off")
+    table = axis.table(
+        cellText=table_rows,
+        colLabels=column_labels,
+        colWidths=normalized_widths,
+        cellLoc="right",
+        colLoc="center",
+        bbox=[0.0, 0.0, 1.0, 0.94],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+
+    for (row_index, column_index), cell in table.get_celld().items():
+        cell.set_edgecolor("#d1d5db")
+        cell.set_linewidth(0.5)
+        if row_index == 0:
+            cell.set_facecolor("#1f2937")
+            cell.set_text_props(color="white", weight="bold", ha="center")
+        else:
+            cell.set_facecolor("#f3f4f6" if row_index % 2 == 0 else "white")
+            if column_index in (0, 1, 2):
+                cell.set_text_props(ha="left")
+
+    figure.suptitle(
+        "Key Strategy Indicators",
+        fontsize=16,
+        fontweight="bold",
+        y=0.99,
+    )
+    figure.savefig(
+        output_path,
+        dpi=200,
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    plt.close(figure)
+    print(f"Key strategy indicators image saved: {output_path}")
+    return output_path
+
+
 def show_performance(
     all_results,
     output_dir,
@@ -1226,7 +1294,7 @@ def show_performance(
     equity_scale=EQUITY_SCALE,
     addition_info=None,
     plot_ood=False,
-    strategy_num_start=0,
+    strategy_num_start=1,
 ):
     strategy_numbers = [strategy_num_start + index for index in range(len(all_results))]
     model_numbers = _model_group_numbers(all_results)
@@ -1273,6 +1341,25 @@ def show_performance(
     print(header)
     print("-" * len(header))
 
+    column_labels = [
+        "Num",
+        "Hash",
+        "Model",
+        "Ver",
+        "L_CAGR",
+        "F_CAGR",
+        "Sharpe",
+        "Calmar",
+        "MaxDD",
+        "Freq",
+        "Win",
+        "RCMed",
+        "RCPos",
+        "DDDays",
+        *(str(column_name) for column_name, _ in additional_columns),
+    ]
+    table_rows = []
+
     for i, r in enumerate(all_results):
         strategy_label = strategy_labels[i]
         long_metric = lambda key: common.recursive_get(r["long"], key)
@@ -1292,6 +1379,30 @@ def show_performance(
         )
         line += "".join(f" {value:<{width}}" for value, width in zip(additional_values[i], additional_widths))
         print(line)
+        table_rows.append(
+            [
+                strategy_label,
+                str(long_metric("hash")),
+                _short_model_type(model_type),
+                str(model_version),
+                f"{long_metric('cagr'):.2f}",
+                f"{forward_metric('cagr'):.2f}",
+                f"{long_metric('sharpe'):.2f}",
+                f"{long_metric('calmar'):.2f}",
+                f"{long_metric('max_dd_pct'):.2f}",
+                f"{long_metric('daily_freq'):.2f}",
+                f"{long_metric('win_rate'):.2f}",
+                f"{long_metric('rc_median'):.2f}",
+                f"{long_metric('rc_pos_ratio'):.2f}",
+                f"{long_metric('max_hwm_duration_days'):.2f}",
+                *additional_values[i],
+            ]
+        )
+    plot_key_strategy_indicators(
+        column_labels,
+        table_rows,
+        output_dir,
+    )
     detailed_results = [attach_report_details(row) for row in all_results]
     for model_number, strategy_number, strategy_label, row in zip(
         model_numbers,
@@ -1302,7 +1413,7 @@ def show_performance(
         row["_model_num"] = model_number
         row["_strategy_num"] = strategy_number
         row["_strategy_label"] = strategy_label
-    # compute_correlation(detailed_results, output_dir)
+    compute_correlation(detailed_results, output_dir)
     plot_in_batches(
         detailed_results,
         output_dir,
@@ -1320,10 +1431,10 @@ def sort_by_correlation_diversity(all_results):
 
     # 1. Build returns DataFrame (reuse existing build_return_series)
     returns_dict = {}
-    for i, r in enumerate(all_results):
+    for strategy_number, r in enumerate(all_results, start=1):
         # Assume build_return_series is already defined
         ret = build_return_series(r)
-        returns_dict[f"S{i}"] = ret
+        returns_dict[f"S{strategy_number}"] = ret
 
     df = pd.DataFrame(returns_dict).dropna()
 
@@ -1342,7 +1453,7 @@ def sort_by_correlation_diversity(all_results):
     print(diversity_df)
 
     # 5. Reorder all_results according to ranking
-    sorted_indices = [int(idx.replace("S", "")) for idx in diversity_df.index]
+    sorted_indices = [int(idx.replace("S", "")) - 1 for idx in diversity_df.index]
     sorted_results = [all_results[idx] for idx in sorted_indices]
 
     return sorted_results
@@ -1370,10 +1481,10 @@ def compute_correlation(all_results, output_dir):
 
     # ===== 1. Build return series =====
     returns_dict = {}
-    for i, r in enumerate(all_results):
+    for strategy_number, r in enumerate(all_results, start=1):
         # Use build_return_series
         ret = build_return_series(r)
-        returns_dict[f"S{i}"] = ret
+        returns_dict[f"S{strategy_number}"] = ret
 
     df = pd.DataFrame(returns_dict).dropna()
     if df.empty:
@@ -1506,7 +1617,7 @@ def _group_equity_plots_by_log_end_value(
         raise ValueError("max_log_ratio must be finite and at least 1")
 
     items = []
-    for fallback_index, row in enumerate(all_results):
+    for fallback_index, row in enumerate(all_results, start=1):
         strategy_number = row.get("_strategy_num", fallback_index)
         strategy_label = row.get("_strategy_label", f"S{strategy_number}")
         end_value = _equity_end_value(row, plot_ood=plot_ood)
@@ -1586,7 +1697,6 @@ def plot_in_batches(
 def main():
     exp_dir1 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "DOGEUSDT_15m", "2026-08-25", "21_00_17")
     exp_dir5 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "AAVEUSDT_15m", "2026-08-23", "12_12_48")
-    exp_dir6 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "ETHUSDT_15m", "2026-08-25", "06_01_55")
     exp_dir7 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "XLMUSDT_15m", "2026-08-24", "13_07_55")
     exp_dir8 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "ETHUSDT_15m", "2026-09-02", "22_01_49")
     exp_dir9 = os.path.join(common.PERSISTENCE_DIR, "batch_experiments", "BTCUSDT_15m", "2026-09-03", "20_33_34")

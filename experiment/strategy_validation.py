@@ -31,6 +31,10 @@ MODEL_ARCHIVE_DIR = "models"
 MODEL_ARCHIVE_MANIFEST_FILE = "model_archive_manifest.jsonl"
 BACKTEST_COMPARE_REPORTS_FILE = "backtest_compare_reports.jsonl"
 BACKTEST_REPORTS_FILE = "backtest_reproduction_reports.jsonl"
+REPORT_DETAILS_FILE = "report_details.json"
+BACKTEST_REPRODUCTION_ARCHIVE_DIR = "backtest_reproduction"
+EQUITY_PLOT_DIR = "equity"
+EQUITY_BATCH_SIZE = 3
 
 CROSS_TEST_SYMBOLS = ("DOGEUSDT", "ETHUSDT", "BTCUSDT")
 CROSS_TEST_INTERVALS = ("15m", "30m", "1h")
@@ -202,6 +206,67 @@ def backtest_reproduction_source(filename: str) -> str:
     return path
 
 
+def report_details_path(
+    report: Dict[str, Any],
+    reports_path: str,
+) -> str:
+    """Return the canonical sidecar path for one report record."""
+    identity = (report.get("params") or {}).get("identity") or {}
+    full_hash = str(identity.get("full_hash", ""))
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", full_hash):
+        raise ValueError(
+            "Report has an unsafe full simulation hash: "
+            f"value={full_hash!r}"
+        )
+    return os.path.join(
+        os.path.dirname(os.path.abspath(reports_path)),
+        "sim_output",
+        full_hash,
+        REPORT_DETAILS_FILE,
+    )
+
+
+def copy_report_details(
+    records: List[Dict[str, Any]],
+    source_reports_path: str,
+    destination_reports_path: str,
+) -> int:
+    """Copy report sidecars while preserving their canonical relative paths."""
+    copied_paths = set()
+    for report in records:
+        source = report_details_path(report, source_reports_path)
+        destination = report_details_path(report, destination_reports_path)
+        if destination in copied_paths:
+            continue
+        if not os.path.isfile(source):
+            raise FileNotFoundError(
+                "Report details file was not found: "
+                f"report={source_reports_path}, details={source}"
+            )
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        if os.path.abspath(source) != os.path.abspath(destination):
+            shutil.copy2(source, destination)
+        copied_paths.add(destination)
+    return len(copied_paths)
+
+
+def load_jsonl(path: str) -> List[Dict[str, Any]]:
+    records = []
+    with open(path, "r", encoding="utf-8") as source:
+        for line_number, line in enumerate(source, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise ValueError(
+                    f"JSONL record must be an object: path={path}, "
+                    f"line={line_number}"
+                )
+            records.append(record)
+    return records
+
+
 def archive_cross_test_inputs(
     selected_configs_path: str,
     records: List[Dict[str, Any]],
@@ -220,9 +285,22 @@ def archive_cross_test_inputs(
     backtest_reports_path = os.path.abspath(
         backtest_reproduction_source("reports.jsonl")
     )
+    archived_selected_path = os.path.join(output_dir, SELECTED_FILE)
+    backtest_archive_dir = os.path.join(
+        output_dir,
+        BACKTEST_REPRODUCTION_ARCHIVE_DIR,
+    )
+    archived_backtest_reports_path = os.path.join(
+        backtest_archive_dir,
+        "reports.jsonl",
+    )
+    archived_backtest_compare_reports_path = os.path.join(
+        backtest_archive_dir,
+        COMPARE_REPORTS_FILE,
+    )
 
     file_sources = (
-        (selected_configs_path, os.path.join(output_dir, SELECTED_FILE)),
+        (selected_configs_path, archived_selected_path),
         (
             compare_reports_path,
             os.path.join(output_dir, COMPARE_REPORTS_FILE),
@@ -235,10 +313,31 @@ def archive_cross_test_inputs(
             backtest_reports_path,
             os.path.join(output_dir, BACKTEST_REPORTS_FILE),
         ),
+        (
+            backtest_compare_reports_path,
+            archived_backtest_compare_reports_path,
+        ),
+        (
+            backtest_reports_path,
+            archived_backtest_reports_path,
+        ),
     )
     for source, destination in file_sources:
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
         if source != os.path.abspath(destination):
             shutil.copy2(source, destination)
+
+    selected_details_count = copy_report_details(
+        records,
+        selected_configs_path,
+        archived_selected_path,
+    )
+    backtest_records = load_jsonl(backtest_reports_path)
+    backtest_details_count = copy_report_details(
+        backtest_records,
+        backtest_reports_path,
+        archived_backtest_reports_path,
+    )
 
     copied_hashes = set()
     archive_manifest: List[Dict[str, Any]] = []
@@ -292,11 +391,14 @@ def archive_cross_test_inputs(
     logger.info(
         "Archived cross-test inputs | selected_configs=%s | "
         "compare_reports=%s | backtest_compare_reports=%s | "
-        "backtest_reports=%s | models=%d | destination=%s",
+        "backtest_reports=%s | selected_report_details=%d | "
+        "backtest_report_details=%d | models=%d | destination=%s",
         selected_configs_path,
         compare_reports_path,
         backtest_compare_reports_path,
         backtest_reports_path,
+        selected_details_count,
+        backtest_details_count,
         len(copied_hashes),
         output_dir,
     )
@@ -344,6 +446,43 @@ def backtest_output_dir(
         strategy_hash,
         target_key(symbol, interval),
     )
+
+
+def cross_test_report_details_path(
+    output_dir: str,
+    mode: str,
+    strategy_hash: str,
+    symbol: str,
+    interval: str,
+) -> str:
+    return os.path.join(
+        backtest_output_dir(
+            output_dir,
+            mode,
+            strategy_hash,
+            symbol,
+            interval,
+        ),
+        REPORT_DETAILS_FILE,
+    )
+
+
+def write_json(path: str, payload: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as output:
+            json.dump(
+                payload,
+                output,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
 
 def validate_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -577,11 +716,13 @@ def sim_worker(
                 experiment_context=experiment_context,
             )
 
-            report = backtest_runner.main(
+            backtest_result = backtest_runner.main(
                 logger,
                 runner_config,
                 period,
-            )["report"]
+            )
+            report = backtest_result["report"]
+            report_details = backtest_result["report_details"]
 
             validate_report_market(
                 report,
@@ -589,6 +730,16 @@ def sim_worker(
                 interval,
             )
             validate_report_period(report, period)
+            validate_report_period(report_details, period)
+
+            details_path = cross_test_report_details_path(
+                output_dir,
+                mode,
+                strategy_hash,
+                symbol,
+                interval,
+            )
+            write_json(details_path, report_details)
 
             result_queue.put(
                 (
@@ -598,6 +749,7 @@ def sim_worker(
                     time.time() - t0,
                     train_metrics,
                     report,
+                    details_path,
                 )
             )
         except Exception:
@@ -878,11 +1030,15 @@ def run_parallel_pipeline(
                 if kind != "sim_done":
                     raise CrossTestError(f"Unexpected simulation result: {message!r}")
 
-                train_metrics, report = payload
+                train_metrics, report, details_path = payload
                 period = MODEL_PERIOD_BY_MODE[mode]
                 result_entry = {
                     "cagr": report["results"][period]["performance"]["cagr"],
                     "report": report,
+                    "report_details_path": os.path.relpath(
+                        details_path,
+                        output_dir,
+                    ),
                 }
                 if mode == "retrained_model":
                     result_entry["train_metrics"] = train_metrics
@@ -1047,6 +1203,9 @@ def aggregate_results(
 
                 report_entry: Dict[str, Any] = {
                     "report": report,
+                    "report_details_path": model_result[
+                        "report_details_path"
+                    ],
                 }
 
                 if model_mode == "retrained_model":
@@ -1067,6 +1226,92 @@ def aggregate_results(
         aggregated.append(strategy_result)
 
     return aggregated
+
+
+def _load_cross_test_plot_rows(
+    flat_results: Dict[Tuple[str, str, str], Dict[str, Any]],
+    output_dir: str,
+) -> Dict[Tuple[str, str, str], List[Dict[str, Any]]]:
+    """Group detailed cross-test reports by model mode and target market."""
+    grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+    for (strategy_hash, symbol, interval), result in flat_results.items():
+        for mode in ENABLED_MODEL_MODES:
+            model_result = result.get(mode)
+            if not model_result:
+                continue
+            details_path = os.path.join(
+                output_dir,
+                model_result["report_details_path"],
+            )
+            with open(details_path, "r", encoding="utf-8") as source:
+                report_details = json.load(source)
+            grouped.setdefault((mode, symbol, interval), []).append(
+                {
+                    "raw": model_result["report"],
+                    "report_details": report_details,
+                    "_strategy_label": strategy_hash,
+                }
+            )
+    return grouped
+
+
+def regenerate_equity_images(
+    records: List[Dict[str, Any]],
+    flat_results: Dict[Tuple[str, str, str], Dict[str, Any]],
+    output_dir: str,
+    logger: logging.Logger,
+) -> None:
+    """Regenerate selected-strategy and cross-test equity images for the run."""
+    from experiment import reports_view
+
+    equity_root = os.path.join(output_dir, EQUITY_PLOT_DIR)
+    selected_reports_path = os.path.join(output_dir, SELECTED_FILE)
+    selected_rows = [
+        reports_view.extract_row(report, selected_reports_path)
+        for report in records
+    ]
+    selected_output_dir = os.path.join(equity_root, "selected")
+    reports_view.show_performance(
+        selected_rows,
+        selected_output_dir,
+        batch_size=EQUITY_BATCH_SIZE,
+        equity_scale=reports_view.EQUITY_SCALE,
+        plot_ood=True,
+    )
+    selected_indicators_path = os.path.join(
+        selected_output_dir,
+        reports_view.KEY_STRATEGY_INDICATORS_FILE,
+    )
+    shutil.copy2(
+        selected_indicators_path,
+        os.path.join(
+            output_dir,
+            reports_view.KEY_STRATEGY_INDICATORS_FILE,
+        ),
+    )
+
+    grouped_rows = _load_cross_test_plot_rows(flat_results, output_dir)
+    for (mode, symbol, interval), rows in grouped_rows.items():
+        reports_view.plot_in_batches(
+            rows,
+            os.path.join(
+                equity_root,
+                "cross_test",
+                mode,
+                target_key(symbol, interval),
+            ),
+            batch_size=EQUITY_BATCH_SIZE,
+            equity_scale=reports_view.EQUITY_SCALE,
+            plot_ood=True,
+        )
+
+    logger.info(
+        "Regenerated equity images | selected_strategies=%d | "
+        "cross_test_groups=%d | destination=%s",
+        len(selected_rows),
+        len(grouped_rows),
+        equity_root,
+    )
 
 
 def write_jsonl(
@@ -1161,6 +1406,13 @@ def main() -> None:
     logger.info("Output directory: %s", output_dir)
     logger.info("Git commit: %s", experiment_context.git_commit)
 
+    archive_cross_test_inputs(
+        args.selected_configs,
+        records,
+        output_dir,
+        logger,
+    )
+
     begin_time = time.time()
 
     flat_results = run_parallel_pipeline(
@@ -1180,9 +1432,9 @@ def main() -> None:
         "cross_test_reports.jsonl",
     )
     write_jsonl(output_path, aggregated)
-    archive_cross_test_inputs(
-        args.selected_configs,
+    regenerate_equity_images(
         records,
+        flat_results,
         output_dir,
         logger,
     )

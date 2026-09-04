@@ -1,6 +1,7 @@
 {
     "runner_id": "runner-main",
     "report":"../../output/reports.jsonl",
+    "telegram_token": "../notification/telegram/main",
     "monitoring": {
         "publish_url": "http://127.0.0.1:8000/internal/live/snapshots",
         "publish_interval_seconds": 1,
@@ -11,6 +12,7 @@
     "strategy":{
         "ctrader-live-the5ers-1": {
             "run_live": false,
+            "enable": true,
             "compound": false,
             "hash": "ctrader-report-hash",
             "model_path": "../../quant_output/experiment/valid_train_out/ctrader-report-hash",
@@ -36,6 +38,7 @@
         {
             "hash":"6b41d3de9072",
             "run_live": true,
+            "enable": true,
             "compound": true,
             "model_path":"./model",
             "broker_config":{

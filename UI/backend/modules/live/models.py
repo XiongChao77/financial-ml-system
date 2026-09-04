@@ -71,12 +71,13 @@ class SnapshotError(StrictModel):
 
 class StrategySnapshot(StrictModel):
     strategy_id: str = Field(min_length=1)
+    venue: str = Field(min_length=1)
     symbol: str = Field(min_length=1)
     interval: str = Field(min_length=1)
     risk_per_trade_pct: float = Field(ge=0.0, le=1.0)
     max_daily_loss_pct: float = Field(ge=0.0, le=1.0)
     max_holding_seconds: float | None = Field(default=None, ge=0.0)
-    status: Literal["running", "stopped"]
+    status: Literal["running", "disabled", "stopped"]
     account: AccountSnapshot | None = None
     position: PositionSnapshot | None = None
     latest_signal: SignalSnapshot | None = None
