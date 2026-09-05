@@ -1,4 +1,6 @@
 *old*
+# Generated standalone performance reports.
+tearsheet*.html
 *__pycache__*
 data.csv
 notes/
@@ -26,6 +28,8 @@ dow
 tests/*
 .venv/*
 *test*
+!trade/venue/live/bitget/test_bitget_venue.py
+!trade/venue/live/bitget/smoke_test.py
 
 # Local experiment sweeps. Keep the tracked example as the default fallback.
 /experiment/task_constructors.py

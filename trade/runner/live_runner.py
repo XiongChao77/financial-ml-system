@@ -152,6 +152,7 @@ SUPPORTED_VENUES = {
     "ctrader": LiveVenueConfigCtrader,
     "bybit": LiveVenueConfigBase,
     "binance": LiveVenueConfigBase,
+    "bitget": LiveVenueConfigBase,
 }
 
 
@@ -1003,6 +1004,15 @@ class LiveRunner:
             from trade.venue.live.binance.binance_venue import BinanceVenue
 
             return BinanceVenue(
+                config.path,
+                spec.base_define.symbol,
+                f"{spec.strategy_id}:{spec.hash_id}",
+                logger=logger,
+            )
+        if config.venue == "bitget":
+            from trade.venue.live.bitget.bitget_venue import BitgetVenue
+
+            return BitgetVenue(
                 config.path,
                 spec.base_define.symbol,
                 f"{spec.strategy_id}:{spec.hash_id}",
