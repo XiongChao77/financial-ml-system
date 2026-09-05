@@ -360,6 +360,7 @@ function formatVenue(value) {
     mt5: "MT5",
     bybit: "Bybit",
     binance: "Binance",
+    bitget: "Bitget",
     mock: "Mock",
   }[normalized] || value || "—";
 }

@@ -29,9 +29,27 @@
                 "trader_login": "12345678",
                 "firm":"the5ers",
                 "login":"531400400",
-                "password":"B8?@h4rW7x",
+                "password":"REPLACE_WITH_PASSWORD",
                 "profit_target": 0.1,
                 "max_loss": 0.1
+            }
+        },
+        "bitget-live-1": {
+            "hash": "bitget-report-hash",
+            "run_live": false,
+            "enable": true,
+            "compound": true,
+            "model_path": "../../quant_output/experiment/valid_train_out/bitget-report-hash",
+            "device": "cpu",
+            "broker_config": {
+                "initial_equity": 1000,
+                "commission_pct": 0.06,
+                "leverage": 10.0,
+                "margin_warn_pct": 0.95
+            },
+            "venue": "Bitget",
+            "Bitget": {
+                "path": "../../LiveTrading/bitget/trading1"
             }
         },
         "id2":
